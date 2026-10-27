@@ -209,3 +209,49 @@ def test_q35_defaulted_parameter_bound_to_an_unsupplied_source() -> None:
     assert run_fnloom([load_fixture("rows_f")], ["shifted_total"], inputs) == (
         Outcome({"shifted_total": 106}, None)
     )
+
+
+@pytest.mark.deliberate("Q34")
+def test_tags_match_hamilton_except_module() -> None:
+    """Hamilton tags each function node with its module; fnloom does not.
+
+    fnloom's tags are only the author's, and inputs carry no tags in either.
+    """
+    tags_h, tags_f = load_fixture("tags_h"), load_fixture("tags_f")
+    hamilton = {
+        node.name: node.tags
+        for node in hamilton_driver.Builder()
+        .with_modules(tags_h)
+        .build()
+        .list_available_variables()
+    }
+    views = fnloom.build(tags_f).nodes
+    assert sorted(hamilton) == list(views)
+    for name, view in views.items():
+        if view.is_input:
+            assert hamilton[name] == {}, name
+            assert dict(view.tags) == {}, name
+            assert view.module is None, name
+        else:
+            assert hamilton[name] == {**view.tags, "module": tags_h.__name__}, name
+            assert view.module == tags_f.__name__, name
+    assert dict(views["low"].tags) == {"owner": "limits"}
+
+
+@pytest.mark.deliberate("Q36")
+def test_q36_list_valued_tag() -> None:
+    """Hamilton accepts a list of strings as a tag value; fnloom raises `TypeError`."""
+    body = """
+@tag(kind=["a", "b"])
+def f(x: int) -> int:
+    return x
+"""
+    hamilton_module = make_module(
+        "differential_list_tag_h",
+        "from hamilton.function_modifiers import tag\n" + body,
+    )
+    built = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    (node,) = (n for n in built.list_available_variables() if n.name == "f")
+    assert node.tags["kind"] == ["a", "b"]
+    with pytest.raises(TypeError, match="'kind'"):
+        make_module("differential_list_tag_f", "from fnloom import tag\n" + body)

@@ -79,6 +79,11 @@ ignore = [
 "tests/**" = [
     "S101", # pytest tests are asserts
 ]
+# Built by the tests, so their annotation-only imports must exist at run time.
+"tests/differential/fixtures/typed*.py" = [
+    "TC003", # resolved at build, so imported for real, not under TYPE_CHECKING
+    "UP037", # a quoted name nested in a generic is a case under test
+]
 "scripts/test_*.py" = [
     "S101", # pytest tests are asserts
 ]

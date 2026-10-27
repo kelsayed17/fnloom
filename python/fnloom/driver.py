@@ -1,10 +1,12 @@
 """The user-facing `Builder`, `Driver` and `PreparedPlan`."""
 
 import threading
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol
 
 from fnloom import _core
-from fnloom._scan import NodeDef, collect, core_inputs
+from fnloom._scan import NodeDef, collect, core_inputs, resolve
+from fnloom._view import NodeView, node_views
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -106,12 +108,17 @@ class Driver:
 
     The cache keeps the `PLAN_CACHE_SIZE` most recently used plans. Make a driver with
     `Builder` (or its shorthand `build`); the constructor takes an already built
-    native graph.
+    native graph and the views of its nodes.
     """
 
-    def __init__(self, graph: _GraphLike) -> None:
+    def __init__(
+        self, graph: _GraphLike, nodes: Mapping[str, NodeView] | None = None
+    ) -> None:
         """Wraps a native graph; `Builder` is the way to make one from modules."""
         self._graph = graph
+        self._nodes: Mapping[str, NodeView] = (
+            MappingProxyType[str, NodeView]({}) if nodes is None else nodes
+        )
         # Insertion order is recency order: a hit moves its plan to the end.
         self._plans: dict[_PlanKey, PreparedPlan] = {}
         self._plans_lock = threading.Lock()
@@ -163,6 +170,11 @@ class Driver:
         """Returns every node name, sorted."""
         return self._graph.node_names()
 
+    @property
+    def nodes(self) -> Mapping[str, NodeView]:
+        """Every node, inputs included, by name: read-only, iterating in name order."""
+        return self._nodes
+
     def what_is_upstream_of(self, *names: str) -> list[str]:
         """Returns the named nodes and every node they depend on, sorted."""
         return sorted({*names, *self._graph.upstream_of(list(names))})
@@ -191,8 +203,14 @@ class Builder:
         return Builder((*self._modules, *modules))
 
     def build(self) -> Driver:
-        """Scans the modules and returns a `Driver`; `ValueError` on a bad node."""
-        return Driver(_graph_of(collect(self._modules)))
+        """Scans the modules and returns a `Driver`; `ValueError` on a bad node.
+
+        Annotations are evaluated here: a name that does not resolve raises its
+        `NameError`, with a note naming the node.
+        """
+        nodes = resolve(collect(self._modules))
+        views = node_views(nodes)
+        return Driver(_graph_of(nodes), views)
 
 
 def build(*modules: ModuleType) -> Driver:

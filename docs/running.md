@@ -91,6 +91,43 @@ driver.what_is_downstream_of("total")
 
 Each query returns sorted names, and includes the nodes you named. `node_names()` lists every node, inputs included.
 
+## Inspecting a graph
+
+`driver.nodes` maps every node name, inputs included, to a read-only `NodeView`, in name order:
+
+```python
+list(driver.nodes)
+# -> ['currency', 'discount', 'discounted', 'label', 'price', 'quantity', 'total']
+view = driver.nodes["discounted"]
+view.type
+# -> float
+view.dependencies
+# -> ('discount', 'total')
+view.is_input
+# -> False
+view.doc
+# -> 'The total after the discount, if one is given.'
+[(p.name, p.required) for p in view.params]
+# -> [('total', True), ('discount', False)]
+```
+
+`origin` is the function the node came from and `module` its module's name; `tags` are the ones written with `@tag`.
+An input has no function: its `origin`, `module` and `doc` are `None`, its `params` are empty, and its `type` is the
+annotation of the parameters that read it:
+
+```python
+driver.nodes["quantity"].type
+# -> int
+driver.nodes["quantity"].origin is None
+# -> True
+```
+
+The view is built once, when the graph is built. Annotations are evaluated then too, so a module written with
+`from __future__ import annotations` gives the same types as one without it, and an annotation may name a class
+defined further down the module. A name that does not resolve, such as one imported only under `TYPE_CHECKING`, fails
+the build with its `NameError`, with a note naming the node and the parameter. When the functions reading one input
+annotate it with different types, the build raises a `ValueError` naming the input and each function.
+
 ## Exceptions from your functions
 
 When a node's function raises, the run stops and the exception propagates as itself, with a note naming the node:

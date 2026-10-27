@@ -165,3 +165,12 @@ def test_row_that_is_not_a_mapping_is_a_type_error() -> None:
     """A non-mapping row names the row."""
     with pytest.raises(TypeError, match="row 'a'"):
         parameterize(a=1)  # ty: ignore[invalid-argument-type]
+
+
+def test_parameterize_does_not_evaluate_annotations() -> None:
+    """An unresolvable annotation is the build's error, not the decorator's."""
+
+    def f(x: Missing) -> Missing:  # noqa: F821  # ty: ignore[unresolved-reference]  # the unresolvable name is the point
+        return x
+
+    assert parameterize(out={"x": source("a")})(f) is f

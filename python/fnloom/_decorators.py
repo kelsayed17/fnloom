@@ -1,5 +1,6 @@
 """Decorators that attach metadata to a node function and return the function itself."""
 
+import annotationlib
 import inspect
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
@@ -96,7 +97,9 @@ def parameterize[F: Callable[..., object]](
         if current.rows is not None:
             msg = "function is already parameterized; apply parameterize once"
             raise ValueError(msg)
-        params = set(inspect.signature(fn).parameters)
+        # Names only: annotations are evaluated at build, not when decorating.
+        forward = annotationlib.Format.FORWARDREF
+        params = set(inspect.signature(fn, annotation_format=forward).parameters)
         _check_rows(frozen, params)
         setattr(fn, _ATTRIBUTE, replace(current, rows=MappingProxyType(frozen)))
         return fn

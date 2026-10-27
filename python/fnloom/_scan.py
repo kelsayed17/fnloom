@@ -2,7 +2,8 @@
 
 import annotationlib
 import inspect
-from dataclasses import dataclass
+import typing
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from fnloom._decorators import Source, Value, decorations
@@ -25,7 +26,8 @@ class NodeDef:
 
     `origin` is the function as written; `payload` is what the core calls with one
     keyword per core input: `origin` itself, or a call that maps those keywords onto
-    `origin`'s parameters. `returns` is the return annotation as written.
+    `origin`'s parameters. `returns` is the return annotation: as written after
+    `collect`, its value after `resolve`, as are the params' annotations.
     """
 
     name: str
@@ -171,17 +173,102 @@ def _scan_module(module: ModuleType) -> list[NodeDef]:
     ]
 
 
+def _definition(node: NodeDef) -> str:
+    """How `node` was written: as a function, or as a row of a parameterized one."""
+    function = getattr(node.origin, "__name__", node.name)
+    if decorations(node.origin).rows is None:
+        return f"function {function!r}"
+    return f"a row of function {function!r}"
+
+
+def _duplicate(first: NodeDef, second: NodeDef) -> str:
+    if first.module != second.module:
+        return (
+            f"node {first.name!r} is defined in both "
+            f"{first.module!r} and {second.module!r}"
+        )
+    return (
+        f"node {first.name!r} is defined twice in {first.module!r}: "
+        f"by {_definition(first)} and by {_definition(second)}"
+    )
+
+
 def collect(modules: Sequence[ModuleType]) -> list[NodeDef]:
-    """Returns the nodes of `modules`; `ValueError` on a malformed or duplicate one."""
+    """Returns the nodes of `modules`; `ValueError` on a malformed or duplicate one.
+
+    Annotations are read without being evaluated; `resolve` evaluates them.
+    """
     seen: dict[str, NodeDef] = {}
     # Modules hash by identity, so this drops repeats of one module, keeping the first.
     for module in dict.fromkeys(modules):
         for node in _scan_module(module):
             if node.name in seen:
-                msg = (
-                    f"node {node.name!r} is defined in both "
-                    f"{seen[node.name].module!r} and {node.module!r}"
-                )
-                raise ValueError(msg)
+                raise ValueError(_duplicate(seen[node.name], node))
             seen[node.name] = node
     return list(seen.values())
+
+
+def _owner(origin: Callable[..., object], names: list[str]) -> str:
+    """Names the nodes of `origin`: its node, or every row of a parameterized one."""
+    if decorations(origin).rows is None:
+        return f"node {names[0]!r}"
+    rows = ", ".join(repr(name) for name in sorted(names))
+    function = getattr(origin, "__name__", names[0])
+    return f"nodes {rows} (rows of function {function!r})"
+
+
+def _unresolved(origin: Callable[..., object]) -> list[str]:
+    """The annotations of `origin` that do not evaluate, in declaration order."""
+    written = annotationlib.get_annotations(origin, format=annotationlib.Format.STRING)
+    culprits: list[str] = []
+    for key, text in written.items():
+        try:
+            typing.evaluate_forward_ref(annotationlib.ForwardRef(text, owner=origin))
+        except NameError:
+            culprits.append("the return" if key == "return" else f"parameter {key!r}")
+    return culprits or ["an annotation"]
+
+
+def _unresolved_note(failures: list[tuple[str, list[str]]]) -> str:
+    """One note naming every failing annotation; `failures` are (owner, culprits)."""
+    items = [(culprit, owner) for owner, culprits in failures for culprit in culprits]
+    if len(items) == 1:
+        culprit, owner = items[0]
+        if culprit == "the return":
+            return f"resolving the return annotation of {owner}"
+        return f"resolving the annotation of {culprit} of {owner}"
+    listed = "; ".join(f"{culprit} of {owner}" for culprit, owner in items)
+    return f"resolving the annotations of: {listed}"
+
+
+def resolve(nodes: Sequence[NodeDef]) -> list[NodeDef]:
+    """Returns `nodes` with their annotations evaluated to values, as Hamilton does.
+
+    `typing.get_type_hints` evaluates them: string annotations, and forward
+    references to names defined anywhere in the module, also nested ones such as
+    `list["Later"]`, resolve, and a `None` annotation becomes `NoneType`. When
+    names do not resolve, the `NameError` of the first failing node by name is
+    raised, with one note naming every failing node and annotation, sorted by node.
+    """
+    origins: dict[int, tuple[Callable[..., object], list[str]]] = {}
+    for node in nodes:
+        origins.setdefault(id(node.origin), (node.origin, []))[1].append(node.name)
+    values: dict[int, dict[str, typing.Any]] = {}
+    errors: list[tuple[str, NameError, Callable[..., object], list[str]]] = []
+    for key, (origin, names) in origins.items():
+        try:
+            values[key] = typing.get_type_hints(origin, include_extras=True)
+        except NameError as error:
+            errors.append((min(names), error, origin, names))
+    if errors:
+        errors.sort(key=lambda failure: failure[0])
+        failures = [(_owner(o, names), _unresolved(o)) for _, _, o, names in errors]
+        error = errors[0][1]
+        error.add_note(_unresolved_note(failures))
+        raise error
+    resolved: list[NodeDef] = []
+    for node in nodes:
+        hints = values[id(node.origin)]
+        params = tuple(replace(p, annotation=hints[p.name]) for p in node.params)
+        resolved.append(replace(node, params=params, returns=hints["return"]))
+    return resolved

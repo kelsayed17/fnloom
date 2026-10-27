@@ -33,6 +33,8 @@ driver = fnloom.build(pricing)
 | A parameter or the return without an annotation | `ValueError: 'f': parameter 'a' has no type annotation` |
 | A positional-only, `*args` or `**kwargs` parameter | `ValueError: 'f': *args parameter 'a' is not supported` |
 | An `async def` or generator function | `ValueError: 'f': async function is not supported; nodes are called synchronously` |
+| An annotation naming something that does not exist at run time, such as an import under `TYPE_CHECKING` | `NameError: name 'Decimal' is not defined`, with a note naming the node and the parameter |
+| Functions annotating the same input with different types | `ValueError: inputs have conflicting types: 'a' is int in 'f', str in 'g'` |
 
 ## When you execute or prepare
 

@@ -228,6 +228,8 @@ def test_public_api_is_exported() -> None:
     assert sorted(fnloom.__all__) == [
         "Builder",
         "Driver",
+        "NodeView",
+        "Param",
         "PreparedPlan",
         "Source",
         "Value",

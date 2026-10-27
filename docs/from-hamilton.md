@@ -26,7 +26,7 @@ The decorators fnloom has so far take the same arguments as Hamilton's; only the
 | `from hamilton.function_modifiers import parameterize, source, value` | `from fnloom import parameterize, source, value` |
 | `@parameterize(row={"param": source("node")})` | The same |
 | `@parameterize(row={"param": value(v)})` | The same; `v` is passed itself, uncopied, as in Hamilton |
-| `@tag(owner="data")` | `from fnloom import tag`, the same; values are `str` |
+| `@tag(owner="data")` | `from fnloom import tag`, the same, except that a value must be a `str`, not a list (Q36) |
 | A row as `(bindings, docstring)`, `group(...)`, `parameterize_sources`, `parameterize_values` | Not yet; a row is a mapping |
 
 </div>

@@ -1,8 +1,10 @@
 """Behaviour fnloom keeps from Hamilton: same values or same exception class."""
 
 import pytest
+from hamilton import driver as hamilton_driver
 from harness import (
     Direction,
+    Nodes,
     Outcome,
     lineage_fnloom,
     lineage_hamilton,
@@ -13,6 +15,7 @@ from harness import (
     run_hamilton,
 )
 
+import fnloom
 from helpers import make_module
 
 
@@ -187,3 +190,46 @@ def test_value_object_is_passed_by_identity() -> None:
         seen[runtime] = [results, list(module.BOUND)]
     assert seen["hamilton"] == [[{"bound_seen": True}] * 2, [1, 2]]
     assert seen["fnloom"] == seen["hamilton"]
+
+
+@pytest.mark.parametrize("fixture", ["typed", "typed_future"])
+def test_node_types_match_hamilton(fixture: str) -> None:
+    """Every node, inputs included, has the type Hamilton gives it.
+
+    The fixtures include `-> None` (`NoneType` in both) and the nested string
+    forward reference `list["Report"]` (resolved to the class in both).
+    """
+    module = load_fixture(fixture)
+    hamilton = {
+        node.name: node.type
+        for node in hamilton_driver.Builder()
+        .with_modules(module)
+        .build()
+        .list_available_variables()
+    }
+    views = fnloom.build(module).nodes
+    assert sorted(hamilton) == list(views)
+    for name, view in views.items():
+        assert hamilton[name] == view.type, name
+    assert views["report"].type is module.Report
+    assert views["history"].type == list[module.Report]
+    assert views["log"].type is type(None)
+
+
+def test_unresolvable_annotation_same_class() -> None:
+    """A name imported only under `TYPE_CHECKING` fails the build the same way."""
+    module = make_module(
+        "differential_unresolvable",
+        """
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from decimal import Decimal
+
+def price(rate: Decimal) -> int:
+    return 1
+""",
+    )
+    hamilton = nodes_hamilton([module])
+    assert hamilton == Nodes(None, "NameError")
+    assert nodes_fnloom([module]) == hamilton

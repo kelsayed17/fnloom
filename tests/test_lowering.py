@@ -284,3 +284,42 @@ def _make(bound):
     for a in (1, 2):
         assert driver.execute(["out"], inputs={"a": a}) == {"out": id(bound)}
     assert bound == [1, 2]
+
+
+def test_row_clashing_with_a_function_of_the_same_module_names_both_definitions() -> None:  # noqa: E501  # fmt: skip
+    """In one module, the error names the row's function and the clashing function."""
+    module = make_module(
+        "lower_same",
+        HEADER
+        + """
+@parameterize(g={"x": source("a")})
+def f(x: int) -> int:
+    return x
+
+def g(a: int) -> int:
+    return a
+""",
+    )
+    message = "node 'g' is defined twice in 'lower_same': by a row of function 'f' and by function 'g'"  # noqa: E501
+    with pytest.raises(ValueError, match=f"^{message}$"):
+        collect([module])
+
+
+def test_rows_of_two_functions_clashing_name_both_functions() -> None:
+    """Two parameterized functions of one module declaring one row name clash."""
+    module = make_module(
+        "lower_rows_clash",
+        HEADER
+        + """
+@parameterize(out={"x": source("a")})
+def f(x: int) -> int:
+    return x
+
+@parameterize(out={"y": source("a")})
+def g(y: int) -> int:
+    return y
+""",
+    )
+    message = "node 'out' is defined twice in 'lower_rows_clash': by a row of function 'f' and by a row of function 'g'"  # noqa: E501
+    with pytest.raises(ValueError, match=f"^{message}$"):
+        collect([module])
