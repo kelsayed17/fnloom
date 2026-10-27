@@ -110,7 +110,7 @@ fnloom.build(mismatched)
 A return type feeds a parameter when:
 
 - it's the same type or a subclass;
-- either side is `Any`;
+- either side is `Any`, except that a `TypeVar` producer matches only the same `TypeVar`;
 - it's a union and the parameter accepts every member, or the parameter is a union and one member accepts it;
 - it's a generic of the same kind, with matching arguments when both sides name them.
 
@@ -158,8 +158,9 @@ A few rules worth knowing:
 | `TypeVar` | Anything fits; on an edge it matches only itself |
 | A `runtime_checkable` protocol | `isinstance` |
 | A PEP 695 alias (`type Price = float`) | As what it names |
-| `list`, `list[T]`, `dict[K, V]`, `tuple[T, ...]` | By class only, so `["a"]` fits `list[int]` |
-| `Sequence[T]`, `Iterable[T]` | By kind, plus the first element |
+| `list`, `dict`, `tuple` and other plain classes | `isinstance` |
+| `list[T]`, `tuple[T, ...]`, `Sequence[T]`, `set[T]`, `Iterable[T]` | A value of exactly the declared class (a `list` for `list[T]`) by class only, so `["a"]` fits `list[int]`. Any other value by kind, plus its first element |
+| `dict[K, V]` | By class only: the value's class must be exactly `dict` |
 | Other `collections.abc` generics (`Mapping[str, int]`, `Callable[[int], int]`, ...) | By kind only, so any `dict` fits `Mapping[str, int]` |
 | An iterator | By kind only. It's never read, so no items are lost |
 
@@ -171,7 +172,7 @@ alias inside another generic's arguments is compared as written too, so a node r
 ### Unsupported annotations
 
 Anything else refuses every value except `None`. Two examples are a plain protocol (one not marked
-`runtime_checkable`), and a subclass of a concrete generic's class, such as an `OrderedDict` for `dict[str, int]`.
+`runtime_checkable`), and a `dict` subclass, such as an `OrderedDict`, for `dict[str, int]`.
 Either annotate with a supported form, or build with `Builder.without_input_type_checks()`:
 
 ```python

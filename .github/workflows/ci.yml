@@ -57,7 +57,8 @@ jobs:
     # benchmark under `setarch -R`, which Docker's default profile refuses.
     runs-on: ubuntu-24.04-arm
     container:
-      image: rust:1.99.1
+      # Pinned by digest as well, so a re-pushed tag cannot change what runs with seccomp relaxed.
+      image: rust:1.99.1@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc
       options: --security-opt seccomp=unconfined
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

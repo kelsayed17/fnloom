@@ -52,7 +52,11 @@ impl Plan {
     /// downstream node runs; never for an input, an override or a skipped optional input.
     /// It is driven as one more observer, so an exception from it is raised like an
     /// observer's: as itself, after the closing `post_graph(ok=False)`.
-    #[pyo3(signature = (inputs, overrides, observers = Vec::new(), on_value = None))]
+    // PyO3 renders the `Vec::new()` default as `Ellipsis`, so the signature says `()` itself.
+    #[pyo3(
+        signature = (inputs, overrides, observers = Vec::new(), on_value = None),
+        text_signature = "($self, /, inputs, overrides, observers=(), on_value=None)"
+    )]
     fn run<'py>(
         &self,
         py: Python<'py>,

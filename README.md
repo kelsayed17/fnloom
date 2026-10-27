@@ -37,7 +37,7 @@ needed to produce them, in a fixed order, with your mistakes caught before anyth
   or an `async def` node raises a clear error naming the culprit. Hamilton accepts several of these silently.
 - 🎯 **The same order, every run.** Nodes run in topological order with ties broken by name, so logs and side effects
   never shuffle between runs.
-- 🏔️ **No depth limit.** Nothing recurses over the graph, so a 50,000-node chain builds and runs in about 0.6 s. Hamilton
+- 🏔️ **No depth limit.** Nothing recurses over the graph, so a 50,000-node chain builds and runs. Hamilton
   hits `RecursionError` at around 1,000.
 - 🦀 **A Rust core you can embed.** `fnloom-core` has no dependencies and no `unsafe`, and it doesn't care what a node
   runs.
@@ -108,8 +108,9 @@ in what happens when you run it.
 | Running a request again | Re-planned on every call | ✅ `prepare` once, `run` many times |
 | Runtime dependencies | numpy, pandas and more | ✅ None |
 
-Hamilton is fnloom's test oracle. Every case runs through both, and every deliberate difference is
-[a row in the register](https://kelsayed17.github.io/fnloom/quirk-register/) with a test asserting both sides.
+Hamilton is fnloom's test oracle: the shared behaviour runs through both, and every deliberate difference is
+[a row in the register](https://kelsayed17.github.io/fnloom/quirk-register/). Most rows have a test that checks
+Hamilton and fnloom side by side.
 Moving over? Read [Coming from Hamilton](https://kelsayed17.github.io/fnloom/from-hamilton/).
 
 ## Performance
@@ -132,8 +133,8 @@ dispatch.
 **Yes, if** you compute many derived values from a few inputs (features, metrics, pricing, signals), want each step
 to be a small function you can test on its own, and run the same graph many times in one process.
 
-**Not yet, if** you need Hamilton's adapters, result builders, async execution, `@config.when`, `@extract_columns` or
-caching. They're on the [roadmap](#status). fnloom is also not a scheduler. It doesn't retry, distribute or schedule
+**Not yet, if** you need Hamilton's adapters, result builders, async execution, `@config.when` or `@extract_columns`.
+They're on the [roadmap](#status). fnloom is also not a scheduler. It doesn't retry, distribute or schedule
 work, so pair it with an orchestrator if you need that.
 
 ## Install
@@ -154,7 +155,7 @@ uv run maturin develop --release
 
 - ✅ The Rust core and the native Python path
 - ✅ `@parameterize`, `@tag`, graph inspection and type checks
-- 📐 Result caching: designed, not yet built
+- ✅ [Result caching](https://kelsayed17.github.io/fnloom/caching/), in memory or on disk
 - 🔜 Configuration and `@extract_*`, then adapters and async execution, then visualisation
 
 The [design](https://kelsayed17.github.io/fnloom/design/2026-10-26-fnloom-design/) has the full plan. The name is
@@ -162,8 +163,8 @@ provisional, pending a trademark check before the first release.
 
 ## Contributing
 
-[CONTRIBUTING.md](CONTRIBUTING.md) covers the setup and the one check script. Please report security problems
-privately, as [SECURITY.md](SECURITY.md) describes.
+[CONTRIBUTING.md](https://github.com/kelsayed17/fnloom/blob/main/CONTRIBUTING.md) covers the setup and the one check script. Please report security problems
+privately, as [SECURITY.md](https://github.com/kelsayed17/fnloom/blob/main/SECURITY.md) describes.
 
-Licensed under [Apache-2.0](LICENSE). Not affiliated with or endorsed by the Apache Software Foundation or the Apache
+Licensed under [Apache-2.0](https://github.com/kelsayed17/fnloom/blob/main/LICENSE). Not affiliated with or endorsed by the Apache Software Foundation or the Apache
 Hamilton (incubating) project.

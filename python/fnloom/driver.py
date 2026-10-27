@@ -21,7 +21,6 @@ type _PlanKey = tuple[tuple[str, ...], frozenset[str], frozenset[str]]
 # A request's final_vars (a list or tuple, copied), its input and override names,
 # and its plan.
 type _LastRequest = tuple[Sequence[str], frozenset[str], frozenset[str], PreparedPlan]
-# A name whose supplied value is checked, and the type it is checked against.
 # A checked name, its declared type, and the class `isinstance` checks it against
 # when the type is a plain class (`None` for any other type).
 type _Check = tuple[str, object, type | None]
@@ -96,15 +95,15 @@ def _keys(values: Mapping[str, object] | None) -> AbstractSet[str]:
 
 
 def _as_dict(values: Mapping[str, object] | None) -> dict[str, object]:
-    """`values` as a dict: itself when it is one, as the native run copies it."""
+    """`values`, which is not an exact dict, as a plain dict to check and run.
+
+    The caller passes an exact dict through itself, so this only copies: a dict
+    subclass or another mapping, so the checks and the native run read the same
+    plain values.
+    """
     # Any falsy value is no values, as `inputs or {}` always read it.
     if values is None or not values:
         return _NO_VALUES
-    # An exact dict only; `isinstance` narrows the type for the type checker.
-    if isinstance(values, dict) and type(values) is dict:
-        return values
-    # A copy for anything else, a dict subclass included, so the checks and the
-    # native run read the same plain values.
     return dict(values)
 
 
@@ -169,7 +168,8 @@ class PreparedPlan:
         `plan` is the native plan, or the `CacheRun` over it when the driver has
         a cache: either is called with values already checked. `checks` are the
         input and the override checks each run applies: the supplied names whose
-        values are checked, each with its declared type.
+        values are checked, each with its declared type and, for a plain class,
+        the class `isinstance` checks it against.
         """
         self._plan = plan
         self._outputs = tuple(dict.fromkeys(outputs))

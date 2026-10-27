@@ -7,6 +7,7 @@ from typing import (
     Literal,
     NewType,
     Protocol,
+    TypeVar,
     override,
     runtime_checkable,
 )
@@ -96,6 +97,15 @@ def test_annotated_answers_as_its_type() -> None:
     assert type_matches(Annotated[Child, "m"], Annotated[Base, "n"]) is True
 
 
+def test_annotated_any_and_typevar_answer_as_themselves() -> None:
+    """Metadata changes nothing for `Any` and a `TypeVar` either (Q41)."""
+    t = TypeVar("t")
+    assert type_matches(Annotated[Any, "m"], int) is True
+    assert type_matches(Annotated[t, "m"], t) is True
+    assert type_matches(t, Annotated[t, "m"]) is True
+    assert type_matches(Annotated[t, "m"], int) is False
+
+
 def test_runtime_checkable_protocol_takes_a_conforming_value() -> None:
     """A value with the protocol's methods fits it; one without does not (Q42)."""
     assert value_matches(Sized, HasSize()) is True
@@ -173,6 +183,24 @@ def test_type_alias_answers_as_its_value() -> None:
     assert type_matches(Price, str) is False
 
 
+type Anything = Any
+type Tree = list[Tree]
+
+
+def test_recursive_alias_refuses_a_string_without_recursing() -> None:
+    """A string's first item is a string, so `Tree` would ask about it forever (Q44)."""
+    assert value_matches(Tree, [[], [[]]]) is True
+    assert value_matches(Tree, "x") is False
+    assert value_matches(Tree, "ab") is False
+    assert value_matches(Tree, ("a",)) is False
+
+
+def test_alias_of_any_answers_as_any() -> None:
+    """An alias naming `Any` feeds anything, as `Any` does (Q44)."""
+    assert type_matches(Anything, int) is True
+    assert type_matches(int, Anything) is True
+
+
 def test_generic_type_alias_is_substituted_when_its_parameters_are_in_order() -> None:
     """`Pair[int]` is `tuple[int, int]`; an alias reordering its parameters is not."""
     assert value_matches(Pair[int], (1, 2)) is True
@@ -243,3 +271,18 @@ def test_plain_class_is_only_a_class_isinstance_accepts() -> None:
 
     assert plain_class(Odd) is None
     assert plain_class(collections.abc.Sized) is collections.abc.Sized
+
+
+type Variadic[*Ts] = tuple[*Ts]
+
+
+def test_a_variadic_generic_alias_is_compared_as_written() -> None:
+    """An alias over `*Ts` is not read through, so it answers as before (Q44)."""
+    assert type_matches(Variadic[int], Variadic[int]) is True
+    assert type_matches(tuple[int], Variadic[int]) is False
+
+
+def test_an_empty_collection_fits_any_element_type() -> None:
+    """With no first element there is nothing to check."""
+    assert value_matches(collections.abc.Sequence[int], ()) is True
+    assert value_matches(collections.abc.Iterable[str], set()) is True

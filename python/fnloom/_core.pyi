@@ -1,5 +1,17 @@
 from collections.abc import Callable, Sequence
-from typing import Any, final
+from typing import Any, Self, final
+
+__all__ = [
+    "Graph",
+    "KeyPlan",
+    "ObserverBase",
+    "Plan",
+    "UnfingerprintableError",
+    "_panic_for_test",
+    "core_version",
+    "fingerprint",
+    "hash_parts",
+]
 
 def core_version() -> str: ...
 def fingerprint(
@@ -16,13 +28,13 @@ def _panic_for_test() -> None: ...
 
 @final
 class Graph:
-    def __init__(
-        self,
+    def __new__(
+        cls,
         nodes: list[
             tuple[str, list[tuple[str, bool]], dict[str, str], Callable[..., Any]]
         ],
         renames: dict[str, dict[str, str]] | None = None,
-    ) -> None: ...
+    ) -> Self: ...
     def node_names(self) -> list[str]: ...
     def upstream_of(self, names: list[str]) -> list[str]: ...
     def downstream_of(self, names: list[str]) -> list[str]: ...
@@ -44,15 +56,16 @@ class Plan:
 
 @final
 class KeyPlan:
-    def __init__(
-        self,
+    def __new__(
+        cls,
         nodes: list[
             tuple[str, bytes | None, list[tuple[str, str | None, bytes | None]]]
         ],
-    ) -> None: ...
+    ) -> Self: ...
     def keys(self, versions: dict[str, bytes | None]) -> dict[str, bytes | None]: ...
 
 class ObserverBase:
+    def __new__(cls, *_args: object, **_kwargs: object) -> Self: ...
     def pre_graph(self) -> None: ...
     def pre_node(self, node: str) -> None: ...
     def post_node(self, node: str, *, ok: bool) -> None: ...

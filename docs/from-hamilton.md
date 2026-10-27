@@ -6,7 +6,7 @@ mechanical ways.
 
 fnloom isn't a drop-in replacement, though. There's no `hamilton` module to import and no compatibility layer.
 Hamilton 1.90.0 is fnloom's test oracle: every place the two differ on purpose is a row in
-[the register of differences](quirk-register.md), with a test that checks both sides.
+[the register of differences](quirk-register.md), and most rows have a test that checks both sides.
 
 ## What you get by switching
 
@@ -102,8 +102,7 @@ value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](
 ## Not there yet
 
 fnloom is pre-alpha. The core, the native path, `@parameterize`, `@tag`, graph inspection, type checks and result
-caching are done.
-These Hamilton features come next, roughly in this order:
+caching are done. These Hamilton features come next, roughly in this order:
 
 1. **Configuration and more decorators:** `@config.when`, `@extract_columns` and `@extract_fields`.
 2. **Adapters and lifecycle hooks**, result builders and async execution.
