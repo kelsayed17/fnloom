@@ -5,44 +5,76 @@ and on prepared execution; a row where it is reliably slower is a bug.
 
 ## Results
 
-Milliseconds, Hamilton / fnloom; lower is better. Hamilton has no prepared plans, so the last column is fnloom's
-alone.
+Milliseconds, Hamilton / fnloom with input type checks on / fnloom with them off; lower is better. Hamilton has no
+prepared plans and no way to switch its input checks off, so it is measured as it ships. The last column is fnloom's
+alone (checks on / off). A cell marked † is a build where fnloom with checks on was slower than Hamilton in
+that single sample.
 
 | shape | n | build | first execute | steady execute | prepare |
 | --- | ---: | --- | --- | --- | ---: |
-| chain | 10 | 0.762 / 0.309 | 0.107 / 0.045 | 0.040 / 0.004 | 0.013 |
-| chain | 100 | 2.159 / 0.908 | 0.358 / 0.110 | 0.322 / 0.017 | 0.056 |
-| chain | 1,000 | 21.5 / 10.1 | `RecursionError` / 0.715 | `RecursionError` / 0.165 | 0.494 |
-| chain | 10,000 | 249.2 / 109.1 | `RecursionError` / 7.146 | `RecursionError` / 1.688 | 6.499 |
-| fan_in | 10 | 0.202 / 0.166 | 0.072 / 0.062 | 0.038 / 0.003 | 0.015 |
-| fan_in | 100 | 0.358 / 0.225 | 0.316 / 0.168 | 0.295 / 0.031 | 0.076 |
-| fan_in | 1,000 | 3.638 / 2.455 | 3.803 / 1.614 | 3.386 / 0.638 | 0.902 |
-| fan_in | 10,000 | 32.8 / 86.8 | 54.2 / 32.7 | 52.1 / 21.3 | 14.8 |
-| layered | 10 | 0.361 / 0.153 | 0.084 / 0.066 | 0.042 / 0.004 | 0.013 |
-| layered | 100 | 2.518 / 1.101 | 0.499 / 0.128 | 0.411 / 0.023 | 0.070 |
-| layered | 1,000 | 28.8 / 13.1 | 6.349 / 1.138 | 5.185 / 0.227 | 1.583 |
-| layered | 10,000 | 393.2 / 225.9 | `RecursionError` / 10.6 | `RecursionError` / 3.517 | 8.436 |
+| chain | 10 | 0.515 / 0.408 / 0.220 | 0.109 / 0.040 / 0.014 | 0.049 / 0.005 / 0.003 | 0.019 / 0.012 |
+| chain | 100 | 2.239 / 3.664 / 1.722 † | 0.388 / 0.066 / 0.041 | 0.349 / 0.019 / 0.018 | 0.030 / 0.017 |
+| chain | 1,000 | 17.7 / 16.5 / 15.0 | `RecursionError` / 0.341 / 0.219 | `RecursionError` / 0.148 / 0.137 | 0.151 / 0.064 |
+| chain | 10,000 | 214.9 / 167.6 / 198.3 | `RecursionError` / 4.091 / 2.446 | `RecursionError` / 1.586 / 1.464 | 1.857 / 0.694 |
+| fan_in | 10 | 0.176 / 0.144 / 0.082 | 0.070 / 0.073 / 0.011 | 0.036 / 0.011 / 0.003 | 0.020 / 0.006 |
+| fan_in | 100 | 0.347 / 0.592 / 0.533 † | 0.317 / 0.212 / 0.075 | 0.283 / 0.108 / 0.029 | 0.068 / 0.031 |
+| fan_in | 1,000 | 3.600 / 5.491 / 5.545 † | 3.132 / 1.849 / 0.846 | 2.898 / 1.237 / 0.493 | 0.496 / 0.339 |
+| fan_in | 10,000 | 32.4 / 57.4 / 71.4 † | 45.2 / 33.0 / 22.6 | 42.0 / 26.3 / 18.8 | 7.142 / 3.811 |
+| layered | 10 | 0.292 / 0.226 / 0.168 | 0.064 / 0.049 / 0.012 | 0.037 / 0.004 / 0.004 | 0.017 / 0.005 |
+| layered | 100 | 2.081 / 1.816 / 1.759 | 0.427 / 0.066 / 0.044 | 0.385 / 0.021 / 0.020 | 0.034 / 0.026 |
+| layered | 1,000 | 19.9 / 20.1 / 18.4 † | 3.956 / 0.375 / 0.263 | 3.886 / 0.183 / 0.182 | 0.163 / 0.074 |
+| layered | 10,000 | 241.8 / 268.1 / 222.9 † | `RecursionError` / 4.277 / 2.807 | `RecursionError` / 1.857 / 1.823 | 2.028 / 0.759 |
+| rows | 10 | 0.260 / 0.167 / 0.108 | 0.076 / 0.056 / 0.012 | 0.040 / 0.006 / 0.004 | 0.013 / 0.004 |
+| rows | 100 | 1.843 / 0.825 / 0.801 | 0.350 / 0.075 / 0.053 | 0.314 / 0.036 / 0.034 | 0.028 / 0.013 |
+| rows | 1,000 | 61.4 / 9.485 / 8.165 | `RecursionError` / 0.596 / 0.423 | `RecursionError` / 0.348 / 0.341 | 0.157 / 0.063 |
+| rows | 10,000 | 5,145.4 / 143.6 / 105.3 | `RecursionError` / 6.059 / 4.288 | `RecursionError` / 3.703 / 3.554 | 1.709 / 0.513 |
 
 Measured on an Apple M2 Pro with 16 GB, macOS 27.0, CPython 3.14.9, `apache-hamilton==1.90.0`, and a release build
 of the extension, on 2026-10-27.
 
-**Steady execution**, the cost of running a prepared plan again, is where fnloom differs most: 5 to 23 times faster
-than Hamilton's `execute` wherever both finish, because the plan is compiled once and each run is a loop over its
-steps in Rust. The exception is the 10,000-parameter `fan_in` at 2.4 times, where one Python call with 10,000 keyword
-arguments is most of the cost for both.
+**Steady execution**, the cost of running a prepared plan again, is where fnloom differs most: with checks on it is
+1.6 to 21 times faster than Hamilton's `execute` wherever both finish, because the plan is compiled once and each run
+is a loop over its steps in Rust. The low end is `fan_in`, 1.6 times at 10,000 parameters, where one Python call with
+10,000 keyword arguments is most of the cost for both.
+
+**The cost of input checks** is the gap between the two fnloom figures. Per run it is small next to the call itself
+(steady execution, checks on against off, differs by at most 0.15 ms on every `chain`, `layered` and `rows` graph, and
+by 0.08 to 7.5 ms on the `fan_in` graphs of 100 parameters or more, where every one of the `n` inputs is checked). On
+`fan_in` that is more than half of the steady time at 1,000 parameters (1.237 against 0.493 ms).
 
 ### Where Hamilton raises
 
-Hamilton builds the 1,000- and 10,000-node chains and the 10,000-node layered graph, then raises `RecursionError` on
-the first `execute`: its graph walk recurses once per level of depth. fnloom runs all 24 cases, and every answer it
-gives is checked against the shape's closed form.
+Hamilton builds the 1,000- and 10,000-node chains, the 10,000-node layered graph and the 1,000- and 10,000-row `rows`
+graphs, then raises `RecursionError` on the first `execute`: its graph walk recurses once per level of depth. fnloom
+runs all 16 cases, with checks on and off, and every answer it gives is checked against the shape's closed form.
 
-### The one slower row
+### Build: the rows where fnloom with checks on is slower
 
-In this run, building the 10,000-parameter `fan_in` took fnloom 86.8 ms against Hamilton's 32.8 ms. Each build is a
-single sample, taken right after Hamilton's runs in the same process. Measured alone, in five fresh processes, fnloom
-built it in 20 to 42 ms and Hamilton in 32 to 45 ms, fnloom faster every time. Treat the row as noise until a quieter
-run says otherwise.
+The design calls a row where fnloom is reliably slower a bug. The table's build column is one sample per cell, with
+Hamilton running first in the same process, so it cannot settle this: it marks six builds † that are noise or
+ordering. They were re-measured with one fresh process per sample, nine samples per runtime and case, the two
+runtimes alternating which goes first, on a release build, timing only the build call (medians, ms, Hamilton /
+fnloom):
+
+| shape | n | Hamilton / fnloom | verdict |
+| --- | ---: | --- | --- |
+| chain | 100 | 2.040 / 1.693 | fnloom faster |
+| layered | 1,000 | 21.974 / 20.300 | fnloom faster |
+| layered | 10,000 | 215.8 / 206.0 | fnloom faster |
+| fan_in | 100 | 0.402 / 0.633 | **slower, issue to open** |
+| fan_in | 1,000 | 3.078 / 5.344 | **slower, issue to open** |
+| fan_in | 10,000 | 31.8 / 56.5 | **slower, issue to open** |
+
+Only `fan_in` builds are reliably slower, by 1.6 to 1.8 times, and each is an issue to open (none opened yet). The
+other † cells in the table, and the 10-parameter `fan_in` first execute (0.073 against 0.070 ms), were not reliably
+slower. The checks-on and checks-off builds do the same build work, since input checks run per run, so their
+differences in the table (for example chain 100, 3.664 against 1.722 ms) are noise.
+
+The cost is probably per-parameter Python work in the scan, not type resolution. A `cProfile` of one fnloom build of
+`fan_in` with 10,000 parameters (0.133 s under the profiler, which inflates it) puts the scan at 44% of the total
+(`_node_defs`, 0.057 s), within it `_bind`/`resolve` 26% (0.034 s, `dataclasses.replace` once per parameter 18%) and
+one `inspect.signature` call 19% (0.025 s), and building the node views at 25% (`node_views`, 0.033 s). The rest,
+about 30%, was not broken down. `typing.get_type_hints` does not appear among the top entries.
 
 ## Why fan-in is fast
 
@@ -60,10 +92,11 @@ uv run maturin develop --release   # time an optimised extension, not the debug 
 uv run python -m benches.run > bench.jsonl 2> bench.stderr
 ```
 
-It prints 24 JSON lines to stdout (`shape`, `n`, `runtime`, `build_ms`, `first_execute_ms`, `steady_execute_ms`,
-`prepare_ms`, `error`, `error_phase`). Hamilton prints a help banner to stderr whenever it raises, hence the second
-redirect. Each runtime's answer is checked against the shape's closed form, and a mismatch aborts the run. Generated
-modules are dropped from `sys.modules` after each case.
+It prints 48 JSON lines to stdout (`shape`, `n`, `runtime`, `input_checks`, `build_ms`,
+`first_execute_ms`, `steady_execute_ms`, `prepare_ms`, `error`, `error_phase`).
+Hamilton prints a help banner to stderr whenever it raises, hence the second redirect.
+Each runtime's answer is checked against the shape's closed form, and a
+mismatch aborts the run. Generated modules are dropped from `sys.modules` after each case.
 
 ### What is timed
 
@@ -77,6 +110,8 @@ All times use `time.perf_counter_ns`, in milliseconds. Graph generation is not t
   cached. Always null for Hamilton.
 - A runtime that raises records the exception class in `error` and the phase in `error_phase` (`build`,
   `first_execute`, `steady_execute` or `prepare`). Timings of earlier phases are kept; the rest are null.
+- `input_checks`: Hamilton is always `true`, as it ships. fnloom is measured twice per graph, with the checks on and
+  with `Builder.without_input_type_checks()`.
 - Argument copies (`[*outputs]`, `dict(inputs)`) are made once, outside the timed regions.
 
 ### Shapes
@@ -84,6 +119,8 @@ All times use `time.perf_counter_ns`, in milliseconds. Graph generation is not t
 - `chain`: `n` nodes in a line, each adding one to the one before; one input, `seed`.
 - `fan_in`: one function with `n` parameters, all inputs, summed.
 - `layered`: `n` nodes in rows of ten, each reading two nodes of the row above; one input, `seed`.
+- `rows`: one function with `n` `@parameterize` rows, each sourcing the row before it, the first sourcing the input
+  `seed`. The module is generated in Hamilton's spelling for Hamilton and in fnloom's for fnloom.
 
 ## The instruction-count gate
 

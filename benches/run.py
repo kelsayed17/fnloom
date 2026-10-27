@@ -42,6 +42,7 @@ class Row:
     shape: str
     n: int
     runtime: str
+    input_checks: bool
     build_ms: float | None
     first_execute_ms: float | None
     steady_execute_ms: float | None
@@ -62,6 +63,7 @@ class Runtime[D]:
     first_execute: Callable[[D], Mapping[str, object]]
     steady_call: Callable[[D], Callable[[], object]]
     prepare: Callable[[D], object] | None
+    input_checks: bool
 
 
 def _timed[T](call: Callable[[], T]) -> tuple[T, float]:
@@ -84,8 +86,18 @@ def _cold_prepare_ms[D](
 
 
 def _fnloom(
-    module: ModuleType, outputs: Sequence[str], inputs: Mapping[str, object]
+    module: ModuleType,
+    outputs: Sequence[str],
+    inputs: Mapping[str, object],
+    *,
+    input_checks: bool,
 ) -> Runtime[fnloom.Driver]:
+
+    def build() -> fnloom.Driver:
+        builder = fnloom.Builder().with_modules(module)
+        if not input_checks:
+            builder = builder.without_input_type_checks()
+        return builder.build()
 
     def steady_call(driver: fnloom.Driver) -> Callable[[], object]:
         prepared = driver.prepare(outputs, inputs=inputs)
@@ -93,10 +105,11 @@ def _fnloom(
 
     return Runtime(
         "fnloom",
-        lambda: fnloom.build(module),
+        build,
         lambda driver: driver.execute(outputs, inputs=inputs),
         steady_call,
         lambda driver: driver.prepare(outputs, inputs=inputs),
+        input_checks=input_checks,
     )
 
 
@@ -112,6 +125,7 @@ def _hamilton(
         lambda driver: driver.execute(names, inputs=given),
         lambda driver: lambda: driver.execute(names, inputs=given),
         None,
+        input_checks=True,
     )
 
 
@@ -138,6 +152,7 @@ def _measure[D](
         shape,
         n,
         runtime.name,
+        runtime.input_checks,
         timings.get("build"),
         timings.get("first_execute"),
         timings.get("steady_execute"),
@@ -151,20 +166,28 @@ def _check_answer(
     row: Row, result: Mapping[str, object] | None, expected: object
 ) -> None:
     if result is not None and dict(result) != expected:
-        where = f"{row.shape} n={row.n}: {row.runtime}"
+        checks = "on" if row.input_checks else "off"
+        where = f"{row.shape} n={row.n}: {row.runtime} (checks {checks})"
         msg = f"{where} computed {result!r}, not {expected!r}"
         raise SystemExit(msg)
 
 
 def measure_case(shape: Shape, n: int) -> list[Row]:
-    """Times both runtimes on one graph; aborts if an answer is not the closed form."""
+    """Times Hamilton and fnloom, checks on and off, on one graph.
+
+    Aborts if an answer is not the closed form.
+    """
     outputs, inputs = make_request(shape, n)
     expected = make_expected(shape, n)
     rows: list[Row] = []
-    with generated(shape, n) as module:
+    with (
+        generated(shape, n, "hamilton") as hamilton_module,
+        generated(shape, n, "fnloom") as fnloom_module,
+    ):
         for runtime in (
-            _hamilton(module, outputs, inputs),
-            _fnloom(module, outputs, inputs),
+            _hamilton(hamilton_module, outputs, inputs),
+            _fnloom(fnloom_module, outputs, inputs, input_checks=True),
+            _fnloom(fnloom_module, outputs, inputs, input_checks=False),
         ):
             row, result = _measure(runtime, shape, n)
             _check_answer(row, result, expected)
@@ -173,7 +196,7 @@ def measure_case(shape: Shape, n: int) -> list[Row]:
 
 
 def main() -> None:
-    """Prints the 24 rows as JSON lines."""
+    """Prints the 48 rows as JSON lines."""
     for shape in get_args(Shape.__value__):
         for n in SIZES:
             for row in measure_case(shape, n):
