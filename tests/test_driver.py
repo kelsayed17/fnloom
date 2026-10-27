@@ -224,5 +224,16 @@ def test_ten_thousand_node_chain_executes() -> None:
 
 
 def test_public_api_is_exported() -> None:
-    """The package exports exactly the four public names."""
-    assert sorted(fnloom.__all__) == ["Builder", "Driver", "PreparedPlan", "build"]
+    """The package exports exactly its public names."""
+    assert sorted(fnloom.__all__) == [
+        "Builder",
+        "Driver",
+        "PreparedPlan",
+        "Source",
+        "Value",
+        "build",
+        "parameterize",
+        "source",
+        "tag",
+        "value",
+    ]
