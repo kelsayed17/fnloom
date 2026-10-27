@@ -2,9 +2,10 @@
 
 import inspect
 import threading
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from fnloom import _core, _types
+from fnloom._caching import Cache, CacheRun
 from fnloom._decorators import Source
 from fnloom._scan import NodeDef, collect, core_inputs, resolve
 from fnloom._view import NodeView, NodeViews, node_views
@@ -13,6 +14,8 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
     from collections.abc import Set as AbstractSet
     from types import ModuleType
+
+    from fnloom._stores import CacheStore
 
 type _PlanKey = tuple[tuple[str, ...], frozenset[str], frozenset[str]]
 # A request's final_vars (a list or tuple, copied), its input and override names,
@@ -25,6 +28,16 @@ type _Check = tuple[str, object, type | None]
 
 # How many compiled plans a driver keeps; the least recently used one goes first.
 PLAN_CACHE_SIZE = 128
+
+
+class _Runnable(Protocol):
+    """What a prepared plan runs: a native plan, or a cached run over one."""
+
+    def run(
+        self, inputs: dict[str, Any], overrides: dict[str, Any], /
+    ) -> dict[str, object]:
+        """Runs with checked values; exactly the outputs, keyed by name, sorted."""
+        ...
 
 
 class _GraphLike(Protocol):
@@ -145,7 +158,7 @@ class PreparedPlan:
 
     def __init__(
         self,
-        plan: _core.Plan,
+        plan: _Runnable,
         outputs: Sequence[str],
         input_names: frozenset[str],
         override_names: frozenset[str],
@@ -153,8 +166,10 @@ class PreparedPlan:
     ) -> None:
         """Wraps a compiled plan with the outputs and names it was compiled for.
 
-        `checks` are the input and the override checks each run applies: the
-        supplied names whose values are checked, each with its declared type.
+        `plan` is the native plan, or the `CacheRun` over it when the driver has
+        a cache: either is called with values already checked. `checks` are the
+        input and the override checks each run applies: the supplied names whose
+        values are checked, each with its declared type.
         """
         self._plan = plan
         self._outputs = tuple(dict.fromkeys(outputs))
@@ -211,8 +226,8 @@ class Driver:
 
     The cache keeps the `PLAN_CACHE_SIZE` most recently used plans. Make a driver with
     `Builder` (or its shorthand `build`); the constructor takes an already built
-    native graph, the views of its nodes, and whether runs check the types of
-    inputs and overrides.
+    native graph, the views of its nodes, whether runs check the types of inputs
+    and overrides, and the cache, if runs use one.
     """
 
     def __init__(
@@ -221,10 +236,12 @@ class Driver:
         nodes: Mapping[str, NodeView] | None = None,
         *,
         check_inputs: bool = True,
+        cache: Cache | None = None,
     ) -> None:
         """Wraps a native graph; `Builder` is the way to make one from modules."""
         self._graph = graph
         self._check_inputs = check_inputs
+        self._cache = cache
         self._nodes = (
             nodes if isinstance(nodes, NodeViews) else NodeViews(nodes or {}, {})
         )
@@ -279,7 +296,12 @@ class Driver:
             list(outputs), sorted(input_names), sorted(override_names)
         )
         checks = self._checks(plan, override_names) if self._check_inputs else ((), ())
-        return PreparedPlan(plan, outputs, input_names, override_names, checks)
+        if self._cache is None:
+            return PreparedPlan(plan, outputs, input_names, override_names, checks)
+        cached = CacheRun(
+            self._cache, self._graph, plan, outputs, input_names, override_names
+        )
+        return PreparedPlan(cached, outputs, input_names, override_names, checks)
 
     def _checks(
         self, plan: _core.Plan, override_names: frozenset[str]
@@ -345,22 +367,45 @@ class Builder:
     """Accumulates modules, then builds a `Driver`; methods return new builders."""
 
     def __init__(
-        self, modules: tuple[ModuleType, ...] = (), *, check_inputs: bool = True
+        self,
+        modules: tuple[ModuleType, ...] = (),
+        *,
+        check_inputs: bool = True,
+        store: CacheStore | None = None,
     ) -> None:
-        """Starts with the given modules (none by default), checking input types."""
+        """Starts with the given modules (none by default), checking input types.
+
+        `store`, when given, caches the results of the driver's runs in it.
+        """
         self._modules = modules
         self._check_inputs = check_inputs
+        self._store = store
 
     def with_modules(self, *modules: ModuleType) -> Builder:
         """Returns a new builder with `modules` appended to this one's."""
-        return Builder((*self._modules, *modules), check_inputs=self._check_inputs)
+        return Builder(
+            (*self._modules, *modules),
+            check_inputs=self._check_inputs,
+            store=self._store,
+        )
 
     def without_input_type_checks(self) -> Builder:
         """Returns a new builder whose driver skips input and override type checks.
 
         Edge checks, between a node and the parameters it feeds, stay on (Q10).
         """
-        return Builder(self._modules, check_inputs=False)
+        return Builder(self._modules, check_inputs=False, store=self._store)
+
+    def with_cache(self, store: CacheStore) -> Builder:
+        """Returns a new builder whose driver caches every node's result in `store`.
+
+        A node's `@cache` policy changes how it is cached. Each run computes every
+        node's key from its code and the versions of what it reads, loads only the
+        stored results nearest the outputs, and runs and stores the rest. Code
+        versions are read at build, so rebuild after editing code. A stored value is
+        returned as it is, not copied: a cached node must not mutate its arguments.
+        """
+        return Builder(self._modules, check_inputs=self._check_inputs, store=store)
 
     def build(self) -> Driver:
         """Scans the modules and returns a `Driver`; `ValueError` on a bad node.
@@ -376,7 +421,8 @@ class Builder:
         graph = _graph_of(nodes)
         if mismatches := _edge_mismatches(views.functions):
             raise ValueError("\n".join(mismatches))
-        return Driver(graph, views, check_inputs=self._check_inputs)
+        cache = None if self._store is None else Cache.of(self._store, nodes)
+        return Driver(graph, views, check_inputs=self._check_inputs, cache=cache)
 
 
 def build(*modules: ModuleType) -> Driver:

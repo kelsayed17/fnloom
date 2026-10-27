@@ -9,6 +9,9 @@ from typing import Literal
 
 _ATTRIBUTE = "__fnloom__"
 
+# How a node uses the result cache: see `cache`.
+type CacheBehavior = Literal["default", "recompute", "disable"]
+
 
 @dataclass(frozen=True, slots=True)
 class Source:
@@ -34,7 +37,7 @@ class CachePolicy:
         version: The user's own code version, or None for the automatic one.
     """
 
-    behavior: str
+    behavior: CacheBehavior
     ignore: frozenset[str]
     version: str | None
 
@@ -159,12 +162,13 @@ def tag[F: Callable[..., object]](**tags: str) -> Callable[[F], F]:
     return apply
 
 
+# The values of `CacheBehavior`.
 _BEHAVIORS = ("default", "recompute", "disable")
 
 
 def cache[F: Callable[..., object]](
     *,
-    behavior: Literal["default", "recompute", "disable"] = "default",
+    behavior: CacheBehavior = "default",
     ignore: Iterable[str] = (),
     version: str | None = None,
 ) -> Callable[[F], F]:
