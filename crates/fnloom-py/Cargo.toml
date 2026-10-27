@@ -1,0 +1,30 @@
+[package]
+name = "fnloom-py"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[lib]
+name = "_core"
+crate-type = ["cdylib"]
+# The crate has no Rust tests (tests/test_binding.py covers it), and a test harness would
+# have to embed and link libpython for nothing.
+test = false
+doctest = false
+
+[features]
+# Test-only hooks (a deliberate panic for the FFI-boundary test). Enabled by
+# `maturin develop --features test-hooks` in check.sh and CI, never in releases.
+test-hooks = []
+
+[dependencies]
+fnloom-core = { path = "../fnloom-core" }
+# No `extension-module` feature: PyO3 0.30 deprecates it in favour of the
+# PYO3_BUILD_EXTENSION_MODULE variable, which maturin (>= 1.9.4) sets for its own builds,
+# so plain cargo builds and lints of the workspace still link the way PyO3 expects.
+pyo3 = "0.30.1"
+
+[lints]
+workspace = true

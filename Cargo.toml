@@ -1,8 +1,27 @@
 [workspace]
-resolver = "2"
-members = ["crates/fnloom-core"]
+resolver = "3"
+members = ["crates/fnloom-core", "crates/fnloom-py"]
 
 [workspace.package]
-edition = "2021"
+edition = "2024"
+# The first release with edition 2024; CI's `msrv` job verifies it.
+rust-version = "1.85"
 version = "0.0.0"
+license = "Apache-2.0"
 publish = false
+
+[workspace.lints.rust]
+missing_docs = "deny"
+unused = { level = "deny", priority = -1 }
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "deny", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+dbg_macro = "deny"
+print_stdout = "deny"
+allow_attributes_without_reason = "deny"

@@ -1,0 +1,74 @@
+[build-system]
+requires = ["maturin>=1.15,<2"]
+build-backend = "maturin"
+
+[project]
+name = "fnloom"
+version = "0.0.0"
+description = "A Rust dataflow engine: plain Python functions are nodes, wired by parameter name."
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+requires-python = ">=3.14"
+classifiers = ["Typing :: Typed"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8",
+    "ruff>=0.15",
+    "ty>=0.0.89",
+    "maturin>=1.15,<2",
+    # The behavioural oracle for the differential tests; pinned so the oracle never drifts.
+    "apache-hamilton==1.90.0",
+]
+
+[tool.maturin]
+manifest-path = "crates/fnloom-py/Cargo.toml"
+python-source = "python"
+module-name = "fnloom._core"
+
+[tool.pytest.ini_options]
+testpaths = ["tests", "scripts"]
+# Test modules import shared helpers as `from helpers import ...`; "." lets them import `benches`,
+# and "scripts" lets scripts/test_bench_gate.py import the script it tests.
+pythonpath = ["tests", ".", "scripts"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+
+[tool.ruff]
+target-version = "py314"
+src = ["python", "tests", "scripts", "benches"]
+# Plain directories loaded by path or by pytest's rootdir, deliberately not packages.
+namespace-packages = ["tests/differential", "tests/differential/fixtures"]
+
+[tool.ruff.lint]
+select = ["ALL"]
+ignore = [
+    "COM812", # conflicts with the formatter (trailing commas)
+    "ISC001", # conflicts with the formatter (implicit string concatenation)
+    "D203",   # incompatible with D211; we require no blank line before a class docstring
+    "D213",   # incompatible with D212; we start multi-line docstrings on the first line
+    "CPY001", # no per-file copyright headers; the licence lives in LICENSE and the package metadata
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = [
+    "S101", # pytest tests are asserts
+]
+"scripts/test_*.py" = [
+    "S101", # pytest tests are asserts
+]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"
+
+[tool.ty.environment]
+python-version = "3.14"
+
+[tool.ty.src]
+include = ["python", "tests", "benches", "scripts"]
+
+[tool.ty.analysis]
+respect-type-ignore-comments = false
+
+[tool.ty.rules]
+all = "error"
