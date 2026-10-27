@@ -239,6 +239,8 @@ plan); `explain_cache` reports the same outcomes now. Remote stores (spec §2).
 
 **Files:**
 - Create: `python/fnloom/cache.py` (public), `tests/test_stores.py`
+  - As built: the module is the private `python/fnloom/_stores.py`, every store name re-exported from `fnloom`,
+    since `fnloom.cache` is the decorator of Task 3 and a module of the same name would shadow it.
 - Modify: `python/fnloom/__init__.py`
 
 **Interfaces:**

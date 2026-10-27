@@ -371,6 +371,10 @@ class Driver:
         in name order, each with its `CacheOutcome`. The request is checked as
         `execute` checks it. A store error is a miss, and warns `CacheWarning`.
         Raises `ValueError` for a driver built without `Builder.with_cache`.
+
+        The store is consulted for every node with a key, including nodes upstream
+        of a hit, which a run would neither load nor run: with a `DiskCache`, that
+        reads each of their entries.
         """
         if self._cache is None:
             msg = "explain_cache needs a driver built with Builder.with_cache"

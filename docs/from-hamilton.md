@@ -27,6 +27,7 @@ The decorators fnloom has so far take the same arguments as Hamilton's; only the
 | `@parameterize(row={"param": source("node")})` | The same |
 | `@parameterize(row={"param": value(v)})` | The same; `v` is passed itself, uncopied, as in Hamilton |
 | `@tag(owner="data")` | `from fnloom import tag`, the same, except that a value must be a `str`, not a list (Q36) |
+| `@cache(behavior="recompute")`, `@cache(behavior="disable")` | `from fnloom import cache`, the same ([Caching](#caching)) |
 | A row as `(bindings, docstring)`, `group(...)`, `parameterize_sources`, `parameterize_values` | Not yet; a row is a mapping |
 
 </div>
@@ -63,6 +64,27 @@ The decorators fnloom has so far take the same arguments as Hamilton's; only the
 
 </div>
 
+## Caching
+
+fnloom's cache keeps Hamilton's names for what they mean, and differs wherever Hamilton's cache can return a wrong
+value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](caching.md).
+
+<div class="fl-compare" markdown>
+
+| | Hamilton 1.90.0 | fnloom |
+| --- | --- | --- |
+| Turning it on | `Builder().with_cache(path=...)` | `Builder().with_cache(fnloom.DiskCache(path))`, or `fnloom.MemoryCache()` |
+| Per-node behavior | `@cache(behavior=...)`, or lists of names given to `with_cache` | `@cache(behavior=...)` on the function only |
+| `ignore` | `@cache(behavior="ignore")` on the producer hides it from every consumer | `@cache(ignore=("name",))` on a consumer, per parameter; the producer is `disable` (Q50) |
+| A code version | The function's source, hashed on every run | Its code, helpers, constants and libraries, read once at build (Q16, Q48) |
+| A helper or global the node reads | Not seen | Seen; a mutable global makes the node uncacheable unless it gives `@cache(version=...)` |
+| A value that cannot be hashed, nested in a list | A constant hash | The nodes reading it run, and `explain_cache` says why (Q47) |
+| `@cache(format=...)`, result stores per format | Supported | Not there: `DiskCache` takes one `dumps`/`loads` pair |
+| A corrupt stored entry | Fails the run | A miss, with a `CacheWarning` (Q51) |
+| What a run did with each node | A log that reports a hit on every lookup | `driver.explain_cache(...)` |
+
+</div>
+
 ## Not there yet
 
 Plan 1 is the core and the native path. These Hamilton features come in later plans, in roughly this order:
@@ -71,6 +93,6 @@ Plan 1 is the core and the native path. These Hamilton features come in later pl
    edges and inputs. `@parameterize`, `source`, `value` and `@tag` are here.
 2. Adapters and lifecycle hooks, result builders, and async execution.
 3. Graph visualisation.
-4. Dynamic execution, caching, materializers, `@subdag`, `@check_output` and `@pipe`.
+4. Dynamic execution, materializers, `@subdag`, `@check_output` and `@pipe`.
 
 There will be no compatibility layer: code moves to fnloom's API rather than running unchanged.

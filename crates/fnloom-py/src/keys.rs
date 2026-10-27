@@ -6,7 +6,7 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyString};
 
-use crate::fingerprint::{Digest, Framer, Kind};
+use crate::fingerprint::{Digest, Kind};
 
 /// The version of a source that is neither in `versions` nor a computed node: an optional
 /// input not supplied. No fingerprint is 7 bytes long, so it equals no version.
@@ -116,9 +116,10 @@ impl KeyPlan {
     fn keys<'py>(&self, versions: &Bound<'py, PyDict>) -> PyResult<Bound<'py, PyDict>> {
         let py = versions.py();
         let mut keys: Vec<Option<Digest>> = Vec::with_capacity(self.nodes.len());
+        let mut buffer = KeyBuffer(Vec::new());
         let result = PyDict::new(py);
         for node in &self.nodes {
-            let key = node_key(node, versions, &keys)?;
+            let key = node_key(node, versions, &keys, &mut buffer)?;
             keys.push(key);
             match key {
                 Some(key) => result.set_item(node.name.bind(py), PyBytes::new(py, &key))?,
@@ -129,39 +130,67 @@ impl KeyPlan {
     }
 }
 
+/// One key's bytes, framed as `Framer` frames a `Kind::Parts` digest, then hashed whole.
+///
+/// The digest is the one `Framer` gives for the same parts (`hash_parts`): a key is a
+/// hundred or so bytes, which one `blake3::hash` call hashes faster than a streaming
+/// hasher fed a part at a time. The buffer is reused from node to node.
+struct KeyBuffer(Vec<u8>);
+
+impl KeyBuffer {
+    /// Starts a new key.
+    fn start(&mut self) {
+        self.0.clear();
+        self.0.push(Kind::Parts as u8);
+    }
+
+    /// Adds `bytes` as one part: its length (`u64`, little-endian), then the bytes.
+    fn part(&mut self, bytes: &[u8]) {
+        self.0
+            .extend_from_slice(&(bytes.len() as u64).to_le_bytes());
+        self.0.extend_from_slice(bytes);
+    }
+
+    /// The key.
+    fn finish(&self) -> Digest {
+        *blake3::hash(&self.0).as_bytes()
+    }
+}
+
 /// The key of `node`, given `versions` and the keys of the nodes before it.
 fn node_key(
     node: &KeyNode,
     versions: &Bound<'_, PyDict>,
     keys: &[Option<Digest>],
+    buffer: &mut KeyBuffer,
 ) -> PyResult<Option<Digest>> {
     let Some(stat) = &node.stat else {
         return Ok(None);
     };
     let py = versions.py();
-    let mut framer = Framer::new(Kind::Parts);
-    framer.part(stat);
+    buffer.start();
+    buffer.part(stat);
     for param in &node.params {
-        framer.part(&param.name);
+        buffer.part(&param.name);
         match &param.source {
             Source::Constant(None) => return Ok(None),
-            Source::Constant(Some(version)) => framer.part(version),
+            Source::Constant(Some(version)) => buffer.part(version),
             Source::Read { name, computed } => {
                 if let Some(version) = versions.get_item(name.bind(py))? {
                     if version.is_none() {
                         return Ok(None);
                     }
-                    framer.part(version.cast::<PyBytes>()?.as_bytes());
+                    buffer.part(version.cast::<PyBytes>()?.as_bytes());
                 } else if let Some(at) = computed {
                     match keys.get(*at).copied().flatten() {
-                        Some(key) => framer.part(&key),
+                        Some(key) => buffer.part(&key),
                         None => return Ok(None),
                     }
                 } else {
-                    framer.part(ABSENT);
+                    buffer.part(ABSENT);
                 }
             }
         }
     }
-    Ok(Some(framer.finish()))
+    Ok(Some(buffer.finish()))
 }

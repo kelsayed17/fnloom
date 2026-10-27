@@ -81,8 +81,9 @@ pub(crate) enum Kind {
 
 /// One framed digest under construction: a kind byte, then length-prefixed parts.
 ///
-/// This is the only framing: fingerprints, `hash_parts` and cache keys all use it, so a
-/// digest of one kind never equals a digest of another, and parts never run together.
+/// This is the only framing: fingerprints, `hash_parts` and cache keys all use it (cache
+/// keys write the same bytes to one buffer and hash it whole, in `keys.rs`), so a digest
+/// of one kind never equals a digest of another, and parts never run together.
 pub(crate) struct Framer(blake3::Hasher);
 
 impl Framer {

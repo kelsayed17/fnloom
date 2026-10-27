@@ -1,7 +1,8 @@
 # fnloom — result caching, design
 
-**Status:** approved by the maintainer, 2026-10-27; to be built in Plan 4
-(`docs/plans/2026-10-27-plan-4-result-caching.md`). Written without a question round, at the maintainer's request,
+**Status:** approved by the maintainer, 2026-10-27; built in Plan 4
+(`docs/plans/2026-10-27-plan-4-result-caching.md`). The user guide is `docs/caching.md`, and the measured targets of
+§8 are in `docs/benchmarks.md`. Written without a question round, at the maintainer's request,
 from a study of Hamilton 1.90.0's cache (most faults reproduced against the installed wheel). Every call in this
 document is the author's unless it says otherwise; §11 lists them so any can be changed. It extends the main design
 (`2026-10-26-fnloom-design.md`), which lists caching as a v1 non-goal; building this moves it into scope.

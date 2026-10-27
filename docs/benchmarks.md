@@ -98,6 +98,45 @@ the plan cache's key and lock when a request repeats the last one, the common ca
 130 ns in the native run, against about 30 ns for a bare Python call; a run's fixed cost is about 0.3 µs native and
 0.7 µs through `PreparedPlan.run`, and `Driver.execute` adds about 0.3 µs more.
 
+## Caching
+
+Cached runs against uncached ones and against Hamilton 1.90.0's `with_cache`, on a 200-node `chain` and a 1,000-node
+`layered` graph of trivial nodes, the worst case for a cache: a node costs less to run than to look up. Milliseconds,
+cold / warm, medians over seven fresh processes, each the median of three cold runs (a new driver with an empty
+store) and the 21 warm runs after them. Uncached, cold is a first run and warm a steady one. fnloom runs a prepared
+plan; Hamilton, which has none, runs `execute`. Hamilton's memory store is its `InMemoryMetadataStore` with its
+`InMemoryResultStore`, and its disk store the default `with_cache(path=...)`.
+
+| shape | n | runtime | uncached | memory | disk |
+| --- | ---: | --- | --- | --- | --- |
+| chain | 200 | fnloom | 0.039 / 0.032 | 0.231 / 0.045 | 47.7 / 0.094 |
+| chain | 200 | Hamilton | 0.675 / 0.583 | 23.7 / 22.2 | 120.9 / 33.2 |
+| layered | 1,000 | fnloom | 0.256 / 0.219 | 1.304 / 0.293 | 221.9 / 0.661 |
+| layered | 1,000 | Hamilton | 4.644 / 4.264 | 149.7 / 134.3 | 655.2 / 184.2 |
+
+Measured on the machine and build above, on 2026-10-27. A warm fnloom run is 280 to 490 times faster than Hamilton's
+on the same kind of store, and 6 to 15 times faster than Hamilton's uncached run. Hamilton's warm runs cost more than
+its uncached ones, 31 to 38 times as much in memory, as the caching design found (Q16).
+
+The targets of the caching design (§8), with fnloom's figures:
+
+| target | chain 200 | layered 1,000 | verdict |
+| --- | --- | --- | --- |
+| A memory hit costs at most 1 µs of overhead per node (warm run / n) | 0.22 µs | 0.29 µs | met |
+| A warm run costs at most about twice an uncached one (warm / uncached steady) | 1.41× | 1.34× | met |
+| A cold run costs at most 1.5 times an uncached one, with `MemoryCache` (cold / uncached first) | 5.9× | 5.1× | **missed** |
+| A requested output that hits loads one entry | 1 entry | 10 entries, one per output | met |
+
+**The cold target is missed.** A cold run pays about 1 µs per node over an uncached one: the node's key, its lookup on
+the walk back from the outputs, and the call that stores its result as it finishes. An uncached trivial node costs
+about 0.16 µs, so 1.5 times would leave 0.08 µs per node, less than hashing one key. The cost is per node, not per
+byte, so on nodes doing real work it is a fixed microsecond each. Moving the memory store and the store calls into
+Rust would cut it; the target as written, on trivial nodes, may need restating.
+
+Each key is hashed with one BLAKE3 call over its framed parts, rather than a streaming hasher fed a part at a time,
+which gives the same digests: the keys of the 200-node chain take 39 µs instead of 53, and its warm memory run 45 µs
+instead of 55.
+
 ## Why fan-in is fast
 
 A node with `n` parameters is called with `n` keyword arguments. CPython binds a keyword to a parameter by identity
@@ -119,6 +158,17 @@ It prints 48 JSON lines to stdout (`shape`, `n`, `runtime`, `input_checks`, `bui
 Hamilton prints a help banner to stderr whenever it raises, hence the second redirect.
 Each runtime's answer is checked against the shape's closed form, and a
 mismatch aborts the run. Generated modules are dropped from `sys.modules` after each case.
+
+The cached runs have their own script, which starts a fresh process per sample:
+
+```bash
+uv run python -m benches.cache > cache.jsonl
+```
+
+It prints 12 JSON lines (`shape`, `n`, `runtime`, `store`, `cold_ms`, `warm_ms`, `warm_loads`, `processes`,
+`error`), one per shape, runtime and store (`none`, `memory` or `disk`). `warm_loads` is how many entries a warm fnloom
+run loads, counted on a separate, untimed driver. The graphs are written to files and imported, since Hamilton's cache
+versions a function by its source, and every answer is checked against the shape's closed form.
 
 ### What is timed
 
