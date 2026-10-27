@@ -280,6 +280,7 @@ def test_public_api_is_exported() -> None:
     """The package exports exactly its public names."""
     assert sorted(fnloom.__all__) == [
         "Builder",
+        "CachePolicy",
         "Driver",
         "NodeView",
         "Param",
@@ -288,6 +289,7 @@ def test_public_api_is_exported() -> None:
         "UnfingerprintableError",
         "Value",
         "build",
+        "cache",
         "fingerprint",
         "parameterize",
         "register_fingerprint",
