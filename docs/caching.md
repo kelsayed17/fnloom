@@ -238,8 +238,9 @@ and everything downstream, consistently: never a recompute result beside downstr
 ## Fingerprints
 
 An input's or override's version is its **fingerprint**: a hash of its exact type and its whole content, computed
-once per run. Two values share one only if every node would treat them alike, so `1`, `1.0`, `True` and `"1"` all
-differ, as do `[1, 2]` and `(1, 2)`. A computed node's value is never fingerprinted: its version is its own key, so a
+once per run. Two values share one only if they hold the same content of the same types, so `1`, `1.0`, `True` and
+`"1"` all differ, as do `[1, 2]` and `(1, 2)`. The limits at the end of this section list the few ways a node could
+still tell two such values apart. A computed node's value is never fingerprinted: its version is its own key, so a
 large intermediate costs nothing to version.
 
 ```python
@@ -253,14 +254,19 @@ These can be fingerprinted:
 
 - `None`, `bool`, `int`, `float` (by bit pattern, so `-0.0` and `0.0` differ, and every NaN is the same), `complex`,
   `str`, `bytes` and `bytearray`;
-- `tuple` and `list` by element, in order; `dict` by entry, in insertion order, since a node can see the order; `set`
-  and `frozenset` by member, in any order;
+- `tuple` and `list` by element, in order; `dict` by entry, in insertion order, and `set` and `frozenset` by member,
+  in iteration order, since a node can see the order. Two equal sets that iterate differently differ;
 - `datetime`, `date`, `time` and `timedelta`, with a time zone from `zoneinfo` or `datetime.timezone`; `Decimal`,
   `Fraction`, `UUID`, the `pathlib` paths and enum members;
 - dataclass instances and named tuples, by type and fields, then any other attribute set on the instance (in its
   `__dict__` or a slot, by `__post_init__` or later), by name;
-- numpy arrays, by dtype, shape and content; pandas and polars frames and series, by their columns' names, types and
-  values and their name, and a pandas one by its index too (polars has none). fnloom never imports these libraries
+- a value of a class from your own code (a dataclass, a named tuple, an enum, or one you registered) also by its
+  class's code version, so editing a method its nodes call misses. A class holding a mutable class attribute cannot
+  be versioned, so its values cannot be fingerprinted;
+- numpy arrays, by dtype, shape, strides and content, so a Fortran-ordered array or a strided view differs from its
+  C-ordered copy; pandas and polars frames and series, by their columns' names, types and
+  values and their name, and a pandas one by its index (with a datetime index's frequency) and `attrs` too (polars
+  has none). fnloom never imports these libraries
   itself: it reads their values through the modules your code already loaded.
 
 Anything else cannot be fingerprinted, at any depth, and is never replaced by a constant, a `repr` or an `id`: a
@@ -308,13 +314,19 @@ book.explain_cache(["total_size"], inputs={"levels": levels})
 The form you return is fingerprinted under the value's own type, so two classes returning the same tuple still
 differ. It must hold everything that can change a node's result.
 
-**Limits.** Some values are fingerprinted by less than all their state, or refused although they look plain:
+**Limits.** Some values miss more often than you might expect, are fingerprinted by less than all their state, or
+are refused although they look plain:
 
+- A set of strings iterates in an order the hash seed decides, which changes with every process unless
+  `PYTHONHASHSEED` is set. Its fingerprint follows that order, so an input holding one, or a global `frozenset` of
+  strings a node reads, misses in each new process with `DiskCache`. Pass a sorted tuple instead, or fix
+  `PYTHONHASHSEED`, to share results across processes.
 - An object of a type fnloom does not know that exposes a buffer (a `bytes` subclass, a `ctypes` value) is hashed
   by its type's name, its buffer and the attributes set on the instance, so state held elsewhere (in memory a
   `ctypes` pointer reaches, say) is not seen.
-- A dataclass or a named tuple is fingerprinted by what the instance holds: state kept outside it, in a class
-  attribute or behind a property, is not seen. Register a fingerprint for such a class.
+- A dataclass or a named tuple is fingerprinted by what the instance holds and its class's code: state kept
+  elsewhere, behind a property reading another object say, is not seen. Register a fingerprint for such a class.
+- A value nested more than 1,000 levels deep, or holding itself, is refused.
 - Classes are told apart by module and qualified name, so classes made at run time under one name (by
   `dataclasses.make_dataclass` in a loop, say) can share fingerprints.
 - `pandas.NaT` and `pytz` time zones are refused; use `zoneinfo` zones.
@@ -326,11 +338,18 @@ source text, so it works in a notebook too. It hashes:
 
 - the function's bytecode, constants and names, nested functions and comprehensions included; not its line numbers,
   comments or docstring, so moving or reformatting a function keeps its version;
-- its defaults and its closure, fingerprinted at build;
+- its defaults, fingerprinted at build, and its closure cells, by the rules for globals below;
 - every global name it reads: a function or class of your own code by its own code version, recursively; a module of
-  your own code by the attributes the function reads from it; a library function, class or module by its name and the
-  version of the installed distribution, so upgrading a library misses; an immutable value (a number, a string,
-  `None`, an enum member, or a tuple or frozenset of these) by its fingerprint.
+  your own code by every attribute that any code it reaches reads from a module, whichever function reads it (a helper
+  handed the module, say), and by its `__getattr__` for a name it does not define; a function's own attributes it
+  reads, by the same rules; a library function, class or module by its name and the version of the installed
+  distribution, so upgrading a library misses; an immutable value (an `int`, `float`, `complex`, `bool`, `str`,
+  `bytes`, `None`, an enum member, or a tuple or frozenset of these) by its fingerprint.
+
+A name read by a string constant counts as read by name, so `globals()["RATE"]` and `getattr(config, "RATE")` see
+`RATE`. Your own code is any module that is neither built in, nor the standard library, nor installed: a module whose
+file sits in the interpreter's library directories, or in any `site-packages` or `dist-packages` directory on
+`sys.path`, is a library. A project installed in editable mode keeps its files in the project, so it stays your own.
 
 A `@parameterize` row's `value()` constants and its bindings are not part of the code version: they are parameters
 of the node's key, fingerprinted once, at build, so `version=` does not replace them and a changed constant misses.
@@ -345,6 +364,9 @@ change, or change the version yourself when it does, give `@cache(version=...)`.
 - a global **rebound after the build**, by assignment from outside the function or by reloading its module: the
   driver keeps the version read at build until it is rebuilt;
 - code reached only by **dynamic import**, `importlib.import_module(name)` or `__import__(name)`;
+- a name **built at run time**, as in `getattr(config, prefix + "RATE")`;
+- the **iteration order of a set literal** in a function's code (`for x in {"a", "b"}`), which a code version hashes
+  in sorted order so that `x in {"a", "b"}`, the common use, keeps its version across processes;
 - **reflection at run time** on what the version leaves out: a function or class reading its own docstring, a class's
   generic arguments (`__orig_bases__`), or the annotations of a method;
 - a **mutable default mutated after the build**: `def f(x, opts={"k": 1})` is fingerprinted with `{"k": 1}` at
@@ -373,9 +395,11 @@ which a run would neither load nor run. With a `DiskCache`, that reads every suc
 A store is any object with three methods, the `fnloom.CacheStore` protocol: `get(key)` returns the value or
 `fnloom.MISSING`, `put(key, value)` stores one, replacing any there, and `discard(key)` forgets one. A key is 32 bytes.
 A store must be safe to call from several threads at once, and must never raise for a store error: it misses or skips
-the write, and warns with `fnloom.CacheWarning`. fnloom has two; they live in the private module `fnloom._stores`, so
-use them through `fnloom`: `fnloom.MemoryCache`, `fnloom.DiskCache`, `fnloom.CacheStore`, `fnloom.MISSING` and
-`fnloom.CacheWarning`. (`fnloom.cache` is the decorator.) One store can be shared by several drivers in one process.
+the write, and warns with `fnloom.CacheWarning`. A miss is `MISSING`, never `None`, which is a value a node may
+return. `with_cache` refuses an object without these three methods. fnloom has two; they live in the private module
+`fnloom._stores`, so use them through `fnloom`: `fnloom.MemoryCache`, `fnloom.DiskCache`, `fnloom.CacheStore`,
+`fnloom.MISSING` and `fnloom.CacheWarning`. (`fnloom.cache` is the decorator.) One store can be shared by several
+drivers in one process.
 
 **`MemoryCache(max_entries=100_000, max_bytes=None)`** holds the results themselves, so a hit costs a lookup and no
 copy (hence the [purity contract](#the-purity-contract)). Past either bound it evicts the least recently used entries.
@@ -394,8 +418,14 @@ corrupt, and a lookup is one file read.
   a `CacheWarning`, and the node runs.
 - Writes go to a temporary file in the same directory that then replaces the entry, so a reader sees a whole entry
   or none, and of two writers of one key the last one wins.
-- With `max_bytes`, the least recently read entries are removed until the rest fit, when the store opens and after
-  every 100 writes. `prune(max_bytes)` does it on demand, and `clear()` removes every entry.
+- The header names the library of the value's own type only: a list of DataFrames is recorded as a list, so after
+  a pandas upgrade its entry is read back by the new pandas, or found unreadable and removed.
+- Without `max_bytes` the directory grows without bound, and entries of another Python or library version stay until
+  a write replaces them. With `max_bytes`, the least recently read entries are removed until the rest fit, when the
+  store opens and after every 100 writes. `prune(max_bytes)` does it on demand, and `clear()` removes every entry,
+  warning about any it cannot.
+- A write is not synced to disk. After a crash or a power loss an entry may be torn, and a torn entry is found
+  unreadable, so it is a miss, never a wrong value.
 - `dumps` and `loads` replace pickle. Give `serializer` a new name whenever you change them: entries written under
   another name are misses.
 
@@ -403,6 +433,8 @@ corrupt, and a lookup is one file read.
 
     The default serializer is pickle, and loading a pickle runs whatever code it names. Whoever can write to the cache
     directory can run code in every process that reads it. Keep the directory as private as the code itself.
+    `DiskCache` makes its directories readable and writable by their owner only, and warns when it opens an existing
+    directory that other users can write or that another user owns.
 
 ```python
 import shutil

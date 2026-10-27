@@ -7,9 +7,13 @@ imported here: their values are recognised by module name and read through the m
 already loaded.
 """
 
+import contextlib
 import dataclasses
 import enum
 import sys
+import threading
+import weakref
+from collections.abc import Callable  # noqa: TC003  # `inspect.signature` evaluates it
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal
 from fractions import Fraction
@@ -28,13 +32,48 @@ from zoneinfo import ZoneInfo
 from fnloom import _core
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Generator
 
 # Registered canonical forms, by the exact type they were registered for.
 _REGISTRY: dict[type, Callable[[Any], object]] = {}
 
 # What `getattr` gives for a dataclass field never set.
 _UNSET = object()
+
+# The code version of each class whose values were fingerprinted: `b""` for a library
+# class, `None` for a user class refused. Cleared when a cached driver is built, so a
+# rebuild after an edit reads the class again.
+_CLASS_VERSIONS: weakref.WeakKeyDictionary[type, bytes | None] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+# Whether this thread is in a code-version walk. The walk versions the classes inside
+# every value it fingerprints itself, so their fingerprints leave them out: else an
+# enum's version, which fingerprints its members, would ask for itself again.
+class _Walking(threading.local):
+    """How many code-version walks this thread is inside."""
+
+    depth: int = 0
+
+
+_WALKING = _Walking()
+
+
+@contextlib.contextmanager
+def classes_versioned_by_caller() -> Generator[None]:
+    """Leaves class versions out of fingerprints taken inside the block."""
+    depth = _WALKING.depth
+    _WALKING.depth = depth + 1
+    try:
+        yield
+    finally:
+        _WALKING.depth = depth
+
+
+def forget_class_versions() -> None:
+    """Drops every remembered class version, for a driver built after an edit."""
+    _CLASS_VERSIONS.clear()
 
 
 def fingerprint(value: object) -> bytes:
@@ -61,7 +100,41 @@ def fallback(value: object) -> object | None:
 
     The form is fingerprinted under `value`'s type, so it holds only the content. A
     type's own declaration, `__fnloom_fingerprint__` or a registration, comes first.
+    A value of a user class carries the class's code version too: a node may call its
+    methods, so the same content under edited code is another value.
     """
+    form = _form(value)
+    if form is None:
+        return None
+    version = _class_version(type(value))
+    if version is None:
+        return None
+    return form if version == b"" else (version, form)
+
+
+def _class_version(cls: type) -> bytes | None:
+    """A user class's code version, `b""` for a library class, `None` if refused."""
+    from fnloom import _codeversion  # noqa: PLC0415  # it imports this module
+
+    if _WALKING.depth:
+        return b""
+    try:
+        return _CLASS_VERSIONS[cls]
+    except KeyError:
+        pass
+    module = sys.modules.get(cls.__module__)
+    version: bytes | None = b""
+    if module is not None and _codeversion.is_user_module(module):
+        try:
+            version = _codeversion.class_version(cls)
+        except _codeversion.UncacheableError:
+            version = None
+    _CLASS_VERSIONS[cls] = version
+    return version
+
+
+def _form(value: object) -> object | None:
+    """`value`'s canonical form by its declaration, a registration or its kind."""
     own = getattr(type(value), "__fnloom_fingerprint__", None)
     if own is not None:
         return own(value)
@@ -202,7 +275,7 @@ def _buffer(value: object) -> object | None:
 
 
 def _numpy(value: object) -> object | None:
-    """An array's or numpy scalar's form: dtype, shape and bytes, or its elements."""
+    """An array's or numpy scalar's form: dtype, shape, strides and bytes, or items."""
     np = sys.modules["numpy"]
     if isinstance(value, np.generic):
         value = np.asarray(value)
@@ -217,9 +290,11 @@ def _numpy(value: object) -> object | None:
     # A structured dtype's `str` is only its size; `descr` names its fields.
     dtype = value.dtype.str if value.dtype.names is None else value.dtype.descr
     # Flat bytes in C order: every dtype exports them, including those (datetimes)
-    # the buffer protocol cannot describe.
+    # the buffer protocol cannot describe. The strides keep the layout, which a node
+    # can read (`ravel(order="K")`, `.flags`): a Fortran-ordered array or a strided
+    # view is not its C-ordered copy.
     data = np.ascontiguousarray(value).reshape(-1).view(np.uint8).data
-    return (dtype, value.shape, data)
+    return (dtype, value.shape, value.strides, data)
 
 
 def _pandas(value: object) -> object | None:  # noqa: PLR0911  # one return per type
@@ -234,6 +309,7 @@ def _pandas(value: object) -> object | None:  # noqa: PLR0911  # one return per 
                 [_pandas_dtype(column.dtype) for column in columns],
                 value.index,
                 [column.to_numpy() for column in columns],
+                value.attrs,
             )
         case pd.Series():
             return (
@@ -241,12 +317,15 @@ def _pandas(value: object) -> object | None:  # noqa: PLR0911  # one return per 
                 _pandas_dtype(value.dtype),
                 value.index,
                 value.to_numpy(),
+                value.attrs,
             )
         case pd.MultiIndex():
             dtypes = [_pandas_dtype(dtype) for dtype in value.dtypes]
             return (list(value.names), dtypes, value.to_numpy())
         case pd.Index():
-            return (value.name, _pandas_dtype(value.dtype), value.to_numpy())
+            # A datetime or period index's frequency is state its values do not show.
+            frequency = getattr(value, "freqstr", None)
+            return (value.name, _pandas_dtype(value.dtype), value.to_numpy(), frequency)
         case pd.Timestamp():
             zone = _tz_form(value.tzinfo)
             if zone is None:

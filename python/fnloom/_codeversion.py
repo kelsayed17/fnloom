@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 from fnloom import _core
 from fnloom._core import UnfingerprintableError
-from fnloom._fingerprint import fingerprint
+from fnloom._fingerprint import classes_versioned_by_caller, fingerprint
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Container, Iterator, Mapping, Sequence
@@ -191,7 +191,35 @@ def code_version(fn: Callable[..., object]) -> bytes:
     if not isinstance(fn, types.FunctionType):
         msg = f"a code version needs a function, not {_article(type(fn).__qualname__)}"
         raise TypeError(msg)
-    return _Walk().function(fn)
+    return _settled(lambda walk: walk.function(fn))
+
+
+def class_version(cls: type) -> bytes:
+    """The 32-byte version of a user class: its body, bases and the code they reach.
+
+    Raises:
+        UncacheableError: the class, or code it reaches, holds state that may change.
+    """
+    name = cls.__qualname__
+    return _settled(lambda walk: walk.value(cls, _Where("class", name, name)))
+
+
+def _settled(read: Callable[[_Walk], bytes]) -> bytes:
+    """What `read` gives from a walk whose names have settled.
+
+    A module or function attribute may be read by any code the walk reaches, a helper
+    that was handed the module say, so each is versioned by every name read anywhere.
+    Walking with more names can reach more code, and so more names: walk again until
+    the names settle.
+    """
+    reads = frozenset[str]()
+    with classes_versioned_by_caller():
+        while True:
+            walk = _Walk(reads)
+            digest = read(walk)
+            if walk.seen <= reads:
+                return digest
+            reads |= walk.seen
 
 
 def is_user_module(module: types.ModuleType) -> bool:
@@ -204,11 +232,13 @@ def is_user_module(module: types.ModuleType) -> bool:
     name = module.__name__
     if name in sys.builtin_module_names or _root(name) == "fnloom":
         return False
-    spec = getattr(module, "__spec__", None)
+    # From the namespace, not `getattr`: a module's `__getattr__` would be asked.
+    attributes = vars(module)
+    spec = attributes.get("__spec__")
     if getattr(spec, "origin", None) in {"built-in", "frozen"}:
         return False
-    file = getattr(module, "__file__", None)
-    if file is None:
+    file = attributes.get("__file__")
+    if not isinstance(file, str):
         return True
     path = Path(file).resolve()
     return not any(path.is_relative_to(library) for library in _library_paths())
@@ -249,12 +279,29 @@ def _installed_version(distribution: str) -> str | None:
         return None
 
 
-@functools.cache
 def _library_paths() -> tuple[Path, ...]:
-    """The standard library's and the installed packages' directories, resolved."""
+    """The standard library's and the installed packages' directories, resolved.
+
+    Besides the interpreter's own, every `site-packages` or `dist-packages` directory
+    on `sys.path`: an overlay or user environment, or a `PYTHONPATH` entry, installs
+    there too. A project installed in editable mode keeps its files in the project,
+    so it is still the user's code, walked rather than versioned by name.
+    """
+    return _library_paths_for(tuple(sys.path))
+
+
+@functools.cache
+def _library_paths_for(entries: tuple[str, ...]) -> tuple[Path, ...]:
+    """`_library_paths` for this `sys.path`."""
     paths = sysconfig.get_paths()
     keys = ("stdlib", "platstdlib", "purelib", "platlib")
-    return tuple(Path(paths[key]).resolve() for key in keys if key in paths)
+    found = [Path(paths[key]) for key in keys if key in paths]
+    found += [Path(e) for e in entries if Path(e).name in _INSTALL_DIRECTORIES]
+    return tuple(dict.fromkeys(path.resolve() for path in found))
+
+
+# The directory names installers put packages in.
+_INSTALL_DIRECTORIES = frozenset({"site-packages", "dist-packages"})
 
 
 def _root(module_name: str) -> str:
@@ -465,10 +512,14 @@ class _Walk:
     qualified name, so mutual recursion terminates and still hashes the same.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, reads: frozenset[str] = frozenset()) -> None:
+        """Starts a walk that versions attributes by `reads` and the reader's names."""
         # Keyed by `id`; each entry keeps its object alive for the walk.
         self._done: dict[int, tuple[object, bytes]] = {}
         self._busy: set[int] = set()
+        # The names any code of the previous walk read, and those this walk reads.
+        self._reads = reads
+        self.seen: set[str] = set()
 
     def value(  # noqa: PLR0911  # one return per rule
         self, value: object, where: _Where, names: Sequence[str] = ()
@@ -528,8 +579,10 @@ class _Walk:
         as it would read by name.
         """
         what = f"{where.kind} {where.name!r} of {where.owner!r}"
-        data = _fingerprint(value, what)
+        # Classes first: a refused class says why, where its value's fingerprint
+        # would only say that it cannot be taken.
         classes = {self.value(cls, where) for cls in _instance_types(value)}
+        data = _fingerprint(value, what)
         return _hash([b"constant", data, *sorted(classes)])
 
     def _library_function(
@@ -584,6 +637,7 @@ class _Walk:
         def compute() -> bytes:
             owner = fn.__qualname__
             names = _names(fn.__code__)
+            self.seen.update(names)
             return _hash(
                 [
                     b"function",
@@ -591,10 +645,28 @@ class _Walk:
                     self._defaults(fn, owner),
                     self._closure(fn, owner, names),
                     self._globals(fn, owner, names),
+                    self._attributes(fn, owner, names),
                 ]
             )
 
         return self._memo(fn, compute)
+
+    def _attributes(
+        self, fn: types.FunctionType, owner: str, names: Sequence[str]
+    ) -> bytes:
+        """The function's own attributes that code reads, by the global rules.
+
+        Dunder attributes are Python's and fnloom's metadata (`__wrapped__`, the
+        decorators' record), never state a result depends on.
+        """
+        parts = [b"attributes"]
+        read = self._reads.union(names)
+        for name, value in sorted(vars(fn).items()):
+            if name not in read or (name.startswith("__") and name.endswith("__")):
+                continue
+            digest = self.value(value, _Where("attribute", name, owner), names)
+            parts.append(_hash([name.encode(), digest]))
+        return _hash(parts)
 
     def _defaults(self, fn: types.FunctionType, owner: str) -> bytes:
         """Defaults and keyword-only defaults, each with its parameter's name."""
@@ -624,11 +696,13 @@ class _Walk:
         """
         if _is_immutable(value) or isinstance(value, _CODE):
             return _hash([b"read", self.value(value, where)])
+        # Classes first: a refused class says why, where its value's fingerprint
+        # would only say that it cannot be taken.
+        classes = {self.value(cls, where) for cls in _instance_types(value)}
         try:
             data = fingerprint(value)
         except UnfingerprintableError:
             return _hash([b"read", self.value(value, where)])
-        classes = {self.value(cls, where) for cls in _instance_types(value)}
         return _hash([b"value", data, *sorted(classes)])
 
     def _closure(
@@ -715,12 +789,16 @@ class _Walk:
         def compute() -> bytes:
             parts = [b"user-module", module.__name__.encode()]
             attributes = vars(module)
-            for name in names:
+            for name in sorted(self._reads.union(names)):
                 inner = where.within(name)
                 if name in attributes:
                     digest = self.value(attributes[name], inner, names)
                 elif (sub := self._submodule(module, name, inner, names)) is not None:
                     digest = _hash([b"submodule", sub])
+                elif "__getattr__" in attributes:
+                    # A name the module lacks is its `__getattr__`'s to answer.
+                    hook = self.value(attributes["__getattr__"], inner, names)
+                    digest = _hash([b"getattr-hook", hook])
                 else:
                     continue
                 parts.append(_hash([name.encode(), digest]))
@@ -753,7 +831,8 @@ class _Walk:
         loaded = sys.modules.get(full)
         if loaded is not None:
             return self.value(loaded, where, names)
-        if not hasattr(module, "__path__"):
+        # Not `hasattr`: a module's `__getattr__` would be asked, and may raise.
+        if "__path__" not in vars(module):
             return None
         try:
             spec = importlib.util.find_spec(full)
@@ -834,8 +913,19 @@ def _codes(code: types.CodeType) -> Iterator[types.CodeType]:
 
 
 def _names(code: types.CodeType) -> list[str]:
-    """Every name `code` and its nested code read, sorted."""
-    return sorted({name for nested in _codes(code) for name in nested.co_names})
+    """Every name `code` and its nested code read, sorted.
+
+    A string constant that is an identifier counts too: `globals()["RATE"]` and
+    `getattr(module, "RATE")` read `RATE` by it. A name built at run time cannot be
+    seen, a known limit.
+    """
+    names: set[str] = set()
+    for nested in _codes(code):
+        names.update(nested.co_names)
+        names.update(
+            c for c in nested.co_consts if isinstance(c, str) and c.isidentifier()
+        )
+    return sorted(names)
 
 
 def _imports(code: types.CodeType, package: object, owner: str) -> list[str]:

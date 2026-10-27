@@ -450,6 +450,11 @@ class Builder:
         versions are read at build, so rebuild after editing code. A stored value is
         returned as it is, not copied: a cached node must not mutate its arguments.
         """
+        if not all(
+            callable(getattr(store, m, None)) for m in ("get", "put", "discard")
+        ):
+            msg = f"a cache store needs get, put and discard methods, not {store!r}"
+            raise TypeError(msg)
         return Builder(self._modules, check_inputs=self._check_inputs, store=store)
 
     def build(self) -> Driver:

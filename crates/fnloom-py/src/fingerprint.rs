@@ -34,6 +34,9 @@ pub(crate) type Digest = [u8; 32];
 /// ones, which never end) are refused rather than exhausting memory.
 const MAX_DEPTH: usize = 1000;
 
+/// The most characters of a refused value's path kept in its error.
+const PATH_LIMIT: usize = 160;
+
 /// The bytes of a buffer are copied out and hashed this many at a time.
 const CHUNK: usize = 1 << 20;
 
@@ -68,10 +71,12 @@ pub(crate) enum Kind {
     List = 10,
     /// `dict`: each key's then its value's digest, in insertion order.
     Dict = 11,
-    /// `set`: its members' digests, sorted.
-    Set = 12,
-    /// `frozenset`: its members' digests, sorted.
-    FrozenSet = 13,
+    // 12 and 13 were `set` and `frozenset` by sorted member digests: a node can see a
+    // set's iteration order, so they are retired, and never reused.
+    /// `set`: its members' digests, in iteration order.
+    Set = 16,
+    /// `frozenset`: its members' digests, in iteration order.
+    FrozenSet = 17,
     /// `memoryview`: format, shape and bytes in C order.
     MemoryView = 14,
     /// A canonical form from the fallback: the value's type's qualified name, then the
@@ -182,10 +187,7 @@ impl<'py> Frame<'py> {
     }
 
     /// The digest of the container, once every child's digest is in.
-    fn finish(mut self) -> Digest {
-        if matches!(self.kind, Kind::Set | Kind::FrozenSet) {
-            self.digests.sort_unstable();
-        }
+    fn finish(self) -> Digest {
         let mut framer = Framer::new(self.kind);
         if let Some(head) = &self.head {
             framer.part(head.as_bytes());
@@ -288,7 +290,20 @@ fn path(ancestors: &[Frame<'_>], current: Option<&Frame<'_>>) -> String {
         }
         frame.segment(&mut path);
     }
-    path
+    shortened(&path)
+}
+
+/// `path` with its middle elided when it is longer than `PATH_LIMIT` characters, as
+/// it is a thousand levels down a cyclic or deeply nested value.
+fn shortened(path: &str) -> String {
+    let count = path.chars().count();
+    if count <= PATH_LIMIT {
+        return path.to_owned();
+    }
+    let half = PATH_LIMIT / 2;
+    let head: String = path.chars().take(half).collect();
+    let tail: String = path.chars().skip(count - half).collect();
+    format!("{head}…{tail}")
 }
 
 /// An `UnfingerprintableError` for `value` at `path`, its message ending with `detail`.
