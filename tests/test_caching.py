@@ -259,6 +259,44 @@ def test_a_recompute_node_behind_another_is_keyed_by_both_results(
     assert _called(capsys) == ["first", "second", "last"]
 
 
+SWITCHED = """
+from pathlib import Path
+
+from fnloom import cache
+
+{decorator}
+def text(path: str) -> str:
+    return Path(path).read_text()
+
+def shout(text: str) -> str:
+    return text + "!"
+"""
+
+
+def test_a_policy_switch_never_mixes_key_spaces(tmp_path: Path) -> None:
+    """Default, recompute, default: each run's consumer agrees with its loader (Q49).
+
+    The policy is part of a node's key, so the last default run serves the first
+    run's entries for both nodes, never the recompute run's `text` beside an older
+    `shout`. A node that reads the outside world must stay `recompute`.
+    """
+    file = tmp_path / "text.txt"
+    store = MemoryCache()
+    seen: list[dict[str, object]] = []
+    for run, decorator in enumerate(("", '@cache(behavior="recompute")', "")):
+        file.write_text(str(run + 1))
+        module = make_module("cached_switched", SWITCHED.format(decorator=decorator))
+        driver = _cached(module, store)
+        result = driver.execute(["text", "shout"], inputs={"path": str(file)})
+        assert result["shout"] == f"{result['text']}!"
+        seen.append(result)
+    assert seen == [
+        {"text": "1", "shout": "1!"},
+        {"text": "2", "shout": "2!"},
+        {"text": "1", "shout": "1!"},
+    ]
+
+
 CLIENT = """
 from fnloom import cache
 
