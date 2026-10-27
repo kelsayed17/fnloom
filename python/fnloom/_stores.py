@@ -273,8 +273,11 @@ class DiskCache:
     ) -> None:
         """Opens the store at `path`, pruning it to `max_bytes` if given.
 
+        An existing directory that other users can write is reported with a
+        `CacheWarning`: whoever can write it can run code in every reader.
+
         Raises:
-            ValueError: `max_bytes` is negative.
+            ValueError: `max_bytes` is negative, or `path` holds a NUL byte.
             TypeError: `serializer` is not a non-empty `str`: it names the pair, it
                 is not a module (pass `dumps` and `loads` for that).
         """
@@ -287,8 +290,12 @@ class DiskCache:
                 f"not {serializer!r}"
             )
             raise TypeError(msg)
+        if "\x00" in os.fspath(path):
+            msg = f"a cache path cannot hold a NUL byte: {os.fspath(path)!r}"
+            raise ValueError(msg)
         self._path = Path(path)
         self._root = self._path / _LAYOUT
+        _warn_if_shared(self._path)
         self._max_bytes = max_bytes
         self._dumps = dumps
         self._loads = loads
@@ -317,7 +324,9 @@ class DiskCache:
         """
         path = self._file(key)
         try:
-            data = path.read_bytes()
+            with path.open("rb") as file:
+                read = os.fstat(file.fileno())
+                data = file.read()
         except FileNotFoundError:
             return MISSING
         except OSError as error:
@@ -329,7 +338,7 @@ class DiskCache:
             return MISSING
         except Exception as error:  # noqa: BLE001  # any failure to load is a miss
             _warn(f"removed unreadable cache entry {path}: {error!r}")
-            self._remove(path)
+            self._remove_if_unchanged(path, read)
             return MISSING
         # Mark the entry as just read, for pruning; a failure only ages it.
         with contextlib.suppress(OSError):
@@ -351,7 +360,7 @@ class DiskCache:
         path = self._file(key)
         temporary: str | None = None
         try:
-            path.parent.mkdir(parents=True, exist_ok=True)
+            self._make_directories(path.parent)
             with tempfile.NamedTemporaryFile(
                 dir=path.parent, prefix=".", suffix=".tmp", delete=False
             ) as file:
@@ -373,8 +382,16 @@ class DiskCache:
         self._remove(self._file(key))
 
     def clear(self) -> None:
-        """Removes every entry, and any temporary file left by a failed write."""
-        shutil.rmtree(self._root, ignore_errors=True)
+        """Removes every entry, and any temporary file left by a failed write.
+
+        What cannot be removed is reported with a `CacheWarning`.
+        """
+
+        def report(_function: object, path: str, error: BaseException) -> None:
+            if not isinstance(error, FileNotFoundError):
+                _warn(f"cannot remove {path} from the cache: {error}", depth=3)
+
+        shutil.rmtree(self._root, onexc=report)
 
     def prune(self, max_bytes: int) -> None:
         """Removes the least recently read entries until the rest fit in `max_bytes`.
@@ -421,6 +438,29 @@ class DiskCache:
         except OSError as error:
             _warn(f"cannot prune cache directory {self._path}: {error}", depth=2)
 
+    def _make_directories(self, shard: Path) -> None:
+        """Makes the store's directories, its own private ones owner-only.
+
+        Its entries can run code when read, so nobody else may write them. Parents
+        above the store's directory are made as any directory is.
+        """
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+        for directory in (self._path, self._root, shard):
+            directory.mkdir(mode=_PRIVATE, exist_ok=True)
+
+    def _remove_if_unchanged(self, path: Path, read: os.stat_result) -> None:
+        """Removes the entry that was read, unless another writer has replaced it."""
+        try:
+            now = path.stat()
+        except OSError:
+            return
+        if (now.st_ino, now.st_dev, now.st_mtime_ns) == (
+            read.st_ino,
+            read.st_dev,
+            read.st_mtime_ns,
+        ):
+            self._remove(path)
+
     def _remove(self, path: Path) -> None:
         """Removes a file if it is there, warning if it cannot."""
         try:
@@ -459,6 +499,30 @@ class DiskCache:
             "python": sys.version,
             "libraries": libraries,
         }
+
+
+# The mode of the directories a store makes: its owner's alone.
+_PRIVATE = 0o700
+
+# Permission bits that let the group or others write.
+_WRITABLE_BY_OTHERS = 0o022
+
+
+def _warn_if_shared(path: Path) -> None:
+    """Warns when `path` exists and someone other than this user may write to it."""
+    try:
+        status = path.stat()
+    except OSError:
+        return
+    others = status.st_mode & _WRITABLE_BY_OTHERS
+    getuid = getattr(os, "getuid", None)
+    foreign = getuid is not None and status.st_uid != getuid()
+    if others or foreign:
+        _warn(
+            f"cache directory {path} is writable by other users or owned by another:"
+            " whoever can write it can run code in every process that reads it",
+            depth=2,
+        )
 
 
 def _scan(directory: Path) -> list[os.DirEntry[str]]:

@@ -452,3 +452,89 @@ def test_disk_clear_and_prune_on_a_new_directory(tmp_path: Path) -> None:
     store.clear()
     store.prune(0)
     assert store.get(_key(1)) is MISSING
+
+
+_POSIX = pytest.mark.skipif(os.name != "posix", reason="POSIX permissions")
+# Permission bits for the group and for others.
+_SHARED_BITS = 0o077
+
+
+@_POSIX
+def test_disk_directories_are_private(tmp_path: Path) -> None:
+    """The store's directories are its owner's alone: their entries can run code."""
+    path = tmp_path / "cache"
+    store = DiskCache(path)
+    store.put(_key(1), b"x")
+    entry = next(path.rglob(_key(1).hex()))
+    for directory in (path, entry.parent.parent, entry.parent):
+        assert directory.stat().st_mode & _SHARED_BITS == 0, directory
+
+
+@_POSIX
+def test_disk_warns_about_a_directory_others_can_write(tmp_path: Path) -> None:
+    """Whoever can write the directory can run code in every reader, so say so."""
+    path = tmp_path / "shared"
+    path.mkdir()
+    path.chmod(0o777)
+    with pytest.warns(CacheWarning, match="writable by other users"):
+        DiskCache(path)
+    path.chmod(0o700)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        DiskCache(path)
+
+
+@_POSIX
+def test_disk_clear_warns_about_what_it_cannot_remove(tmp_path: Path) -> None:
+    """A failed `clear` says so, rather than leaving entries behind in silence."""
+    store = DiskCache(tmp_path)
+    store.put(_key(1), b"x")
+    shard = next(tmp_path.rglob(_key(1).hex())).parent
+    shard.chmod(0o500)
+    try:
+        with pytest.warns(CacheWarning, match="cannot remove"):
+            store.clear()
+    finally:
+        shard.chmod(0o700)
+    store.clear()
+    assert store.get(_key(1)) is MISSING
+
+
+def test_disk_clear_on_a_new_directory_is_quiet(tmp_path: Path) -> None:
+    """Clearing a store that never wrote anything has nothing to report."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        DiskCache(tmp_path / "never").clear()
+
+
+def test_disk_keeps_an_entry_rewritten_while_a_bad_one_was_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A reader removes the bad entry it read, never a good one written since."""
+    store = DiskCache(tmp_path, dumps=_identity, loads=_identity_loads, serializer="b")
+    writer = DiskCache(tmp_path, dumps=_identity, loads=_identity_loads, serializer="b")
+    store.put(_key(1), b"old")
+
+    def decode_then_rewrite(data: bytes) -> object:
+        # Another process replaces the entry after this one read it, before it
+        # finds what it read unreadable.
+        writer.put(_key(1), b"new")
+        msg = f"unreadable {len(data)} bytes"
+        raise ValueError(msg)
+
+    monkeypatch.setattr(store, "_decode", decode_then_rewrite)
+    with pytest.warns(CacheWarning, match="unreadable"):
+        assert store.get(_key(1)) is MISSING
+    assert writer.get(_key(1)) == b"new"
+
+
+def test_disk_refuses_a_path_with_a_nul_byte(tmp_path: Path) -> None:
+    """A path no file system accepts is a mistake at once, not a warning per entry."""
+    with pytest.raises(ValueError, match="NUL"):
+        DiskCache(f"{tmp_path}/a\x00b")
+
+
+def test_with_cache_refuses_what_is_not_a_store() -> None:
+    """A store needs `get`, `put` and `discard`; anything else fails at once."""
+    with pytest.raises(TypeError, match="get, put and discard"):
+        fnloom.Builder().with_cache(object())  # ty: ignore[invalid-argument-type]

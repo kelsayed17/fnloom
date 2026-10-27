@@ -64,6 +64,23 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Fixed
 
+- The cache returned a stale result after an edit it should have seen. A module constant read through another name
+  (a default, a helper handed the module, a class attribute), a function's own attribute, a name read as a string
+  (`globals()["RATE"]`, `getattr(config, "RATE")`), a name a module's `__getattr__` serves, and a method of an input
+  value's own class now all count in a code version or a fingerprint. Fingerprinting an input of a user class costs
+  about 1 µs more per value.
+- A pandas index's frequency and a frame's or series' `attrs` are part of their fingerprints.
+- A `set` or `frozenset` is fingerprinted in iteration order, and a numpy array by its strides as well as its
+  bytes, so a node that reads a set's order or an array's layout never gets another order's or layout's result. A
+  set of strings now fingerprints differently in each process unless `PYTHONHASHSEED` is fixed, so with `DiskCache`
+  it misses across processes; pass a sorted tuple to share results.
+- Packages installed outside the interpreter's own `site-packages` (an overlay or user environment, a `PYTHONPATH`
+  entry) are libraries, versioned by name, not user code whose globals could make a node uncacheable.
+- `DiskCache` makes its directories private to their owner, warns when it opens a directory others can write, warns
+  about what `clear()` cannot remove, never removes a good entry another process wrote since it read a bad one, and
+  refuses a path with a NUL byte. `with_cache` refuses an object that is not a store.
+- A refusal of a cyclic or deeply nested value shortens its path, and `inspect.signature(fnloom.register_fingerprint)`
+  works.
 - An edge check now strips `Annotated` and PEP 695 aliases before it looks for `Any` or a `TypeVar`, so a node
   returning `Annotated[Any, ...]` or an alias of `Any` feeds any parameter, as `Any` does (Q41, Q44).
 - An input check against a recursive alias such as `type Tree = list[Tree]` refuses a string instead of raising

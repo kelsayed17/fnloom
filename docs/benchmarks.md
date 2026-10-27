@@ -155,7 +155,8 @@ The targets of the caching design (§8), with fnloom's figures:
 the walk back from the outputs, and the call that stores its result as it finishes. An uncached trivial node costs
 about 0.16 µs, so 1.5 times would leave 0.08 µs per node, less than hashing one key. The cost is per node, not per
 byte, so on nodes doing real work it is a fixed microsecond each. Moving the memory store and the store calls into
-Rust would cut it; the target as written, on trivial nodes, may need restating.
+Rust would cut it; the target as written, on trivial nodes, may need restating. It is tracked in
+[#10](https://github.com/kelsayed17/fnloom/issues/10).
 
 Each key is hashed with one BLAKE3 call over its framed parts, rather than a streaming hasher fed a part at a time,
 which gives the same digests.

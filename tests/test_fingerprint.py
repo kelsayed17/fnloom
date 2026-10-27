@@ -25,9 +25,12 @@ for _name in ("numpy", "pandas", "polars"):
         importlib.import_module(_name)
 
 DIGEST_SIZE = 32
+# Longer than any refusal message should be.
+_SHORT_MESSAGE = 400
 
-# A value that exercises sets, dicts, strings and nesting, for the hash-seed check.
-_SEEDED = "[{'x', 'y', 'z', 'w'}, {'k': frozenset({1, 'a', (2, 'b')})}, 'text']"
+# A value that exercises dicts, strings and nesting, for the hash-seed check. Sets of
+# strings are left out: they are fingerprinted in iteration order, which the seed sets.
+_SEEDED = "[('x', 'y', 'z', 'w'), {'k': (1, 'a', (2, 'b'))}, 'text', {3, 1, 2}]"
 
 
 def _fingerprint_in_subprocess(seed: str) -> str:
@@ -76,7 +79,7 @@ def test_type_is_part_of_the_fingerprint() -> None:
 
 
 def test_equal_values_share_a_fingerprint() -> None:
-    """Equal values share a fingerprint, whatever the order or hash seed."""
+    """Equal values share a fingerprint whatever the hash seed, string sets aside."""
     assert fingerprint([1, "a", (2.5, None)]) == fingerprint([1, "a", (2.5, None)])
     assert fingerprint({2, 1}) == fingerprint({1, 2})
     assert _fingerprint_in_subprocess("1") == _fingerprint_in_subprocess("2")
@@ -345,8 +348,11 @@ def test_deep_nesting_is_refused_cleanly() -> None:
     value: list[object] = []
     for _ in range(100_000):
         value = [value]
-    with pytest.raises(UnfingerprintableError, match="nested"):
+    with pytest.raises(UnfingerprintableError, match="nested") as caught:
         fingerprint(value)
+    # The path a thousand levels down is shortened, so the message stays readable.
+    assert len(str(caught.value)) < _SHORT_MESSAGE
+    assert "…" in caught.value.path
 
 
 def test_protocol_and_registry() -> None:
@@ -393,7 +399,7 @@ def test_numpy_arrays() -> None:
         np.zeros((3, 2), dtype="float32")
     )
     a = np.arange(12).reshape(3, 4)
-    assert fingerprint(a[:, ::2]) == fingerprint(np.ascontiguousarray(a[:, ::2]))
+    assert fingerprint(a[:, ::2]) == fingerprint(np.arange(12).reshape(3, 4)[:, ::2])
     assert fingerprint(a) != fingerprint(a + 1)
     with pytest.raises(UnfingerprintableError):
         fingerprint(np.array([object()], dtype=object))
@@ -479,3 +485,91 @@ def test_python_never_imports_numpy() -> None:
         [sys.executable, "-c", code], capture_output=True, check=True, text=True
     )
     assert result.stdout.strip() == "False"
+
+
+_RECORD = """
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class Price:
+    amount: int
+
+    def doubled(self) -> int:
+        return self.amount * {factor}
+"""
+
+
+def test_a_user_class_counts_its_code() -> None:
+    """Editing a method of a value's own class changes the value's fingerprint.
+
+    A node may call it, so the same fields under edited code are another value.
+    """
+    from helpers import make_module  # noqa: PLC0415  # the tests' module builder
+
+    before = fingerprint(make_module("fp_price", _RECORD.format(factor=2)).Price(5))
+    same = fingerprint(make_module("fp_price", _RECORD.format(factor=2)).Price(5))
+    after = fingerprint(make_module("fp_price", _RECORD.format(factor=3)).Price(5))
+    assert same == before
+    assert after != before
+
+
+def test_a_user_class_with_mutable_state_is_refused() -> None:
+    """A class attribute that may change in place makes its values unfingerprintable."""
+    from helpers import make_module  # noqa: PLC0415  # the tests' module builder
+
+    source = _RECORD.format(factor=2) + "\nPrice.seen = []\n"
+    with pytest.raises(UnfingerprintableError):
+        fingerprint(make_module("fp_price", source).Price(5))
+
+
+def test_pandas_index_frequency_and_attrs_count() -> None:
+    """An index's frequency and a frame's or series' `attrs` are state a node reads."""
+    pd = pytest.importorskip("pandas")
+    daily = pd.date_range("2026-01-01", periods=3, freq="D")
+    assert fingerprint(daily) != fingerprint(pd.DatetimeIndex(list(daily)))
+    frame = pd.DataFrame({"x": [1]})
+    labelled = pd.DataFrame({"x": [1]})
+    labelled.attrs["unit"] = "m"
+    assert fingerprint(frame) != fingerprint(labelled)
+    series = pd.Series([1])
+    tagged = pd.Series([1])
+    tagged.attrs["unit"] = "m"
+    assert fingerprint(series) != fingerprint(tagged)
+
+
+def test_dates_fractions_and_uuids() -> None:
+    """Each is fingerprinted by its content: equal values agree, others differ."""
+    from datetime import date  # noqa: PLC0415  # only this test needs them
+    from fractions import Fraction  # noqa: PLC0415
+    from uuid import UUID  # noqa: PLC0415
+
+    assert fingerprint(date(2026, 1, 2)) == fingerprint(date(2026, 1, 2))
+    assert fingerprint(date(2026, 1, 2)) != fingerprint(date(2026, 1, 3))
+    assert fingerprint(Fraction(1, 3)) == fingerprint(Fraction(2, 6))
+    assert fingerprint(Fraction(1, 3)) != fingerprint(Fraction(1, 4))
+    one = UUID(int=1)
+    assert fingerprint(one) == fingerprint(UUID(int=1))
+    assert fingerprint(one) != fingerprint(UUID(int=2))
+    assert fingerprint(one) != fingerprint(one.bytes)
+
+
+def test_set_iteration_order_counts() -> None:
+    """Equal sets that iterate in different orders differ: a node can see the order."""
+    first, second = {8, 16}, {16, 8}
+    assert first == second
+    assert list(first) != list(second)
+    assert fingerprint(first) != fingerprint(second)
+    assert fingerprint(frozenset(first)) != fingerprint(frozenset(second))
+    assert fingerprint({8, 16}) == fingerprint(first)
+
+
+def test_numpy_layout_counts() -> None:
+    """An array's memory layout is part of its fingerprint: a node can read it."""
+    np = pytest.importorskip("numpy")
+    c_order = np.arange(6).reshape(2, 3)
+    f_order = np.asfortranarray(c_order)
+    assert np.array_equal(c_order, f_order)
+    assert fingerprint(c_order) != fingerprint(f_order)
+    view = np.arange(12).reshape(3, 4)[:, ::2]
+    assert fingerprint(view) != fingerprint(np.ascontiguousarray(view))
+    assert fingerprint(c_order) == fingerprint(np.arange(6).reshape(2, 3))

@@ -31,7 +31,8 @@ Hamilton 1.90.0 is fnloom's test oracle: every place the two differ on purpose i
 
 ## Decorators
 
-The decorators fnloom has so far take the same arguments as Hamilton's. Usually only the import changes.
+Most decorators fnloom has so far take the same arguments as Hamilton's, so usually only the import changes.
+`@cache` is the exception, below.
 
 <div class="fl-compare" markdown>
 
@@ -42,6 +43,8 @@ The decorators fnloom has so far take the same arguments as Hamilton's. Usually 
 | `@parameterize(row={"param": value(v)})` | The same. `v` is passed as is, never copied, as in Hamilton |
 | `@tag(owner="data")` | The same, imported from `fnloom`. A value must be a `str`, not a list (Q36) |
 | `@cache(behavior="recompute")`, `@cache(behavior="disable")` | The same, imported from `fnloom` ([Caching](#caching)) |
+| `@cache(behavior="ignore")` on a producer | `@cache(ignore=("name",))` on the consumer instead (Q50) |
+| `@cache(format=...)`, `target_=...` | Not there. fnloom adds `version=` to pin a code version |
 | A row as `(bindings, docstring)`, `group(...)`, `parameterize_sources`, `parameterize_values` | Not yet. A row is a mapping |
 
 </div>

@@ -157,6 +157,48 @@ def test_is_user_module(tmp_path: Path) -> None:
     assert not is_user_module(_codeversion)
 
 
+def test_a_module_in_any_site_packages_on_the_path_is_a_library(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Packages installed outside the interpreter's prefix are libraries too.
+
+    An overlay or user environment, or a `PYTHONPATH` entry, holds installed code
+    that is versioned by name, not walked.
+    """
+    for directory in ("site-packages", "dist-packages"):
+        packages = tmp_path / directory
+        packages.mkdir()
+        monkeypatch.syspath_prepend(str(packages))
+        installed = types.ModuleType("cv_installed")
+        installed.__file__ = str(packages / "cv_installed.py")
+        assert not is_user_module(installed)
+    beside = types.ModuleType("cv_beside")
+    beside.__file__ = str(tmp_path / "cv_beside.py")
+    assert is_user_module(beside)
+
+
+def test_a_module_with_a_getattr_hook_is_read_by_its_attributes() -> None:
+    """A module-level `__getattr__` is not asked for `__path__`: it may raise."""
+    hooked = make_module(
+        "cv_hooked", "RATE = 2\n\ndef __getattr__(name):\n    return len(name) + 1\n"
+    )
+    assert hooked.anything == len("anything") + 1
+    source = (
+        "import cv_hooked\n\n"
+        "def f(x):\n    return cv_hooked.RATE * x + cv_hooked.OTHER\n"
+    )
+    assert len(_version(source)) == DIGEST_SIZE
+
+
+def test_a_name_a_module_getattr_hook_serves_counts_the_hook() -> None:
+    """A name the module does not define is the hook's to answer, so its code counts."""
+    source = "import cv_hooked\n\ndef f(x):\n    return cv_hooked.RATE * x\n"
+    make_module("cv_hooked", "def __getattr__(name):\n    return 2\n")
+    before = _version(source)
+    make_module("cv_hooked", "def __getattr__(name):\n    return 3\n")
+    assert _version(source) != before
+
+
 @pytest.mark.parametrize(
     ("value", "kind"),
     [
@@ -320,13 +362,15 @@ def test_only_functions_have_code_versions() -> None:
         code_version(len)
 
 
-# Builds a module from fixed source, with sets, helpers and a library call.
+# Builds a module from fixed source, with a set literal, helpers and a library call. A
+# frozenset of strings held in a global would not do: it is fingerprinted in iteration
+# order, which the hash seed changes.
 _SEEDED = """
 import json, sys, textwrap, types
 from fnloom._codeversion import code_version
 source = textwrap.dedent('''
     import json
-    NAMES = frozenset({"alpha", "beta", "gamma", "delta"})
+    NAMES = ("alpha", "beta", "gamma", "delta")
     def helper(x):
         return x in {"a", "b", "c", "d"}
     def f(x):
@@ -798,3 +842,64 @@ def test_hand_written_kind_markers_do_not_hide_attributes(body: str, name: str) 
     source = f"class Model(tuple):\n    {body}\ndef f():\n    return Model\n"
     with pytest.raises(UncacheableError, match=f"attribute '{name}' of 'Model'"):
         _version(source)
+
+
+@pytest.mark.parametrize(
+    "main",
+    [
+        # The module as a default, read through the parameter.
+        "import cv_cfg\n\ndef f(x, m=cv_cfg):\n    return m.RATE * x\n",
+        # Passed to a helper that reads the attribute.
+        (
+            "import cv_cfg\n\ndef _apply(m, x):\n    return m.RATE * x\n\n"
+            "def f(x):\n    return _apply(cv_cfg, x)\n"
+        ),
+        # Held by a class attribute.
+        (
+            "import cv_cfg\n\nclass K:\n    cfg = cv_cfg\n\n"
+            "def f(x):\n    return K.cfg.RATE * x\n"
+        ),
+        # Returned by a helper.
+        (
+            "import cv_cfg\n\ndef _config():\n    return cv_cfg\n\n"
+            "def f(x):\n    return _config().RATE * x\n"
+        ),
+    ],
+    ids=["default", "argument", "class-attribute", "returned"],
+)
+def test_a_module_constant_read_through_another_name_counts(main: str) -> None:
+    """Whoever reads the attribute, editing the module's constant changes the caller."""
+    make_module("cv_cfg", "RATE = 2\n")
+    before = _version(main)
+    make_module("cv_cfg", "RATE = 3\n")
+    assert _version(main) != before
+
+
+def test_a_function_attribute_it_reads_counts() -> None:
+    """A function's own attribute is state its code reads, like a global."""
+    template = "def _h(x):\n    return x * _h.factor\n\n_h.factor = {factor}\n\n"
+    template += "def f(x):\n    return _h(x)\n"
+    before = _version(template.format(factor=2))
+    assert _version(template.format(factor=2)) == before
+    assert _version(template.format(factor=3)) != before
+
+
+def test_a_mutable_function_attribute_it_reads_is_refused() -> None:
+    """A function attribute that may change in place is refused, as a global is."""
+    source = "def f(x):\n    return x + len(f.seen)\n\nf.seen = []\n"
+    with pytest.raises(UncacheableError, match="'seen'"):
+        _version(source)
+
+
+@pytest.mark.parametrize(
+    "read",
+    ["globals()['RATE']", "getattr(cv_cfg, 'RATE')", "vars(cv_cfg)['RATE']"],
+)
+def test_a_name_read_as_a_string_counts(read: str) -> None:
+    """A name looked up by a string constant counts as if read by name."""
+    make_module("cv_cfg", "RATE = 2\n")
+    template = "import cv_cfg\n\nRATE = {rate}\n\ndef f(x):\n    return {read} * x\n"
+    before = _version(template.format(rate=2, read=read))
+    make_module("cv_cfg", "RATE = 3\n")
+    after = _version(template.format(rate=3, read=read))
+    assert after != before

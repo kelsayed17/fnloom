@@ -2,8 +2,9 @@
 
 A node's key hashes its static part (identity, code version and behavior) and the
 version of each value it reads: an input's or override's fingerprint, a computed
-node's key, or a `recompute` node's result's fingerprint. `CacheRun` computes every
-key of a plan before anything runs, walks back from the outputs to the first nodes
+node's key, or a `recompute` node's result's fingerprint. `CacheRun` first runs the
+plan's `recompute` nodes, in a nested run, then computes every key, walks back from
+the outputs to the first nodes
 the store holds, and runs the plan with those as overrides, so the core prunes their
 upstream. Each `default` node that runs is stored under its key as it succeeds;
 nothing else is ever looked up, so nothing else is stored. `explain`
@@ -22,7 +23,7 @@ from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
 from fnloom import _core
 from fnloom._codeversion import UncacheableError, code_version
 from fnloom._decorators import CacheBehavior, CachePolicy, Source, decorations
-from fnloom._fingerprint import fingerprint
+from fnloom._fingerprint import fingerprint, forget_class_versions
 from fnloom._scan import core_inputs
 from fnloom._stores import MISSING, CacheStore, CacheWarning
 
@@ -193,6 +194,8 @@ class Cache:
     @classmethod
     def of(cls, store: CacheStore, nodes: Sequence[NodeDef]) -> Cache:
         """The cache over `store` for the built `nodes`."""
+        # Classes may have been edited since the last build: read them again.
+        forget_class_versions()
         sources = {n.name: tuple(s for s, _ in core_inputs(n.params)) for n in nodes}
         return cls(store, node_keys(nodes), sources)
 
