@@ -128,8 +128,8 @@ Cached runs against uncached ones and against Hamilton 1.90.0's `with_cache`, on
 cold / warm, medians over seven fresh processes, each the median of three cold runs (a new driver with an empty
 store) and the 21 warm runs after them. Uncached, cold is a first run and warm a steady one. fnloom runs a prepared
 plan; Hamilton, which has none, runs `execute`. So fnloom's cold and warm times leave out `prepare`, made once before
-the timed runs, while Hamilton's include the planning each `execute` does. Hamilton's memory store is its `InMemoryMetadataStore` with its
-`InMemoryResultStore`, and its disk store the default `with_cache(path=...)`.
+the timed runs, while Hamilton's include the planning each `execute` does. Hamilton's memory store is its
+`InMemoryMetadataStore` with its `InMemoryResultStore`, and its disk store the default `with_cache(path=...)`.
 
 | shape | n | runtime | uncached | memory | disk |
 | --- | ---: | --- | --- | --- | --- |
