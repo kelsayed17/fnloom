@@ -1,5 +1,6 @@
 """fnloom: plain Python functions as nodes in a dataflow graph, run by a Rust core."""
 
+from fnloom._caching import CacheOutcome
 from fnloom._core import UnfingerprintableError
 from fnloom._decorators import (
     CachePolicy,
@@ -19,6 +20,7 @@ from fnloom.driver import Builder, Driver, PreparedPlan, build
 __all__ = [
     "MISSING",
     "Builder",
+    "CacheOutcome",
     "CachePolicy",
     "CacheStore",
     "CacheWarning",

@@ -5,7 +5,8 @@ version of each value it reads: an input's or override's fingerprint, a computed
 node's key, or a `recompute` node's result's fingerprint. `CacheRun` computes every
 key of a plan before anything runs, walks back from the outputs to the first nodes
 the store holds, and runs the plan with those as overrides, so the core prunes their
-upstream. Each node that runs is stored under its key as it succeeds.
+upstream. Each node that runs is stored under its key as it succeeds. `explain`
+reports what a run would do with each computed node, running nothing.
 
 The cache never fails a run: a store that raises is a miss or a skipped write,
 reported with one `CacheWarning` per node per run. A node's own exception fails the
@@ -15,7 +16,7 @@ run as without the cache, and nothing is stored for that node.
 import threading
 import warnings
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
 
 from fnloom import _core
 from fnloom._codeversion import UncacheableError, code_version
@@ -42,6 +43,27 @@ _DEFAULT_POLICY = CachePolicy("default", frozenset(), None)
 # A key parameter: its name, the node or input it reads (`None` for a constant), and
 # a constant's version (`None` for a read, or a constant with no fingerprint).
 type KeyParam = tuple[str, str | None, bytes | None]
+
+
+class CacheOutcome(NamedTuple):
+    """What a cached run would do with one computed node, from `explain_cache`.
+
+    Attributes:
+        status: `"hit"`: the store holds the node's key. `"miss"`: it does not, so
+            the node runs and is stored; a `recompute` node is always one, with the
+            reason `"policy recompute"`. `"uncacheable"`: the node has no key, so it
+            always runs and is never stored. `"unknown"`: the key depends on the
+            result of a `recompute` node, which only a run knows.
+        reason: Why a node is uncacheable or unknown, or is a `recompute` miss;
+            `None` for a plain hit or miss.
+    """
+
+    status: Literal["hit", "miss", "uncacheable", "unknown"]
+    reason: str | None
+
+
+# The outcome of a `recompute` node with a key, or one that only a run would know.
+_RECOMPUTE = CacheOutcome("miss", "policy recompute")
 
 
 @dataclass(frozen=True, slots=True)
@@ -231,9 +253,9 @@ class CacheRun:
                 for name, k in zip(computed, keys, strict=True)
             ]
         )
-        self._behaviors = {
-            name: k.behavior for name, k in zip(computed, keys, strict=True)
-        }
+        # In plan order.
+        self._node_keys = dict(zip(computed, keys, strict=True))
+        self._behaviors = {name: k.behavior for name, k in self._node_keys.items()}
         self._sources = {name: cache.sources[name] for name in computed}
         # Every input and override a key reads gets a version, so a version that
         # is missing only ever means an optional input not supplied.
@@ -304,18 +326,100 @@ class CacheRun:
             values.update(result)
         return result
 
+    def explain(
+        self, inputs: dict[str, object], overrides: dict[str, object]
+    ) -> dict[str, CacheOutcome]:
+        """Each computed node's outcome, by name, in name order; runs nothing.
+
+        The keys are a run's, except that no `recompute` node runs first: what
+        reads one has no known key, and is `unknown`. Every default node with a key
+        is looked up on its own, not only the ones a run's walk would reach, so a
+        node upstream of a hit reports its own entry although a run would neither
+        load nor run it.
+        """
+        warned: set[str] = set()
+        reasons: dict[str, str] = {}
+        versions = self._versions(inputs, overrides, warned, reasons)
+        # No result, so no version: every key reading one is `None`.
+        versions.update(dict.fromkeys(self._first))
+        keys = self._key_plan.keys(versions)
+        outcomes: dict[str, CacheOutcome] = {}
+        # Plan order, so each node's sources have their outcomes already.
+        for name, k in self._node_keys.items():
+            key = keys[name]
+            if key is None:
+                outcome = self._keyless(k, reasons, outcomes)
+            elif k.behavior == "default":
+                found = self._get(key, name, warned) is not MISSING
+                outcome = CacheOutcome("hit" if found else "miss", None)
+            else:
+                outcome = _RECOMPUTE
+            # A `recompute` node always runs, so it is a miss whether or not its
+            # key is known, unless it has none to be stored under.
+            if k.behavior == "recompute" and outcome.status == "unknown":
+                outcome = _RECOMPUTE
+            outcomes[name] = outcome
+        return dict(sorted(outcomes.items()))
+
+    def _keyless(
+        self,
+        k: NodeKey,
+        reasons: Mapping[str, str],
+        outcomes: Mapping[str, CacheOutcome],
+    ) -> CacheOutcome:
+        """Why a node has no key: its own reason, else the first source it reads.
+
+        An uncacheable source outweighs one with no known version yet, since the
+        node is uncacheable whatever that version turns out to be.
+        """
+        if k.static is None:
+            return CacheOutcome("uncacheable", k.reason)
+        unknown: CacheOutcome | None = None
+        for _, source, _ in k.params:
+            if source is None:
+                continue
+            if source in self._first:
+                found = CacheOutcome(
+                    "unknown", f"downstream of recompute node {source!r}"
+                )
+            elif source in reasons:
+                return CacheOutcome("uncacheable", reasons[source])
+            elif (upstream := outcomes.get(source)) is None:
+                continue
+            elif upstream.status == "uncacheable":
+                return CacheOutcome("uncacheable", f"reads uncacheable {source!r}")
+            elif upstream.status == "unknown":
+                found = upstream
+            else:
+                continue
+            unknown = unknown or found
+        # A source with no version is one of the above; never guess a hit.
+        return unknown or CacheOutcome("unknown", "no key")
+
     def _versions(
         self,
         inputs: dict[str, object],
         overrides: dict[str, object],
         warned: set[str],
+        reasons: dict[str, str] | None = None,
     ) -> dict[str, bytes | None]:
-        """The fingerprint of every input and override a key reads; `None` if none."""
-        versions = {
-            name: _version(inputs[name], name, warned) for name in self._read_inputs
-        }
-        for name in self._read_overrides:
-            versions[name] = _version(overrides[name], name, warned)
+        """The fingerprint of every input and override a key reads; `None` if none.
+
+        `reasons`, when given, receives why each one with no fingerprint has none.
+        """
+        versions: dict[str, bytes | None] = {}
+        for values, names in (
+            (inputs, self._read_inputs),
+            (overrides, self._read_overrides),
+        ):
+            for name in names:
+                version = _version_or_reason(values[name], name, warned)
+                if isinstance(version, bytes):
+                    versions[name] = version
+                else:
+                    versions[name] = None
+                    if reasons is not None:
+                        reasons[name] = version
         return versions
 
     def _frontier(
@@ -403,17 +507,22 @@ class CacheRun:
 
 
 def _version(value: object, name: str, warned: set[str]) -> bytes | None:
-    """`value`'s fingerprint, or `None` when it has none.
+    """`value`'s fingerprint, or `None` when it has none."""
+    version = _version_or_reason(value, name, warned)
+    return version if isinstance(version, bytes) else None
+
+
+def _version_or_reason(value: object, name: str, warned: set[str]) -> bytes | str:
+    """`value`'s fingerprint, or why it has none, such as `items[0]: Model`.
 
     A value with no fingerprint is expected, and quiet: what reads it runs. A
     fingerprint function that fails is reported.
     """
     try:
         return fingerprint(value)
-    except _core.UnfingerprintableError:
-        return None
+    except _core.UnfingerprintableError as error:
+        return f"{name}{error.path}: {error.type_name}"
     except Exception as error:  # noqa: BLE001  # a failing fingerprint is no version
-        _warn_once(
-            warned, name, f"cannot fingerprint {name!r} for the cache: {error!r}"
-        )
-        return None
+        reason = f"cannot fingerprint {name!r} for the cache: {error!r}"
+        _warn_once(warned, name, reason)
+        return reason

@@ -11,6 +11,7 @@ import pytest
 from fnloom import (
     MISSING,
     Builder,
+    CacheOutcome,
     CacheStore,
     CacheWarning,
     DiskCache,
@@ -578,3 +579,159 @@ def test_a_failing_fingerprint_function_builds_and_runs(
         "default",
         "plain",
     ]
+
+
+EXPLAINED = """
+from fnloom import cache
+
+SCALE = [2]
+
+class Model:
+    pass
+
+@cache(behavior="recompute")
+def load(path: str) -> str:
+    print("load")
+    return path.upper()
+
+def parsed(load: str) -> int:
+    print("parsed")
+    return len(load)
+
+def summary(parsed: int) -> int:
+    print("summary")
+    return parsed + 1
+
+def base(x: int) -> int:
+    print("base")
+    return x + 1
+
+def doubled(base: int) -> int:
+    print("doubled")
+    return base * 2
+
+def scaled(x: int) -> int:
+    print("scaled")
+    return x * SCALE[0]
+
+def counted(items: list[Model]) -> int:
+    print("counted")
+    return len(items)
+
+@cache(behavior="disable")
+def client(x: int) -> object:
+    print("client")
+    return object()
+
+def fetched(client: object, base: int) -> int:
+    print("fetched")
+    return base
+
+def mixed(parsed: int, scaled: int) -> int:
+    print("mixed")
+    return parsed + scaled
+"""
+
+
+def test_explain_names_every_outcome_and_runs_nothing(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Each computed node's outcome, in name order, before and after a run (§6)."""
+    module = make_module("cached_explained", EXPLAINED)
+    store = CountingCache()
+    driver = _cached(module, store)
+    outputs = ["summary", "doubled", "counted", "fetched", "mixed"]
+    inputs = {"path": "a b", "x": 1, "items": [module.Model()]}
+    before = driver.explain_cache(outputs, inputs=inputs)
+    assert _called(capsys) == []
+    assert store.puts == []
+    downstream = CacheOutcome("unknown", "downstream of recompute node 'load'")
+    unchanging = {
+        "client": CacheOutcome("uncacheable", "policy disable"),
+        "counted": CacheOutcome("uncacheable", "items[0]: Model"),
+        "fetched": CacheOutcome("uncacheable", "reads uncacheable 'client'"),
+        "load": CacheOutcome("miss", "policy recompute"),
+        # An uncacheable source outweighs one whose version is not known yet.
+        "mixed": CacheOutcome("uncacheable", "reads uncacheable 'scaled'"),
+        "parsed": downstream,
+        "summary": downstream,
+    }
+    scaled = before.pop("scaled")
+    assert scaled.status == "uncacheable"
+    assert scaled.reason is not None
+    assert "'SCALE'" in scaled.reason
+    assert list(before) == sorted(before)
+    miss = CacheOutcome("miss", None)
+    assert before == {**unchanging, "base": miss, "doubled": miss}
+    driver.execute(outputs, inputs=inputs)
+    _called(capsys)
+    store.forget_calls()
+    after = driver.explain_cache(outputs, inputs=inputs)
+    assert _called(capsys) == []
+    assert store.puts == []
+    hit = CacheOutcome("hit", None)
+    assert after == {**unchanging, "base": hit, "doubled": hit, "scaled": scaled}
+    assert isinstance(after["base"], tuple)
+    # An overridden node is not computed, and what reads it is keyed by its value.
+    overridden = driver.explain_cache(
+        ["doubled"], inputs={"x": 1}, overrides={"base": 5}
+    )
+    assert overridden == {"doubled": miss}
+    assert _called(capsys) == []
+
+
+def test_explain_checks_its_request_and_treats_a_store_error_as_a_miss() -> None:
+    """The run's checks apply; a store that raises warns and is a miss."""
+    module = make_module("cached_explain_errors", CHAIN)
+    driver = _cached(module, MemoryCache())
+    with pytest.raises(ValueError, match="x: expected int, got str"):
+        driver.explain_cache(["c"], inputs={"x": "1"})
+    with pytest.raises(ValueError, match="inputs"):
+        driver.explain_cache(["c"], inputs={})
+    driver = _cached(module, RaisingCache())
+    with pytest.warns(CacheWarning) as caught:
+        outcomes = driver.explain_cache(["c"], inputs={"x": 1})
+    assert [str(w.message).split(" from")[0] for w in caught] == [
+        f"cannot load node {name!r}" for name in ("a", "b", "c")
+    ]
+    miss = CacheOutcome("miss", None)
+    assert outcomes == {"a": miss, "b": miss, "c": miss}
+
+
+def test_explain_without_a_store_is_a_value_error() -> None:
+    """Only a driver built with a cache can explain one."""
+    driver = build(make_module("uncached_explain", CHAIN))
+    with pytest.raises(ValueError, match="with_cache"):
+        driver.explain_cache(["c"], inputs={"x": 1})
+
+
+def test_explain_names_the_nearest_recompute_node() -> None:
+    """A `recompute` node behind another is a miss; what reads it names it."""
+    module = make_module(
+        "cached_explain_loaders",
+        """
+        from fnloom import cache
+
+        @cache(behavior="recompute")
+        def first(path: str) -> str:
+            return path
+
+        @cache(behavior="recompute")
+        def second(first: str, other: object) -> str:
+            return first
+
+        def last(second: str, first: str) -> int:
+            return len(second + first)
+        """,
+    )
+    driver = _cached(module, MemoryCache())
+    outcomes = driver.explain_cache(["last"], inputs={"path": "p", "other": 1})
+    recompute = CacheOutcome("miss", "policy recompute")
+    assert outcomes == {
+        "first": recompute,
+        "last": CacheOutcome("unknown", "downstream of recompute node 'second'"),
+        "second": recompute,
+    }
+    # A `recompute` node with no key is never stored: uncacheable, not a miss.
+    outcomes = driver.explain_cache(["second"], inputs={"path": "p", "other": object()})
+    assert outcomes["second"] == CacheOutcome("uncacheable", "other: object")

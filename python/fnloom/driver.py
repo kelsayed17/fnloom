@@ -5,7 +5,7 @@ import threading
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fnloom import _core, _types
-from fnloom._caching import Cache, CacheRun
+from fnloom._caching import Cache, CacheOutcome, CacheRun
 from fnloom._decorators import Source
 from fnloom._scan import NodeDef, collect, core_inputs, resolve
 from fnloom._view import NodeView, NodeViews, node_views
@@ -193,6 +193,30 @@ class PreparedPlan:
         without input type checks). The result holds each requested output once,
         in the order first requested.
         """
+        given_inputs, given_overrides = self._checked(inputs, overrides)
+        values = self._plan.run(given_inputs, given_overrides)
+        if self._sorted:
+            return values
+        return {name: values[name] for name in self._outputs}
+
+    def _explain(
+        self,
+        inputs: Mapping[str, object] | None,
+        overrides: Mapping[str, object] | None,
+    ) -> dict[str, CacheOutcome]:
+        """`Driver.explain_cache` over this plan, which runs through a cache."""
+        given_inputs, given_overrides = self._checked(inputs, overrides)
+        if not isinstance(self._plan, CacheRun):
+            msg = "this plan does not run through a cache"
+            raise TypeError(msg)
+        return self._plan.explain(given_inputs, given_overrides)
+
+    def _checked(
+        self,
+        inputs: Mapping[str, object] | None,
+        overrides: Mapping[str, object] | None,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        """The inputs and overrides as dicts, once a run's checks pass; see `run`."""
         # Inline for a dict, the common case: this runs once per run.
         given_inputs = inputs if type(inputs) is dict else _as_dict(inputs)
         given_overrides = overrides if type(overrides) is dict else _as_dict(overrides)
@@ -215,10 +239,7 @@ class PreparedPlan:
             mismatches += _mismatches(self._override_checks, given_overrides)
             if mismatches:
                 raise ValueError("\n".join(sorted(mismatches)))
-        values = self._plan.run(given_inputs, given_overrides)
-        if self._sorted:
-            return values
-        return {name: values[name] for name in self._outputs}
+        return given_inputs, given_overrides
 
 
 class Driver:
@@ -336,6 +357,26 @@ class Driver:
         """
         plan = self.prepare(final_vars, inputs=inputs, overrides=overrides)
         return plan.run(inputs=inputs, overrides=overrides)
+
+    def explain_cache(
+        self,
+        final_vars: Sequence[str],
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+    ) -> dict[str, CacheOutcome]:
+        """What a cached run of this request would do with each node; runs nothing.
+
+        Returns every computed node of the plan, overridden ones left out, by name
+        in name order, each with its `CacheOutcome`. The request is checked as
+        `execute` checks it. A store error is a miss, and warns `CacheWarning`.
+        Raises `ValueError` for a driver built without `Builder.with_cache`.
+        """
+        if self._cache is None:
+            msg = "explain_cache needs a driver built with Builder.with_cache"
+            raise ValueError(msg)
+        plan = self.prepare(final_vars, inputs=inputs, overrides=overrides)
+        return plan._explain(inputs, overrides)  # noqa: SLF001  # the driver's own plan
 
     def node_names(self) -> list[str]:
         """Returns every node name, sorted."""
