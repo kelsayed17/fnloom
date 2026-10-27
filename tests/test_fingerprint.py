@@ -266,6 +266,35 @@ def test_state_beyond_a_records_fields_counts() -> None:
     assert fingerprint(plain) != fingerprint(labelled)
 
 
+@dataclass
+class _Duo:
+    """A two-field dataclass, which may gain attributes."""
+
+    a: object
+    b: object
+
+
+class _DuoTuple(NamedTuple):
+    """A two-field named tuple subclassed below to gain a `__dict__`."""
+
+    a: object
+    b: object
+
+
+class _DuoTupleMore(_DuoTuple):
+    """A named tuple subclass with a `__dict__`."""
+
+
+def test_extra_state_cannot_mimic_fields() -> None:
+    """A two-field record with extra state never collides with another's fields."""
+    extra = _Duo(1, 2)
+    extra.z = 3  # ty: ignore[unresolved-attribute]
+    assert fingerprint(_Duo((1, 2), (("z", 3),))) != fingerprint(extra)
+    tup = _DuoTupleMore(1, 2)
+    tup.z = 3  # ty: ignore[unresolved-attribute]
+    assert fingerprint(_DuoTupleMore((1, 2), (("z", 3),))) != fingerprint(tup)
+
+
 def test_a_buffer_subclass_counts_its_attributes() -> None:
     """A bytes subclass's `__dict__` is part of its form, or refuses it."""
     plain, tagged = _Blob(b"ab"), _Blob(b"ab")

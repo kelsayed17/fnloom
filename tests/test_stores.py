@@ -359,10 +359,6 @@ def test_warnings_point_at_the_caller(
     assert [warning.filename for warning in caught] == [__file__]
 
 
-@pytest.mark.skipif(
-    sys.platform == "win32" or os.geteuid() == 0,
-    reason="permissions do not stop this user writing",
-)
 @pytest.mark.parametrize("serializer", [pickle, "", None, b"pickle"])
 def test_disk_serializer_must_be_a_name(tmp_path: Path, serializer: object) -> None:
     """`serializer` names the pair: a module, an empty name or a non-str is refused."""
@@ -370,6 +366,10 @@ def test_disk_serializer_must_be_a_name(tmp_path: Path, serializer: object) -> N
         DiskCache(tmp_path, serializer=serializer)  # ty: ignore[invalid-argument-type]
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32" or os.geteuid() == 0,
+    reason="permissions do not stop this user writing",
+)
 def test_disk_unwritable_is_a_warning(tmp_path: Path) -> None:
     """A read-only directory or an unpicklable value skips the write, with a warning."""
     store = DiskCache(tmp_path)

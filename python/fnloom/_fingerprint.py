@@ -154,7 +154,7 @@ def _record(value: object) -> object | None:
     else:
         return None
     extra = _extra_state(value, names)
-    return items if not extra else (items, extra)
+    return items if not extra else (*items, extra)
 
 
 def _extra_state(value: object, known: frozenset[str]) -> tuple[object, ...]:
