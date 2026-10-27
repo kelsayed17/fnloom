@@ -146,6 +146,7 @@ type Prices = collections.abc.Sequence[Price]
 type Again = Price
 type Pair[T] = tuple[T, T]
 type Swapped[K, V] = dict[V, K]
+type Same[T] = T
 
 
 def test_type_alias_answers_as_its_value() -> None:
@@ -171,6 +172,8 @@ def test_generic_type_alias_is_substituted_when_its_parameters_are_in_order() ->
     assert type_matches(tuple[int, int], Pair[int]) is True
     assert type_matches(Pair[int], tuple[int, int]) is True
     assert type_matches(Pair[int], tuple[str, str]) is False
+    assert value_matches(Same[Same[int]], 1) is True
+    assert type_matches(tuple[int, int], Same[Same[Pair[int]]]) is True
     assert value_matches(Swapped[str, int], {1: "a"}) is False
     assert type_matches(dict[int, str], Swapped[str, int]) is False
 
@@ -191,3 +194,14 @@ def test_abstract_collection_without_an_element_check_is_checked_by_its_kind() -
     assert value_matches(collections.abc.Sequence[int], ["s"]) is False
     assert type_matches(dict[str, int], collections.abc.Mapping[str, int]) is True
     assert type_matches(dict[str, int], collections.abc.Mapping[str, str]) is False
+
+
+def test_cyclic_type_alias_answers_as_written() -> None:
+    """Aliases naming each other are compared as written, and the answer ends (Q44)."""
+    # Built at run time: a type checker refuses a circular alias in source.
+    namespace: dict[str, object] = {}
+    exec("type Ping = Pong\ntype Pong = Ping", namespace)  # noqa: S102  # fixed source
+    ping = namespace["Ping"]
+    assert value_matches(ping, 1) is False
+    assert type_matches(ping, ping) is True
+    assert type_matches(int, ping) is False

@@ -169,8 +169,8 @@ def test_bad_input_and_bad_override_fail_together_in_one_sorted_message() -> Non
     module = make_module(
         "checks_input_and_override",
         """
-def b(a: int) -> int:
-    return a
+def b(z: int) -> int:
+    return z
 
 def d(c: int) -> int:
     return c
@@ -181,8 +181,9 @@ def e(b: int, d: int) -> int:
     )
     driver = build(module)
     with pytest.raises(ValueError, match="expected") as raised:
-        driver.execute(["e"], inputs={"a": "x"}, overrides={"d": "y"})
-    assert str(raised.value) == ("a: expected int, got str\nd: expected int, got str")
+        driver.execute(["e"], inputs={"z": "x"}, overrides={"d": "y"})
+    # The override `d` sorts before the input `z`, though inputs are checked first.
+    assert str(raised.value) == ("d: expected int, got str\nz: expected int, got str")
 
 
 def test_unreached_override_is_still_checked() -> None:

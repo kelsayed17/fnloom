@@ -7,6 +7,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from fnloom._decorators import Source, Value, decorations
+from fnloom._types import read_aliases
 from fnloom._view import Param
 
 if TYPE_CHECKING:
@@ -242,6 +243,21 @@ def _unresolved(origin: Callable[..., object]) -> list[str]:
     return culprits or ["an annotation"]
 
 
+def _unread_aliases(hints: dict[str, object]) -> list[tuple[str, _Unresolved]]:
+    """The annotations among `hints` naming an alias whose value does not evaluate.
+
+    Each is (culprit, the error its value raised), in declaration order (Q44).
+    """
+    culprits: list[tuple[str, _Unresolved]] = []
+    for key, hint in hints.items():
+        try:
+            read_aliases(hint)
+        except (NameError, AttributeError) as error:
+            culprit = "the return" if key == "return" else f"parameter {key!r}"
+            culprits.append((culprit, error))
+    return culprits
+
+
 def _unresolved_note(failures: list[tuple[str, list[str]]]) -> str:
     """One note naming every failing annotation; `failures` are (owner, culprits)."""
     items = [(culprit, owner) for owner, culprits in failures for culprit in culprits]
@@ -263,21 +279,31 @@ def resolve(nodes: Sequence[NodeDef]) -> list[NodeDef]:
     names do not resolve, the `NameError` (or, for a missing attribute such as
     `decimal.Missing`, the `AttributeError`) of the first failing node by name is
     raised, as Hamilton raises it, with one note naming every failing node and
-    annotation, sorted by node.
+    annotation, sorted by node. A PEP 695 alias's value is evaluated here too, so
+    an alias over a name that does not resolve fails the same way (Q44).
     """
     origins: dict[int, tuple[Callable[..., object], list[str]]] = {}
     for node in nodes:
         origins.setdefault(id(node.origin), (node.origin, []))[1].append(node.name)
     values: dict[int, dict[str, typing.Any]] = {}
-    errors: list[tuple[str, _Unresolved, Callable[..., object], list[str]]] = []
+    # Each failure: (first node name, error, origin, node names, culprits).
+    errors: list[
+        tuple[str, _Unresolved, Callable[..., object], list[str], list[str]]
+    ] = []
     for key, (origin, names) in origins.items():
         try:
-            values[key] = typing.get_type_hints(origin, include_extras=True)
+            hints = typing.get_type_hints(origin, include_extras=True)
         except (NameError, AttributeError) as error:
-            errors.append((min(names), error, origin, names))
+            errors.append((min(names), error, origin, names, _unresolved(origin)))
+            continue
+        if unread := _unread_aliases(hints):
+            culprits = [culprit for culprit, _ in unread]
+            errors.append((min(names), unread[0][1], origin, names, culprits))
+        else:
+            values[key] = hints
     if errors:
         errors.sort(key=lambda failure: failure[0])
-        failures = [(_owner(o, names), _unresolved(o)) for _, _, o, names in errors]
+        failures = [(_owner(o, names), culprits) for _, _, o, names, culprits in errors]
         error = errors[0][1]
         error.add_note(_unresolved_note(failures))
         raise error

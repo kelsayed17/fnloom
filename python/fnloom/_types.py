@@ -18,7 +18,7 @@ _ITERABLES: tuple[type, ...] = (set, collections.abc.Iterable)
 # takes any value of its kind, its items or signature unchecked (Q45).
 _BY_KIND: frozenset[type] = frozenset(
     abstract
-    for abstract in vars(collections.abc).values()
+    for abstract in (getattr(collections.abc, name) for name in collections.abc.__all__)
     if isinstance(abstract, type) and abstract not in {*_SEQUENCES, *_ITERABLES}
 )
 
@@ -53,15 +53,46 @@ def _strip(annotation: object) -> object:
     """The type an answer is about.
 
     `Annotated[T, ...]` is `T`: metadata never changes an answer (Q41). A PEP 695
-    alias is what it names, read through as many aliases as there are (Q44).
+    alias is what it names, read through as many aliases as there are (Q44); an
+    alias reached a second time, in aliases naming each other, stops the reading.
     """
+    # A list, compared by equality: `Pair[int]` is a new object on each reading.
+    seen: list[object] = []
     while True:
         if typing.get_origin(annotation) is Annotated:
             annotation = typing.get_args(annotation)[0]
-        elif (aliased := _alias_value(annotation)) is not None:
-            annotation = aliased
-        else:
+            continue
+        if annotation in seen:
+            return seen[0]
+        if (aliased := _alias_value(annotation)) is None:
             return annotation
+        seen.append(annotation)
+        annotation = aliased
+
+
+def read_aliases(annotation: object) -> None:
+    """Evaluates the value of every PEP 695 alias in `annotation`, nested or not.
+
+    An alias's value is evaluated only when first read, so a name in it that does
+    not resolve raises then: reading them all at build raises that `NameError` or
+    `AttributeError` once, where the build can name the annotation (Q44).
+    """
+    seen: set[int] = set()
+    pending = [annotation]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, list | tuple):
+            pending.extend(typing.cast("collections.abc.Sequence[object]", current))
+            continue
+        if isinstance(current, typing.TypeAliasType):
+            if id(current) in seen:
+                continue
+            seen.add(id(current))
+            pending.append(current.__value__)
+        pending.extend(typing.get_args(current))
+        origin = typing.get_origin(current)
+        if origin is not None:
+            pending.append(origin)
 
 
 def _is_union(annotation: object) -> bool:

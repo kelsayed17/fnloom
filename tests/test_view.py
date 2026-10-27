@@ -344,3 +344,30 @@ def price(a: int, rate: decimal.Missing) -> int:
     assert raised.value.__notes__ == [
         "resolving the annotation of parameter 'rate' of node 'price'"
     ]
+
+
+def test_alias_over_an_unresolvable_name_fails_the_build_with_note() -> None:
+    """An alias over a type-checking-only import fails the build like it (Q44)."""
+    module = make_module(
+        "view_unresolvable_alias",
+        """
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from decimal import Decimal
+
+type Money = Decimal
+type Prices = list[Money]
+
+def ok(a: int) -> int:
+    return a
+
+def price(ok: int, rate: Prices) -> int:
+    return ok
+""",
+    )
+    with pytest.raises(NameError, match="Decimal") as raised:
+        fnloom.build(module)
+    assert raised.value.__notes__ == [
+        "resolving the annotation of parameter 'rate' of node 'price'"
+    ]
