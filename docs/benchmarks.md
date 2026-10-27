@@ -65,13 +65,13 @@ are still the earlier single samples.
 | chain | 100 | 2.040 / 1.693 | fnloom faster |
 | layered | 1,000 | 21.974 / 20.300 | fnloom faster |
 | layered | 10,000 | 215.8 / 206.0 | fnloom faster |
-| fan_in | 100 | 0.419 / 0.542 (post-fix) | **slower, issue to open** |
-| fan_in | 1,000 | 4.290 / 4.491 (post-fix) | **slower, issue to open** |
-| fan_in | 10,000 | 33.0 / 49.8 (post-fix) | **slower, issue to open** |
+| fan_in | 100 | 0.419 / 0.542 (post-fix) | **slower, [#5](https://github.com/kelsayed17/fnloom/issues/5)** |
+| fan_in | 1,000 | 4.290 / 4.491 (post-fix) | **slower, [#6](https://github.com/kelsayed17/fnloom/issues/6)** |
+| fan_in | 10,000 | 33.0 / 49.8 (post-fix) | **slower, [#7](https://github.com/kelsayed17/fnloom/issues/7)** |
 
 Only `fan_in` builds are reliably slower, by 1.05 to 1.5 times after the fixes (1.6 to 1.8 before; Hamilton's own
 1,000-parameter median moved from 3.078 to 4.290 ms between the two runs, so that row's narrower gap is partly noise),
-and each is an issue to open (none opened yet). The other † cells in the table, and the 10-parameter `fan_in` first
+and each has an issue, linked in the table. The other † cells in the table, and the 10-parameter `fan_in` first
 execute (0.073 against 0.070 ms), were not reliably slower. The checks-on and checks-off builds do the same build
 work, since input checks run per run, so their differences in the table (for example chain 100, 3.664 against 1.722
 ms) are noise.
