@@ -72,6 +72,70 @@ differ.
 `execute` keeps the plans it compiles, keyed by the outputs and the input and override names, so repeated calls of the
 same shape skip compiling. It keeps the 128 most recently used.
 
+## Type checks
+
+Types are checked at two points, against the annotations the build evaluated.
+
+**Edges, at build.** Every parameter fed by another function's node must accept that node's return type. A mismatch
+fails the build, with one `ValueError` listing every such parameter, sorted:
+
+```python
+# file: mismatched.py
+def count() -> str:
+    """Returns text by mistake."""
+    return "3"
+
+
+def doubled(count: int) -> int:
+    """Twice the count."""
+    return count * 2
+```
+
+```python
+import mismatched
+
+fnloom.build(mismatched)
+# raises ValueError: doubled.count requires int but count returns str
+```
+
+A node's return type feeds a parameter when it is the same type or a subclass, when either side is `Any`, when every
+member of a returned union is accepted, or when one member of a parameter's union accepts it. A generic matches by
+its kind, and by its arguments when both sides name them.
+
+**Inputs and overrides, on each run.** Each input that the plan reads is checked against the input's type, and each
+override against the overridden node's return type, before any node runs. The values that do not fit are listed in
+one `ValueError`, sorted, each as `<name>: expected <type>, got <type of the value>`:
+
+```python
+driver.execute(["total"], inputs={"price": "2.5", "quantity": 4})
+# raises ValueError: price: expected float, got str
+```
+
+`None` fits every type. An input supplied but not read by the plan is not checked. Which checks a plan needs is
+worked out once, when it is prepared, so a run only checks the values.
+
+**What the checks understand.** Classes, including your own and their subclasses; `Any`; `object`; unions and
+`Optional`; `Literal`; `Annotated[T, ...]`, checked as `T`; `NewType`, checked as its supertype; `TypeVar`, which
+takes any value and, on an edge, matches only itself; runtime-checkable protocols, checked with `isinstance`; and the
+collections `list`, `list[T]`, `dict[K, V]`, `tuple[T, ...]`, `Sequence` and `Sequence[T]`. A value of exactly the
+collection's own class is checked by its class alone, so `["a"]` fits `list[int]`; another value of an abstract
+collection such as `Sequence[int]` is checked by its kind and its first element only. An iterator is checked by its
+kind alone and is never read.
+
+Other forms are unsupported and, as written, refuse every value but `None`: for example `Mapping[str, int]` given a
+`dict`, `Callable[..., T]` given a function, a protocol that is not runtime-checkable, and a PEP 695 alias
+(`type Price = float`, which takes no `float` and feeds only a parameter annotated with the same alias). Annotate with
+a supported form, or build with `Builder.without_input_type_checks()`:
+
+```python
+lenient = fnloom.Builder().with_modules(pricing).without_input_type_checks().build()
+lenient.execute(["total"], inputs={"price": 2, "quantity": 4})
+# -> {'total': 8}
+```
+
+The opt-out turns off the input and override checks only. Edge checks stay on: they need no values, so they cost
+nothing per run, and a graph whose edges disagree is a bug whatever is supplied.
+
 ## Execution order
 
 Nodes run in topological order, and nodes that could run in either order run in order of their names. The order does

@@ -350,3 +350,26 @@ def g(a: Child) -> int:
     )
     assert hamilton is module.Child
     assert fnloom.build(module).nodes["a"].type is hamilton
+
+
+def test_edge_mismatch_same_exception_class() -> None:
+    """A node returning `str` feeding an `int` parameter fails both builds."""
+    module = make_module(
+        "differential_edge_mismatch",
+        """
+def text() -> str:
+    return "x"
+
+def uses_text(text: int) -> int:
+    return 1
+""",
+    )
+    assert nodes_hamilton([module]) == Nodes(None, "ValueError")
+    assert nodes_fnloom([module]) == Nodes(None, "ValueError")
+
+
+def test_wrong_input_type_same_exception_class() -> None:
+    """A `str` supplied for an `int` input is refused by both, before any node runs."""
+    module = load_fixture("chain")
+    assert run_hamilton([module], ["c"], {"a": "x"}) == Outcome(None, "ValueError")
+    assert run_fnloom([module], ["c"], {"a": "x"}) == Outcome(None, "ValueError")

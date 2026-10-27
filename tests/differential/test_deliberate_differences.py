@@ -7,6 +7,7 @@ import pytest
 from hamilton import driver as hamilton_driver
 from hamilton import htypes
 from hamilton.function_modifiers.base import InvalidDecoratorException
+from hamilton.lifecycle import NoEdgeAndInputTypeChecking
 from harness import (
     Nodes,
     Outcome,
@@ -406,3 +407,49 @@ def test_q43_an_iterator_is_not_consumed_by_the_input_check() -> None:
     fnloom_unread = iter(["s", 2])
     assert value_matches(declared, fnloom_unread) is True
     assert list(fnloom_unread) == ["s", 2]
+
+
+@pytest.mark.deliberate("Q22")
+def test_q22_override_type_checked() -> None:
+    """Hamilton runs a node on an override of the wrong type; fnloom refuses first."""
+    module = load_fixture("chain")
+    overrides = {"b": "x"}
+    assert run_hamilton([module], ["c"], {}, overrides) == Outcome({"c": "xx"}, None)
+    assert run_fnloom([module], ["c"], {}, overrides) == Outcome(None, "ValueError")
+
+
+@pytest.mark.deliberate("Q10")
+def test_q10_opt_out_is_explicit() -> None:
+    """Hamilton's opt-out also drops edge checks; fnloom's keeps them."""
+    mismatched = make_module(
+        "differential_opt_out_edge",
+        """
+def text() -> str:
+    return "x"
+
+def uses_text(text: int) -> str:
+    return text
+""",
+    )
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(mismatched)
+        .with_adapters(NoEdgeAndInputTypeChecking())
+        .build()
+    )
+    assert hamilton.execute(["uses_text"]) == {"uses_text": "x"}
+    unchecked = fnloom.Builder().with_modules(mismatched).without_input_type_checks()
+    with pytest.raises(ValueError, match=r"uses_text\.text requires int"):
+        unchecked.build()
+    chain = load_fixture("chain")
+    hamilton_chain = (
+        hamilton_driver.Builder()
+        .with_modules(chain)
+        .with_adapters(NoEdgeAndInputTypeChecking())
+        .build()
+    )
+    fnloom_chain = (
+        fnloom.Builder().with_modules(chain).without_input_type_checks().build()
+    )
+    assert hamilton_chain.execute(["b"], inputs={"a": 1.5}) == {"b": 2.5}
+    assert fnloom_chain.execute(["b"], inputs={"a": 1.5}) == {"b": 2.5}

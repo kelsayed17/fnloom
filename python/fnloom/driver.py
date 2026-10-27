@@ -1,10 +1,12 @@
 """The user-facing `Builder`, `Driver` and `PreparedPlan`."""
 
+import inspect
 import threading
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol
 
-from fnloom import _core
+from fnloom import _core, _types
+from fnloom._decorators import Source
 from fnloom._scan import NodeDef, collect, core_inputs, resolve
 from fnloom._view import NodeView, node_views
 
@@ -13,6 +15,8 @@ if TYPE_CHECKING:
     from types import ModuleType
 
 type _PlanKey = tuple[tuple[str, ...], frozenset[str], frozenset[str]]
+# A name whose supplied value is checked, and the type it is checked against.
+type _Check = tuple[str, object]
 
 # How many compiled plans a driver keeps; the least recently used one goes first.
 PLAN_CACHE_SIZE = 128
@@ -61,6 +65,34 @@ def _difference(kind: str, prepared: frozenset[str], given: frozenset[str]) -> s
     return f"{kind} {sorted(given)} differ from the prepared {sorted(prepared)}"
 
 
+def _mismatches(checks: Sequence[_Check], values: Mapping[str, object]) -> list[str]:
+    """A line for each checked value that does not fit its declared type."""
+    return [
+        f"{name}: expected {inspect.formatannotation(declared)}, "
+        f"got {inspect.formatannotation(type(values[name]))}"
+        for name, declared in checks
+        if not _types.value_matches(declared, values[name])
+    ]
+
+
+def _edge_mismatches(views: Mapping[str, NodeView]) -> list[str]:
+    """A line for each parameter that a function node feeds with a type it rejects."""
+    found: list[str] = []
+    for view in views.values():
+        for p in view.params:
+            if not isinstance(p.binding, Source):
+                continue
+            upstream = views[p.binding.name]
+            if upstream.is_input or _types.type_matches(upstream.type, p.annotation):
+                continue
+            found.append(
+                f"{view.name}.{p.name} requires "
+                f"{inspect.formatannotation(p.annotation)} but {upstream.name} "
+                f"returns {inspect.formatannotation(upstream.type)}"
+            )
+    return sorted(found)
+
+
 class PreparedPlan:
     """A plan compiled for fixed outputs and fixed input and override names."""
 
@@ -70,12 +102,18 @@ class PreparedPlan:
         outputs: Sequence[str],
         input_names: frozenset[str],
         override_names: frozenset[str],
+        checks: tuple[Sequence[_Check], Sequence[_Check]] = ((), ()),
     ) -> None:
-        """Wraps a compiled plan with the outputs and names it was compiled for."""
+        """Wraps a compiled plan with the outputs and names it was compiled for.
+
+        `checks` are the input and the override checks each run applies: the
+        supplied names whose values are checked, each with its declared type.
+        """
         self._plan = plan
         self._outputs = tuple(dict.fromkeys(outputs))
         self._input_names = input_names
         self._override_names = override_names
+        self._input_checks, self._override_checks = checks
 
     def run(
         self,
@@ -85,7 +123,10 @@ class PreparedPlan:
     ) -> dict[str, object]:
         """Runs the plan; raises `ValueError` if the input or override names differ.
 
-        The result holds each requested output once, in the order first requested.
+        `ValueError` too, listing each one, when an input the plan reads or an
+        override does not fit its node's type (unless the driver was built
+        without input type checks). The result holds each requested output once,
+        in the order first requested.
         """
         given_inputs = dict(inputs or {})
         given_overrides = dict(overrides or {})
@@ -99,6 +140,10 @@ class PreparedPlan:
         ]
         if problems:
             raise ValueError("; ".join(problems))
+        mismatches = _mismatches(self._input_checks, given_inputs)
+        mismatches += _mismatches(self._override_checks, given_overrides)
+        if mismatches:
+            raise ValueError("\n".join(sorted(mismatches)))
         values = self._plan.run(given_inputs, given_overrides)
         return {name: values[name] for name in self._outputs}
 
@@ -108,14 +153,20 @@ class Driver:
 
     The cache keeps the `PLAN_CACHE_SIZE` most recently used plans. Make a driver with
     `Builder` (or its shorthand `build`); the constructor takes an already built
-    native graph and the views of its nodes.
+    native graph, the views of its nodes, and whether runs check the types of
+    inputs and overrides.
     """
 
     def __init__(
-        self, graph: _GraphLike, nodes: Mapping[str, NodeView] | None = None
+        self,
+        graph: _GraphLike,
+        nodes: Mapping[str, NodeView] | None = None,
+        *,
+        check_inputs: bool = True,
     ) -> None:
         """Wraps a native graph; `Builder` is the way to make one from modules."""
         self._graph = graph
+        self._check_inputs = check_inputs
         self._nodes: Mapping[str, NodeView] = (
             MappingProxyType[str, NodeView]({}) if nodes is None else nodes
         )
@@ -150,7 +201,22 @@ class Driver:
         plan = self._graph.prepare(
             list(outputs), sorted(input_names), sorted(override_names)
         )
-        return PreparedPlan(plan, outputs, input_names, override_names)
+        checks = self._checks(plan, override_names) if self._check_inputs else ((), ())
+        return PreparedPlan(plan, outputs, input_names, override_names, checks)
+
+    def _checks(
+        self, plan: _core.Plan, override_names: frozenset[str]
+    ) -> tuple[tuple[_Check, ...], tuple[_Check, ...]]:
+        """The input checks the plan's runs need, and the override checks (Q22).
+
+        Only an input a step reads is checked, as Hamilton; every override is.
+        """
+        read = sorted(node for node, action in plan.steps() if action == "use_input")
+        return self._declared(read), self._declared(sorted(override_names))
+
+    def _declared(self, names: list[str]) -> tuple[_Check, ...]:
+        """Each of `names` with its node's type; a name with no view goes unchecked."""
+        return tuple((n, self._nodes[n].type) for n in names if n in self._nodes)
 
     def execute(
         self,
@@ -194,23 +260,38 @@ def _graph_of(nodes: list[NodeDef]) -> _core.Graph:
 class Builder:
     """Accumulates modules, then builds a `Driver`; methods return new builders."""
 
-    def __init__(self, modules: tuple[ModuleType, ...] = ()) -> None:
-        """Starts with the given modules (none by default)."""
+    def __init__(
+        self, modules: tuple[ModuleType, ...] = (), *, check_inputs: bool = True
+    ) -> None:
+        """Starts with the given modules (none by default), checking input types."""
         self._modules = modules
+        self._check_inputs = check_inputs
 
     def with_modules(self, *modules: ModuleType) -> Builder:
         """Returns a new builder with `modules` appended to this one's."""
-        return Builder((*self._modules, *modules))
+        return Builder((*self._modules, *modules), check_inputs=self._check_inputs)
+
+    def without_input_type_checks(self) -> Builder:
+        """Returns a new builder whose driver skips input and override type checks.
+
+        Edge checks, between a node and the parameters it feeds, stay on (Q10).
+        """
+        return Builder(self._modules, check_inputs=False)
 
     def build(self) -> Driver:
         """Scans the modules and returns a `Driver`; `ValueError` on a bad node.
 
         Annotations are evaluated here: a name that does not resolve raises its
-        `NameError`, with a note naming the node.
+        `NameError`, with a note naming the node. Every edge is type checked: a
+        node whose return type a parameter it feeds does not accept fails the
+        build, with one `ValueError` listing every such parameter.
         """
         nodes = resolve(collect(self._modules))
         views = node_views(nodes)
-        return Driver(_graph_of(nodes), views)
+        graph = _graph_of(nodes)
+        if mismatches := _edge_mismatches(views):
+            raise ValueError("\n".join(mismatches))
+        return Driver(graph, views, check_inputs=self._check_inputs)
 
 
 def build(*modules: ModuleType) -> Driver:
