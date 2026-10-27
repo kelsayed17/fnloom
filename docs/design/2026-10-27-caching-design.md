@@ -166,7 +166,8 @@ arrays and frames runs in Rust. Registered functions and the fingerprint protoco
 driver = (
     fnloom.Builder()
     .with_modules(features)
-    .with_cache(fnloom.MemoryCache(max_entries=100_000))  # or fnloom.DiskCache(".fnloom-cache")
+    # Or fnloom.DiskCache(".fnloom-cache") to keep results across processes.
+    .with_cache(fnloom.MemoryCache(max_entries=100_000))
     .build()
 )
 ```
