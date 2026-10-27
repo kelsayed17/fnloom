@@ -62,3 +62,34 @@ aarch64 Linux) with `scripts/bench_gate.py --write-baseline`, and say why in the
 Keep a pull request to one change, describe the behaviour it changes, and add an entry to `CHANGELOG.md` under
 "Unreleased". Pull requests are squash-merged, so `main` stays linear; the pull request's title becomes the commit's
 summary, written as `area: imperative summary`.
+
+## Releases
+
+A pushed `vX.Y.Z` tag runs `.github/workflows/release.yml`. It builds a wheel per interpreter (CPython 3.14 and the
+free-threaded 3.14t; no abi3, which cannot target free-threaded builds) for manylinux and musllinux on x86_64 and
+aarch64, macOS on arm64 and x86_64, and Windows on x86_64, plus the sdist. Every wheel is installed into a clean
+environment and imported (`scripts/smoke_wheel.py`), and a wheel built from the sdist alone must pass the same test.
+Then the `publish` job uploads everything to PyPI through trusted publishing: no token is stored anywhere. A pull
+request that changes the workflow builds and tests the same set without publishing.
+
+To release:
+
+1. Set `version` under `[workspace.package]` in `Cargo.toml`. It is the only place the version lives: maturin reads
+   it for the package, and `core_version()` compiles it in.
+2. Move the "Unreleased" entries in `CHANGELOG.md` under a heading for the new version.
+3. Merge that change to `main`, then tag the merge commit and push the tag:
+
+    ```bash
+    git tag -a vX.Y.Z -m "fnloom X.Y.Z"
+    git push origin vX.Y.Z
+    ```
+
+The workflow fails before publishing if the tag is not `v` followed by the Cargo version, or if any wheel's metadata
+version differs from its `core_version()`.
+
+Before the first release, the maintainer sets up trusted publishing once:
+
+1. On PyPI, under **Your account → Publishing**, add a pending trusted publisher (it creates the `fnloom` project on
+   the first upload): owner `kelsayed17`, repository `fnloom`, workflow `release.yml`, environment `pypi`.
+2. On GitHub, under **Settings → Environments**, create the `pypi` environment. Limit its deployment tags to `v*`, and
+   add yourself as a required reviewer so every upload waits for an approval.

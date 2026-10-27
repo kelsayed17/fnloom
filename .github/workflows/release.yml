@@ -1,0 +1,163 @@
+name: release
+
+# A pushed `vX.Y.Z` tag builds every wheel and the sdist, then publishes them to PyPI through
+# trusted publishing. Pull requests that touch this file, and manual runs, build and smoke-test
+# the same set without publishing. CONTRIBUTING.md has the release steps.
+on:
+  push:
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - .github/workflows/release.yml
+      - scripts/smoke_wheel.py
+  workflow_dispatch:
+
+permissions:
+  contents: read # checkout only
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Never cancel a release half-way through publishing.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  wheels:
+    name: Wheel (${{ matrix.platform.name }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.platform.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # One wheel per interpreter: abi3 cannot target the free-threaded build.
+        python: ["3.14", "3.14t"]
+        # Every runner is native to its target, so each wheel is smoke-tested where it was built.
+        platform:
+          - name: manylinux-x86_64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            manylinux: "2_28"
+          - name: manylinux-aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            manylinux: "2_28"
+          - name: musllinux-x86_64
+            os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            manylinux: musllinux_1_2
+          - name: musllinux-aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            manylinux: musllinux_1_2
+          - name: macos-arm64
+            os: macos-15
+            target: aarch64-apple-darwin
+          - name: macos-x86_64
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+          - name: windows-x86_64
+            os: windows-2025
+            target: x86_64-pc-windows-msvc
+    env:
+      PYTHON: ${{ matrix.python }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: false # no cache in a workflow that publishes
+      # Linux wheels build in the PyPA manylinux and musllinux images, which ship every CPython and
+      # find one by name. macOS and Windows build on the runner, against a uv-managed interpreter.
+      - name: Pick the interpreter
+        id: interpreter
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            echo "interpreter=python$PYTHON" >> "$GITHUB_OUTPUT"
+          else
+            uv python install "$PYTHON"
+            echo "interpreter=$(uv python find --managed-python "$PYTHON")" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          maturin-version: v1.15.0
+          target: ${{ matrix.platform.target }}
+          manylinux: ${{ matrix.platform.manylinux || 'off' }}
+          args: --release --locked --out dist --interpreter ${{ steps.interpreter.outputs.interpreter }}
+      - name: Smoke-test the wheel on the host
+        if: ${{ !startsWith(matrix.platform.name, 'musllinux') }}
+        run: >
+          uv run --no-project --isolated --managed-python --python "$PYTHON" --with dist/*.whl
+          python -I scripts/smoke_wheel.py
+      # The runner is glibc, so a musllinux wheel is tested in Alpine.
+      - name: Smoke-test the wheel in Alpine
+        if: ${{ startsWith(matrix.platform.name, 'musllinux') }}
+        run: >
+          docker run --rm -v "$PWD:/src:ro" -w /src -e PYTHON
+          astral/uv:0.13.6-alpine@sha256:95f501aef734a5aaf167ff0640e02f215dcc7043ff48685de70328e5c55a57b0
+          sh -c 'uv run --no-project --isolated --managed-python --python "$PYTHON" --with dist/*.whl
+          python -I scripts/smoke_wheel.py'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: wheel-${{ matrix.platform.name }}-${{ matrix.python }}
+          path: dist/*.whl
+          if-no-files-found: error
+
+  sdist:
+    name: Source distribution
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The package version comes from the Cargo workspace, so a tag that disagrees with it would
+      # publish a version nobody tagged.
+      - name: Check the tag against the Cargo version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          cargo_version="$(cargo metadata --no-deps --locked --format-version 1 \
+            | jq -r '.packages[] | select(.name == "fnloom-py") | .version')"
+          if [ "${GITHUB_REF_NAME#v}" != "$cargo_version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match the Cargo workspace version $cargo_version"
+            exit 1
+          fi
+      - uses: PyO3/maturin-action@e83996d129638aa358a18fbd1dfb82f0b0fb5d3b # v1.51.0
+        with:
+          maturin-version: v1.15.0
+          command: sdist
+          args: --out dist
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          enable-cache: false # no cache in a workflow that publishes
+      # Proves the sdist is self-contained: a wheel builds from it alone and passes the smoke test.
+      - name: Build a wheel from the sdist
+        run: uv build --python 3.14 --wheel --out-dir sdist-wheel dist/*.tar.gz
+      - name: Smoke-test the wheel built from the sdist
+        run: >
+          uv run --no-project --isolated --managed-python --python 3.14 --with sdist-wheel/*.whl
+          python -I scripts/smoke_wheel.py
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+          if-no-files-found: error
+
+  publish:
+    name: Publish to PyPI
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    needs: [wheels, sdist]
+    runs-on: ubuntu-24.04
+    # The trusted publisher on PyPI names this environment; its protection rules gate the upload.
+    environment:
+      name: pypi
+      url: https://pypi.org/project/fnloom/
+    permissions:
+      id-token: write # trusted publishing: exchange the OIDC token for a short-lived PyPI token
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086 # v1.14.3
