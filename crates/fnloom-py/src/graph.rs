@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use fnloom_core::graph::Graph as CoreGraph;
 use fnloom_core::node::{Dependency, InputSpec, NodeId, NodeSpec};
 use fnloom_core::plan::Request;
+use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::PyString;
 use pyo3::{PyTraverseError, PyVisit};
@@ -29,19 +30,31 @@ type NodeTuple = (
 /// reference to this object, so the cyclic GC counts each function reference once.
 #[pyclass(frozen, module = "fnloom._core")]
 pub struct Graph {
-    graph: PyCoreGraph,
+    core: PyCoreGraph,
     /// Each node's name as an interned string, by node id: the keyword its consumers
     /// receive it under, interned once here instead of on every call.
     keywords: Vec<Py<PyString>>,
+    /// By consumer id, the inputs it receives under another keyword, sorted by input id:
+    /// a `@parameterize` row binding a parameter to a source of another name.
+    renames: RenamesById,
 }
+
+/// Renamed inputs by consumer id, each consumer's sorted by input id.
+type RenamesById = Vec<Vec<(NodeId, Py<PyString>)>>;
+
+/// Each renaming node's renames, by its name: input name to the keyword it is passed as.
+type Renames = BTreeMap<String, BTreeMap<String, String>>;
 
 #[pymethods]
 impl Graph {
     /// Builds a graph from `(name, [(param, required)], tags, fn)` tuples.
     ///
-    /// Raises `ValueError` naming the culprits for a duplicate name or a cycle.
+    /// `renames` maps a node to the inputs it is passed under another keyword: input
+    /// name to keyword. Raises `ValueError` naming the culprits for a duplicate name or a
+    /// cycle, or naming a rename of a node or input the graph does not have.
     #[new]
-    fn new(py: Python<'_>, nodes: Vec<NodeTuple>) -> PyResult<Self> {
+    #[pyo3(signature = (nodes, renames = None))]
+    fn new(py: Python<'_>, nodes: Vec<NodeTuple>, renames: Option<Renames>) -> PyResult<Self> {
         let specs = nodes.into_iter().map(node_spec).collect();
         let graph = CoreGraph::build(specs).map_err(value_error)?;
         let keywords = graph
@@ -49,13 +62,18 @@ impl Graph {
             .iter()
             .map(|node| PyString::intern(py, &node.name).unbind())
             .collect();
-        Ok(Self { graph, keywords })
+        let renames = renamed(py, &graph, renames.unwrap_or_default())?;
+        Ok(Self {
+            core: graph,
+            keywords,
+            renames,
+        })
     }
 
     /// Lets the cyclic GC see the node functions, which may refer back to this graph
     /// through their module's globals.
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
-        for function in self.graph.nodes().iter().filter_map(|node| node.payload()) {
+        for function in self.core.nodes().iter().filter_map(|node| node.payload()) {
             visit.call(function)?;
         }
         Ok(())
@@ -63,7 +81,7 @@ impl Graph {
 
     /// Every node name, declared and synthesized inputs alike, sorted.
     fn node_names(&self) -> Vec<String> {
-        self.graph
+        self.core
             .nodes()
             .iter()
             .map(|node| node.name.clone())
@@ -77,7 +95,7 @@ impl Graph {
     )]
     fn upstream_of(&self, names: Vec<String>) -> PyResult<Vec<String>> {
         let ids = self
-            .graph
+            .core
             .upstream_of(&as_strs(&names))
             .map_err(value_error)?;
         Ok(self.names_of(&ids))
@@ -90,7 +108,7 @@ impl Graph {
     )]
     fn downstream_of(&self, names: Vec<String>) -> PyResult<Vec<String>> {
         let ids = self
-            .graph
+            .core
             .downstream_of(&as_strs(&names))
             .map_err(value_error)?;
         Ok(self.names_of(&ids))
@@ -98,7 +116,7 @@ impl Graph {
 
     /// Nodes on some path from `a` to `b`, endpoints excluded; sorted.
     fn between(&self, a: &str, b: &str) -> PyResult<Vec<String>> {
-        let ids = self.graph.between(a, b).map_err(value_error)?;
+        let ids = self.core.between(a, b).map_err(value_error)?;
         Ok(self.names_of(&ids))
     }
 
@@ -116,7 +134,7 @@ impl Graph {
             inputs: inputs.into_iter().collect::<BTreeSet<_>>(),
             overrides: overrides.into_iter().collect::<BTreeSet<_>>(),
         };
-        let plan = slf.get().graph.prepare(&request).map_err(value_error)?;
+        let plan = slf.get().core.prepare(&request).map_err(value_error)?;
         Ok(Plan::new(slf.clone().unbind(), plan))
     }
 }
@@ -124,7 +142,7 @@ impl Graph {
 impl Graph {
     /// The core graph.
     pub const fn core(&self) -> &PyCoreGraph {
-        &self.graph
+        &self.core
     }
 
     /// Each node's interned name, by node id.
@@ -132,9 +150,16 @@ impl Graph {
         &self.keywords
     }
 
+    /// The keyword `consumer` receives `input` under, when it is not `input`'s own name.
+    pub fn renamed(&self, consumer: NodeId, input: NodeId) -> Option<&Py<PyString>> {
+        let renames = self.renames.get(consumer.index())?;
+        let found = renames.binary_search_by_key(&input, |&(id, _)| id).ok()?;
+        renames.get(found).map(|(_, keyword)| keyword)
+    }
+
     fn names_of(&self, ids: &[NodeId]) -> Vec<String> {
         ids.iter()
-            .map(|&id| self.graph.node(id).name.clone())
+            .map(|&id| self.core.node(id).name.clone())
             .collect()
     }
 }
@@ -161,4 +186,27 @@ fn node_spec((name, params, tags, function): NodeTuple) -> NodeSpec<Py<PyAny>> {
 
 fn as_strs(names: &[String]) -> Vec<&str> {
     names.iter().map(String::as_str).collect()
+}
+
+/// The renames by consumer id, each sorted by input id, with interned keywords.
+fn renamed(py: Python<'_>, graph: &PyCoreGraph, renames: Renames) -> PyResult<RenamesById> {
+    let mut by_id: RenamesById = Vec::new();
+    by_id.resize_with(graph.nodes().len(), Vec::new);
+    let id_of = |name: &str| {
+        graph
+            .id_of(name)
+            .ok_or_else(|| PyValueError::new_err(format!("rename of unknown node '{name}'")))
+    };
+    for (consumer, inputs) in renames {
+        let consumer = id_of(&consumer)?;
+        let mut entries = inputs
+            .into_iter()
+            .map(|(input, keyword)| Ok((id_of(&input)?, PyString::intern(py, &keyword).unbind())))
+            .collect::<PyResult<Vec<_>>>()?;
+        entries.sort_by_key(|&(id, _)| id);
+        if let Some(slot) = by_id.get_mut(consumer.index()) {
+            *slot = entries;
+        }
+    }
+    Ok(by_id)
 }

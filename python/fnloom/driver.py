@@ -11,11 +11,17 @@ from fnloom._view import NodeView, NodeViews, node_views
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from collections.abc import Set as AbstractSet
     from types import ModuleType
 
 type _PlanKey = tuple[tuple[str, ...], frozenset[str], frozenset[str]]
+# A request's final_vars (a list or tuple, copied), its input and override names,
+# and its plan.
+type _LastRequest = tuple[Sequence[str], frozenset[str], frozenset[str], PreparedPlan]
 # A name whose supplied value is checked, and the type it is checked against.
-type _Check = tuple[str, object]
+# A checked name, its declared type, and the class `isinstance` checks it against
+# when the type is a plain class (`None` for any other type).
+type _Check = tuple[str, object, type | None]
 
 # How many compiled plans a driver keeps; the least recently used one goes first.
 PLAN_CACHE_SIZE = 128
@@ -56,8 +62,37 @@ def _check_final_vars(final_vars: Sequence[str]) -> tuple[str, ...]:
     return names
 
 
+# No names, made once: calling `frozenset[str]` costs more than the check it serves.
+_NO_NAMES = frozenset[str]()
+
+
+# The one type a repeat's names may have, checked in C rather than in a loop.
+_STR_ONLY = frozenset({str})
+
+# No values, passed for a missing mapping; read, never written.
+_NO_VALUES: dict[str, object] = {}
+
+
 def _names(values: Mapping[str, object] | None) -> frozenset[str]:
-    return frozenset[str]() if values is None else frozenset[str](values)
+    return _NO_NAMES if values is None else frozenset(values)
+
+
+def _keys(values: Mapping[str, object] | None) -> AbstractSet[str]:
+    """The names of `values`, compared with a set without building one."""
+    return _NO_NAMES if values is None else values.keys()
+
+
+def _as_dict(values: Mapping[str, object] | None) -> dict[str, object]:
+    """`values` as a dict: itself when it is one, as the native run copies it."""
+    # Any falsy value is no values, as `inputs or {}` always read it.
+    if values is None or not values:
+        return _NO_VALUES
+    # An exact dict only; `isinstance` narrows the type for the type checker.
+    if isinstance(values, dict) and type(values) is dict:
+        return values
+    # A copy for anything else, a dict subclass included, so the checks and the
+    # native run read the same plain values.
+    return dict(values)
 
 
 def _difference(kind: str, prepared: frozenset[str], given: frozenset[str]) -> str:
@@ -66,12 +101,21 @@ def _difference(kind: str, prepared: frozenset[str], given: frozenset[str]) -> s
 
 def _mismatches(checks: Sequence[_Check], values: Mapping[str, object]) -> list[str]:
     """A line for each checked value that does not fit its declared type."""
-    return [
-        f"{name}: expected {inspect.formatannotation(declared)}, "
-        f"got {inspect.formatannotation(type(values[name]))}"
-        for name, declared in checks
-        if not _types.value_matches(declared, values[name])
-    ]
+    found: list[str] = []
+    for name, declared, cls in checks:
+        value = values[name]
+        if value is None:
+            continue
+        if cls is not None:
+            if isinstance(value, cls):
+                continue
+        elif _types.value_matches(declared, value):
+            continue
+        found.append(
+            f"{name}: expected {inspect.formatannotation(declared)}, "
+            f"got {inspect.formatannotation(type(value))}"
+        )
+    return found
 
 
 def _edge_mismatches(functions: Mapping[str, NodeView]) -> list[str]:
@@ -114,6 +158,9 @@ class PreparedPlan:
         """
         self._plan = plan
         self._outputs = tuple(dict.fromkeys(outputs))
+        # The native run returns its outputs sorted by name: already in the order
+        # asked for when that order is sorted.
+        self._sorted = list(self._outputs) == sorted(self._outputs)
         self._input_names = input_names
         self._override_names = override_names
         self._input_checks, self._override_checks = checks
@@ -131,23 +178,31 @@ class PreparedPlan:
         without input type checks). The result holds each requested output once,
         in the order first requested.
         """
-        given_inputs = dict(inputs or {})
-        given_overrides = dict(overrides or {})
-        problems = [
-            _difference(kind, prepared, frozenset(given))
-            for kind, prepared, given in (
-                ("inputs", self._input_names, given_inputs),
-                ("overrides", self._override_names, given_overrides),
-            )
-            if prepared != frozenset(given)
-        ]
-        if problems:
+        # Inline for a dict, the common case: this runs once per run.
+        given_inputs = inputs if type(inputs) is dict else _as_dict(inputs)
+        given_overrides = overrides if type(overrides) is dict else _as_dict(overrides)
+        # A keys view compares with a set without building one.
+        if (
+            given_inputs.keys() != self._input_names
+            or given_overrides.keys() != self._override_names
+        ):
+            problems = [
+                _difference(kind, prepared, frozenset(given))
+                for kind, prepared, given in (
+                    ("inputs", self._input_names, given_inputs),
+                    ("overrides", self._override_names, given_overrides),
+                )
+                if prepared != frozenset(given)
+            ]
             raise ValueError("; ".join(problems))
-        mismatches = _mismatches(self._input_checks, given_inputs)
-        mismatches += _mismatches(self._override_checks, given_overrides)
-        if mismatches:
-            raise ValueError("\n".join(sorted(mismatches)))
+        if self._input_checks or self._override_checks:
+            mismatches = _mismatches(self._input_checks, given_inputs)
+            mismatches += _mismatches(self._override_checks, given_overrides)
+            if mismatches:
+                raise ValueError("\n".join(sorted(mismatches)))
         values = self._plan.run(given_inputs, given_overrides)
+        if self._sorted:
+            return values
         return {name: values[name] for name in self._outputs}
 
 
@@ -176,6 +231,9 @@ class Driver:
         # Insertion order is recency order: a hit moves its plan to the end.
         self._plans: dict[_PlanKey, PreparedPlan] = {}
         self._plans_lock = threading.Lock()
+        # The last request and its plan, which is the most recently used one, so a
+        # repeat of it, the common case in a loop, skips the key and the lock.
+        self._last: _LastRequest | None = None
 
     def prepare(
         self,
@@ -185,6 +243,17 @@ class Driver:
         overrides: Mapping[str, object] | None = None,
     ) -> PreparedPlan:
         """Returns the plan for this request shape, compiling it on first use."""
+        last = self._last
+        if (
+            last is not None
+            and type(final_vars) is type(last[0])
+            and final_vars == last[0]
+            # Names only: an item of another type could compare equal to one.
+            and _STR_ONLY.issuperset(map(type, final_vars))
+            and _keys(inputs) == last[1]
+            and _keys(overrides) == last[2]
+        ):
+            return last[3]
         key: _PlanKey = (
             _check_final_vars(final_vars),
             _names(inputs),
@@ -197,6 +266,11 @@ class Driver:
             self._plans[key] = prepared
             if len(self._plans) > PLAN_CACHE_SIZE:
                 del self._plans[next(iter(self._plans))]
+            # A list is copied, so a list changed after this call is not a repeat.
+            if type(final_vars) is list:
+                self._last = (list(final_vars), key[1], key[2], prepared)
+            elif type(final_vars) is tuple:
+                self._last = (final_vars, key[1], key[2], prepared)
         return prepared
 
     def _compile(self, key: _PlanKey) -> PreparedPlan:
@@ -220,7 +294,12 @@ class Driver:
     def _declared(self, names: list[str]) -> tuple[_Check, ...]:
         """Each of `names` with its node's type; a name with no view goes unchecked."""
         # By type, not view: the views of many inputs are never made at all.
-        return tuple((n, self._nodes.type_of(n)) for n in names if n in self._nodes)
+        return tuple(
+            (n, declared, _types.plain_class(declared))
+            for n in names
+            if n in self._nodes
+            for declared in (self._nodes.type_of(n),)
+        )
 
     def execute(
         self,
@@ -257,7 +336,8 @@ class Driver:
 def _graph_of(nodes: list[NodeDef]) -> _core.Graph:
     """Builds the native graph for scanned nodes: their core inputs and payloads."""
     return _core.Graph(
-        [(n.name, core_inputs(n.params), dict(n.tags), n.payload) for n in nodes]
+        [(n.name, core_inputs(n.params), dict(n.tags), n.payload) for n in nodes],
+        {n.name: dict(n.renames) for n in nodes if n.renames},
     )
 
 

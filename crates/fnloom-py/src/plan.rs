@@ -1,9 +1,8 @@
 //! The Python `Plan`, and the evaluator that calls each node's Python function.
 
-use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use fnloom_core::node::Node;
+use fnloom_core::node::{Node, NodeId};
 use fnloom_core::plan::{Action, Plan as CorePlan};
 use fnloom_core::run::{Arg, Evaluate, Observer};
 use pyo3::prelude::*;
@@ -41,15 +40,17 @@ impl Plan {
         visit.call(&self.graph)
     }
 
-    /// Runs the plan and returns exactly the requested outputs, keyed by name.
+    /// Runs the plan and returns exactly the requested outputs, keyed by name, sorted.
     ///
+    /// Each value is read from `inputs` or `overrides` by its node's interned name, and
+    /// each output is keyed by it, so a run makes no name strings. Extra keys are ignored.
     /// Every observer sees every event, in sequence order. The GIL is held throughout.
     #[pyo3(signature = (inputs, overrides, observers = Vec::new()))]
     fn run<'py>(
         &self,
         py: Python<'py>,
-        inputs: BTreeMap<String, Py<PyAny>>,
-        overrides: BTreeMap<String, Py<PyAny>>,
+        inputs: &Bound<'py, PyDict>,
+        overrides: &Bound<'py, PyDict>,
         observers: Vec<Bound<'py, ObserverBase>>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let mut adapters: Vec<PyObserver<'py>> =
@@ -59,22 +60,41 @@ impl Plan {
             .map(|adapter| adapter as &mut dyn Observer<PyErr>)
             .collect();
         let graph = self.graph.get();
-        let outputs = self
-            .plan
-            .run(
-                graph.core(),
-                &mut Caller {
-                    py,
-                    keywords: graph.keywords(),
-                },
-                &wrap(inputs),
-                &wrap(overrides),
-                &mut hooks,
-            )
-            .map_err(|error| run_error(py, error))?;
+        let keywords = graph.keywords();
+        // A failed lookup (a key whose `__eq__` raises) is kept and raised after the run.
+        let mut failure = None;
+        let lookup = |action, id: NodeId| {
+            let values = if action == Action::UseOverride {
+                overrides
+            } else {
+                inputs
+            };
+            let key = keyword(py, keywords, graph.core().node(id));
+            match values.get_item(key) {
+                Ok(value) => value.map(|value| Arc::new(value.unbind())),
+                Err(error) => {
+                    failure.get_or_insert(error);
+                    None
+                }
+            }
+        };
+        let outcome = self.plan.run_by_id(
+            graph.core(),
+            &mut Caller {
+                py,
+                graph,
+                keywords,
+            },
+            lookup,
+            &mut hooks,
+        );
+        if let Some(error) = failure {
+            return Err(error);
+        }
+        let outputs = outcome.map_err(|error| run_error(py, error))?;
         let result = PyDict::new(py);
-        for (name, value) in outputs {
-            result.set_item(name, value.bind(py))?;
+        for (id, value) in outputs {
+            result.set_item(keyword(py, keywords, graph.core().node(id)), value.bind(py))?;
         }
         Ok(result)
     }
@@ -100,16 +120,24 @@ const fn action_name(action: Action) -> &'static str {
     }
 }
 
-fn wrap(values: BTreeMap<String, Py<PyAny>>) -> BTreeMap<String, Value> {
-    values
-        .into_iter()
-        .map(|(name, value)| (name, Arc::new(value)))
-        .collect()
+/// The interned name of `node`, interned when the graph was built; interned now only if
+/// the table lacks it, which a plan run on its own graph rules out.
+fn keyword<'py, P>(
+    py: Python<'py>,
+    keywords: &[Py<PyString>],
+    node: &Node<P>,
+) -> Bound<'py, PyString> {
+    keywords.get(node.id.index()).map_or_else(
+        || PyString::intern(py, &node.name),
+        |keyword| keyword.bind(py).clone(),
+    )
 }
 
 /// Calls each node's function with its arguments as keyword arguments.
 struct Caller<'py, 'g> {
     py: Python<'py>,
+    /// The graph, for the keywords a `@parameterize` row renames.
+    graph: &'g Graph,
     /// The graph's interned node names, by node id.
     keywords: &'g [Py<PyString>],
 }
@@ -120,23 +148,32 @@ impl Evaluate<Py<PyAny>> for Caller<'_, '_> {
 
     fn evaluate(
         &mut self,
-        _node: &Node<Py<PyAny>>,
+        node: &Node<Py<PyAny>>,
         function: &Py<PyAny>,
         args: &[Arg<'_, Value>],
     ) -> PyResult<Value> {
-        caught(|| self.call(function, args))
+        caught(|| self.call(node.id, function, args))
     }
 }
 
 impl<'py> Caller<'py, '_> {
-    /// Calls `function` with `args` as keyword arguments.
-    fn call(&self, function: &Py<PyAny>, args: &[Arg<'_, Value>]) -> PyResult<Value> {
+    /// Calls `function`, the payload of `consumer`, with `args` as keyword arguments.
+    fn call(
+        &self,
+        consumer: NodeId,
+        function: &Py<PyAny>,
+        args: &[Arg<'_, Value>],
+    ) -> PyResult<Value> {
         let kwargs = PyDict::new(self.py);
         for arg in args {
             // CPython binds a keyword to a parameter by identity with the interned
             // parameter name, else by `==` against every parameter. A fresh key string
             // takes the slow path, which makes an n-parameter call cost O(n²).
-            kwargs.set_item(self.keyword(arg), arg.value.bind(self.py))?;
+            let keyword = match self.graph.renamed(consumer, arg.node) {
+                Some(renamed) => renamed.bind(self.py).clone(),
+                None => self.keyword(arg),
+            };
+            kwargs.set_item(keyword, arg.value.bind(self.py))?;
         }
         let result = function.bind(self.py).call((), Some(&kwargs))?;
         Ok(Arc::new(result.unbind()))

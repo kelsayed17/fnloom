@@ -401,3 +401,22 @@ def test_an_input_view_is_made_once_when_first_read() -> None:
     assert list(nodes) == names
     with pytest.raises(KeyError):
         nodes["missing"]
+
+
+def test_a_wrapped_function_is_typed_by_its_own_annotations() -> None:
+    """A wrapper's own annotations type it, as `typing.get_type_hints` reads them."""
+    module = make_module(
+        "view_wrapped",
+        """
+def _inner(x: int) -> int:
+    return x
+
+def wrapper(x: str) -> int:
+    return len(x)
+
+wrapper.__wrapped__ = _inner
+""",
+    )
+    driver = fnloom.build(module)
+    assert driver.nodes["wrapper"].params[0].annotation is str
+    assert driver.execute(["wrapper"], inputs={"x": "abc"}) == {"wrapper": 3}

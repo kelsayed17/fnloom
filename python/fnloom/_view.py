@@ -197,6 +197,24 @@ class NodeViews(Mapping[str, NodeView]):
         return f"{type(self).__name__}({dict(self)!r})"
 
 
+def _read_only(tags: Mapping[str, str]) -> Mapping[str, str]:
+    """`tags` read-only: as they are when the decorators already made them so."""
+    if isinstance(tags, MappingProxyType):
+        return tags
+    return MappingProxyType(dict(tags))
+
+
+def _doc(fn: Callable[..., object]) -> str | None:
+    """`inspect.getdoc(fn)`, without its search for a docstring a class could give.
+
+    An undocumented function defined at module level belongs to no class, so it
+    has no docstring to inherit: the common case, and the costly search skipped.
+    """
+    if fn.__doc__ is None and "." not in getattr(fn, "__qualname__", "."):
+        return None
+    return inspect.getdoc(fn)
+
+
 def node_views(nodes: Sequence[NodeDef]) -> NodeViews:
     """The views of `nodes` and of the inputs they read, read-only, sorted by name.
 
@@ -211,8 +229,8 @@ def node_views(nodes: Sequence[NodeDef]) -> NodeViews:
             origin=node.origin,
             module=node.module,
             params=node.params,
-            tags=MappingProxyType(dict(node.tags)),
-            doc=inspect.getdoc(node.origin),
+            tags=_read_only(node.tags),
+            doc=_doc(node.origin),
         )
         for node in nodes
     }

@@ -46,7 +46,11 @@ def decorations(fn: Callable[..., object]) -> Decorations:
     recorded = getattr(fn, _ATTRIBUTE, None)
     if isinstance(recorded, Decorations):
         return recorded
-    return Decorations(None, {})
+    return _UNDECORATED
+
+
+# What a plain function records: no rows and no tags. One object, shared.
+_UNDECORATED = Decorations(None, MappingProxyType[str, str]({}))
 
 
 def _check_rows(

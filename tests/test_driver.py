@@ -1,5 +1,7 @@
 """Tests for `Builder`, `build`, `Driver` and `PreparedPlan`."""
 
+from typing import override
+
 import pytest
 
 import fnloom
@@ -139,6 +141,57 @@ def test_execute_caches_plans_by_request_shape() -> None:
     assert spy.prepares == 1
     driver.execute(["c"], overrides={"b": 7})
     assert spy.prepares == DISTINCT_SHAPES
+
+
+def test_a_repeated_request_returns_the_same_plan() -> None:
+    """A repeat is the same plan; a changed list or other names are not a repeat."""
+    spy = SpyGraph(_chain_graph())
+    driver = Driver(spy)
+    outputs = ["c"]
+    first = driver.prepare(outputs, inputs={"a": 0})
+    assert driver.prepare(outputs, inputs={"a": 9}) is first
+    assert driver.prepare(("c",), inputs={"a": 0}) is first
+    outputs.append("b")
+    assert driver.prepare(outputs, inputs={"a": 0}) is not first
+    assert driver.prepare(["c"], overrides={"b": 0}) is not first
+    assert driver.prepare(["c"], inputs={"a": 0}) is first
+    assert spy.prepares == DISTINCT_SHAPES + 1
+
+
+class _LooksLikeC:
+    """Equal to the name "c", without being a str."""
+
+    @override
+    def __eq__(self, other: object) -> bool:
+        return other == "c"
+
+    @override
+    def __hash__(self) -> int:
+        return hash("c")
+
+
+def test_a_repeat_with_a_non_str_name_is_refused_as_before() -> None:
+    """The repeat path matches names only; an item equal to one is still refused."""
+    driver = build(make_module("drv_repeat_names", CHAIN))
+    driver.prepare(("c",), inputs={"a": 0})
+    with pytest.raises(TypeError, match="final_vars items must be str"):
+        driver.prepare((_LooksLikeC(),), inputs={"a": 0})  # ty: ignore[invalid-argument-type]  # the refusal is the point
+
+
+class _Shouting(dict[str, object]):
+    """A dict whose item reads give something else than what it holds."""
+
+    @override
+    def __getitem__(self, key: str) -> object:
+        return "not an int"
+
+
+def test_a_dict_subclass_is_read_as_the_plain_values_it_holds() -> None:
+    """A dict subclass is copied, so the checks and the run read the same values."""
+    driver = build(make_module("drv_dict_subclass", CHAIN))
+    assert driver.execute(["c"], inputs=_Shouting(a=1)) == {"c": 4}
+    plan = driver.prepare(["c"], overrides={"b": 0})
+    assert plan.run(inputs=0, overrides={"b": 1}) == {"c": 2}  # ty: ignore[invalid-argument-type]  # a falsy value is no inputs, as before
 
 
 def test_plan_cache_evicts_the_least_recently_used_plan() -> None:

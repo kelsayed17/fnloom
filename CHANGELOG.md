@@ -12,7 +12,7 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - The Rust core, `fnloom-core`: a graph built from node specs, with cycle and duplicate detection; upstream,
   downstream and between queries; plans compiled once from outputs, input names and override names; and an executor
   with `Evaluate` and `Observer` seams. No walk recurses over graph depth, and execution order is topological with ties
-  broken by node name.
+  broken by node name. `Plan::run_by_id` runs a plan reading its values by node id and returns the outputs by id.
 - The Python front end: `fnloom.build(*modules)` and `Builder().with_modules(...).build()` return a `Driver` whose
   nodes are a module's public functions, wired by parameter name. `Driver.execute`, `Driver.prepare` and
   `PreparedPlan.run`; `node_names`, `what_is_upstream_of` and `what_is_downstream_of`.
@@ -32,9 +32,13 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Changed
 
-- Building a graph does less Python work per parameter, so a function with many parameters builds faster than in
-  Hamilton (`fan_in` with 10,000 parameters: 21.1 against 33.3 ms). An input's `NodeView` is made when `Driver.nodes`
+- Building a graph does less Python work per parameter and per node, so every benchmark shape builds faster than in
+  Hamilton (`fan_in` with 10,000 parameters: 17.5 against 32.6 ms). An input's `NodeView` is made when `Driver.nodes`
   first reads it.
+- Each run costs less: input checks against a plain class are one `isinstance` call, a run makes no name strings, a
+  `@parameterize` row is called without a Python wrapper when each source feeds one parameter, and `Driver.execute`
+  skips the plan cache's key and lock when a request repeats the last one. A 10-node chain runs in about 1.9 µs, a
+  10-input fan-in in 1.8 µs (13.1 before).
 - Annotations are resolved at build with `typing.get_type_hints(include_extras=True)`, so an annotation that cannot be
   resolved is now a `NameError` (or, for a missing attribute such as `decimal.Missing`, an `AttributeError`) at build,
   with a note naming every failing node and parameter. Undecorated functions whose string annotations resolve behave

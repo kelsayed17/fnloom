@@ -7,40 +7,39 @@ and on prepared execution; a row where it is reliably slower is a bug.
 
 Milliseconds, Hamilton / fnloom with input type checks on / fnloom with them off; lower is better. Hamilton has no
 prepared plans and no way to switch its input checks off, so it is measured as it ships. The last column is fnloom's
-alone (checks on / off). A cell marked † is a build where fnloom with checks on was slower than Hamilton in
-that single sample.
+alone (checks on / off). A cell marked † is one where fnloom with checks on was slower than Hamilton in that single
+sample.
 
 | shape | n | build | first execute | steady execute | prepare |
 | --- | ---: | --- | --- | --- | ---: |
-| chain | 10 | 0.417 / 0.430 / 0.127 † | 0.093 / 0.050 / 0.013 | 0.038 / 0.005 / 0.003 | 0.015 / 0.006 |
-| chain | 100 | 2.041 / 2.902 / 1.038 † | 0.365 / 0.071 / 0.087 | 0.306 / 0.018 / 0.017 | 0.029 / 0.016 |
-| chain | 1,000 | 19.9 / 13.2 / 13.6 | `RecursionError` / 0.387 / 0.287 | `RecursionError` / 0.164 / 0.137 | 0.168 / 0.079 |
-| chain | 10,000 | 208.7 / 109.7 / 135.5 | `RecursionError` / 3.281 / 2.133 | `RecursionError` / 1.338 / 1.332 | 1.845 / 0.692 |
-| fan_in | 10 | 0.178 / 0.112 / 0.054 | 0.070 / 0.348 / 0.018 | 0.037 / 0.015 / 0.003 | 0.017 / 0.208 |
-| fan_in | 100 | 0.343 / 0.227 / 0.178 | 0.298 / 0.229 / 0.062 | 0.265 / 0.133 / 0.029 | 0.066 / 0.028 |
-| fan_in | 1,000 | 2.941 / 1.895 / 1.642 | 2.749 / 2.174 / 0.826 | 2.729 / 1.540 / 0.482 | 0.574 / 0.307 |
-| fan_in | 10,000 | 67.7 / 22.7 / 18.0 | 42.4 / 39.3 / 22.6 | 41.8 / 31.6 / 18.9 | 6.952 / 3.571 |
-| layered | 10 | 0.292 / 0.146 / 0.109 | 0.065 / 0.042 / 0.011 | 0.037 / 0.005 / 0.003 | 0.012 / 0.005 |
-| layered | 100 | 2.099 / 1.119 / 1.106 | 0.412 / 0.062 / 0.044 | 0.385 / 0.021 / 0.020 | 0.037 / 0.019 |
-| layered | 1,000 | 19.8 / 33.4 / 11.5 † | 3.955 / 0.414 / 0.267 | 3.857 / 0.182 / 0.180 | 0.171 / 0.074 |
-| layered | 10,000 | 210.6 / 186.1 / 123.8 | `RecursionError` / 4.344 / 2.816 | `RecursionError` / 1.850 / 1.821 | 1.974 / 0.764 |
-| rows | 10 | 0.233 / 0.120 / 0.077 | 0.067 / 0.044 / 0.011 | 0.038 / 0.006 / 0.005 | 0.011 / 0.004 |
-| rows | 100 | 1.813 / 0.658 / 0.609 | 0.348 / 0.076 / 0.052 | 0.315 / 0.036 / 0.034 | 0.027 / 0.013 |
-| rows | 1,000 | 60.7 / 7.688 / 7.112 | `RecursionError` / 0.520 / 0.430 | `RecursionError` / 0.343 / 0.368 | 0.157 / 0.059 |
-| rows | 10,000 | 5,167.8 / 132.9 / 90.1 | `RecursionError` / 5.735 / 4.345 | `RecursionError` / 3.491 / 3.468 | 2.479 / 0.633 |
+| chain | 10 | 0.342 / 0.219 / 0.068 | 0.073 / 0.036 / 0.010 | 0.035 / 0.002 / 0.002 | 0.016 / 0.004 |
+| chain | 100 | 1.904 / 1.986 / 0.531 † | 0.326 / 0.054 / 0.025 | 0.295 / 0.015 / 0.014 | 0.023 / 0.009 |
+| chain | 1,000 | 18.5 / 7.367 / 5.518 | `RecursionError` / 0.326 / 0.215 | `RecursionError` / 0.159 / 0.139 | 0.176 / 0.060 |
+| chain | 10,000 | 207.5 / 63.4 / 58.7 | `RecursionError` / 3.254 / 2.035 | `RecursionError` / 1.339 / 1.345 | 1.786 / 0.492 |
+| fan_in | 10 | 0.152 / 0.052 / 0.025 | 0.067 / 0.037 / 0.012 | 0.034 / 0.002 / 0.001 | 0.015 / 0.006 |
+| fan_in | 100 | 0.323 / 0.156 / 0.144 | 0.295 / 0.099 / 0.041 | 0.266 / 0.015 / 0.011 | 0.066 / 0.026 |
+| fan_in | 1,000 | 3.024 / 1.467 / 1.245 | 2.777 / 0.932 / 0.593 | 2.733 / 0.312 / 0.269 | 0.597 / 0.308 |
+| fan_in | 10,000 | 66.1 / 17.3 / 16.4 | 42.2 / 26.4 / 20.1 | 43.4 / 17.2 / 17.2 | 7.550 / 6.642 |
+| layered | 10 | 0.323 / 0.120 / 0.163 | 0.068 / 0.047 / 0.024 | 0.039 / 0.003 / 0.002 | 0.015 / 0.007 |
+| layered | 100 | 2.201 / 0.748 / 0.628 | 0.434 / 0.067 / 0.032 | 0.397 / 0.019 / 0.020 | 0.037 / 0.018 |
+| layered | 1,000 | 21.6 / 7.219 / 7.502 | 4.757 / 0.374 / 0.269 | 4.353 / 0.209 / 0.184 | 0.270 / 0.088 |
+| layered | 10,000 | 206.6 / 132.1 / 106.9 | `RecursionError` / 4.944 / 2.850 | `RecursionError` / 1.880 / 1.858 | 2.363 / 0.835 |
+| rows | 10 | 0.265 / 0.123 / 0.060 | 0.078 / 0.037 / 0.007 | 0.043 / 0.002 / 0.002 | 0.010 / 0.004 |
+| rows | 100 | 1.813 / 0.520 / 0.501 | 0.351 / 0.045 / 0.022 | 0.319 / 0.013 / 0.013 | 0.024 / 0.008 |
+| rows | 1,000 | 63.2 / 5.566 / 7.593 | `RecursionError` / 0.301 / 0.207 | `RecursionError` / 0.137 / 0.139 | 0.171 / 0.187 |
+| rows | 10,000 | 5,285.0 / 128.1 / 60.9 | `RecursionError` / 3.325 / 1.965 | `RecursionError` / 1.346 / 1.344 | 3.589 / 0.594 |
 
 Measured on an Apple M2 Pro with 16 GB, macOS 27.0, CPython 3.14.9, `apache-hamilton==1.90.0`, and a release build
 of the extension, on 2026-10-27.
 
 **Steady execution**, the cost of running a prepared plan again, is where fnloom differs most: with checks on it is
-1.3 to 21 times faster than Hamilton's `execute` wherever both finish, because the plan is compiled once and each run
-is a loop over its steps in Rust. The low end is `fan_in`, 1.3 times at 10,000 parameters, where one Python call with
+2.5 to 24 times faster than Hamilton's `execute` wherever both finish, because the plan is compiled once and each run
+is a loop over its steps in Rust. The low end is `fan_in`, 2.5 times at 10,000 parameters, where one Python call with
 10,000 keyword arguments is most of the cost for both.
 
-**The cost of input checks** is the gap between the two fnloom figures. Per run it is small next to the call itself
-(steady execution, checks on against off, differs by at most 0.03 ms on every `chain`, `layered` and `rows` graph, and
-by 0.1 to 12.7 ms on the `fan_in` graphs of 100 parameters or more, where every one of the `n` inputs is checked). On
-`fan_in` that is more than half of the steady time at 1,000 parameters (1.540 against 0.482 ms).
+**The cost of input checks** is the gap between the two fnloom figures, and it is now within noise: steady execution,
+checks on against off, differs by at most 0.05 ms on every graph. A check against a plain class, such as `int`, is
+compiled once per plan to one `isinstance` call; only a generic, a union and the like take the general check.
 
 ### Where Hamilton raises
 
@@ -51,32 +50,53 @@ runs all 16 cases, with checks on and off, and every answer it gives is checked 
 ### Build: re-measured
 
 The design calls a row where fnloom is reliably slower a bug. The table's build column is one sample per cell, with
-Hamilton running first in the same process, so it cannot settle this. The builds it marks †, and the `fan_in` builds
-that were reliably slower before the speedups below ([#5](https://github.com/kelsayed17/fnloom/issues/5),
+Hamilton running first in the same process, so it cannot settle this. The build it marks †, and the `fan_in` builds
+that were reliably slower before ([#5](https://github.com/kelsayed17/fnloom/issues/5),
 [#6](https://github.com/kelsayed17/fnloom/issues/6), [#7](https://github.com/kelsayed17/fnloom/issues/7)), were
 re-measured with one fresh process per sample, nine samples per runtime and case, the two runtimes alternating which
 goes first, on a release build, timing only the build call (medians, ms, Hamilton / fnloom):
 
 | shape | n | Hamilton / fnloom | verdict |
 | --- | ---: | --- | --- |
-| chain | 10 | 0.362 / 0.201 | fnloom faster |
-| chain | 100 | 2.034 / 1.208 | fnloom faster |
-| layered | 1,000 | 21.871 / 14.044 | fnloom faster |
-| fan_in | 100 | 0.407 / 0.278 | fnloom faster (was 0.419 / 0.542) |
-| fan_in | 1,000 | 4.508 / 1.982 | fnloom faster (was 4.290 / 4.491) |
-| fan_in | 10,000 | 33.3 / 21.1 | fnloom faster (was 33.0 / 49.8) |
+| chain | 10 | 0.368 / 0.136 | fnloom faster |
+| chain | 100 | 2.009 / 0.724 | fnloom faster |
+| layered | 1,000 | 21.991 / 8.608 | fnloom faster |
+| fan_in | 100 | 0.428 / 0.222 | fnloom faster (was 0.419 / 0.542) |
+| fan_in | 1,000 | 4.271 / 1.581 | fnloom faster (was 4.290 / 4.491) |
+| fan_in | 10,000 | 32.6 / 17.5 | fnloom faster (was 33.0 / 49.8) |
 
-No build is reliably slower. The 10-parameter `fan_in` first execute, re-measured the same way, was not slower either
-(0.077 against 0.068 ms). The checks-on and checks-off builds do the same build work, since input checks run per
-run, so their differences in the table (for example layered 1,000, 33.4 against 11.5 ms) are noise.
+No build is reliably slower. The checks-on and checks-off builds do the same build work, since input checks run per
+run, so their differences in the table (for example rows 10,000, 128.1 against 60.9 ms) are noise.
 
-The `fan_in` builds were slow from per-parameter Python work, not from the Rust core, which is under a fifth of the
-build. They are now faster from four changes: an ordinary function's parameters are read off its code object, with
-`inspect.signature` kept for wrapped functions, a `__signature__` and the unsupported kinds; resolving annotations
-keeps every parameter whose annotation was already a value, such as `int`, instead of making it again, and skips
-plain classes when it looks for type aliases; an input read by one parameter is typed without comparing consumers;
-and an input's `NodeView` is made when `Driver.nodes` first reads it, not at build, while the input checks read
-each input's type without making its view.
+A build was slow from per-parameter and per-node Python work, not from the Rust core, which is under a fifth of it.
+For an ordinary function the scan reads its parameters off its code object and its kind off its code flags, keeping
+`inspect` for wrapped functions, a `__signature__` and the unsupported kinds; resolving skips
+`typing.get_type_hints` when every annotation is already a class, keeps every parameter and node it would make
+again unchanged, and skips plain classes when it looks for type aliases; an input read by one parameter is typed
+without comparing consumers; an undocumented module-level function skips the search for an inherited docstring; and
+an input's `NodeView` is made when `Driver.nodes` first reads it, while the input checks read each input's type
+without making its view.
+
+### Per run
+
+A prepared plan run once per incoming record (a market bar, say) pays its per-run overhead every time. Microseconds
+per `PreparedPlan.run` on the same machine, median of nine batches, before and after the per-run work, checks on:
+
+| shape | n | before | after | of which the native run |
+| --- | ---: | ---: | ---: | ---: |
+| chain | 10 | 3.46 | 1.92 | 1.49 |
+| fan_in | 10 | 13.13 | 1.84 | 1.05 |
+| layered | 100 | 22.23 | 19.13 | 18.77 |
+| fan_in | 100 | 133.31 | 15.50 | 10.33 |
+| rows | 100 | 36.86 | 13.51 | 13.17 |
+
+What made the difference: input checks compiled to `isinstance` for plain classes; inputs read and outputs keyed by
+each node's interned name, so a run makes no name strings (`Plan::run_by_id` in the core); a `@parameterize` row
+whose sources each feed one parameter called directly, passing each source under its parameter's name, with its
+`value()` constants bound by `functools.partial`, instead of through a Python wrapper; and `Driver.execute` skipping
+the plan cache's key and lock when a request repeats the last one, the common case in a loop. One node call costs about
+130 ns in the native run, against about 30 ns for a bare Python call; a run's fixed cost is about 0.3 µs native and
+0.7 µs through `PreparedPlan.run`, and `Driver.execute` adds about 0.3 µs more.
 
 ## Why fan-in is fast
 

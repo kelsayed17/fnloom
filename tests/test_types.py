@@ -1,11 +1,19 @@
 """Tests for `value_matches` and `type_matches`, fnloom's own answers."""
 
 import collections.abc
-from typing import Annotated, Any, Literal, NewType, Protocol, runtime_checkable
+from typing import (
+    Annotated,
+    Any,
+    Literal,
+    NewType,
+    Protocol,
+    override,
+    runtime_checkable,
+)
 
 import pytest
 
-from fnloom._types import type_matches, value_matches
+from fnloom._types import plain_class, type_matches, value_matches
 
 
 class Base:
@@ -205,3 +213,33 @@ def test_cyclic_type_alias_answers_as_written() -> None:
     assert value_matches(ping, 1) is False
     assert type_matches(ping, ping) is True
     assert type_matches(int, ping) is False
+
+
+def test_plain_class_is_only_a_class_isinstance_accepts() -> None:
+    """Only a class `isinstance` can check, through aliases and `Annotated`."""
+
+    class Plain(Protocol):
+        def run(self) -> None: ...
+
+    assert plain_class(int) is int
+    assert plain_class(Price) is float
+    assert plain_class(Annotated[int, "m"]) is int
+    assert plain_class(list) is list
+    assert plain_class(list[int]) is None
+    assert plain_class(int | None) is None
+    assert plain_class(Any) is None
+    assert plain_class(Plain) is None
+
+    class Meta(type):
+        @override
+        def __instancecheck__(cls, value: object) -> bool:
+            # Refuses every value but `None`, as some metaclasses refuse some values.
+            if value is None:
+                return False
+            raise TypeError(value)
+
+    class Odd(metaclass=Meta):
+        pass
+
+    assert plain_class(Odd) is None
+    assert plain_class(collections.abc.Sized) is collections.abc.Sized

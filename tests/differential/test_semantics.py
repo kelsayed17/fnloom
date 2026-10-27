@@ -24,6 +24,7 @@ from type_matrix import (
 )
 
 import fnloom
+from fnloom import _types
 from helpers import make_module
 
 
@@ -373,3 +374,17 @@ def test_wrong_input_type_same_exception_class() -> None:
     module = load_fixture("chain")
     assert run_hamilton([module], ["c"], {"a": "x"}) == Outcome(None, "ValueError")
     assert run_fnloom([module], ["c"], {"a": "x"}) == Outcome(None, "ValueError")
+
+
+def test_a_compiled_plain_class_check_agrees_with_value_matches() -> None:
+    """Over the matrix, `isinstance` on a plain class answers as `value_matches`."""
+    for declared, annotation in TYPES.items():
+        cls = _types.plain_class(annotation)
+        if cls is None:
+            continue
+        for value_id, value in VALUES.items():
+            compiled = value is None or isinstance(value, cls)
+            assert compiled is _types.value_matches(annotation, value), (
+                declared,
+                value_id,
+            )

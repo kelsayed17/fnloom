@@ -1,9 +1,11 @@
 """Scans modules for node definitions: public functions defined in the module itself."""
 
 import annotationlib
+import functools
 import inspect
+import operator
 import typing
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from fnloom._decorators import Source, Value, decorations
@@ -29,9 +31,11 @@ class NodeDef:
     """A node found in a module.
 
     `origin` is the function as written; `payload` is what the core calls with one
-    keyword per core input: `origin` itself, or a call that maps those keywords onto
-    `origin`'s parameters. `returns` is the return annotation: as written after
-    `collect`, its value after `resolve`, as are the params' annotations.
+    keyword per core input: `origin` itself, `origin` with each `Value` bound, or a
+    call that maps those keywords onto `origin`'s parameters. `renames` maps a core
+    input to the parameter keyword the core passes it under, when the two differ.
+    `returns` is the return annotation: as written after `collect`, its value after
+    `resolve`, as are the params' annotations.
     """
 
     name: str
@@ -41,6 +45,7 @@ class NodeDef:
     origin: Callable[..., object]
     module: str
     returns: object
+    renames: Mapping[str, str] = field(default_factory=dict)
 
 
 def core_inputs(params: tuple[Param, ...]) -> list[tuple[str, bool]]:
@@ -64,8 +69,20 @@ def _is_node(module: ModuleType, name: str, value: object) -> bool:
     )
 
 
+# Code flags of a body that does not run to a value when called.
+_LAZY = inspect.CO_COROUTINE | inspect.CO_GENERATOR | inspect.CO_ASYNC_GENERATOR
+
+
 def _unsupported_function_kind(fn: Callable[..., object]) -> str | None:
     """Names the kind of `fn` when calling it would not run its body to a value."""
+    code = getattr(fn, "__code__", None)
+    if (
+        code is not None
+        and not code.co_flags & _LAZY
+        and not hasattr(fn, "_is_coroutine_marker")
+    ):
+        # An ordinary function, read off its flags: the checks below cost far more.
+        return None
     if inspect.iscoroutinefunction(fn):
         return "async function"
     if inspect.isasyncgenfunction(fn):
@@ -155,20 +172,28 @@ def _bind(
 
 def _payload(
     origin: Callable[..., object], params: tuple[Param, ...]
-) -> Callable[..., object]:
-    """`origin` when each parameter reads its own name, else a call that maps keywords.
+) -> tuple[Callable[..., object], dict[str, str]]:
+    """What the core calls for a row, and the keyword renames it calls it with.
 
-    A parameter whose source the core did not pass is left out, so its default
-    applies. Each `Value` is passed as the object itself, the same on every call.
+    When each source feeds one parameter, the core passes each source under its
+    parameter's name, so the payload is `origin` itself, or `origin` with each
+    `Value` bound by `functools.partial`: no Python call in between. When one source
+    feeds several parameters, the payload is a call that maps the core's keywords
+    onto them. Either way a parameter whose source the core did not pass is left
+    out, so its default applies, and each `Value` is passed as the object itself,
+    the same on every call.
     """
-    if all(type(p.binding) is Source and p.binding.name == p.name for p in params):
-        return origin
     sourced = tuple(
         (p.name, p.binding.name) for p in params if isinstance(p.binding, Source)
     )
     constants = {
         p.name: p.binding.value for p in params if isinstance(p.binding, Value)
     }
+    if len({source for _, source in sourced}) == len(sourced):
+        renames = {source: param for param, source in sourced if source != param}
+        if constants:
+            return functools.partial(origin, **constants), renames
+        return origin, renames
 
     def call(**supplied: object) -> object:
         keywords = {
@@ -177,7 +202,7 @@ def _payload(
         keywords.update(constants)
         return origin(**keywords)
 
-    return call
+    return call, {}
 
 
 def _node_defs(
@@ -206,15 +231,17 @@ def _node_defs(
     nodes: list[NodeDef] = []
     for node_name, row in recorded.rows.items():
         params = _bind(parameters, row)
+        payload, renames = _payload(fn, params)
         nodes.append(
             NodeDef(
                 node_name,
                 params,
                 recorded.tags,
-                _payload(fn, params),
+                payload,
                 fn,
                 module.__name__,
                 annotations["return"],
+                renames,
             )
         )
     return nodes
@@ -320,6 +347,27 @@ def _unresolved_note(failures: list[tuple[str, list[str]]]) -> str:
     return f"resolving the annotations of: {listed}"
 
 
+def _all_classes(node: NodeDef) -> bool:
+    """Whether every annotation of `node`'s function, as written, is already a class.
+
+    `typing.get_type_hints` returns a class as it is, so such a function needs no
+    evaluating: the common case, and the costly call skipped. A generic such as
+    `list[int]` is not a class, nor is `None`, which evaluates to `NoneType`.
+    """
+    return isinstance(node.returns, type) and all(
+        isinstance(p.annotation, type) for p in node.params
+    )
+
+
+def _resigned(fn: Callable[..., object]) -> bool:
+    """Whether `fn`'s parameters were read from another signature than its own.
+
+    For a wrapped function or one with a `__signature__`, the annotations read by
+    the scan need not be the ones `typing.get_type_hints` evaluates, so it is called.
+    """
+    return hasattr(fn, "__wrapped__") or hasattr(fn, "__signature__")
+
+
 def resolve(nodes: Sequence[NodeDef]) -> list[NodeDef]:
     """Returns `nodes` with their annotations evaluated to values, as Hamilton does.
 
@@ -333,14 +381,18 @@ def resolve(nodes: Sequence[NodeDef]) -> list[NodeDef]:
     an alias over a name that does not resolve fails the same way (Q44).
     """
     origins: dict[int, tuple[Callable[..., object], list[str]]] = {}
+    nodes_of: dict[int, NodeDef] = {}
     for node in nodes:
         origins.setdefault(id(node.origin), (node.origin, []))[1].append(node.name)
+        nodes_of.setdefault(id(node.origin), node)
     values: dict[int, dict[str, typing.Any]] = {}
     # Each failure: (first node name, error, origin, node names, culprits).
     errors: list[
         tuple[str, _Unresolved, Callable[..., object], list[str], list[str]]
     ] = []
     for key, (origin, names) in origins.items():
+        if _all_classes(nodes_of[key]) and not _resigned(origin):
+            continue
         try:
             hints = typing.get_type_hints(origin, include_extras=True)
         except (NameError, AttributeError) as error:
@@ -359,7 +411,10 @@ def resolve(nodes: Sequence[NodeDef]) -> list[NodeDef]:
         raise error
     resolved: list[NodeDef] = []
     for node in nodes:
-        hints = values[id(node.origin)]
+        if (hints := values.get(id(node.origin))) is None:
+            # Every annotation was already a class, which evaluates to itself.
+            resolved.append(node)
+            continue
         # A parameter whose annotation was already a value, such as `int`, is kept.
         params = tuple(
             p
@@ -367,5 +422,11 @@ def resolve(nodes: Sequence[NodeDef]) -> list[NodeDef]:
             else Param(p.name, p.binding, p.required, hints[p.name])
             for p in node.params
         )
-        resolved.append(replace(node, params=params, returns=hints["return"]))
+        returns = hints["return"]
+        if returns is node.returns and all(
+            map(operator.is_, params, node.params, strict=True)
+        ):
+            resolved.append(node)
+        else:
+            resolved.append(replace(node, params=params, returns=returns))
     return resolved

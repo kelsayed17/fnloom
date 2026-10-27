@@ -134,10 +134,17 @@ def test_without_input_type_checks_returns_a_new_builder() -> None:
         unchecked.build().execute(["b"], inputs={"a": "x"})
 
 
+GENERIC_CHAIN = """
+def b(a: list[int]) -> list[int]:
+    return a
+
+def c(b: list[int]) -> int:
+    return len(b)
+"""
+
+
 def test_checks_are_compiled_once_per_plan(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A run calls `value_matches` once per checked value, and does no other work."""
-    driver = build(make_module("checks_compiled", CHAIN))
-    plan = driver.prepare(["c"], inputs={"a": 0})
+    """A plain class is checked by `isinstance` alone; any other type, once per run."""
     calls: list[tuple[object, object]] = []
     real = _types.value_matches
 
@@ -146,21 +153,30 @@ def test_checks_are_compiled_once_per_plan(monkeypatch: pytest.MonkeyPatch) -> N
         return real(declared, value)
 
     monkeypatch.setattr(_types, "value_matches", spy)
+    driver = build(make_module("checks_compiled", CHAIN))
+    plan = driver.prepare(["c"], inputs={"a": 0})
     for value in (1, 2, 3):
         assert plan.run(inputs={"a": value}) == {"c": (value + 1) * 2}
-    assert calls == [(int, 1), (int, 2), (int, 3)]
+    with pytest.raises(ValueError, match=r"^a: expected int, got str$"):
+        plan.run(inputs={"a": "x"})
+    assert calls == []
     overridden = driver.prepare(["c"], overrides={"b": 0})
-    calls.clear()
-    overridden.run(overrides={"b": 5})
-    assert calls == [(int, 5)]
+    with pytest.raises(ValueError, match=r"^b: expected int, got str$"):
+        overridden.run(overrides={"b": "x"})
+    assert calls == []
+    generic = build(make_module("checks_compiled_generic", GENERIC_CHAIN))
+    plan = generic.prepare(["c"], inputs={"a": []})
+    for value in ([1], [2]):
+        assert plan.run(inputs={"a": value}) == {"c": 1}
+    assert calls == [(list[int], [1]), (list[int], [2])]
     unchecked = (
         Builder()
-        .with_modules(make_module("checks_compiled_off", CHAIN))
+        .with_modules(make_module("checks_compiled_off", GENERIC_CHAIN))
         .without_input_type_checks()
         .build()
     )
     calls.clear()
-    unchecked.execute(["c"], inputs={"a": 1})
+    unchecked.execute(["c"], inputs={"a": ["x"]})
     assert calls == []
 
 

@@ -5,6 +5,7 @@ where the quirk register says fnloom differs (Q37 to Q45). Forms outside the
 matrix are unsupported: they get an answer, but no promise of Hamilton's.
 """
 
+import abc
 import collections.abc
 import types
 import typing
@@ -173,6 +174,29 @@ def value_matches(declared: object, value: object) -> bool:
     checked by its kind and, for a sequence or set, by its first element only.
     """
     return value is None or _fits(declared, value)
+
+
+def plain_class(declared: object) -> type | None:
+    """The class `isinstance` checks `declared` against, or `None` when it is no class.
+
+    For a returned class, `value_matches(declared, value)` is `value is None or
+    isinstance(value, cls)` for every value, so a check compiled once per plan can
+    skip the general walk. `Any`, a generic, and a class of any metaclass but
+    `type` and `abc.ABCMeta`, protocols included (Q42), are not plain classes.
+    """
+    if type(declared) is type:
+        # A class of the plain metaclass: no alias, no generic, no protocol.
+        return declared
+    declared = _strip(declared)
+    if declared is Any or not isinstance(declared, type):
+        return None
+    if typing.get_origin(declared) is not None:
+        return None
+    # A metaclass of its own may refuse `isinstance` for some values only, which the
+    # general check turns into a mismatch; only these two never refuse a class.
+    if type(declared) not in {type, abc.ABCMeta}:
+        return None
+    return declared
 
 
 def _subclass(produced: object, required: object) -> bool:

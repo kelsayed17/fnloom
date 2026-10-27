@@ -9,6 +9,9 @@ use crate::graph::Graph;
 use crate::node::{Node, NodeId};
 use crate::plan::{Action, Plan, Step};
 
+/// A run's outputs by node id, in `Plan::outputs` order, as `Plan::run_by_id` returns them.
+pub type Outputs<V> = Vec<(NodeId, V)>;
+
 /// Computes one node's value from its arguments; the embedder's seam for running payloads.
 pub trait Evaluate<P> {
     /// The runtime value flowing along edges.
@@ -212,7 +215,40 @@ impl Plan {
         overrides: &BTreeMap<String, V::Value>,
         observers: &mut [&mut dyn Observer<V::Error>],
     ) -> Result<BTreeMap<String, V::Value>, RunError<V::Error>> {
-        let slots = self.seed(graph, inputs, overrides)?;
+        let lookup = |action, id| {
+            let values = if action == Action::UseOverride {
+                overrides
+            } else {
+                inputs
+            };
+            values.get(&graph.node(id).name).cloned()
+        };
+        let outputs = self.run_by_id(graph, eval, lookup, observers)?;
+        Ok(outputs
+            .into_iter()
+            .map(|(id, value)| (graph.node(id).name.clone(), value))
+            .collect())
+    }
+
+    /// Executes the plan as `run` does, reading inputs and overrides through `lookup`, and
+    /// returns the outputs by node id, in `outputs` order.
+    ///
+    /// `lookup` is called once for each `UseInput` and `UseOverride` step, with its action
+    /// and node, before anything runs; `None` means the value is missing. An embedder that
+    /// keys its values by node needs no name strings to run a plan.
+    ///
+    /// # Errors
+    ///
+    /// `RunError::MissingValues` before anything runs when `lookup` has no value for a
+    /// step; otherwise the first failure as described on `RunError`.
+    pub fn run_by_id<P, V: Evaluate<P>>(
+        &self,
+        graph: &Graph<P>,
+        eval: &mut V,
+        lookup: impl FnMut(Action, NodeId) -> Option<V::Value>,
+        observers: &mut [&mut dyn Observer<V::Error>],
+    ) -> Result<Outputs<V::Value>, RunError<V::Error>> {
+        let slots = self.seed(graph, lookup)?;
         let mut hooks = Hooks { observers };
         let outcome = hooks
             .check("pre_graph", |observer| observer.pre_graph())
@@ -232,21 +268,20 @@ impl Plan {
     fn seed<P, T: Clone, E>(
         &self,
         graph: &Graph<P>,
-        inputs: &BTreeMap<String, T>,
-        overrides: &BTreeMap<String, T>,
+        mut lookup: impl FnMut(Action, NodeId) -> Option<T>,
     ) -> Result<Vec<Option<T>>, RunError<E>> {
         let mut slots = vec![None; graph.nodes().len()];
         let mut missing = Vec::new();
         for step in self.steps() {
-            let source = match step.action {
-                Action::UseOverride => overrides,
-                Action::UseInput => inputs,
-                Action::SkipOptionalInput | Action::Compute => continue,
-            };
-            let name = &graph.node(step.node).name;
-            match (source.get(name), slots.get_mut(step.node.index())) {
-                (Some(value), Some(slot)) => *slot = Some(value.clone()),
-                _ => missing.push(name.clone()),
+            if !matches!(step.action, Action::UseInput | Action::UseOverride) {
+                continue;
+            }
+            match (
+                lookup(step.action, step.node),
+                slots.get_mut(step.node.index()),
+            ) {
+                (Some(value), Some(slot)) => *slot = Some(value),
+                _ => missing.push(graph.node(step.node).name.clone()),
             }
         }
         if missing.is_empty() {
@@ -263,7 +298,7 @@ impl Plan {
         eval: &mut V,
         mut slots: Vec<Option<V::Value>>,
         hooks: &mut Hooks<'_, '_, V::Error>,
-    ) -> Result<BTreeMap<String, V::Value>, RunError<V::Error>> {
+    ) -> Result<Outputs<V::Value>, RunError<V::Error>> {
         for step in self.steps() {
             if step.action == Action::Compute {
                 let value = compute(graph, eval, hooks, step, &slots)?;
@@ -275,13 +310,15 @@ impl Plan {
         }
         self.outputs()
             .iter()
-            .map(|&id| {
-                let name = &graph.node(id).name;
-                match slots.get_mut(id.index()).and_then(Option::take) {
-                    Some(value) => Ok((name.clone(), value)),
-                    None => Err(broken(format!("output '{name}' has no value at the end"))),
-                }
-            })
+            .map(
+                |&id| match slots.get_mut(id.index()).and_then(Option::take) {
+                    Some(value) => Ok((id, value)),
+                    None => Err(broken(format!(
+                        "output '{}' has no value at the end",
+                        graph.node(id).name
+                    ))),
+                },
+            )
             .collect()
     }
 }
@@ -474,6 +511,41 @@ mod tests {
         let out = run_with(&g, &plan, &mut Adder::default(), &mut []).unwrap();
         // a = 1 + 5, b = 10 + 6, c = 100 + 6, d = 1000 + 16 + 106.
         assert_eq!(out, map(&[("b", 16), ("d", 1122)]));
+    }
+
+    #[test]
+    fn run_by_id_reads_values_by_node_and_returns_outputs_by_id() {
+        let g = diamond();
+        let plan = g.prepare(&request(&["d", "b"], &["x"], &[])).unwrap();
+        let x = g.id_of("x").unwrap();
+        let mut asked = Vec::new();
+        let out = plan
+            .run_by_id(
+                &g,
+                &mut Adder::default(),
+                |action, id| {
+                    asked.push((action, id));
+                    (id == x).then_some(5)
+                },
+                &mut [],
+            )
+            .unwrap();
+        assert_eq!(asked, vec![(Action::UseInput, x)]);
+        let named: Vec<_> = out
+            .iter()
+            .map(|&(id, v)| (g.node(id).name.as_str(), v))
+            .collect();
+        assert_eq!(named, vec![("b", 16), ("d", 1122)]);
+    }
+
+    #[test]
+    fn run_by_id_reports_a_value_lookup_does_not_have() {
+        let g = diamond();
+        let plan = g.prepare(&request(&["d"], &["x"], &[])).unwrap();
+        let err = plan
+            .run_by_id(&g, &mut Adder::default(), |_, _| None, &mut [])
+            .unwrap_err();
+        assert!(matches!(err, RunError::MissingValues(names) if names == ["x"]));
     }
 
     /// Option<i64> values: `None` is a legitimate supplied value.

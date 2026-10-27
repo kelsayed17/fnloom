@@ -1,5 +1,7 @@
 """Tests for lowering `@parameterize` rows into nodes: names, edges and payloads."""
 
+import functools
+
 import pytest
 
 import fnloom
@@ -178,6 +180,42 @@ def identity(a: int) -> int:
     assert nodes["same"].origin is vars(module)["identity"]
     assert nodes["plain"].module == "lower_plain"
     assert nodes["plain"].params[0].binding == Source("a")
+
+
+def test_row_payloads_call_the_function_directly_when_each_source_is_one_param() -> None:  # noqa: E501  # fmt: skip
+    """Renamed sources pass by keyword, values by `partial`; a shared source wraps."""
+    module = make_module(
+        "lower_payloads",
+        HEADER
+        + """
+@parameterize(
+    renamed={"x": source("a"), "y": source("b")},
+    constant={"x": source("a"), "y": value(10)},
+    shared={"x": source("a"), "y": source("a")},
+)
+def f(x: int, y: int) -> int:
+    return x * 100 + y
+""",
+    )
+    nodes = {n.name: n for n in collect([module])}
+    origin = vars(module)["f"]
+    assert nodes["renamed"].payload is origin
+    assert dict(nodes["renamed"].renames) == {"a": "x", "b": "y"}
+    constant = nodes["constant"].payload
+    assert isinstance(constant, functools.partial)
+    assert constant.func is origin
+    assert constant.keywords == {"y": 10}
+    assert dict(nodes["constant"].renames) == {"a": "x"}
+    assert nodes["shared"].payload is not origin
+    assert dict(nodes["shared"].renames) == {}
+    driver = fnloom.build(module)
+    assert driver.execute(
+        ["renamed", "constant", "shared"], inputs={"a": 1, "b": 2}
+    ) == {
+        "renamed": 102,
+        "constant": 110,
+        "shared": 101,
+    }
 
 
 def test_row_named_like_the_function_is_allowed() -> None:
