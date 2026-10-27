@@ -17,8 +17,12 @@ impl Evaluate<i64> for Adder {
     type Value = i64;
     type Error = Infallible;
 
-    fn evaluate(&mut self, node: &Node<i64>, args: &[Arg<'_, i64>]) -> Result<i64, Infallible> {
-        let constant = node.payload.unwrap_or(0);
+    fn evaluate(
+        &mut self,
+        _node: &Node<i64>,
+        constant: &i64,
+        args: &[Arg<'_, i64>],
+    ) -> Result<i64, Infallible> {
         Ok(constant + args.iter().map(|arg| arg.value).sum::<i64>())
     }
 }

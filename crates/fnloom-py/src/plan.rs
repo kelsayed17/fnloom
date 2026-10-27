@@ -6,7 +6,6 @@ use std::sync::Arc;
 use fnloom_core::node::Node;
 use fnloom_core::plan::{Action, Plan as CorePlan};
 use fnloom_core::run::{Arg, Evaluate, Observer};
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{PyTraverseError, PyVisit};
@@ -119,21 +118,19 @@ impl Evaluate<Py<PyAny>> for Caller<'_, '_> {
     type Value = Value;
     type Error = PyErr;
 
-    fn evaluate(&mut self, node: &Node<Py<PyAny>>, args: &[Arg<'_, Value>]) -> PyResult<Value> {
-        caught(|| self.call(node, args))
+    fn evaluate(
+        &mut self,
+        _node: &Node<Py<PyAny>>,
+        function: &Py<PyAny>,
+        args: &[Arg<'_, Value>],
+    ) -> PyResult<Value> {
+        caught(|| self.call(function, args))
     }
 }
 
 impl<'py> Caller<'py, '_> {
-    /// Calls `node`'s function with `args` as keyword arguments.
-    fn call(&self, node: &Node<Py<PyAny>>, args: &[Arg<'_, Value>]) -> PyResult<Value> {
-        let Some(function) = &node.payload else {
-            // The core plans `Compute` only for function nodes, which always carry a payload.
-            return Err(PyRuntimeError::new_err(format!(
-                "node '{}' has no function to call",
-                node.name
-            )));
-        };
+    /// Calls `function` with `args` as keyword arguments.
+    fn call(&self, function: &Py<PyAny>, args: &[Arg<'_, Value>]) -> PyResult<Value> {
         let kwargs = PyDict::new(self.py);
         for arg in args {
             // CPython binds a keyword to a parameter by identity with the interned

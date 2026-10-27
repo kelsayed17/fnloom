@@ -54,19 +54,11 @@ pub fn run_error(py: Python<'_>, error: RunError<PyErr>) -> PyErr {
             node,
             source,
             observer_errors,
-        } => {
-            let source = noted(py, source, &format!("in node '{node}'"));
-            if observer_errors.is_empty() {
-                source
-            } else {
-                let mut errors = vec![source];
-                errors.extend(observer_errors);
-                group(
-                    format!("node '{node}' failed and observer hooks raised"),
-                    errors,
-                )
-            }
-        }
+        } => with_observer_errors(
+            noted(py, source, &format!("in node '{node}'")),
+            observer_errors,
+            || format!("node '{node}' failed and observer hooks raised"),
+        ),
         RunError::Observers { event, mut errors } => {
             if errors.len() == 1 {
                 if let Some(only) = errors.pop() {
@@ -79,20 +71,26 @@ pub fn run_error(py: Python<'_>, error: RunError<PyErr>) -> PyErr {
         RunError::BrokenPlan {
             detail,
             observer_errors,
-        } => {
-            let error = PyRuntimeError::new_err(format!("broken plan: {detail}"));
-            if observer_errors.is_empty() {
-                error
-            } else {
-                let mut errors = vec![error];
-                errors.extend(observer_errors);
-                group(
-                    format!("broken plan: {detail}; observer hooks raised"),
-                    errors,
-                )
-            }
-        }
+        } => with_observer_errors(
+            PyRuntimeError::new_err(format!("broken plan: {detail}")),
+            observer_errors,
+            || format!("broken plan: {detail}; observer hooks raised"),
+        ),
     }
+}
+
+/// `error` alone, or grouped with `observer_errors` under `message` when there are any.
+fn with_observer_errors(
+    error: PyErr,
+    observer_errors: Vec<PyErr>,
+    message: impl FnOnce() -> String,
+) -> PyErr {
+    if observer_errors.is_empty() {
+        return error;
+    }
+    let mut errors = vec![error];
+    errors.extend(observer_errors);
+    group(message(), errors)
 }
 
 /// `error` with `note` added; if adding the note itself fails, that failure, caused by `error`.

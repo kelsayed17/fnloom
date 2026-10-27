@@ -55,8 +55,8 @@ impl Graph {
     /// Lets the cyclic GC see the node functions, which may refer back to this graph
     /// through their module's globals.
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
-        for node in self.graph.nodes() {
-            visit.call(&node.payload)?;
+        for function in self.graph.nodes().iter().filter_map(|node| node.payload()) {
+            visit.call(function)?;
         }
         Ok(())
     }

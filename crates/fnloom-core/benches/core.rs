@@ -59,7 +59,12 @@ mod suite {
         type Value = u64;
         type Error = Infallible;
 
-        fn evaluate(&mut self, _node: &Node<()>, args: &[Arg<'_, u64>]) -> Result<u64, Infallible> {
+        fn evaluate(
+            &mut self,
+            _node: &Node<()>,
+            _payload: &(),
+            args: &[Arg<'_, u64>],
+        ) -> Result<u64, Infallible> {
             Ok(args.iter().fold(0, |sum, arg| sum.wrapping_add(arg.value)))
         }
     }
