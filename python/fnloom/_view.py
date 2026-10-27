@@ -3,7 +3,7 @@
 import inspect
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, NamedTuple
 
 from fnloom._decorators import Source, Value
 from fnloom._types import type_matches
@@ -59,8 +59,7 @@ class NodeView:
         )
 
 
-@dataclass(frozen=True)
-class _Consumer:
+class _Consumer(NamedTuple):
     """A parameter reading an input: its node, its own name and its annotation."""
 
     node: str

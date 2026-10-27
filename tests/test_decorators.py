@@ -174,3 +174,22 @@ def test_parameterize_does_not_evaluate_annotations() -> None:
         return x
 
     assert parameterize(out={"x": source("a")})(f) is f
+
+
+def test_every_row_that_is_not_a_mapping_is_listed_sorted_in_one_message() -> None:
+    """Two non-mapping rows are both named, sorted, in one `TypeError`."""
+    with pytest.raises(TypeError) as excinfo:
+        parameterize(z=1, a="s", ok={"x": value(1)})  # ty: ignore[invalid-argument-type]
+    assert str(excinfo.value) == (
+        "row 'a': expected a mapping, got str; row 'z': expected a mapping, got int"
+    )
+
+
+def test_every_non_str_tag_is_listed_sorted_in_one_message() -> None:
+    """Two non-str tag values are both named, sorted, in one `TypeError`."""
+    with pytest.raises(TypeError) as excinfo:
+        tag(zone=1, area=["a"], ok="s")  # ty: ignore[invalid-argument-type]
+    assert str(excinfo.value) == (
+        "tag 'area': value must be str, got list; "
+        "tag 'zone': value must be str, got int"
+    )

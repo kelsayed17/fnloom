@@ -162,3 +162,31 @@ def test_checks_are_compiled_once_per_plan(monkeypatch: pytest.MonkeyPatch) -> N
     calls.clear()
     unchecked.execute(["c"], inputs={"a": 1})
     assert calls == []
+
+
+def test_bad_input_and_bad_override_fail_together_in_one_sorted_message() -> None:
+    """An input and an override that both do not fit are listed in one error, sorted."""
+    module = make_module(
+        "checks_input_and_override",
+        """
+def b(a: int) -> int:
+    return a
+
+def d(c: int) -> int:
+    return c
+
+def e(b: int, d: int) -> int:
+    return b + d
+""",
+    )
+    driver = build(module)
+    with pytest.raises(ValueError, match="expected") as raised:
+        driver.execute(["e"], inputs={"a": "x"}, overrides={"d": "y"})
+    assert str(raised.value) == ("a: expected int, got str\nd: expected int, got str")
+
+
+def test_unreached_override_is_still_checked() -> None:
+    """An override of a node the plan never reaches is type checked too."""
+    driver = build(make_module("checks_unreached_override", CHAIN))
+    with pytest.raises(ValueError, match=r"^c: expected int, got str$"):
+        driver.execute(["b"], inputs={"a": 1}, overrides={"c": "x"})

@@ -453,3 +453,86 @@ def uses_text(text: int) -> str:
     )
     assert hamilton_chain.execute(["b"], inputs={"a": 1.5}) == {"b": 2.5}
     assert fnloom_chain.execute(["b"], inputs={"a": 1.5}) == {"b": 2.5}
+
+
+def _hamilton_fits(declared: object, value: object) -> bool:
+    """Hamilton's input check of `value` against `declared`."""
+    return htypes.check_input_type(declared, value)  # ty: ignore[invalid-argument-type]  # Hamilton's hint is narrower than what it accepts
+
+
+def _hamilton_feeds(produced: object, required: object) -> bool:
+    """Hamilton's edge check of a `produced` node feeding a `required` parameter."""
+    return htypes.types_match(required, produced)  # ty: ignore[invalid-argument-type]  # Hamilton's hint is narrower than what it accepts
+
+
+ALIASES = """
+type Price = float
+
+def base() -> float:
+    return 1.5
+
+def priced(base: Price) -> Price:
+    return base * 2
+
+def doubled(priced: float) -> float:
+    return priced * 2
+
+def total(given: Price) -> float:
+    return given + 1
+"""
+
+
+@pytest.mark.deliberate("Q44")
+def test_q44_type_alias_is_checked_as_what_it_names() -> None:
+    """Hamilton refuses a `float` node feeding `Price` and a `float` for a `Price`."""
+    module = make_module("differential_alias", ALIASES)
+    edges = run_hamilton([module], ["doubled"], {})
+    assert edges == Outcome(None, "ValueError")
+    assert run_fnloom([module], ["doubled"], {}) == Outcome({"doubled": 6.0}, None)
+    unchecked = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_adapters(NoEdgeAndInputTypeChecking())
+        .build()
+    )
+    assert unchecked.execute(["doubled"]) == {"doubled": 6.0}
+    price = vars(module)["Price"]
+    assert _hamilton_fits(price, 1.5) is False
+    assert _hamilton_feeds(float, price) is False
+    assert _hamilton_feeds(price, float) is False
+    assert value_matches(price, 1.5) is True
+    assert type_matches(float, price) is True
+    assert type_matches(price, float) is True
+    assert fnloom.build(module).execute(["total"], inputs={"given": 1.5}) == {
+        "total": 2.5
+    }
+
+
+def _square(x: int) -> int:
+    return x * x
+
+
+@pytest.mark.deliberate("Q45")
+def test_q45_mapping_and_callable_are_checked_by_kind() -> None:
+    """Hamilton refuses a dict for `Mapping[str, int]`, a function for `Callable`."""
+    mapping = collections.abc.Mapping[str, int]
+    callable_ = collections.abc.Callable[[int], int]
+    assert _hamilton_fits(mapping, {"a": 1}) is False
+    assert _hamilton_fits(callable_, _square) is False
+    assert value_matches(mapping, {"a": 1}) is True
+    assert value_matches(callable_, _square) is True
+    assert value_matches(mapping, [("a", 1)]) is False
+    assert _hamilton_feeds(dict[str, int], mapping) is True
+    assert type_matches(dict[str, int], mapping) is True
+    module = make_module(
+        "differential_mapping_input",
+        """
+from collections.abc import Callable, Mapping
+
+def applied(table: Mapping[str, int], fn: Callable[[int], int]) -> int:
+    return fn(table["a"])
+""",
+    )
+    inputs = {"table": {"a": 3}, "fn": _square}
+    assert run_hamilton([module], ["applied"], inputs) == Outcome(None, "ValueError")
+    assert run_fnloom([module], ["applied"], inputs) == Outcome({"applied": 9}, None)

@@ -1,7 +1,7 @@
 """Whether a value fits a declared type, and whether one type may feed another.
 
 The answers agree with Hamilton 1.90.0 over the matrix of design §10, except
-where the quirk register says fnloom differs (Q37 to Q43). Forms outside the
+where the quirk register says fnloom differs (Q37 to Q45). Forms outside the
 matrix are unsupported: they get an answer, but no promise of Hamilton's.
 """
 
@@ -14,13 +14,54 @@ from typing import Annotated, Any, Literal, NewType, TypeVar, Union
 # value's first element is checked against the declaration's first argument.
 _SEQUENCES: tuple[type, ...] = (list, tuple, collections.abc.Sequence)
 _ITERABLES: tuple[type, ...] = (set, collections.abc.Iterable)
+# Every other abstract collection or callable (`Mapping`, `Callable`, `Set`, ...)
+# takes any value of its kind, its items or signature unchecked (Q45).
+_BY_KIND: frozenset[type] = frozenset(
+    abstract
+    for abstract in vars(collections.abc).values()
+    if isinstance(abstract, type) and abstract not in {*_SEQUENCES, *_ITERABLES}
+)
+
+
+def _alias_value(annotation: object) -> object | None:
+    """What a PEP 695 alias names (Q44), or `None` when `annotation` is no alias.
+
+    `type Price = float` names `float`. A subscripted generic alias, `Pair[int]`
+    for `type Pair[T] = tuple[T, T]`, names its value with the arguments put in:
+    when the value is one of the alias's own type parameters, or a generic whose
+    free parameters are exactly the alias's, in order. Any other generic alias
+    (one that reorders, repeats or drops its parameters, or takes a `*Ts` or a
+    `**P`) is not read, and answers as before.
+    """
+    if isinstance(annotation, typing.TypeAliasType):
+        return annotation.__value__
+    alias = typing.get_origin(annotation)
+    if not isinstance(alias, typing.TypeAliasType):
+        return None
+    params, args = alias.__type_params__, typing.get_args(annotation)
+    if len(params) != len(args) or not all(isinstance(p, TypeVar) for p in params):
+        return None
+    aliased = alias.__value__
+    if aliased in params:
+        return args[params.index(aliased)]
+    if getattr(aliased, "__parameters__", None) != params:
+        return None
+    return aliased[args]
 
 
 def _strip(annotation: object) -> object:
-    """`Annotated[T, ...]` is `T`: metadata never changes an answer (Q41)."""
-    while typing.get_origin(annotation) is Annotated:
-        annotation = typing.get_args(annotation)[0]
-    return annotation
+    """The type an answer is about.
+
+    `Annotated[T, ...]` is `T`: metadata never changes an answer (Q41). A PEP 695
+    alias is what it names, read through as many aliases as there are (Q44).
+    """
+    while True:
+        if typing.get_origin(annotation) is Annotated:
+            annotation = typing.get_args(annotation)[0]
+        elif (aliased := _alias_value(annotation)) is not None:
+            annotation = aliased
+        else:
+            return annotation
 
 
 def _is_union(annotation: object) -> bool:
@@ -46,7 +87,11 @@ def _first_fits(element: object, value: object) -> bool:
 
 
 def _fits_generic(declared: object, origin: object, value: object) -> bool:
-    """A parameterized collection: its kind, then at most its first element."""
+    """A parameterized collection: its kind, then at most its first element.
+
+    Only a sequence or an iterable has its first element checked; another
+    abstract collection, or a callable, is checked by its kind alone (Q45).
+    """
     if type(value) is origin:
         return True
     if origin is tuple and not isinstance(value, tuple):
@@ -55,11 +100,13 @@ def _fits_generic(declared: object, origin: object, value: object) -> bool:
         # Never look inside an iterator: reading its first item would consume it,
         # so it is checked by its kind alone (Q43).
         return isinstance(origin, type) and isinstance(value, origin)
-    groups = (_SEQUENCES, _ITERABLES)
-    if not any(origin in group and isinstance(value, group) for group in groups):
-        return False
-    args = _element_args(declared)
-    return not args or _first_fits(args[0], value)
+    for group in (_SEQUENCES, _ITERABLES):
+        if origin in group:
+            if not isinstance(value, group):
+                return False
+            args = _element_args(declared)
+            return not args or _first_fits(args[0], value)
+    return origin in _BY_KIND and isinstance(value, typing.cast("type", origin))
 
 
 def _fits(declared: object, value: object) -> bool:  # noqa: PLR0911  # one return per form

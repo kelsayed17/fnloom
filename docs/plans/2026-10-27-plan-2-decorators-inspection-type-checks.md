@@ -1,9 +1,11 @@
 # fnloom Plan 2: parameterize, tags, graph inspection and type checks
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or
-> superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
-**Status:** draft for maintainer review, 2026-10-27. Nothing below is built.
+**Status:** done. Every task below was built and tested on the `plan-2-engine-surface` branch on 2026-10-27, with
+the fixes of the final whole-branch review in one commit on top. The plan is kept as written, as the record of what
+was decided; where the build went further (register rows Q44 and Q45), the register says so.
 
 **Goal:** Enough of the v1 surface (design §5) for a real numeric library to move off Hamilton: `@parameterize` with
 `source()` and `value()`, `@tag` with readable tags, a public typed read-only graph view, and type checks (edge
@@ -102,7 +104,7 @@ docs/writing-nodes.md, running.md, errors.md, from-hamilton.md, quirk-register.m
   Task 2); `parameterize` applied twice to one function is `ValueError`; a tag value that is not `str` is `TypeError`;
   the same tag key set twice on one function is `ValueError`.
 
-- [ ] **Step 1: Write the failing tests** in `tests/test_decorators.py`:
+- [x] **Step 1: Write the failing tests** in `tests/test_decorators.py`:
   `test_parameterize_returns_the_same_function` (`parameterize(a={"x": value(1)})(f) is f`);
   `test_tag_returns_the_same_function`;
   `test_decorators_keep_the_signature_for_type_checkers` (module-level `assert_type(rowed(1), int)` where
@@ -114,10 +116,10 @@ docs/writing-nodes.md, running.md, errors.md, from-hamilton.md, quirk-register.m
   `test_parameterize_twice_is_a_value_error`; `test_non_str_tag_is_a_type_error`;
   `test_repeated_tag_key_is_a_value_error`; `test_public_names_are_exported` (`fnloom.parameterize`, `source`,
   `value`, `tag`, `Source`, `Value` exist).
-- [ ] **Step 2: Run** `uv run pytest tests/test_decorators.py -v`. Expected: FAIL, `ImportError`.
-- [ ] **Step 3: Implement** `_decorators.py` with the signatures above and add the six names to `__init__.__all__`.
-- [ ] **Step 4: Run** `bash scripts/check.sh`. Expected: exit 0, including ty on `tests/test_decorators.py`.
-- [ ] **Step 5: Commit** `python: parameterize, source, value and tag decorators`.
+- [x] **Step 2: Run** `uv run pytest tests/test_decorators.py -v`. Expected: FAIL, `ImportError`.
+- [x] **Step 3: Implement** `_decorators.py` with the signatures above and add the six names to `__init__.__all__`.
+- [x] **Step 4: Run** `bash scripts/check.sh`. Expected: exit 0, including ty on `tests/test_decorators.py`.
+- [x] **Step 5: Commit** `python: parameterize, source, value and tag decorators`.
 
 ### Task 2: Lowering `@parameterize` rows into nodes
 
@@ -146,7 +148,7 @@ docs/writing-nodes.md, running.md, errors.md, from-hamilton.md, quirk-register.m
   passing each `Value` object itself, uncopied. A private (underscore) or imported decorated function yields no nodes,
   exactly as for plain functions.
 
-- [ ] **Step 1: Write failing unit tests** in `tests/test_lowering.py`:
+- [x] **Step 1: Write failing unit tests** in `tests/test_lowering.py`:
   `test_each_row_is_a_node_and_the_function_is_not`; `test_source_renames_an_edge`;
   `test_value_binds_a_constant_and_is_not_an_edge`; `test_unmentioned_parameter_stays_an_edge_of_its_own_name`;
   `test_two_parameters_from_one_source_get_one_core_input_and_the_same_value`;
@@ -159,7 +161,7 @@ docs/writing-nodes.md, running.md, errors.md, from-hamilton.md, quirk-register.m
   `test_private_decorated_function_yields_no_nodes`;
   `test_decorated_function_imported_elsewhere_is_one_node_set` (Review Focus 5: build both modules, no error, nodes
   once); `test_node_exception_from_a_row_carries_the_row_name_note`.
-- [ ] **Step 2: Write failing differential tests.** `rows_h.py` and `rows_f.py` hold the same functions; only the
+- [x] **Step 2: Write failing differential tests.** `rows_h.py` and `rows_f.py` hold the same functions; only the
   decorator import differs (`hamilton.function_modifiers` vs `fnloom`). Cover: a two-row reducer over one input, a
   row sourcing another row, a defaulted parameter bound by `source()`, two parameters from one source, a `value()`
   holding a list. In `test_semantics.py`: `test_rows_compute_the_same_values` (every row node requested, with and
@@ -169,15 +171,15 @@ docs/writing-nodes.md, running.md, errors.md, from-hamilton.md, quirk-register.m
   `test_q33_row_naming_an_unknown_parameter` (Hamilton raises `InvalidDecoratorException`, an `Exception` subclass in
   `hamilton/function_modifiers/base.py`, at `build()`; fnloom raises `ValueError` at decoration). Add row Q33 to
   `docs/quirk-register.md` in this step: the `deliberate` marker fails collection for a row that does not exist.
-- [ ] **Step 3: Run** `uv run pytest tests/test_lowering.py tests/differential -v`. Expected: the new tests FAIL.
-- [ ] **Step 4: Implement** the lowering in `_scan.py`, `Param` in `_view.py`, `core_inputs`, and `_graph_of`.
+- [x] **Step 3: Run** `uv run pytest tests/test_lowering.py tests/differential -v`. Expected: the new tests FAIL.
+- [x] **Step 4: Implement** the lowering in `_scan.py`, `Param` in `_view.py`, `core_inputs`, and `_graph_of`.
   Keep annotations as `_scan` reads them today (`Format.FORWARDREF`); Task 3 resolves them.
-- [ ] **Step 5: Run** `bash scripts/check.sh`. Expected: exit 0. A differential test where the two runtimes disagree
+- [x] **Step 5: Run** `bash scripts/check.sh`. Expected: exit 0. A differential test where the two runtimes disagree
   is settled by the register, never by editing an expected value: fix fnloom, or add a row and move the case to
   `test_deliberate_differences.py`.
-- [ ] **Step 6: Docs.** A "One function, several nodes" section in
+- [x] **Step 6: Docs.** A "One function, several nodes" section in
   `docs/writing-nodes.md`; the decorator mapping to `docs/from-hamilton.md`.
-- [ ] **Step 7: Commit** `python: lower parameterize rows into nodes`.
+- [x] **Step 7: Commit** `python: lower parameterize rows into nodes`.
 
 ### Task 3: Resolved annotations, readable tags and the graph view
 
@@ -208,7 +210,7 @@ docs/writing-nodes.md, running.md, errors.md, from-hamilton.md, quirk-register.m
 - `NodeView` and `Param` are exported from `fnloom`. Q2 is FIXED by `Driver.nodes`, except that the node's own
   callable is not exposed: a prepared plan replaces the replay it was used for (update the Q2 row's fnloom column).
 
-- [ ] **Step 1: Write failing tests** in `tests/test_view.py`:
+- [x] **Step 1: Write failing tests** in `tests/test_view.py`:
   `test_function_node_view_fields` (type, origin, module, params with bindings, doc, `is_input is False`);
   `test_input_node_view_fields` (`origin is None`, `params == ()`, type from its consumer);
   `test_dependencies_are_distinct_sorted_sources`; `test_value_bound_param_is_not_a_dependency`;
@@ -219,17 +221,17 @@ docs/writing-nodes.md, running.md, errors.md, from-hamilton.md, quirk-register.m
   `test_forward_reference_to_a_later_class_resolves`;
   `test_unresolvable_annotation_raises_name_error_with_a_note_naming_the_node`;
   `test_input_with_conflicting_consumer_types_is_a_value_error_naming_both_consumers`.
-- [ ] **Step 2: Write failing differential tests:** `test_tags_match_hamilton_except_module` (`@deliberate("Q34")`:
+- [x] **Step 2: Write failing differential tests:** `test_tags_match_hamilton_except_module` (`@deliberate("Q34")`:
   per node, Hamilton's tags equal `{**view.tags, "module": view.module}`; add row Q34 to the register in this step);
   `test_node_types_match_hamilton`
   (per node of `typed`, Hamilton's node `type` equals `view.type`); `test_unresolvable_annotation_same_class`.
   Pin Plan 1's `test_scan.py::test_forward_reference_annotation_is_accepted` unchanged: it must stay green.
-- [ ] **Step 3: Run** `uv run pytest tests/test_view.py tests/differential -v`. Expected: the new tests FAIL.
-- [ ] **Step 4: Implement** resolution in `_scan.py`, `NodeView` and input-type resolution in `_view.py`, and
+- [x] **Step 3: Run** `uv run pytest tests/test_view.py tests/differential -v`. Expected: the new tests FAIL.
+- [x] **Step 4: Implement** resolution in `_scan.py`, `NodeView` and input-type resolution in `_view.py`, and
   `Driver.nodes` (the `Driver` constructor gains the views; `Builder.build` passes them).
-- [ ] **Step 5: Run** `bash scripts/check.sh`. Expected: exit 0.
-- [ ] **Step 6: Docs.** Update the Q2 and Q28 rows; an "Inspecting a graph" section in `docs/running.md`.
-- [ ] **Step 7: Commit** `python: resolved annotations, tags and the graph view`.
+- [x] **Step 5: Run** `bash scripts/check.sh`. Expected: exit 0.
+- [x] **Step 6: Docs.** Update the Q2 and Q28 rows; an "Inspecting a graph" section in `docs/running.md`.
+- [x] **Step 7: Commit** `python: resolved annotations, tags and the graph view`.
 
 ### Task 4: The type-matching functions, proven against Hamilton's
 
@@ -253,22 +255,22 @@ docs/writing-nodes.md, running.md, errors.md, from-hamilton.md, quirk-register.m
   `types_match(param_type, required_node_type)` for `type_matches`. Read the latter's body before mapping
   `produced`/`required` onto its two arguments; the parameter names alone are ambiguous.
 
-- [ ] **Step 1: Write failing tests.** `tests/test_types.py`: `test_none_fits_every_declaration`;
+- [x] **Step 1: Write failing tests.** `tests/test_types.py`: `test_none_fits_every_declaration`;
   `test_subclass_fits_its_base_and_not_the_reverse`; `test_any_fits_everything`;
   `test_bool_for_int_answers_as_the_oracle` and `test_int_for_float_answers_as_the_oracle` (Review Focus 4; the
   expected value is the one Step 2's oracle records, written here as a literal). In `test_semantics.py`, two
   parametrized tests over the whole matrix: `test_value_matches_agrees_with_hamilton[declared-value]` and
   `test_type_matches_agrees_with_hamilton[produced-required]`, excluding only the pairs listed in a module-level
   `DELIBERATE: dict[tuple[str, str], str]` mapping a pair's ids to its register row.
-- [ ] **Step 2: Run** `uv run pytest tests/test_types.py tests/differential -v`. Expected: FAIL, `ImportError`.
-- [ ] **Step 3: Implement** `_types.py`. Where Hamilton's answer is wrong for any user (a `Literal` or `Annotated`
+- [x] **Step 2: Run** `uv run pytest tests/test_types.py tests/differential -v`. Expected: FAIL, `ImportError`.
+- [x] **Step 3: Implement** `_types.py`. Where Hamilton's answer is wrong for any user (a `Literal` or `Annotated`
   form Hamilton mishandles, for example), fnloom differs on purpose: add the pair to `DELIBERATE`, a register row
   (Q35 onward) and a `deliberate` test asserting both answers. Where it is merely surprising, KEEP it.
-- [ ] **Step 4: Widen Task 3's input-type rule** to "the narrower by `type_matches`" and add
+- [x] **Step 4: Widen Task 3's input-type rule** to "the narrower by `type_matches`" and add
   `test_view.py::test_input_takes_the_narrower_of_two_compatible_consumer_types` (`Base` and `Child` consumers give
   `Child`), with a differential twin against Hamilton's input node type.
-- [ ] **Step 5: Run** `bash scripts/check.sh`. Expected: exit 0.
-- [ ] **Step 6: Commit** `python: type matching, proven against Hamilton's matrix`.
+- [x] **Step 5: Run** `bash scripts/check.sh`. Expected: exit 0.
+- [x] **Step 6: Commit** `python: type matching, proven against Hamilton's matrix`.
 
 ### Task 5: Edge checks at build; input and override checks at run; the opt-out
 
@@ -290,7 +292,7 @@ docs/writing-nodes.md, running.md, errors.md, from-hamilton.md, quirk-register.m
     listing every failure, sorted, each `"<name>: expected <declared>, got <type of value>"`. A supplied input that
     no step reads is not checked (as Hamilton).
 
-- [ ] **Step 1: Write failing tests** in `tests/test_type_checks.py`:
+- [x] **Step 1: Write failing tests** in `tests/test_type_checks.py`:
   `test_mismatched_edge_fails_build_naming_node_param_and_upstream`;
   `test_all_edge_mismatches_are_listed_together_sorted`;
   `test_edge_check_runs_even_with_input_checks_off`;
@@ -301,17 +303,17 @@ docs/writing-nodes.md, running.md, errors.md, from-hamilton.md, quirk-register.m
   `test_without_input_type_checks_returns_a_new_builder`;
   `test_checks_are_compiled_once_per_plan` (spy on `value_matches` through a module attribute: one call per checked
   value per run, zero work per run on names).
-- [ ] **Step 2: Write failing differential tests:** `test_edge_mismatch_same_exception_class`;
+- [x] **Step 2: Write failing differential tests:** `test_edge_mismatch_same_exception_class`;
   `test_wrong_input_type_same_exception_class`; `test_q22_override_type_checked` (`@deliberate("Q22")`: Hamilton
   runs the node with the wrong override value, fnloom refuses before running);
   `test_q10_opt_out_is_explicit` (`@deliberate("Q10")`: Hamilton's `NoEdgeAndInputTypeChecking` also turns off edge
   checks; fnloom's opt-out leaves them on).
-- [ ] **Step 3: Run** `uv run pytest tests/test_type_checks.py tests/differential -v`. Expected: the new tests FAIL.
-- [ ] **Step 4: Implement** in `driver.py`.
-- [ ] **Step 5: Run** `bash scripts/check.sh`. Expected: exit 0.
-- [ ] **Step 6: Docs.** "Type checks" in `docs/running.md`; each new error in `docs/errors.md`; Q10 and Q22 rows say
+- [x] **Step 3: Run** `uv run pytest tests/test_type_checks.py tests/differential -v`. Expected: the new tests FAIL.
+- [x] **Step 4: Implement** in `driver.py`.
+- [x] **Step 5: Run** `bash scripts/check.sh`. Expected: exit 0.
+- [x] **Step 6: Docs.** "Type checks" in `docs/running.md`; each new error in `docs/errors.md`; Q10 and Q22 rows say
   which tests pin them.
-- [ ] **Step 7: Commit** `python: edge, input and override type checks`.
+- [x] **Step 7: Commit** `python: edge, input and override type checks`.
 
 ### Task 6: Benchmarks and release notes for the new surface
 
@@ -325,17 +327,17 @@ docs/writing-nodes.md, running.md, errors.md, from-hamilton.md, quirk-register.m
   `benches/run.py` rows gain `"input_checks": bool`; fnloom is measured with checks on and off, Hamilton as it ships
   (checks on).
 
-- [ ] **Step 1: Write a failing test** `test_bench_generate.py::test_rows_shape_has_n_nodes_in_both_spellings`.
-- [ ] **Step 2: Run** `uv run pytest tests/test_bench_generate.py -v`. Expected: FAIL.
-- [ ] **Step 3: Implement** the shape and the column.
-- [ ] **Step 4: Run** `uv run python -m benches.run > bench.jsonl`; update the table in `docs/benchmarks.md` with the
+- [x] **Step 1: Write a failing test** `test_bench_generate.py::test_rows_shape_has_n_nodes_in_both_spellings`.
+- [x] **Step 2: Run** `uv run pytest tests/test_bench_generate.py -v`. Expected: FAIL.
+- [x] **Step 3: Implement** the shape and the column.
+- [x] **Step 4: Run** `uv run python -m benches.run > bench.jsonl`; update the table in `docs/benchmarks.md` with the
   machine description. Name every row where fnloom with checks ON is slower than Hamilton: the design calls each a
   bug, so open an issue per row and link it from the table.
-- [ ] **Step 5: Changelog.** Under `[Unreleased]`: Added (decorators, `Driver.nodes`, `NodeView`, `Param`, type checks,
+- [x] **Step 5: Changelog.** Under `[Unreleased]`: Added (decorators, `Driver.nodes`, `NodeView`, `Param`, type checks,
   `Builder.without_input_type_checks`); Changed (annotations resolved at build, so an unresolvable one is now a
   `NameError`; undecorated functions with string annotations unchanged).
-- [ ] **Step 6: Run** `bash scripts/check.sh`. Expected: exit 0.
-- [ ] **Step 7: Commit** `bench: rows shape and input-check cost`.
+- [x] **Step 6: Run** `bash scripts/check.sh`. Expected: exit 0.
+- [x] **Step 7: Commit** `bench: rows shape and input-check cost`.
 
 ---
 

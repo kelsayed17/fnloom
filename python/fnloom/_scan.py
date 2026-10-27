@@ -13,6 +13,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
     from types import ModuleType
 
+# What evaluating an annotation raises when a name in it does not resolve.
+type _Unresolved = NameError | AttributeError
+
 _UNSUPPORTED_KINDS = {
     inspect.Parameter.POSITIONAL_ONLY: "positional-only parameter",
     inspect.Parameter.VAR_POSITIONAL: "*args parameter",
@@ -87,7 +90,8 @@ def _bind(
     """Binds each parameter to the row's source or value, or to its own name."""
     params: list[Param] = []
     for p in parameters:
-        binding = row.get(p.name, Source(p.name))
+        # A `Source` is made only for a parameter the row does not bind.
+        binding = row[p.name] if p.name in row else Source(p.name)
         required = isinstance(binding, Value) or p.default is inspect.Parameter.empty
         params.append(Param(p.name, binding, required, p.annotation))
     return tuple(params)
@@ -101,7 +105,7 @@ def _payload(
     A parameter whose source the core did not pass is left out, so its default
     applies. Each `Value` is passed as the object itself, the same on every call.
     """
-    if all(p.binding == Source(p.name) for p in params):
+    if all(type(p.binding) is Source and p.binding.name == p.name for p in params):
         return origin
     sourced = tuple(
         (p.name, p.binding.name) for p in params if isinstance(p.binding, Source)
@@ -142,13 +146,14 @@ def _node_defs(
     for p in parameters:
         _check_param(name, p, annotated)
     recorded = decorations(fn)
-    rows = recorded.rows
-    if rows is None:
-        # A plain function is one row, of its own name, binding nothing.
-        unbound: dict[str, Source | Value] = {}
-        rows = {name: unbound}
+    if recorded.rows is None:
+        # A plain function is one node, of its own name, binding nothing, so each
+        # parameter reads its own name and the payload is the function itself.
+        params = _bind(parameters, {})
+        returns = annotations["return"]
+        return [NodeDef(name, params, recorded.tags, fn, fn, module.__name__, returns)]
     nodes: list[NodeDef] = []
-    for node_name, row in rows.items():
+    for node_name, row in recorded.rows.items():
         params = _bind(parameters, row)
         nodes.append(
             NodeDef(
@@ -196,15 +201,23 @@ def _duplicate(first: NodeDef, second: NodeDef) -> str:
 def collect(modules: Sequence[ModuleType]) -> list[NodeDef]:
     """Returns the nodes of `modules`; `ValueError` on a malformed or duplicate one.
 
+    Every duplicate name is listed, sorted by name, in one `ValueError`.
+
     Annotations are read without being evaluated; `resolve` evaluates them.
     """
     seen: dict[str, NodeDef] = {}
+    clashes: list[tuple[str, str]] = []
     # Modules hash by identity, so this drops repeats of one module, keeping the first.
     for module in dict.fromkeys(modules):
         for node in _scan_module(module):
             if node.name in seen:
-                raise ValueError(_duplicate(seen[node.name], node))
-            seen[node.name] = node
+                clashes.append((node.name, _duplicate(seen[node.name], node)))
+            else:
+                seen[node.name] = node
+    if clashes:
+        # Sorted by node name; a name clashing more than once keeps scan order.
+        clashes.sort(key=lambda clash: clash[0])
+        raise ValueError("; ".join(message for _, message in clashes))
     return list(seen.values())
 
 
@@ -224,7 +237,7 @@ def _unresolved(origin: Callable[..., object]) -> list[str]:
     for key, text in written.items():
         try:
             typing.evaluate_forward_ref(annotationlib.ForwardRef(text, owner=origin))
-        except NameError:
+        except NameError, AttributeError:
             culprits.append("the return" if key == "return" else f"parameter {key!r}")
     return culprits or ["an annotation"]
 
@@ -247,18 +260,20 @@ def resolve(nodes: Sequence[NodeDef]) -> list[NodeDef]:
     `typing.get_type_hints` evaluates them: string annotations, and forward
     references to names defined anywhere in the module, also nested ones such as
     `list["Later"]`, resolve, and a `None` annotation becomes `NoneType`. When
-    names do not resolve, the `NameError` of the first failing node by name is
-    raised, with one note naming every failing node and annotation, sorted by node.
+    names do not resolve, the `NameError` (or, for a missing attribute such as
+    `decimal.Missing`, the `AttributeError`) of the first failing node by name is
+    raised, as Hamilton raises it, with one note naming every failing node and
+    annotation, sorted by node.
     """
     origins: dict[int, tuple[Callable[..., object], list[str]]] = {}
     for node in nodes:
         origins.setdefault(id(node.origin), (node.origin, []))[1].append(node.name)
     values: dict[int, dict[str, typing.Any]] = {}
-    errors: list[tuple[str, NameError, Callable[..., object], list[str]]] = []
+    errors: list[tuple[str, _Unresolved, Callable[..., object], list[str]]] = []
     for key, (origin, names) in origins.items():
         try:
             values[key] = typing.get_type_hints(origin, include_extras=True)
-        except NameError as error:
+        except (NameError, AttributeError) as error:
             errors.append((min(names), error, origin, names))
     if errors:
         errors.sort(key=lambda failure: failure[0])
@@ -269,6 +284,8 @@ def resolve(nodes: Sequence[NodeDef]) -> list[NodeDef]:
     resolved: list[NodeDef] = []
     for node in nodes:
         hints = values[id(node.origin)]
-        params = tuple(replace(p, annotation=hints[p.name]) for p in node.params)
+        params = tuple(
+            Param(p.name, p.binding, p.required, hints[p.name]) for p in node.params
+        )
         resolved.append(replace(node, params=params, returns=hints["return"]))
     return resolved

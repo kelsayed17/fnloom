@@ -143,3 +143,21 @@ def test_duplicate_error_lists_modules_in_scan_order() -> None:
     b = make_module("scan_two", "def f(x: int) -> int:\n    return x\n")
     with pytest.raises(ValueError, match=r"'scan_one' and 'scan_two'"):
         collect([a, b, a])
+
+
+def test_every_duplicate_name_is_listed_sorted_in_one_message() -> None:
+    """Two clashing names are both in the one `ValueError`, sorted by node name."""
+    first = make_module(
+        "scan_many_first",
+        "def z(a: int) -> int:\n    return a\ndef b(a: int) -> int:\n    return a\n",
+    )
+    second = make_module(
+        "scan_many_second",
+        "def z(a: int) -> int:\n    return a\ndef b(a: int) -> int:\n    return a\n",
+    )
+    with pytest.raises(ValueError, match="defined in both") as excinfo:
+        collect([first, second])
+    assert str(excinfo.value) == (
+        "node 'b' is defined in both 'scan_many_first' and 'scan_many_second'; "
+        "node 'z' is defined in both 'scan_many_first' and 'scan_many_second'"
+    )

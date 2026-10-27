@@ -243,9 +243,9 @@ def f(x: int) -> int:
     )
     nodes = collect([defining, importing])
     assert sorted(n.name for n in nodes) == ["other", "out"]
-    assert fnloom.build(importing, defining).execute(["other"], inputs={"a": 4}) == {
-        "other": 4
-    }
+    driver = fnloom.build(importing, defining)
+    assert driver.execute(["other"], inputs={"a": 4}) == {"other": 4}
+    assert driver.nodes["out"].module == "lower_defining"
 
 
 def test_node_exception_from_a_row_carries_the_row_name_note() -> None:

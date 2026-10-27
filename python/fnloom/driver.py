@@ -282,9 +282,10 @@ class Builder:
         """Scans the modules and returns a `Driver`; `ValueError` on a bad node.
 
         Annotations are evaluated here: a name that does not resolve raises its
-        `NameError`, with a note naming the node. Every edge is type checked: a
-        node whose return type a parameter it feeds does not accept fails the
-        build, with one `ValueError` listing every such parameter.
+        `NameError` (`AttributeError` for a missing attribute), with a note naming
+        the node. Every edge is type checked: a node whose return type a parameter
+        it feeds does not accept fails the build, with one `ValueError` listing
+        every such parameter.
         """
         nodes = resolve(collect(self._modules))
         views = node_views(nodes)

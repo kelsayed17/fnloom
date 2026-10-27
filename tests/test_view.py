@@ -324,3 +324,23 @@ def bound(x: Missing) -> int:
         "(rows of function 'bound')"
     )
     assert raised.value.__notes__ == [note]
+
+
+def test_missing_module_attribute_raises_attribute_error_with_a_note_naming_the_node() -> None:  # noqa: E501  # fmt: skip
+    """`decimal.Missing` fails the build with its `AttributeError`, with the note."""
+    module = make_module(
+        "view_missing_attribute",
+        """
+from __future__ import annotations
+
+import decimal
+
+def price(a: int, rate: decimal.Missing) -> int:
+    return a
+""",
+    )
+    with pytest.raises(AttributeError, match="Missing") as raised:
+        fnloom.build(module)
+    assert raised.value.__notes__ == [
+        "resolving the annotation of parameter 'rate' of node 'price'"
+    ]

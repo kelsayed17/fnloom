@@ -139,3 +139,55 @@ def test_an_iterator_is_checked_without_being_consumed() -> None:
     generator = (n for n in (1, 2, 3))
     assert value_matches(collections.abc.Iterable[str], generator) is True
     assert list(generator) == [1, 2, 3]
+
+
+type Price = float
+type Prices = collections.abc.Sequence[Price]
+type Again = Price
+type Pair[T] = tuple[T, T]
+type Swapped[K, V] = dict[V, K]
+
+
+def test_type_alias_answers_as_its_value() -> None:
+    """A PEP 695 alias is checked as what it names, also through another alias (Q44)."""
+    assert value_matches(Price, 1.5) is True
+    assert value_matches(Price, "s") is False
+    assert value_matches(Again, 1.5) is True
+    assert value_matches(Prices, [1.5]) is True
+    assert value_matches(Prices, ["s"]) is False
+    assert value_matches(Price | None, 1.5) is True
+    assert type_matches(float, Price) is True
+    assert type_matches(Price, float) is True
+    assert type_matches(Again, float) is True
+    assert type_matches(float, Again) is True
+    assert type_matches(str, Price) is False
+    assert type_matches(Price, str) is False
+
+
+def test_generic_type_alias_is_substituted_when_its_parameters_are_in_order() -> None:
+    """`Pair[int]` is `tuple[int, int]`; an alias reordering its parameters is not."""
+    assert value_matches(Pair[int], (1, 2)) is True
+    assert value_matches(Pair[int], [1, 2]) is False
+    assert type_matches(tuple[int, int], Pair[int]) is True
+    assert type_matches(Pair[int], tuple[int, int]) is True
+    assert type_matches(Pair[int], tuple[str, str]) is False
+    assert value_matches(Swapped[str, int], {1: "a"}) is False
+    assert type_matches(dict[int, str], Swapped[str, int]) is False
+
+
+def _function(x: int) -> int:
+    return x
+
+
+def test_abstract_collection_without_an_element_check_is_checked_by_its_kind() -> None:
+    """`Mapping[str, int]` takes a dict, `Callable[..., T]` a function (Q45)."""
+    assert value_matches(collections.abc.Mapping[str, int], {"a": 1}) is True
+    assert value_matches(collections.abc.Mapping[str, int], {"a": "s"}) is True
+    assert value_matches(collections.abc.Mapping[str, int], [1]) is False
+    assert value_matches(collections.abc.MutableMapping[str, int], {"a": 1}) is True
+    assert value_matches(collections.abc.Callable[[int], int], _function) is True
+    assert value_matches(collections.abc.Callable[..., int], _function) is True
+    assert value_matches(collections.abc.Callable[..., int], 1) is False
+    assert value_matches(collections.abc.Sequence[int], ["s"]) is False
+    assert type_matches(dict[str, int], collections.abc.Mapping[str, int]) is True
+    assert type_matches(dict[str, int], collections.abc.Mapping[str, str]) is False

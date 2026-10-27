@@ -51,30 +51,36 @@ runs all 16 cases, with checks on and off, and every answer it gives is checked 
 ### Build: the rows where fnloom with checks on is slower
 
 The design calls a row where fnloom is reliably slower a bug. The table's build column is one sample per cell, with
-Hamilton running first in the same process, so it cannot settle this: it marks six builds † that are noise or
-ordering. They were re-measured with one fresh process per sample, nine samples per runtime and case, the two
-runtimes alternating which goes first, on a release build, timing only the build call (medians, ms, Hamilton /
-fnloom):
+Hamilton running first in the same process, so it cannot settle this: it marks six builds †, re-measured below, and
+three of them are reliably slower. They were re-measured with one fresh process per sample, nine samples per runtime
+and case, the two runtimes alternating which goes first, on a release build, timing only the build call (medians, ms,
+Hamilton / fnloom). The three `fan_in` rows were measured again after the scan speedups of the whole-branch review
+(no `dataclasses.replace` per parameter, no identity check of an undecorated function's bindings, no default `Source`
+made for a parameter its row binds, and a `NamedTuple` for each input's consumers); those are the post-fix figures
+below, in place of the earlier 0.402 / 0.633, 3.078 / 5.344 and 31.8 / 56.5. The main table's `fan_in` build cells
+are still the earlier single samples.
 
 | shape | n | Hamilton / fnloom | verdict |
 | --- | ---: | --- | --- |
 | chain | 100 | 2.040 / 1.693 | fnloom faster |
 | layered | 1,000 | 21.974 / 20.300 | fnloom faster |
 | layered | 10,000 | 215.8 / 206.0 | fnloom faster |
-| fan_in | 100 | 0.402 / 0.633 | **slower, issue to open** |
-| fan_in | 1,000 | 3.078 / 5.344 | **slower, issue to open** |
-| fan_in | 10,000 | 31.8 / 56.5 | **slower, issue to open** |
+| fan_in | 100 | 0.419 / 0.542 (post-fix) | **slower, issue to open** |
+| fan_in | 1,000 | 4.290 / 4.491 (post-fix) | **slower, issue to open** |
+| fan_in | 10,000 | 33.0 / 49.8 (post-fix) | **slower, issue to open** |
 
-Only `fan_in` builds are reliably slower, by 1.6 to 1.8 times, and each is an issue to open (none opened yet). The
-other † cells in the table, and the 10-parameter `fan_in` first execute (0.073 against 0.070 ms), were not reliably
-slower. The checks-on and checks-off builds do the same build work, since input checks run per run, so their
-differences in the table (for example chain 100, 3.664 against 1.722 ms) are noise.
+Only `fan_in` builds are reliably slower, by 1.05 to 1.5 times after the fixes (1.6 to 1.8 before; Hamilton's own
+1,000-parameter median moved from 3.078 to 4.290 ms between the two runs, so that row's narrower gap is partly
+noise), and each is an issue to open (none opened yet). The other † cells in the table, and the 10-parameter `fan_in` first execute (0.073
+against 0.070 ms), were not reliably slower. The checks-on and checks-off builds do the same build work, since input
+checks run per run, so their differences in the table (for example chain 100, 3.664 against 1.722 ms) are noise.
 
-The cost is probably per-parameter Python work in the scan, not type resolution. A `cProfile` of one fnloom build of
-`fan_in` with 10,000 parameters (0.133 s under the profiler, which inflates it) puts the scan at 44% of the total
-(`_node_defs`, 0.057 s), within it `_bind`/`resolve` 26% (0.034 s, `dataclasses.replace` once per parameter 18%) and
-one `inspect.signature` call 19% (0.025 s), and building the node views at 25% (`node_views`, 0.033 s). The rest,
-about 30%, was not broken down. `typing.get_type_hints` does not appear among the top entries.
+The remaining cost is per-parameter Python work in the scan and the node views, not type resolution. A `cProfile` of
+one post-fix fnloom build of `fan_in` with 10,000 parameters (0.107 s under the profiler, which inflates it) splits
+the build into the scan, 45% (`collect`, 0.048 s, of which one `inspect.signature` call is 21% of the build and binding
+each parameter, `_bind`, 20%); resolving the annotations, 16% (`resolve`, 0.017 s, of which `typing.get_type_hints`
+is 7%); the node views, 31% (`node_views`, 0.033 s, of which working out the input types is 17%); making the native
+graph, 6% (`_graph_of`); and the edge checks, 2%.
 
 ## Why fan-in is fast
 

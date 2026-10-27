@@ -86,10 +86,15 @@ def parameterize[F: Callable[..., object]](
     if not rows:
         msg = "parameterize needs at least one row"
         raise ValueError(msg)
-    for name, bindings in rows.items():
-        if not isinstance(bindings, Mapping):
-            msg = f"row {name!r}: expected a mapping, got {type(bindings).__name__}"
-            raise TypeError(msg)
+    # Typed as `object`: a caller may pass anything, whatever the hint says.
+    given_rows: dict[str, object] = dict(rows)
+    not_mappings = [
+        f"row {name!r}: expected a mapping, got {type(bindings).__name__}"
+        for name, bindings in sorted(given_rows.items())
+        if not isinstance(bindings, Mapping)
+    ]
+    if not_mappings:
+        raise TypeError("; ".join(not_mappings))
     frozen = {name: MappingProxyType(dict(b)) for name, b in rows.items()}
 
     def apply(fn: F) -> F:
@@ -109,10 +114,15 @@ def parameterize[F: Callable[..., object]](
 
 def tag[F: Callable[..., object]](**tags: str) -> Callable[[F], F]:
     """Attaches string tags to the node function."""
-    for key, tag_value in tags.items():
-        if not isinstance(tag_value, str):
-            msg = f"tag {key!r}: value must be str, got {type(tag_value).__name__}"
-            raise TypeError(msg)
+    # Typed as `object`: a caller may pass anything, whatever the hint says.
+    given_tags: dict[str, object] = dict(tags)
+    not_str = [
+        f"tag {key!r}: value must be str, got {type(tag_value).__name__}"
+        for key, tag_value in sorted(given_tags.items())
+        if not isinstance(tag_value, str)
+    ]
+    if not_str:
+        raise TypeError("; ".join(not_str))
 
     def apply(fn: F) -> F:
         current = decorations(fn)

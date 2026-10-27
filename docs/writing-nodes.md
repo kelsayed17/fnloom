@@ -76,8 +76,8 @@ Every parameter and the return value need a type annotation, so a graph's edges 
 The annotations are evaluated when the graph is built, as Hamilton does: string annotations
 (`from __future__ import annotations`) and forward references to a class defined further down the module are fine,
 but every name must exist at run time. An import moved under `if TYPE_CHECKING:` (as ruff's `TC003` rule suggests)
-makes the build raise that name's `NameError`, with a note naming the node and the parameter. fnloom does not check
-values against the annotations yet; that comes with the type-checking plan.
+makes the build raise that name's `NameError`, with a note naming the node and the parameter. The edges, inputs and
+overrides are then checked against these annotations: see [Type checks](running.md#type-checks).
 
 ## Modules together
 
