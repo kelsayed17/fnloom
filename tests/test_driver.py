@@ -281,7 +281,12 @@ def test_public_api_is_exported() -> None:
     assert sorted(fnloom.__all__) == [
         "Builder",
         "CachePolicy",
+        "CacheStore",
+        "CacheWarning",
+        "DiskCache",
         "Driver",
+        "MISSING",
+        "MemoryCache",
         "NodeView",
         "Param",
         "PreparedPlan",
