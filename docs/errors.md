@@ -1,7 +1,10 @@
 # Errors
 
-fnloom raises as early as it can, and every message names the culprits. A mistake in the graph is found when you
-build; a mistake in a request is found when it is planned, before any node runs.
+fnloom raises as early as it can, and every message names the culprits, so you're never left guessing which name
+was wrong.
+
+- A mistake **in the graph** is caught when you build.
+- A mistake **in a request** is caught when it's planned, before any node runs.
 
 The examples use this module and driver:
 
@@ -39,7 +42,7 @@ driver = fnloom.build(pricing)
 
 ## When you execute or prepare
 
-Each error lists every offending name, sorted. A request is checked in this order, and the first kind of mistake
+Each error lists every offending name, sorted. A request is checked in the order below, and the first kind of mistake
 found is the one raised:
 
 ```python
@@ -53,8 +56,10 @@ driver.execute(["label"], inputs={"price": 1.0})
 # raises ValueError: missing inputs: 'quantity'
 ```
 
-An input must be an input node: supplying a value for a function's name under `inputs` is an unknown input. To
-replace a function's value, use `overrides`.
+!!! tip "Replacing a function's value"
+
+    `inputs` only accepts input nodes, so passing a function's name there is an unknown input. To replace a
+    function's value, use `overrides`.
 
 The arguments are checked too:
 
@@ -63,13 +68,13 @@ driver.execute("label")
 # raises TypeError: final_vars must be a sequence of names, not a single str
 ```
 
-`inputs` and `overrides` are keyword-only, so a mapping passed positionally is a `TypeError` rather than being taken
-for one of them.
+`inputs` and `overrides` are keyword-only, so a mapping passed positionally is a `TypeError` instead of being
+mistaken for one of them.
 
 ## Type checks on a run
 
-Each input a run reads and each override is checked against its node's type before any node runs. Every value that
-does not fit is listed, one line each, sorted; the first call below raises with a second line,
+Before any node runs, each input the run reads and each override is checked against its node's type. Every value
+that doesn't fit gets its own line, sorted. The first call below raises with a second line too,
 `quantity: expected int, got float`:
 
 ```python
@@ -93,6 +98,6 @@ plan.run(inputs={"price": 1.0})
 
 ## When a node raises
 
-A node's own exception propagates unchanged, with a note naming the node (see
+Your function's own exception reaches you unchanged, with a note naming the node (see
 [Running a graph](running.md#exceptions-from-your-functions)). Lineage queries raise
-`ValueError: unknown nodes: ...` for a name that is not in the graph.
+`ValueError: unknown nodes: ...` for a name that isn't in the graph.

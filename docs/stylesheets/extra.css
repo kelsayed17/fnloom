@@ -134,3 +134,30 @@
     box-shadow: inset -1px 0 0 var(--md-typeset-table-color);
   }
 }
+
+/* Code in a table cell wraps at spaces, never mid-word, so `ValueError` stays whole. */
+.md-typeset table:not([class]) code {
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+/* Diagrams are centred, and never wider than the page. */
+.md-typeset .mermaid {
+  text-align: center;
+}
+
+@media screen and (max-width: 44.9375em) {
+  /* Tighter cards, so a phone shows more than one per screen. */
+  .md-typeset .grid.cards > ul > li {
+    padding: 0.6rem 0.8rem;
+  }
+
+  .md-typeset .grid.cards > ul > li > hr {
+    margin-block: 0.4rem;
+  }
+
+  /* Slightly smaller code, so more of each sample's line fits before it scrolls. */
+  .md-typeset pre > code {
+    font-size: 0.75rem;
+  }
+}

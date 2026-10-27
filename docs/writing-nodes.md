@@ -1,15 +1,16 @@
 # Writing nodes
 
-fnloom wires a graph by name, as Hamilton does: **a function's name is its node, and its parameter names are its
-edges.** There is nothing to register, and a plain function needs no decorator.
+fnloom wires a graph by name, just as Apache Hamilton does: **a function's name is its node, and its parameter names
+are its edges.** There's nothing to register, and a plain function needs no decorator. This page covers the few rules
+that decide what becomes a node.
 
 ## Which functions are nodes
 
-`fnloom.build(*modules)` scans each module and makes a node of every function that is
+`fnloom.build(*modules)` scans each module and makes a node of every function that is:
 
-- **public**: its name does not start with `_`;
-- **defined in that module**: a function imported from elsewhere is left out, so `from math import floor` adds no node
-  called `floor`.
+- **public**, meaning its name doesn't start with `_`;
+- **defined in that module**. Imported functions are left out, so `from math import floor` doesn't add a node called
+  `floor`.
 
 ```python
 # file: orders.py
@@ -36,8 +37,8 @@ fnloom.build(orders).node_names()
 
 ## Inputs
 
-A parameter that names no function becomes an **input** node: its value comes from the caller. Above, `quantity` is
-an input. Inputs appear in `node_names()` alongside the functions, and you supply them by name:
+A parameter that doesn't name any function becomes an **input** node, whose value comes from the caller. Above,
+`quantity` is an input. Inputs show up in `node_names()` next to the functions, and you supply them by name:
 
 ```python
 fnloom.build(orders).execute(["units"], inputs={"quantity": 7.9})
@@ -46,8 +47,8 @@ fnloom.build(orders).execute(["units"], inputs={"quantity": 7.9})
 
 ## Optional inputs
 
-A parameter with a default is **optional**. When the caller does not supply it, the function is called without it
-and its default applies:
+A parameter with a default is **optional**. If the caller doesn't supply it, the function is called without it, so
+its default applies:
 
 ```python
 # file: greeting.py
@@ -67,22 +68,28 @@ driver.execute(["greeting"], inputs={"name": "Ada", "punctuation": "."})
 # -> {'greeting': 'Hello, Ada.'}
 ```
 
-A default makes the edge optional only when it reads an input. A parameter with a default that names another function
-still reads that function's value.
+!!! note
+
+    A default only makes an edge optional when the parameter reads an input. If a parameter with a default names
+    another function, it still reads that function's value.
 
 ## Annotations
 
-Every parameter and the return value need a type annotation, so a graph's edges are typed where they are declared.
-The annotations are evaluated when the graph is built, as Hamilton does: string annotations
-(`from __future__ import annotations`) and forward references to a class defined further down the module are fine,
-but every name must exist at run time. An import moved under `if TYPE_CHECKING:` (as ruff's `TC003` rule suggests)
-makes the build raise that name's `NameError`, with a note naming the node and the parameter. The edges, inputs and
-overrides are then checked against these annotations: see [Type checks](running.md#type-checks).
+Every parameter and every return value needs a type annotation, so each edge in the graph is typed where it's
+declared. fnloom then checks edges, inputs and overrides against them; see [Type checks](running.md#type-checks).
+
+Annotations are evaluated when the graph is built, as in Hamilton. String annotations
+(`from __future__ import annotations`) and forward references to a class further down the module are fine.
+
+!!! warning "Keep annotation imports real"
+
+    Every name in an annotation must exist at run time. If you move an import under `if TYPE_CHECKING:` (as ruff's
+    `TC003` rule suggests), the build raises that name's `NameError`, with a note naming the node and the parameter.
 
 ## Modules together
 
-`fnloom.build` takes several modules, and so does `Builder.with_modules`. A function in one module can read a node
-defined in another, since nodes are matched by name across all of them:
+`fnloom.build` takes several modules, and so does `Builder.with_modules`. Nodes are matched by name across all of
+them, so a function in one module can read a node defined in another:
 
 ```python
 # file: sizes.py
@@ -108,15 +115,22 @@ driver.execute(["message"], inputs={"base": 21})
 # -> {'message': 'size 42'}
 ```
 
-`with_modules` returns a new builder rather than changing the one it was called on, so a builder can be shared and
-extended. Passing the same module twice adds its nodes once. The same name defined in two different modules is a
-`ValueError` naming both.
+A few details:
+
+- `with_modules` returns a new builder instead of changing the one you called it on, so you can share and extend a
+  builder safely.
+- Passing the same module twice adds its nodes once.
+- Defining the same name in two different modules is a `ValueError` naming both.
 
 ## One function, several nodes
 
-`@parameterize` makes one node per row from a single function. Each keyword names a node, and its mapping binds some
-of the function's parameters: `source("x")` reads the parameter from node or input `x`, and `value(v)` passes the
-constant `v`. The function itself is not a node, unless a row takes its name.
+`@parameterize` turns one function into several nodes, one per row. Each keyword names a node, and its mapping binds
+some of the function's parameters:
+
+- `source("x")` reads the parameter from the node or input `x`;
+- `value(v)` passes the constant `v`.
+
+The function itself isn't a node, unless a row takes its name.
 
 ```python
 # file: thresholds.py
@@ -154,13 +168,13 @@ driver.execute(
   changes it for the next run too.
 - A row naming a parameter the function does not have is a `ValueError` when the decorator is applied (Q33).
 
-The decorator returns the function unchanged, so it can still be called directly and keeps its signature for type
-checkers.
+The decorator returns the function unchanged, so you can still call it directly, and type checkers still see its
+signature.
 
 ## What is refused
 
-A node is called with one keyword argument per parameter and must return its value. Functions that cannot be called
-that way are refused when you build, each with a `ValueError` naming the function:
+fnloom calls a node with one keyword argument per parameter, and expects it to return its value. Functions that can't
+be called that way are refused when you build, each with a `ValueError` naming the function:
 
 | Refused | Why |
 | --- | --- |
@@ -170,5 +184,5 @@ that way are refused when you build, each with a `ValueError` naming the functio
 | `async def`, or a generator function | Calling one returns a coroutine or generator, not the node's value. |
 | A dependency cycle, including a function reading itself | A cycle has no order to run in; the error names the cycle. |
 
-Hamilton accepts the first, second and fourth silently and overflows the stack on a cycle; see
+Hamilton silently accepts the first, second and fourth, and overflows the stack on a cycle. See
 [the differences](quirk-register.md) (Q27, Q29, Q32).

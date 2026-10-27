@@ -50,6 +50,7 @@ one plan later each.
 ## Review Focus
 
 Inputs the design implies that no obvious test covers; each line has its test in the owning task.
+
 1. A row's parameter that has a default, bound by `source()` to an input the caller does not supply: the function's
    own default applies (the keyword is omitted), never `None`. Task 2.
 2. A `value()` holding a mutable object (a list): every call receives that same object, and a node that mutates it
@@ -63,7 +64,7 @@ Inputs the design implies that no obvious test covers; each line has its test in
 
 ## File Structure
 
-```
+```text
 python/fnloom/
   __init__.py        + parameterize, source, value, tag, Source, Value, NodeView, Param
   _decorators.py     NEW  Source, Value, source, value, parameterize, tag; metadata kept on the function
@@ -85,17 +86,19 @@ docs/writing-nodes.md, running.md, errors.md, from-hamilton.md, quirk-register.m
 ### Task 1: Decorators record metadata and keep the function's type
 
 **Files:**
+
 - Create: `python/fnloom/_decorators.py`, `tests/test_decorators.py`
 - Modify: `python/fnloom/__init__.py`
 
 **Interfaces:**
+
 - Produces:
-  - `@dataclass(frozen=True, slots=True) class Source: name: str` and `class Value: value: object`
-  - `def source(name: str) -> Source`; `def value(v: object) -> Value`
-  - `def parameterize[F: Callable[..., object]](**rows: Mapping[str, Source | Value]) -> Callable[[F], F]`
-  - `def tag[F: Callable[..., object]](**tags: str) -> Callable[[F], F]`
-  - `@dataclass(frozen=True) class Decorations: rows: Mapping[str, Mapping[str, Source | Value]] | None; tags: Mapping[str, str]`
-  - `def decorations(fn: Callable[..., object]) -> Decorations` (empty `Decorations(None, {})` for a plain function)
+    - `@dataclass(frozen=True, slots=True) class Source: name: str` and `class Value: value: object`
+    - `def source(name: str) -> Source`; `def value(v: object) -> Value`
+    - `def parameterize[F: Callable[..., object]](**rows: Mapping[str, Source | Value]) -> Callable[[F], F]`
+    - `def tag[F: Callable[..., object]](**tags: str) -> Callable[[F], F]`
+    - `@dataclass(frozen=True) class Decorations: rows: Mapping[str, Mapping[str, Source | Value]] | None; tags: Mapping[str, str]`
+    - `def decorations(fn: Callable[..., object]) -> Decorations` (empty `Decorations(None, {})` for a plain function)
 - Metadata lives in one attribute, `fn.__fnloom__`, holding a `Decorations`; each decorator replaces it with an
   updated copy, so stacking order does not matter.
 - Refusals at decoration time (the function is in hand): `parameterize()` with no rows is `ValueError`; a row value
@@ -103,19 +106,16 @@ docs/writing-nodes.md, running.md, errors.md, from-hamilton.md, quirk-register.m
   naming the row and parameter (Hamilton raises `InvalidDecoratorException` at build: register row **Q33**, recorded in
   Task 2); `parameterize` applied twice to one function is `ValueError`; a tag value that is not `str` is `TypeError`;
   the same tag key set twice on one function is `ValueError`.
-
-- [x] **Step 1: Write the failing tests** in `tests/test_decorators.py`:
-  `test_parameterize_returns_the_same_function` (`parameterize(a={"x": value(1)})(f) is f`);
-  `test_tag_returns_the_same_function`;
-  `test_decorators_keep_the_signature_for_type_checkers` (module-level `assert_type(rowed(1), int)` where
-  `rowed = parameterize(a={"x": value(1)})(f)` and `f(x: int) -> int`; ty must report no diagnostic);
-  `test_rows_and_tags_are_recorded_in_either_order` (`@tag` over `@parameterize` and under it give equal `decorations(f)`);
-  `test_plain_function_has_empty_decorations`;
-  `test_empty_parameterize_is_a_value_error`; `test_row_value_of_wrong_type_is_a_type_error` (`{"x": 1}`);
-  `test_row_naming_an_unknown_parameter_is_a_value_error` (message contains the row and parameter names);
-  `test_parameterize_twice_is_a_value_error`; `test_non_str_tag_is_a_type_error`;
-  `test_repeated_tag_key_is_a_value_error`; `test_public_names_are_exported` (`fnloom.parameterize`, `source`,
-  `value`, `tag`, `Source`, `Value` exist).
+- [x] **Step 1: Write the failing tests** in `tests/test_decorators.py`: `test_parameterize_returns_the_same_function`
+    (`parameterize(a={"x": value(1)})(f) is f`); `test_tag_returns_the_same_function`;
+    `test_decorators_keep_the_signature_for_type_checkers` (module-level `assert_type(rowed(1), int)` where
+    `rowed = parameterize(a={"x": value(1)})(f)` and `f(x: int) -> int`; ty must report no diagnostic);
+    `test_rows_and_tags_are_recorded_in_either_order` (`@tag` over `@parameterize` and under it give equal
+    `decorations(f)`); `test_plain_function_has_empty_decorations`; `test_empty_parameterize_is_a_value_error`;
+    `test_row_value_of_wrong_type_is_a_type_error` (`{"x": 1}`); `test_row_naming_an_unknown_parameter_is_a_value_error`
+    (message contains the row and parameter names); `test_parameterize_twice_is_a_value_error`;
+    `test_non_str_tag_is_a_type_error`; `test_repeated_tag_key_is_a_value_error`; `test_public_names_are_exported`
+    (`fnloom.parameterize`, `source`, `value`, `tag`, `Source`, `Value` exist).
 - [x] **Step 2: Run** `uv run pytest tests/test_decorators.py -v`. Expected: FAIL, `ImportError`.
 - [x] **Step 3: Implement** `_decorators.py` with the signatures above and add the six names to `__init__.__all__`.
 - [x] **Step 4: Run** `bash scripts/check.sh`. Expected: exit 0, including ty on `tests/test_decorators.py`.
@@ -124,6 +124,7 @@ docs/writing-nodes.md, running.md, errors.md, from-hamilton.md, quirk-register.m
 ### Task 2: Lowering `@parameterize` rows into nodes
 
 **Files:**
+
 - Create: `python/fnloom/_view.py` (only `Param` in this task), `tests/test_lowering.py`,
   `tests/differential/fixtures/rows_h.py`, `tests/differential/fixtures/rows_f.py`
 - Modify: `python/fnloom/_scan.py`, `python/fnloom/driver.py` (`_graph_of`), `tests/differential/test_semantics.py`,
@@ -131,23 +132,24 @@ docs/writing-nodes.md, running.md, errors.md, from-hamilton.md, quirk-register.m
   `docs/from-hamilton.md`
 
 **Interfaces:**
+
 - Consumes: Task 1's `decorations`, `Source`, `Value`.
 - Produces:
-  - `@dataclass(frozen=True) class Param: name: str; binding: Source | Value; required: bool; annotation: object`
-    (`name` is the function's parameter; a plain parameter is `binding=Source(name)`; `required` is False when the
-    parameter has a default; a `Value`-bound parameter has `required=True`)
-  - `NodeDef` becomes `(name: str, params: tuple[Param, ...], tags: Mapping[str, str], payload: Callable[..., object],
-    origin: Callable[..., object], module: str, returns: object)`; `origin` is the decorated function, `payload`
-    what the core calls.
-  - `def core_inputs(params: tuple[Param, ...]) -> list[tuple[str, bool]]`: distinct `Source` names in first-appearance
-    order; one is required if any parameter bound to it is required. `_graph_of` passes these and `payload`.
+    - `@dataclass(frozen=True) class Param: name: str; binding: Source | Value; required: bool; annotation: object`
+      (`name` is the function's parameter; a plain parameter is `binding=Source(name)`; `required` is False when the
+      parameter has a default; a `Value`-bound parameter has `required=True`)
+    - `NodeDef` becomes `(name: str, params: tuple[Param, ...], tags: Mapping[str, str], payload: Callable[..., object],
+      origin: Callable[..., object], module: str, returns: object)`; `origin` is the decorated function, `payload`
+      what the core calls.
+    - `def core_inputs(params: tuple[Param, ...]) -> list[tuple[str, bool]]`: distinct `Source` names in
+        first-appearance order; one is required if any parameter bound to it is required. `_graph_of` passes these and
+        `payload`.
 - Lowering rules: a function with rows yields one node per row, named by the row key, and no node of its own name
   (unless a row has that name); parameters a row does not mention stay `Source(<parameter>)`; the payload is
   `origin` itself when every binding is `Source(<own name>)`, else a bound call that builds the function's keywords
   from the core's (a parameter whose source was not supplied is omitted so its default applies) plus the `Value`s,
   passing each `Value` object itself, uncopied. A private (underscore) or imported decorated function yields no nodes,
   exactly as for plain functions.
-
 - [x] **Step 1: Write failing unit tests** in `tests/test_lowering.py`:
   `test_each_row_is_a_node_and_the_function_is_not`; `test_source_renames_an_edge`;
   `test_value_binds_a_constant_and_is_not_an_edge`; `test_unmentioned_parameter_stays_an_edge_of_its_own_name`;
@@ -184,20 +186,22 @@ docs/writing-nodes.md, running.md, errors.md, from-hamilton.md, quirk-register.m
 ### Task 3: Resolved annotations, readable tags and the graph view
 
 **Files:**
+
 - Modify: `python/fnloom/_view.py`, `python/fnloom/_scan.py`, `python/fnloom/driver.py`, `python/fnloom/__init__.py`,
   `docs/quirk-register.md` (Q2, Q28, new Q34), `docs/running.md`
 - Create: `tests/test_view.py`, `tests/differential/fixtures/{tags_h,tags_f,typed,typed_future}.py`
 
 **Interfaces:**
+
 - Consumes: Task 2's `NodeDef`, `Param`.
 - Produces:
-  - `@dataclass(frozen=True) class NodeView`: `name: str`; `type: object` (a function node's resolved return
-    annotation; an input's resolved type, below); `is_input: bool`; `origin: Callable[..., object] | None` (`None`
-    for an input); `module: str | None`; `params: tuple[Param, ...]` (declaration order; `()` for an input);
-    `tags: Mapping[str, str]` (read-only); `doc: str | None` (the origin's docstring); and the property
-    `dependencies -> tuple[str, ...]` (the distinct `Source` names, sorted).
-  - `Driver.nodes -> Mapping[str, NodeView]`: a read-only mapping, iterating in sorted name order, built once at
-    `Builder.build`.
+    - `@dataclass(frozen=True) class NodeView`: `name: str`; `type: object` (a function node's resolved return
+      annotation; an input's resolved type, below); `is_input: bool`; `origin: Callable[..., object] | None` (`None`
+      for an input); `module: str | None`; `params: tuple[Param, ...]` (declaration order; `()` for an input);
+      `tags: Mapping[str, str]` (read-only); `doc: str | None` (the origin's docstring); and the property
+      `dependencies -> tuple[str, ...]` (the distinct `Source` names, sorted).
+    - `Driver.nodes -> Mapping[str, NodeView]`: a read-only mapping, iterating in sorted name order, built once at
+      `Builder.build`.
 - Annotations are resolved at build with `annotationlib.get_annotations(fn, format=Format.VALUE, eval_str=True)`,
   so string annotations (`from __future__ import annotations`) and forward references to names defined anywhere in
   the module resolve. A name that does not resolve (for example one imported only under `TYPE_CHECKING`) raises the
@@ -209,7 +213,6 @@ docs/writing-nodes.md, running.md, errors.md, from-hamilton.md, quirk-register.m
   `NodeView.module`.
 - `NodeView` and `Param` are exported from `fnloom`. Q2 is FIXED by `Driver.nodes`, except that the node's own
   callable is not exposed: a prepared plan replaces the replay it was used for (update the Q2 row's fnloom column).
-
 - [x] **Step 1: Write failing tests** in `tests/test_view.py`:
   `test_function_node_view_fields` (type, origin, module, params with bindings, doc, `is_input is False`);
   `test_input_node_view_fields` (`origin is None`, `params == ()`, type from its consumer);
@@ -236,16 +239,18 @@ docs/writing-nodes.md, running.md, errors.md, from-hamilton.md, quirk-register.m
 ### Task 4: The type-matching functions, proven against Hamilton's
 
 **Files:**
+
 - Create: `python/fnloom/_types.py`, `tests/test_types.py`
 - Modify: `tests/differential/test_semantics.py`, `tests/differential/test_deliberate_differences.py`,
   `docs/quirk-register.md`, `python/fnloom/_view.py` (input-type narrowing from Task 3)
 
 **Interfaces:**
+
 - Produces:
-  - `def value_matches(declared: object, value: object) -> bool`: whether a supplied input or override value fits
-    the declared type. `None` fits every declaration (Hamilton KEEP).
-  - `def type_matches(produced: object, required: object) -> bool`: whether a node returning `produced` may feed a
-    parameter annotated `required`.
+    - `def value_matches(declared: object, value: object) -> bool`: whether a supplied input or override value fits
+      the declared type. `None` fits every declaration (Hamilton KEEP).
+    - `def type_matches(produced: object, required: object) -> bool`: whether a node returning `produced` may feed a
+      parameter annotated `required`.
 - The matrix (design §10). Types: `int`, `float`, `bool`, `str`, `object`, `Any`, a user class `Base` and its
   subclass `Child`, `list`, `list[int]`, `dict[str, int]`, `tuple[int, ...]`, `collections.abc.Sequence`,
   `Sequence[int]`, `int | None`, `Optional[int]`, `int | str`, `Literal[1, 2]`, `Annotated[int, "m"]`, a plain
@@ -254,7 +259,6 @@ docs/writing-nodes.md, running.md, errors.md, from-hamilton.md, quirk-register.m
 - The oracle is `hamilton.htypes`: `check_input_type(node_type, input_value)` for `value_matches`, and
   `types_match(param_type, required_node_type)` for `type_matches`. Read the latter's body before mapping
   `produced`/`required` onto its two arguments; the parameter names alone are ambiguous.
-
 - [x] **Step 1: Write failing tests.** `tests/test_types.py`: `test_none_fits_every_declaration`;
   `test_subclass_fits_its_base_and_not_the_reverse`; `test_any_fits_everything`;
   `test_bool_for_int_answers_as_the_oracle` and `test_int_for_float_answers_as_the_oracle` (Review Focus 4; the
@@ -275,23 +279,25 @@ docs/writing-nodes.md, running.md, errors.md, from-hamilton.md, quirk-register.m
 ### Task 5: Edge checks at build; input and override checks at run; the opt-out
 
 **Files:**
+
 - Modify: `python/fnloom/driver.py`, `docs/running.md`, `docs/errors.md`, `docs/quirk-register.md` (Q10, Q22)
 - Create: `tests/test_type_checks.py`
 - Modify: `tests/differential/test_semantics.py`, `tests/differential/test_deliberate_differences.py`
 
 **Interfaces:**
+
 - Consumes: Task 3's `NodeView`, Task 4's `value_matches`, `type_matches`.
 - Produces:
-  - Edge checks in `Builder.build`, always on: for every `Source` parameter whose upstream is a function node,
-    `type_matches(upstream.type, param.annotation)`; all failures in one `ValueError`, each line
-    `"<node>.<param> requires <required> but <upstream> returns <produced>"`, sorted.
-  - `Builder.without_input_type_checks() -> Builder` (a new builder, like `with_modules`); `Driver` carries the flag.
-  - `PreparedPlan` compiles, at prepare time, the checks its runs need: each supplied input the plan reads (an
-    `UseInput` step in `_core.Plan.steps()`) against that input's `NodeView.type`, and each override against the
-    overridden node's `NodeView.type` (Q22). A step's action string for a read input is `"use_input"`. `run` applies them, unless checks are off, and raises one `ValueError`
-    listing every failure, sorted, each `"<name>: expected <declared>, got <type of value>"`. A supplied input that
-    no step reads is not checked (as Hamilton).
-
+    - Edge checks in `Builder.build`, always on: for every `Source` parameter whose upstream is a function node,
+      `type_matches(upstream.type, param.annotation)`; all failures in one `ValueError`, each line
+      `"<node>.<param> requires <required> but <upstream> returns <produced>"`, sorted.
+    - `Builder.without_input_type_checks() -> Builder` (a new builder, like `with_modules`); `Driver` carries the flag.
+    - `PreparedPlan` compiles, at prepare time, the checks its runs need: each supplied input the plan reads (an
+        `UseInput` step in `_core.Plan.steps()`) against that input's `NodeView.type`, and each override against the
+        overridden node's `NodeView.type` (Q22). A step's action string for a read input is `"use_input"`. `run` applies
+        them, unless checks are off, and raises one `ValueError` listing every failure, sorted, each
+        `"<name>: expected <declared>, got <type of value>"`. A supplied input that no step reads is not checked (as
+        Hamilton).
 - [x] **Step 1: Write failing tests** in `tests/test_type_checks.py`:
   `test_mismatched_edge_fails_build_naming_node_param_and_upstream`;
   `test_all_edge_mismatches_are_listed_together_sorted`;
@@ -318,15 +324,16 @@ docs/writing-nodes.md, running.md, errors.md, from-hamilton.md, quirk-register.m
 ### Task 6: Benchmarks and release notes for the new surface
 
 **Files:**
+
 - Modify: `benches/generate.py`, `benches/run.py`, `tests/test_bench_generate.py`, `docs/benchmarks.md`, `CHANGELOG.md`
 
 **Interfaces:**
+
 - Produces: `make_module(shape: Literal["chain", "fan_in", "layered", "rows"], n: int)`, where `"rows"` is one
   function with `n` `@parameterize` rows, each sourcing the previous row (the module is generated twice, in
   Hamilton's and fnloom's spelling, so `make_module` gains `spelling: Literal["hamilton", "fnloom"] = "fnloom"`).
   `benches/run.py` rows gain `"input_checks": bool`; fnloom is measured with checks on and off, Hamilton as it ships
   (checks on).
-
 - [x] **Step 1: Write a failing test** `test_bench_generate.py::test_rows_shape_has_n_nodes_in_both_spellings`.
 - [x] **Step 2: Run** `uv run pytest tests/test_bench_generate.py -v`. Expected: FAIL.
 - [x] **Step 3: Implement** the shape and the column.

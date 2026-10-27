@@ -21,8 +21,8 @@ One script runs every check, and CI runs the same one:
 bash scripts/check.sh
 ```
 
-It runs rustfmt, Clippy, rustdoc, the Rust tests, maturin, ruff, ty and pytest, in that order, and stops at the first
-failure.
+It runs rustfmt, Clippy, rustdoc, the Rust tests, maturin, ruff, rumdl (Markdown lint), ty and pytest, in that order,
+and stops at the first failure.
 
 - **Lints are strict.** Clippy denies `pedantic` and the panic lints (`unwrap_used`, `expect_used`, `panic`); ruff
   selects every rule; ty treats every rule as an error. Fix the cause of a finding. When a suppression is the right
@@ -39,7 +39,7 @@ Preview the docs site with `uv run --group docs zensical serve`.
 
 ## Differences from Hamilton
 
-Hamilton 1.90.0 is the behavioural oracle. `tests/differential/` runs each case through both runtimes:
+Apache Hamilton 1.90.0 is the behavioural oracle. `tests/differential/` runs each case through both runtimes:
 
 - `test_semantics.py` asserts that both give the same values or the same exception class.
 - `test_deliberate_differences.py` asserts each deliberate difference, on both sides, under

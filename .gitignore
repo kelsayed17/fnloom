@@ -6,3 +6,13 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 site/
+.rumdl_cache/
+.cache/
+dist/
+*.whl
+.DS_Store
+# Benchmark output, written at the repository root by the commands in benches/README.md.
+bench.jsonl
+bench.stderr
+# Local Claude Code settings and worktrees.
+.claude/

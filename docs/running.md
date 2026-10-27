@@ -1,6 +1,7 @@
 # Running a graph
 
-The examples on this page use one module:
+Everything about calling a graph: inputs, overrides, prepared plans, type checks, lineage and inspection. The
+examples on this page all use one module:
 
 ```python
 # file: pricing.py
@@ -28,34 +29,35 @@ driver = fnloom.build(pricing)
 
 ## Execute
 
-`execute(final_vars, *, inputs=None, overrides=None)` computes the nodes named in `final_vars` and returns a dict with
-exactly those, in the order you asked for them, each once:
+`execute(final_vars, *, inputs=None, overrides=None)` computes the nodes named in `final_vars`. It returns a dict with
+exactly those, each once, in the order you asked for them:
 
 ```python
 driver.execute(["label", "total"], inputs={"price": 2.5, "quantity": 4})
 # -> {'label': '10.00 EUR', 'total': 10.0}
 ```
 
-Only the nodes the outputs need run. Every required input on the way must be supplied, and every name you pass must
-be a node of the graph: a misspelled input is an error, not a value that is silently ignored.
+Only the nodes your outputs need will run. You must supply every required input on the way, and every name you pass
+must be a node in the graph. A misspelled input is an error, never a value that's quietly ignored.
 
 ## Overrides
 
-`overrides` supplies a node's value in place of computing it, and cuts off everything behind it. Overriding `total`
-means `price` and `quantity` are no longer needed:
+`overrides` supplies a node's value instead of computing it, and cuts off everything upstream of it. Override
+`total`, and `price` and `quantity` are no longer needed:
 
 ```python
 driver.execute(["label"], overrides={"total": 100.0})
 # -> {'label': '100.00 EUR'}
 ```
 
-An override may name any node, a function or an input. It beats a supplied input of the same name, and it satisfies
-a required input that was not supplied.
+An override can name any node, whether a function or an input. It wins over a supplied input of the same name, and
+it fills in for a required input you didn't supply.
 
 ## Prepared plans
 
 Each `execute` call compiles a plan for its request: which nodes run, in what order, and when each value can be
-released. `prepare` does that once and returns the plan, which runs as often as you like:
+freed. `prepare` does that work once and hands you the plan, which you can run as often as you like. This is the
+fastest way to run the same graph in a loop:
 
 ```python
 plan = driver.prepare(["label"], inputs={"price": 0.0, "quantity": 0})
@@ -65,19 +67,26 @@ plan.run(inputs={"price": 4.0, "quantity": 3})
 # -> {'label': '12.00 EUR'}
 ```
 
-A plan is compiled for its outputs and for the **names** of its inputs and overrides, not their values, so the values
-passed to `prepare` are placeholders. `run` must be given the same names, or it raises a `ValueError` saying how they
-differ.
+A plan is compiled for its outputs and for the **names** of its inputs and overrides, not their values. The values
+you pass to `prepare` are just placeholders. `run` must get the same names, or it raises a `ValueError` saying how
+they differ.
 
-`execute` keeps the plans it compiles, keyed by the outputs and the input and override names, so repeated calls of the
-same shape skip compiling. It keeps the 128 most recently used.
+!!! tip "`execute` caches plans too"
+
+    `execute` keeps the 128 most recently used plans, keyed by the outputs and the input and override names. Repeated
+    calls of the same shape skip compiling, so `prepare` mostly saves you the cache lookup.
 
 ## Type checks
 
-Types are checked at two points, against the annotations the build evaluated.
+fnloom checks types at two points, against your annotations:
 
-**Edges, at build.** Every parameter fed by another function's node must accept that node's return type. A mismatch
-fails the build, with one `ValueError` listing every such parameter, sorted:
+- **edges**, once, when you build;
+- **inputs and overrides**, on every run, before any node runs.
+
+### Edges, at build
+
+Every parameter fed by another function must accept that function's return type. A mismatch fails the build, with one
+`ValueError` listing every such parameter, sorted:
 
 ```python
 # file: mismatched.py
@@ -98,49 +107,72 @@ fnloom.build(mismatched)
 # raises ValueError: doubled.count requires int but count returns str
 ```
 
-A node's return type feeds a parameter when it is the same type or a subclass, when either side is `Any`, when every
-member of a returned union is accepted, or when one member of a parameter's union accepts it. A generic matches by
-its kind, and by its arguments when both sides name them.
+A return type feeds a parameter when:
 
-Some edges that you might expect to pass are refused, as Hamilton refuses them (for the protocol, Hamilton raises a
-`TypeError` instead, Q42): a node returning `int` feeding a `float` parameter, `Callable[[int], int]` feeding
-`Callable[..., int]`, `tuple[int, int]` feeding `tuple[int, ...]`, and a class feeding a parameter annotated with a
-plain protocol (one not marked `runtime_checkable`), even when the class conforms to it. Edge checks cannot be turned
-off, so annotate the producer with the parameter's type (`-> float`, `-> Callable[..., int]`, `-> tuple[int, ...]`,
-or the protocol itself), or mark the protocol `@runtime_checkable`.
+- it's the same type or a subclass;
+- either side is `Any`;
+- it's a union and the parameter accepts every member, or the parameter is a union and one member accepts it;
+- it's a generic of the same kind, with matching arguments when both sides name them.
 
-**Inputs and overrides, on each run.** Each input that the plan reads is checked against the input's type, and each
-override against the overridden node's return type, before any node runs. The values that do not fit are listed in
-one `ValueError`, sorted, each as `<name>: expected <type>, got <type of the value>`:
+!!! warning "Edges you might expect to pass, but that don't"
+
+    These are refused, just as Hamilton refuses them (for the protocol, Hamilton raises a `TypeError` instead, Q42):
+
+    | Producer returns | Parameter wants | Fix: annotate the producer as |
+    | --- | --- | --- |
+    | `int` | `float` | `-> float` |
+    | `Callable[[int], int]` | `Callable[..., int]` | `-> Callable[..., int]` |
+    | `tuple[int, int]` | `tuple[int, ...]` | `-> tuple[int, ...]` |
+    | a class | a plain (not `runtime_checkable`) protocol it conforms to | the protocol, or mark it `@runtime_checkable` |
+
+    Edge checks can't be turned off: a graph whose edges disagree is a bug, whatever you supply.
+
+### Inputs and overrides, on each run
+
+Before any node runs, each input the plan reads is checked against the input's type, and each override against the
+overridden node's return type. Every value that doesn't fit is listed in one `ValueError`, sorted, each as
+`<name>: expected <type>, got <type of the value>`:
 
 ```python
 driver.execute(["total"], inputs={"price": "2.5", "quantity": 4})
 # raises ValueError: price: expected float, got str
 ```
 
-`None` fits every type. An input supplied but not read by the plan is not checked, but every override is, even one
-for a node the plan never reaches. Which checks a plan needs is worked out once, when it is prepared, so a run only
-checks the values.
+A few rules worth knowing:
 
-**What the checks understand.** Classes, including your own and their subclasses; `Any`; `object`; unions and
-`Optional`; `Literal`; `Annotated[T, ...]`, checked as `T`; `NewType`, checked as its supertype; `TypeVar`, which
-takes any value and, on an edge, matches only itself; runtime-checkable protocols, checked with `isinstance`; PEP 695
-aliases (`type Price = float`), checked as what they name; and the collections `list`, `list[T]`, `dict[K, V]`,
-`tuple[T, ...]`, `Sequence` and `Sequence[T]`. A value of exactly the collection's own class is checked by its class
-alone, so `["a"]` fits `list[int]`; another value of a sequence or iterable such as `Sequence[int]` is checked by its
-kind and its first element only. Every other parameterized type from `collections.abc`, such as `Mapping[str, int]`,
-`Set[int]` or `Callable[[int], int]`, is checked by its kind alone, with `isinstance`: any `dict` fits
-`Mapping[str, int]` and any function fits `Callable[[int], int]`. An iterator is checked by its kind alone and is
-never read.
+- `None` fits every type.
+- An input you supply but the plan never reads isn't checked. Every override is, even one for a node the plan never
+  reaches.
+- The checks a plan needs are worked out once, when it's prepared, so a run only checks values. Checking against a
+  plain class like `int` costs one `isinstance` call.
+
+### What the checks understand
+
+| Annotation | How a value is checked |
+| --- | --- |
+| A class (yours or built-in), `object` | `isinstance`, so subclasses fit |
+| `Any` | Anything fits |
+| Unions, `Optional`, `Literal` | Against each member or value |
+| `Annotated[T, ...]` | As `T`; metadata never changes the answer |
+| `NewType` | As its supertype |
+| `TypeVar` | Anything fits; on an edge it matches only itself |
+| A `runtime_checkable` protocol | `isinstance` |
+| A PEP 695 alias (`type Price = float`) | As what it names |
+| `list`, `list[T]`, `dict[K, V]`, `tuple[T, ...]` | By class only, so `["a"]` fits `list[int]` |
+| `Sequence[T]`, `Iterable[T]` | By kind, plus the first element |
+| Other `collections.abc` generics (`Mapping[str, int]`, `Callable[[int], int]`, ...) | By kind only, so any `dict` fits `Mapping[str, int]` |
+| An iterator | By kind only. It's never read, so no items are lost |
 
 A generic alias such as `Pair[int]`, for `type Pair[T] = tuple[T, T]`, is read as `tuple[int, int]` when its value
-uses its type parameters in the order it declares them; one that reorders them is compared as written. On an edge,
-an alias inside another generic's arguments is compared as written too, so a node returning `list[float]` does not
-feed a `list[Price]` parameter.
+uses its type parameters in the order it declares them. One that reorders them is compared as written. On an edge, an
+alias inside another generic's arguments is compared as written too, so a node returning `list[float]` doesn't feed a
+`list[Price]` parameter.
 
-Other forms are unsupported and, as written, refuse every value but `None`: for example a plain protocol (one that is
-not runtime-checkable), or a subclass of a concrete generic's class, such as an `OrderedDict` for `dict[str, int]`.
-Annotate with a supported form, or build with `Builder.without_input_type_checks()`:
+### Unsupported annotations
+
+Anything else refuses every value except `None`. Two examples are a plain protocol (one not marked
+`runtime_checkable`), and a subclass of a concrete generic's class, such as an `OrderedDict` for `dict[str, int]`.
+Either annotate with a supported form, or build with `Builder.without_input_type_checks()`:
 
 ```python
 lenient = fnloom.Builder().with_modules(pricing).without_input_type_checks().build()
@@ -148,14 +180,14 @@ lenient.execute(["total"], inputs={"price": 2, "quantity": 4})
 # -> {'total': 8}
 ```
 
-The opt-out turns off the input and override checks only. Edge checks stay on: they need no values, so they cost
-nothing per run, and a graph whose edges disagree is a bug whatever is supplied.
+The opt-out turns off only the input and override checks. Edge checks stay on: they cost nothing per run, and a graph
+whose edges disagree is a bug whatever you supply.
 
 ## Execution order
 
-Nodes run in topological order, and nodes that could run in either order run in order of their names. The order does
-not depend on the order of `final_vars` or of a function's parameters, so side effects and logs come out the same way
-on every run.
+Nodes run in topological order, and when two nodes could run in either order, they run in order of their names. The
+order never depends on how you list `final_vars` or a function's parameters, so logs and side effects come out the
+same way on every run.
 
 ## Lineage
 
@@ -168,7 +200,7 @@ driver.what_is_downstream_of("total")
 # -> ['discounted', 'label', 'total']
 ```
 
-Each query returns sorted names, and includes the nodes you named. `node_names()` lists every node, inputs included.
+Each query returns sorted names, including the nodes you named. `node_names()` lists every node, inputs included.
 
 ## Inspecting a graph
 
@@ -190,9 +222,9 @@ view.doc
 # -> [('total', True), ('discount', False)]
 ```
 
-`origin` is the function the node came from and `module` its module's name; `tags` are the ones written with `@tag`.
-An input has no function: its `origin`, `module` and `doc` are `None`, its `params` are empty, and its `type` is the
-annotation of the parameters that read it:
+`origin` is the function the node came from, `module` is its module's name, and `tags` are the ones you wrote with
+`@tag`. An input has no function, so its `origin`, `module` and `doc` are `None` and its `params` are empty. Its `type`
+is the annotation of the parameters that read it:
 
 ```python
 driver.nodes["quantity"].type
@@ -201,15 +233,19 @@ driver.nodes["quantity"].origin is None
 # -> True
 ```
 
-The view is built once, when the graph is built. Annotations are evaluated then too, so a module written with
-`from __future__ import annotations` gives the same types as one without it, and an annotation may name a class
-defined further down the module. A name that does not resolve, such as one imported only under `TYPE_CHECKING`, fails
-the build with its `NameError`, with a note naming the node and the parameter. When the functions reading one input
-annotate it with different types, the build raises a `ValueError` naming the input and each function.
+The view is made once, when the graph is built, and annotations are evaluated then too. That means:
+
+- a module using `from __future__ import annotations` gives the same types as one without it;
+- an annotation can name a class defined further down the module;
+- a name that doesn't resolve, such as one imported only under `TYPE_CHECKING`, fails the build with its `NameError`
+  and a note naming the node and the parameter;
+- if two functions annotate the same input with types that disagree, the build raises a `ValueError` naming the input
+  and each function.
 
 ## Exceptions from your functions
 
-When a node's function raises, the run stops and the exception propagates as itself, with a note naming the node:
+When one of your functions raises, the run stops and the exception reaches you unchanged, with a note naming the
+node:
 
 ```python
 # file: ratios.py
@@ -226,4 +262,4 @@ broken.execute(["ratio"], inputs={"numerator": 1, "denominator": 0})
 # raises ZeroDivisionError: division by zero
 ```
 
-Python prints the note, `in node 'ratio'`, under the traceback; it is also in the exception's `__notes__`.
+Python prints the note, `in node 'ratio'`, under the traceback. It's also in the exception's `__notes__`.
