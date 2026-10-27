@@ -1,9 +1,13 @@
 """Each deliberate difference from Hamilton, asserted on both sides."""
 
-from typing import Any
+import collections.abc
+from typing import Annotated, Any
 
 import pytest
 from hamilton import driver as hamilton_driver
+from hamilton import htypes
+from hamilton.function_modifiers.base import InvalidDecoratorException
+from hamilton.lifecycle import NoEdgeAndInputTypeChecking
 from harness import (
     Nodes,
     Outcome,
@@ -13,8 +17,20 @@ from harness import (
     run_fnloom,
     run_hamilton,
 )
+from test_semantics import DELIBERATE
+from type_matrix import (
+    TYPES,
+    Base,
+    Checkable,
+    Child,
+    fnloom_type,
+    fnloom_value,
+    hamilton_type,
+    hamilton_value,
+)
 
 import fnloom
+from fnloom._types import type_matches, value_matches
 from helpers import make_module
 
 
@@ -178,3 +194,345 @@ def test_q31_inputs_and_overrides_are_keyword_only() -> None:
     assert hamilton.execute(["c"], {"b": 10}) == {"c": 20}
     with pytest.raises(TypeError):
         fnloom.build(module).execute(["c"], {"b": 10})  # ty: ignore[too-many-positional-arguments]  # the positional call is the point
+
+
+@pytest.mark.deliberate("Q33")
+def test_q33_row_naming_an_unknown_parameter() -> None:
+    """Both refuse the row when decorating; only fnloom's error is a `ValueError`."""
+    body = """
+@parameterize(out={"missing": source("a")})
+def f(x: int) -> int:
+    return x
+"""
+    hamilton_header = "from hamilton.function_modifiers import parameterize, source\n"
+    with pytest.raises(InvalidDecoratorException, match="missing") as hamilton:
+        make_module("differential_unknown_h", hamilton_header + body)
+    assert not isinstance(hamilton.value, ValueError)
+    with pytest.raises(ValueError, match="'missing'"):
+        make_module(
+            "differential_unknown_f", "from fnloom import parameterize, source\n" + body
+        )
+
+
+@pytest.mark.deliberate("Q35")
+def test_q35_defaulted_parameter_bound_to_an_unsupplied_source() -> None:
+    """Hamilton raises `KeyError`; fnloom omits the keyword, so the default applies."""
+    inputs = {"numbers": [1, 2, 3]}
+    assert run_hamilton([load_fixture("rows_h")], ["shifted_total"], inputs) == (
+        Outcome(None, "KeyError")
+    )
+    assert run_fnloom([load_fixture("rows_f")], ["shifted_total"], inputs) == (
+        Outcome({"shifted_total": 106}, None)
+    )
+
+
+@pytest.mark.deliberate("Q34")
+def test_tags_match_hamilton_except_module() -> None:
+    """Hamilton tags each function node with its module; fnloom does not.
+
+    fnloom's tags are only the author's, and inputs carry no tags in either.
+    """
+    tags_h, tags_f = load_fixture("tags_h"), load_fixture("tags_f")
+    hamilton = {
+        node.name: node.tags
+        for node in hamilton_driver.Builder()
+        .with_modules(tags_h)
+        .build()
+        .list_available_variables()
+    }
+    views = fnloom.build(tags_f).nodes
+    assert sorted(hamilton) == list(views)
+    for name, view in views.items():
+        if view.is_input:
+            assert hamilton[name] == {}, name
+            assert dict(view.tags) == {}, name
+            assert view.module is None, name
+        else:
+            assert hamilton[name] == {**view.tags, "module": tags_h.__name__}, name
+            assert view.module == tags_f.__name__, name
+    assert dict(views["low"].tags) == {"owner": "limits"}
+
+
+@pytest.mark.deliberate("Q36")
+def test_q36_list_valued_tag() -> None:
+    """Hamilton accepts a list of strings as a tag value; fnloom raises `TypeError`."""
+    body = """
+@tag(kind=["a", "b"])
+def f(x: int) -> int:
+    return x
+"""
+    hamilton_module = make_module(
+        "differential_list_tag_h",
+        "from hamilton.function_modifiers import tag\n" + body,
+    )
+    built = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    (node,) = (n for n in built.list_available_variables() if n.name == "f")
+    assert node.tags["kind"] == ["a", "b"]
+    with pytest.raises(TypeError, match="'kind'"):
+        make_module("differential_list_tag_f", "from fnloom import tag\n" + body)
+
+
+def _pairs(quirk: str) -> list[tuple[str, str]]:
+    return [pair for pair, row in DELIBERATE.items() if row == quirk]
+
+
+@pytest.mark.deliberate("Q37")
+def test_q37_homogeneous_tuple() -> None:
+    """Hamilton refuses `(1, 2)` for `tuple[int, ...]` and its `Sequence[int]` edge."""
+    assert hamilton_value("tuple[int, ...]", "(1, 2)") is False
+    assert fnloom_value("tuple[int, ...]", "(1, 2)") is True
+    assert hamilton_type("tuple[int, ...]", "Sequence[int]") is False
+    assert fnloom_type("tuple[int, ...]", "Sequence[int]") is True
+    assert _pairs("Q37") == [
+        ("tuple[int, ...]", "(1, 2)"),
+        ("tuple[int, ...]", "Sequence[int]"),
+    ]
+
+
+@pytest.mark.deliberate("Q38")
+def test_q38_new_type_answers_as_its_supertype() -> None:
+    """Hamilton rejects each value of a `NewType` over `int` and each edge from it."""
+    for value in ("1", "True"):
+        assert hamilton_value("NewType(int)", value) is False, value
+        assert fnloom_value("NewType(int)", value) is True, value
+    edges = [pair for pair in _pairs("Q38") if pair[1] in TYPES]
+    assert [required for _, required in edges] == [
+        "int",
+        "object",
+        "int | None",
+        "Optional[int]",
+        "int | str",
+        "Annotated[int, 'm']",
+    ]
+    for produced, required in edges:
+        assert hamilton_type(produced, required) is False, required
+        assert fnloom_type(produced, required) is True, required
+
+
+@pytest.mark.deliberate("Q39")
+def test_q39_literal_producer_answers_as_its_values_types() -> None:
+    """Hamilton refuses a `Literal[1, 2]` node feeding `int` and every type over it."""
+    edges = _pairs("Q39")
+    assert [required for _, required in edges] == [
+        "int",
+        "object",
+        "int | None",
+        "Optional[int]",
+        "int | str",
+        "Annotated[int, 'm']",
+    ]
+    for produced, required in edges:
+        assert hamilton_type(produced, required) is False, required
+        assert fnloom_type(produced, required) is True, required
+    assert hamilton_type("Literal[1, 2]", "str") is False
+    assert fnloom_type("Literal[1, 2]", "str") is False
+
+
+@pytest.mark.deliberate("Q40")
+def test_q40_union_producer_feeds_object() -> None:
+    """Hamilton refuses a union producer feeding `object`; fnloom checks each member."""
+    edges = _pairs("Q40")
+    assert edges == [
+        ("int | None", "object"),
+        ("Optional[int]", "object"),
+        ("int | str", "object"),
+    ]
+    for produced, required in edges:
+        assert hamilton_type(produced, required) is False, produced
+        assert fnloom_type(produced, required) is True, produced
+    assert hamilton_type("int | None", "int") is False
+    assert fnloom_type("int | None", "int") is False
+
+
+@pytest.mark.deliberate("Q41")
+def test_q41_annotated_is_checked_as_its_type() -> None:
+    """Hamilton checks an `Annotated` input by exact type; fnloom as the bare type."""
+    assert hamilton_value("int", "True") is True
+    assert hamilton_value("Annotated[int, 'm']", "True") is False
+    assert fnloom_value("Annotated[int, 'm']", "True") is True
+    declared = Annotated[Base, "m"]
+    assert htypes.check_input_type(declared, Child()) is False  # ty: ignore[invalid-argument-type]  # Hamilton's hint is narrower than what it accepts
+    assert value_matches(declared, Child()) is True
+    assert _pairs("Q41") == [("Annotated[int, 'm']", "True")]
+
+
+class _HasSize:
+    """Conforms to `Checkable` without naming it."""
+
+    def size(self) -> int:
+        """Always 1."""
+        return 1
+
+
+@pytest.mark.deliberate("Q42")
+def test_q42_protocols() -> None:
+    """Hamilton raises `TypeError` on a plain-protocol edge; it rejects a conformer."""
+    edges = _pairs("Q42")
+    assert [produced for produced, _ in edges] == [
+        "int",
+        "float",
+        "bool",
+        "str",
+        "object",
+        "Base",
+        "Child",
+        "list",
+        "Sequence",
+        "runtime Protocol",
+    ]
+    for produced, required in edges:
+        assert hamilton_type(produced, required) == "TypeError", produced
+        assert fnloom_type(produced, required) is False, produced
+    assert hamilton_type("Protocol", "Protocol") is True
+    assert fnloom_type("Protocol", "Protocol") is True
+    assert htypes.check_input_type(Checkable, _HasSize()) is False
+    assert value_matches(Checkable, _HasSize()) is True
+    assert htypes.types_match(Checkable, _HasSize) is True  # ty: ignore[invalid-argument-type]  # Hamilton's hint is narrower than what it accepts
+    assert type_matches(_HasSize, Checkable) is True
+
+
+@pytest.mark.deliberate("Q43")
+def test_q43_an_iterator_is_not_consumed_by_the_input_check() -> None:
+    """Hamilton reads an iterator's first item to check it; fnloom does not."""
+    declared = collections.abc.Iterable[int]
+    hamilton_ok = (n for n in (1, 2, 3))
+    assert htypes.check_input_type(declared, hamilton_ok) is True
+    assert list(hamilton_ok) == [2, 3]
+    hamilton_bad = iter(["s", 2])
+    assert htypes.check_input_type(declared, hamilton_bad) is False
+    assert list(hamilton_bad) == [2]
+    fnloom_ok = (n for n in (1, 2, 3))
+    assert value_matches(declared, fnloom_ok) is True
+    assert list(fnloom_ok) == [1, 2, 3]
+    fnloom_unread = iter(["s", 2])
+    assert value_matches(declared, fnloom_unread) is True
+    assert list(fnloom_unread) == ["s", 2]
+
+
+@pytest.mark.deliberate("Q22")
+def test_q22_override_type_checked() -> None:
+    """Hamilton runs a node on an override of the wrong type; fnloom refuses first."""
+    module = load_fixture("chain")
+    overrides = {"b": "x"}
+    assert run_hamilton([module], ["c"], {}, overrides) == Outcome({"c": "xx"}, None)
+    assert run_fnloom([module], ["c"], {}, overrides) == Outcome(None, "ValueError")
+
+
+@pytest.mark.deliberate("Q10")
+def test_q10_opt_out_is_explicit() -> None:
+    """Hamilton's opt-out also drops edge checks; fnloom's keeps them."""
+    mismatched = make_module(
+        "differential_opt_out_edge",
+        """
+def text() -> str:
+    return "x"
+
+def uses_text(text: int) -> str:
+    return text
+""",
+    )
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(mismatched)
+        .with_adapters(NoEdgeAndInputTypeChecking())
+        .build()
+    )
+    assert hamilton.execute(["uses_text"]) == {"uses_text": "x"}
+    unchecked = fnloom.Builder().with_modules(mismatched).without_input_type_checks()
+    with pytest.raises(ValueError, match=r"uses_text\.text requires int"):
+        unchecked.build()
+    chain = load_fixture("chain")
+    hamilton_chain = (
+        hamilton_driver.Builder()
+        .with_modules(chain)
+        .with_adapters(NoEdgeAndInputTypeChecking())
+        .build()
+    )
+    fnloom_chain = (
+        fnloom.Builder().with_modules(chain).without_input_type_checks().build()
+    )
+    assert hamilton_chain.execute(["b"], inputs={"a": 1.5}) == {"b": 2.5}
+    assert fnloom_chain.execute(["b"], inputs={"a": 1.5}) == {"b": 2.5}
+
+
+def _hamilton_fits(declared: object, value: object) -> bool:
+    """Hamilton's input check of `value` against `declared`."""
+    return htypes.check_input_type(declared, value)  # ty: ignore[invalid-argument-type]  # Hamilton's hint is narrower than what it accepts
+
+
+def _hamilton_feeds(produced: object, required: object) -> bool:
+    """Hamilton's edge check of a `produced` node feeding a `required` parameter."""
+    return htypes.types_match(required, produced)  # ty: ignore[invalid-argument-type]  # Hamilton's hint is narrower than what it accepts
+
+
+ALIASES = """
+type Price = float
+
+def base() -> float:
+    return 1.5
+
+def priced(base: Price) -> Price:
+    return base * 2
+
+def doubled(priced: float) -> float:
+    return priced * 2
+
+def total(given: Price) -> float:
+    return given + 1
+"""
+
+
+@pytest.mark.deliberate("Q44")
+def test_q44_type_alias_is_checked_as_what_it_names() -> None:
+    """Hamilton refuses a `float` node feeding `Price` and a `float` for a `Price`."""
+    module = make_module("differential_alias", ALIASES)
+    edges = run_hamilton([module], ["doubled"], {})
+    assert edges == Outcome(None, "ValueError")
+    assert run_fnloom([module], ["doubled"], {}) == Outcome({"doubled": 6.0}, None)
+    unchecked = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_adapters(NoEdgeAndInputTypeChecking())
+        .build()
+    )
+    assert unchecked.execute(["doubled"]) == {"doubled": 6.0}
+    price = vars(module)["Price"]
+    assert _hamilton_fits(price, 1.5) is False
+    assert _hamilton_feeds(float, price) is False
+    assert _hamilton_feeds(price, float) is False
+    assert value_matches(price, 1.5) is True
+    assert type_matches(float, price) is True
+    assert type_matches(price, float) is True
+    assert fnloom.build(module).execute(["total"], inputs={"given": 1.5}) == {
+        "total": 2.5
+    }
+
+
+def _square(x: int) -> int:
+    return x * x
+
+
+@pytest.mark.deliberate("Q45")
+def test_q45_mapping_and_callable_are_checked_by_kind() -> None:
+    """Hamilton refuses a dict for `Mapping[str, int]`, a function for `Callable`."""
+    mapping = collections.abc.Mapping[str, int]
+    callable_ = collections.abc.Callable[[int], int]
+    assert _hamilton_fits(mapping, {"a": 1}) is False
+    assert _hamilton_fits(callable_, _square) is False
+    assert value_matches(mapping, {"a": 1}) is True
+    assert value_matches(callable_, _square) is True
+    assert value_matches(mapping, [("a", 1)]) is False
+    assert _hamilton_feeds(dict[str, int], mapping) is True
+    assert type_matches(dict[str, int], mapping) is True
+    module = make_module(
+        "differential_mapping_input",
+        """
+from collections.abc import Callable, Mapping
+
+def applied(table: Mapping[str, int], fn: Callable[[int], int]) -> int:
+    return fn(table["a"])
+""",
+    )
+    inputs = {"table": {"a": 3}, "fn": _square}
+    assert run_hamilton([module], ["applied"], inputs) == Outcome(None, "ValueError")
+    assert run_fnloom([module], ["applied"], inputs) == Outcome({"applied": 9}, None)

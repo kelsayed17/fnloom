@@ -1,8 +1,12 @@
 """Tests for `fnloom._scan.collect`: which functions are nodes, which are bad."""
 
+import inspect
+
 import pytest
 
-from fnloom._scan import ParamDef, collect
+from fnloom import Source
+from fnloom._scan import collect
+from fnloom._view import Param
 from helpers import make_module
 
 
@@ -81,8 +85,50 @@ def test_default_parameter_is_optional() -> None:
         "scan_default", "def f(a: int, b: int = 2) -> int:\n    return a + b\n"
     )
     (node,) = collect([module])
-    assert node.params == (ParamDef("a", required=True), ParamDef("b", required=False))
+    assert node.params == (
+        Param("a", Source("a"), required=True, annotation=int),
+        Param("b", Source("b"), required=False, annotation=int),
+    )
     assert node.module == "scan_default"
+    assert node.returns is int
+
+
+SIGNATURES = """
+import functools
+
+def mixed(a: int, b: int = 2, *, c: int, d: int = 4) -> int:
+    return a + b + c + d
+
+def _inner(a: int, b: int = 2) -> int:
+    return a + b
+
+@functools.wraps(_inner)
+def wrapped(*args: int, **kwargs: int) -> int:
+    return _inner(*args, **kwargs)
+
+def _shape(x: int = 1) -> int:
+    return x
+
+def signed(x: int) -> int:
+    return x
+
+# The signature, not the code, gives `x` a default.
+signed.__signature__ = inspect.signature(_shape)
+"""
+
+
+def test_parameters_are_read_as_inspect_signature_reads_them() -> None:
+    """Defaults, keyword-only parameters, `functools.wraps` and `__signature__`."""
+    module = make_module("scan_signatures", "import inspect\n" + SIGNATURES)
+    nodes = {node.name: node for node in collect([module])}
+    for name in ("mixed", "wrapped", "signed"):
+        expected = [
+            (p.name, p.default is inspect.Parameter.empty)
+            for p in inspect.signature(getattr(module, name)).parameters.values()
+        ]
+        assert [(p.name, p.required) for p in nodes[name].params] == expected, name
+    assert [p.name for p in nodes["wrapped"].params] == ["a", "b"]
+    assert [p.required for p in nodes["signed"].params] == [False]
 
 
 def test_unresolvable_annotations_are_accepted() -> None:
@@ -104,10 +150,10 @@ def test_unresolvable_annotations_are_accepted() -> None:
     )
     nodes = {n.name: n for n in collect([module])}
     assert sorted(nodes) == ["f", "g"]
-    assert nodes["g"].params == (
-        ParamDef("a", required=True),
-        ParamDef("b", required=False),
-    )
+    assert [(p.name, p.required) for p in nodes["g"].params] == [
+        ("a", True),
+        ("b", False),
+    ]
 
 
 def test_duplicate_name_across_modules_names_both_modules() -> None:
@@ -137,3 +183,21 @@ def test_duplicate_error_lists_modules_in_scan_order() -> None:
     b = make_module("scan_two", "def f(x: int) -> int:\n    return x\n")
     with pytest.raises(ValueError, match=r"'scan_one' and 'scan_two'"):
         collect([a, b, a])
+
+
+def test_every_duplicate_name_is_listed_sorted_in_one_message() -> None:
+    """Two clashing names are both in the one `ValueError`, sorted by node name."""
+    first = make_module(
+        "scan_many_first",
+        "def z(a: int) -> int:\n    return a\ndef b(a: int) -> int:\n    return a\n",
+    )
+    second = make_module(
+        "scan_many_second",
+        "def z(a: int) -> int:\n    return a\ndef b(a: int) -> int:\n    return a\n",
+    )
+    with pytest.raises(ValueError, match="defined in both") as excinfo:
+        collect([first, second])
+    assert str(excinfo.value) == (
+        "node 'b' is defined in both 'scan_many_first' and 'scan_many_second'; "
+        "node 'z' is defined in both 'scan_many_first' and 'scan_many_second'"
+    )

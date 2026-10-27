@@ -19,7 +19,9 @@ runs, so it can drive payloads other than Python functions.
 3. **Prepare.** `graph.prepare(&request)` turns a `Request` (outputs, input names, override names) into a `Plan`: the
    steps to run, in topological order with ties broken by id, and the values each step releases.
 4. **Run.** `plan.run(&graph, &mut evaluator, &inputs, &overrides, &mut observers)` executes the steps and returns
-   the requested outputs by name. A plan runs as often as you like.
+   the requested outputs by name. A plan runs as often as you like. `plan.run_by_id(&graph, &mut evaluator, lookup,
+   &mut observers)` runs it the same way but reads each input and override through `lookup(action, node_id)` and
+   returns the outputs by `NodeId`, so an embedder that keys its values by node needs no name strings per run.
 
 ## An example
 

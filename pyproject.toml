@@ -79,6 +79,11 @@ ignore = [
 "tests/**" = [
     "S101", # pytest tests are asserts
 ]
+# Built by the tests, so their annotation-only imports must exist at run time.
+"tests/differential/fixtures/typed*.py" = [
+    "TC003", # resolved at build, so imported for real, not under TYPE_CHECKING
+    "UP037", # a quoted name nested in a generic is a case under test
+]
 "scripts/test_*.py" = [
     "S101", # pytest tests are asserts
 ]
@@ -97,3 +102,11 @@ respect-type-ignore-comments = false
 
 [tool.ty.rules]
 all = "error"
+
+# The `*_h.py` fixtures use Hamilton's decorators, which are unannotated (Q1); the
+# `*_f.py` twins, identical but for the import, are checked in full.
+[[tool.ty.overrides]]
+include = ["tests/differential/fixtures/*_h.py"]
+
+[tool.ty.overrides.rules]
+dynamic-function-decorator-return = "ignore"

@@ -9,7 +9,8 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:
     from collections.abc import Generator
 
-type Shape = Literal["chain", "fan_in", "layered"]
+type Shape = Literal["chain", "fan_in", "layered", "rows"]
+type Spelling = Literal["hamilton", "fnloom"]
 type Request = tuple[list[str], dict[str, object]]
 
 LAYER_WIDTH = 10
@@ -53,13 +54,32 @@ def _layered(n: int) -> str:
     return "\n".join(_layered_node(i) for i in range(n))
 
 
-def make_module(shape: Shape, n: int) -> ModuleType:
+def _rows(n: int, spelling: Spelling) -> str:
+    package = "hamilton.function_modifiers" if spelling == "hamilton" else "fnloom"
+    rows = ",\n".join(
+        f'    r{i}={{"prev": source("{"seed" if i == 0 else f"r{i - 1}"}")}}'
+        for i in range(n)
+    )
+    return (
+        f"from {package} import parameterize, source\n\n\n"
+        f"@parameterize(\n{rows},\n)\n"
+        "def step(prev: int) -> int:\n    return prev + 1\n"
+    )
+
+
+def make_module(shape: Shape, n: int, spelling: Spelling = "fnloom") -> ModuleType:
     """Returns a fresh module of `n` nodes (`n` parameters, for `fan_in`) in `shape`.
 
     Every function is annotated. `chain` is a line, `fan_in` one function over `n`
-    inputs, and `layered` rows of ten nodes each reading two nodes of the row above.
+    inputs, `layered` rows of ten nodes each reading two nodes of the row above, and
+    `rows` one function with `n` `parameterize` rows, each sourcing the row before
+    (the first sources `seed`). Only `rows` differs by `spelling`: the decorators come
+    from Hamilton or from fnloom.
     """
-    source = {"chain": _chain, "fan_in": _fan_in, "layered": _layered}[shape](n)
+    if shape == "rows":
+        source = _rows(n, spelling)
+    else:
+        source = {"chain": _chain, "fan_in": _fan_in, "layered": _layered}[shape](n)
     module = ModuleType(f"bench_{shape}_{n}_{next(_counter)}")
     # Hamilton finds a function's module through `sys.modules`.
     sys.modules[module.__name__] = module
@@ -73,9 +93,11 @@ def discard(module: ModuleType) -> None:
 
 
 @contextmanager
-def generated(shape: Shape, n: int) -> Generator[ModuleType]:
-    """Yields `make_module(shape, n)` and discards it on exit, even on an error."""
-    module = make_module(shape, n)
+def generated(
+    shape: Shape, n: int, spelling: Spelling = "fnloom"
+) -> Generator[ModuleType]:
+    """Yields `make_module(shape, n, spelling)`, discarded on exit, even on an error."""
+    module = make_module(shape, n, spelling)
     try:
         yield module
     finally:
@@ -88,6 +110,8 @@ def make_request(shape: Shape, n: int) -> Request:
         return [f"n{n - 1}"], {"seed": _SEED}
     if shape == "fan_in":
         return ["total"], {f"x{i}": i for i in range(n)}
+    if shape == "rows":
+        return [f"r{n - 1}"], {"seed": _SEED}
     last_row = (n - 1) // LAYER_WIDTH
     outputs = [
         f"l{last_row}_{c}" for c in range(LAYER_WIDTH) if last_row * LAYER_WIDTH + c < n
@@ -101,6 +125,8 @@ def make_expected(shape: Shape, n: int) -> dict[str, object]:
         return {f"n{n - 1}": _SEED + n - 1}
     if shape == "fan_in":
         return {"total": n * (n - 1) // 2}
+    if shape == "rows":
+        return {f"r{n - 1}": _SEED + n}
     row = [(_SEED + c) % _MODULUS for c in range(LAYER_WIDTH)]
     for _ in range((n - 1) // LAYER_WIDTH):
         row = [

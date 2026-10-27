@@ -33,6 +33,9 @@ driver = fnloom.build(pricing)
 | A parameter or the return without an annotation | `ValueError: 'f': parameter 'a' has no type annotation` |
 | A positional-only, `*args` or `**kwargs` parameter | `ValueError: 'f': *args parameter 'a' is not supported` |
 | An `async def` or generator function | `ValueError: 'f': async function is not supported; nodes are called synchronously` |
+| An annotation naming something that does not exist at run time, such as an import under `TYPE_CHECKING` | `NameError: name 'Decimal' is not defined`, with a note naming the node and the parameter |
+| Functions annotating the same input with types neither of which feeds the other (`Base` and `Child` are fine: the input is `Child`) | `ValueError: inputs have conflicting types: 'a' is int in 'f', str in 'g'` |
+| A node whose return type a parameter it feeds does not accept, one line per such parameter, sorted (see [Type checks](running.md#type-checks)) | `ValueError: g.f requires int but f returns str` |
 
 ## When you execute or prepare
 
@@ -62,6 +65,21 @@ driver.execute("label")
 
 `inputs` and `overrides` are keyword-only, so a mapping passed positionally is a `TypeError` rather than being taken
 for one of them.
+
+## Type checks on a run
+
+Each input a run reads and each override is checked against its node's type before any node runs. Every value that
+does not fit is listed, one line each, sorted; the first call below raises with a second line,
+`quantity: expected int, got float`:
+
+```python
+driver.execute(["label"], inputs={"price": "cheap", "quantity": 2.5})
+# raises ValueError: price: expected float, got str
+driver.execute(["label"], overrides={"total": "ten"})
+# raises ValueError: total: expected float, got str
+```
+
+Build with `Builder.without_input_type_checks()` to skip these (see [Type checks](running.md#type-checks)).
 
 ## When you run a prepared plan
 

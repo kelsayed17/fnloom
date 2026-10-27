@@ -1,8 +1,10 @@
 """Behaviour fnloom keeps from Hamilton: same values or same exception class."""
 
 import pytest
+from hamilton import driver as hamilton_driver
 from harness import (
     Direction,
+    Nodes,
     Outcome,
     lineage_fnloom,
     lineage_hamilton,
@@ -12,7 +14,17 @@ from harness import (
     run_fnloom,
     run_hamilton,
 )
+from type_matrix import (
+    TYPES,
+    VALUES,
+    fnloom_type,
+    fnloom_value,
+    hamilton_type,
+    hamilton_value,
+)
 
+import fnloom
+from fnloom import _types
 from helpers import make_module
 
 
@@ -136,3 +148,243 @@ def test_scanning_finds_the_same_nodes(case: str) -> None:
     expected = "ValueError" if case.startswith("unannotated") else None
     assert hamilton.error == expected
     assert nodes_fnloom([module]) == hamilton
+
+
+ROWS = [
+    "bound_seen",
+    "first",
+    "second",
+    "shifted_total",
+    "squared",
+    "sum_once",
+    "sum_twice",
+]
+
+
+@pytest.mark.parametrize("bump", [None, 7], ids=["without_optional", "with_optional"])
+def test_rows_compute_the_same_values(bump: int | None) -> None:
+    """Every row node gives the same value, with and without the optional input.
+
+    Without `bump`, `shifted_total` is left out: Hamilton fails it (Q35).
+    """
+    inputs: dict[str, object] = {"numbers": [1, 2, 3], "start": 3}
+    outputs = list(ROWS)
+    if bump is None:
+        outputs.remove("shifted_total")
+    else:
+        inputs["bump"] = bump
+    hamilton = run_hamilton([load_fixture("rows_h")], outputs, inputs)
+    assert hamilton.error is None
+    assert run_fnloom([load_fixture("rows_f")], outputs, inputs) == hamilton
+
+
+def test_rows_list_the_same_nodes() -> None:
+    """Rows are nodes, their function is not, and their sources are inputs, in both."""
+    hamilton = nodes_hamilton([load_fixture("rows_h")])
+    assert hamilton.error is None
+    assert nodes_fnloom([load_fixture("rows_f")]) == hamilton
+
+
+def test_value_object_is_passed_by_identity() -> None:
+    """A bound list is the same object on every call, so its mutations persist."""
+    seen: dict[str, list[object]] = {}
+    for runtime, run, fixture in (
+        ("hamilton", run_hamilton, "rows_h"),
+        ("fnloom", run_fnloom, "rows_f"),
+    ):
+        module = load_fixture(fixture)
+        results = [
+            run([module], ["bound_seen"], {"start": start}).values for start in (1, 2)
+        ]
+        seen[runtime] = [results, list(module.BOUND)]
+    assert seen["hamilton"] == [[{"bound_seen": True}] * 2, [1, 2]]
+    assert seen["fnloom"] == seen["hamilton"]
+
+
+@pytest.mark.parametrize("fixture", ["typed", "typed_future"])
+def test_node_types_match_hamilton(fixture: str) -> None:
+    """Every node, inputs included, has the type Hamilton gives it.
+
+    The fixtures include `-> None` (`NoneType` in both) and the nested string
+    forward reference `list["Report"]` (resolved to the class in both).
+    """
+    module = load_fixture(fixture)
+    hamilton = {
+        node.name: node.type
+        for node in hamilton_driver.Builder()
+        .with_modules(module)
+        .build()
+        .list_available_variables()
+    }
+    views = fnloom.build(module).nodes
+    assert sorted(hamilton) == list(views)
+    for name, view in views.items():
+        assert hamilton[name] == view.type, name
+    assert views["report"].type is module.Report
+    assert views["history"].type == list[module.Report]
+    assert views["log"].type is type(None)
+
+
+def test_unresolvable_annotation_same_class() -> None:
+    """A name imported only under `TYPE_CHECKING` fails the build the same way."""
+    module = make_module(
+        "differential_unresolvable",
+        """
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from decimal import Decimal
+
+def price(rate: Decimal) -> int:
+    return 1
+""",
+    )
+    hamilton = nodes_hamilton([module])
+    assert hamilton == Nodes(None, "NameError")
+    assert nodes_fnloom([module]) == hamilton
+
+
+_PROTOCOL_PRODUCERS = [
+    "int",
+    "float",
+    "bool",
+    "str",
+    "object",
+    "Base",
+    "Child",
+    "list",
+    "Sequence",
+    "runtime Protocol",
+]
+_INT_SUPERTYPES = [
+    "int",
+    "object",
+    "int | None",
+    "Optional[int]",
+    "int | str",
+    "Annotated[int, 'm']",
+]
+DELIBERATE: dict[tuple[str, str], str] = {
+    ("tuple[int, ...]", "(1, 2)"): "Q37",
+    ("tuple[int, ...]", "Sequence[int]"): "Q37",
+    ("NewType(int)", "1"): "Q38",
+    ("NewType(int)", "True"): "Q38",
+    **dict.fromkeys((("NewType(int)", r) for r in _INT_SUPERTYPES), "Q38"),
+    **dict.fromkeys((("Literal[1, 2]", r) for r in _INT_SUPERTYPES), "Q39"),
+    ("int | None", "object"): "Q40",
+    ("Optional[int]", "object"): "Q40",
+    ("int | str", "object"): "Q40",
+    ("Annotated[int, 'm']", "True"): "Q41",
+    **dict.fromkeys(((p, "Protocol") for p in _PROTOCOL_PRODUCERS), "Q42"),
+}
+"""Matrix pairs where fnloom differs on purpose, each mapped to its register row.
+
+Keys are `(declared, value)` for the value check and `(produced, required)` for the
+type check; the two never share a key, as no value id is a type id.
+"""
+
+VALUE_PAIRS = [
+    (declared, value)
+    for declared in TYPES
+    for value in VALUES
+    if (declared, value) not in DELIBERATE
+]
+TYPE_PAIRS = [
+    (produced, required)
+    for produced in TYPES
+    for required in TYPES
+    if (produced, required) not in DELIBERATE
+]
+
+
+@pytest.mark.parametrize(
+    ("declared", "value"), VALUE_PAIRS, ids=[f"{d}-{v}" for d, v in VALUE_PAIRS]
+)
+def test_value_matches_agrees_with_hamilton(declared: str, value: str) -> None:
+    """A value fits a declaration exactly when Hamilton's input check says so."""
+    assert fnloom_value(declared, value) == hamilton_value(declared, value)
+
+
+@pytest.mark.parametrize(
+    ("produced", "required"), TYPE_PAIRS, ids=[f"{p}-{r}" for p, r in TYPE_PAIRS]
+)
+def test_type_matches_agrees_with_hamilton(produced: str, required: str) -> None:
+    """A producer feeds a parameter exactly when Hamilton's edge check says so."""
+    assert fnloom_type(produced, required) == hamilton_type(produced, required)
+
+
+def test_every_deliberate_pair_is_a_matrix_pair_that_differs() -> None:
+    """No stale entry: each listed pair is in the matrix, and the answers differ."""
+    for (left, right), quirk in DELIBERATE.items():
+        if right in VALUES:
+            assert fnloom_value(left, right) != hamilton_value(left, right), quirk
+        else:
+            assert right in TYPES, (left, right)
+            assert fnloom_type(left, right) != hamilton_type(left, right), quirk
+
+
+def test_input_takes_the_narrower_consumer_type_as_hamilton() -> None:
+    """`Base` and `Child` consumers of one input give it `Child` in both."""
+    module = make_module(
+        "differential_narrow",
+        """
+class Base:
+    pass
+
+class Child(Base):
+    pass
+
+def f(a: Base) -> int:
+    return 1
+
+def g(a: Child) -> int:
+    return 1
+""",
+    )
+    (hamilton,) = (
+        node.type
+        for node in hamilton_driver.Builder()
+        .with_modules(module)
+        .build()
+        .list_available_variables()
+        if node.name == "a"
+    )
+    assert hamilton is module.Child
+    assert fnloom.build(module).nodes["a"].type is hamilton
+
+
+def test_edge_mismatch_same_exception_class() -> None:
+    """A node returning `str` feeding an `int` parameter fails both builds."""
+    module = make_module(
+        "differential_edge_mismatch",
+        """
+def text() -> str:
+    return "x"
+
+def uses_text(text: int) -> int:
+    return 1
+""",
+    )
+    assert nodes_hamilton([module]) == Nodes(None, "ValueError")
+    assert nodes_fnloom([module]) == Nodes(None, "ValueError")
+
+
+def test_wrong_input_type_same_exception_class() -> None:
+    """A `str` supplied for an `int` input is refused by both, before any node runs."""
+    module = load_fixture("chain")
+    assert run_hamilton([module], ["c"], {"a": "x"}) == Outcome(None, "ValueError")
+    assert run_fnloom([module], ["c"], {"a": "x"}) == Outcome(None, "ValueError")
+
+
+def test_a_compiled_plain_class_check_agrees_with_value_matches() -> None:
+    """Over the matrix, `isinstance` on a plain class answers as `value_matches`."""
+    for declared, annotation in TYPES.items():
+        cls = _types.plain_class(annotation)
+        if cls is None:
+            continue
+        for value_id, value in VALUES.items():
+            compiled = value is None or isinstance(value, cls)
+            assert compiled is _types.value_matches(annotation, value), (
+                declared,
+                value_id,
+            )

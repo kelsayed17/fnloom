@@ -2,6 +2,7 @@
 
 import inspect
 import sys
+from typing import TYPE_CHECKING
 
 import pytest
 from benches.generate import (
@@ -11,8 +12,12 @@ from benches.generate import (
     make_module,
     make_request,
 )
+from hamilton import driver as hamilton_driver
 
 import fnloom
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 CHAIN_NODES = 50
 FAN_IN_WIDTH = 20
@@ -77,3 +82,28 @@ def test_generated_modules_are_removed_from_sys_modules() -> None:
     other = make_module("chain", CHAIN_NODES)
     discard(other)
     assert other.__name__ not in sys.modules
+
+
+ROWS = 30
+
+
+def test_rows_shape_has_n_nodes_in_both_spellings() -> None:
+    """Rows is one function with n parameterize rows, spelled for each runtime."""
+    outputs, inputs = make_request("rows", ROWS)
+    with generated("rows", ROWS) as module:
+        driver = fnloom.build(module)
+        assert set(driver.node_names()) - {"seed"} == {f"r{i}" for i in range(ROWS)}
+        assert [name for name, v in vars(module).items() if inspect.isfunction(v)] == [
+            "parameterize",
+            "source",
+            "step",
+        ]
+        result = driver.execute(outputs, inputs=inputs)
+    assert result == make_expected("rows", ROWS)
+    with generated("rows", ROWS, spelling="hamilton") as module:
+        built = hamilton_driver.Builder().with_modules(module).build()
+        assert {v.name for v in built.list_available_variables()} - {"seed"} == {
+            f"r{i}" for i in range(ROWS)
+        }
+        names: list[str | Callable[..., object] | hamilton_driver.Variable] = [*outputs]
+        assert built.execute(names, inputs=inputs) == make_expected("rows", ROWS)

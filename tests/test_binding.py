@@ -106,6 +106,31 @@ def test_keyword_names_reach_the_function_interned() -> None:
     assert seen == {"alpha": True, "beta": True}
 
 
+def test_a_renamed_input_reaches_the_function_under_its_keyword_interned() -> None:
+    """A rename passes an input under another keyword, interned; others keep theirs."""
+    seen: dict[str, tuple[int, bool]] = {}
+
+    def record(**kwargs: int) -> int:
+        seen.update({name: (v, name is sys.intern(name)) for name, v in kwargs.items()})
+        return 0
+
+    graph = _core.Graph(
+        [("total", [("alpha", True), ("beta", True)], {}, record)],
+        {"total": {"alpha": "first"}},
+    )
+    graph.prepare(["total"], ["alpha", "beta"], []).run({"alpha": 1, "beta": 2}, {})
+    assert seen == {"first": (1, True), "beta": (2, True)}
+
+
+def test_a_rename_of_an_unknown_node_raises_value_error_naming_it() -> None:
+    """A rename naming no node or input of the graph is refused."""
+    nodes: list[NodeTuple] = [("b", [("a", True)], {}, _add_one)]
+    with pytest.raises(ValueError, match="'nowhere'"):
+        _core.Graph(nodes, {"nowhere": {"a": "x"}})
+    with pytest.raises(ValueError, match="'gone'"):
+        _core.Graph(nodes, {"b": {"gone": "x"}})
+
+
 def test_overrides_and_optional_inputs_have_their_actions() -> None:
     """An override replaces a node; an unsupplied optional input is skipped."""
     graph = _core.Graph(
