@@ -246,6 +246,39 @@ def k(c: bytes) -> int:
         fnloom.build(module)
 
 
+def test_input_takes_the_narrower_of_two_compatible_consumer_types() -> None:
+    """`Base` and `Child` consumers give `Child`, whichever comes first."""
+    body = """
+class Base:
+    pass
+
+class Child(Base):
+    pass
+
+def {first}(a: Base) -> int:
+    return 1
+
+def {second}(a: Child) -> int:
+    return 1
+"""
+    for name, first, second in (
+        ("view_narrow", "f", "g"),
+        ("view_narrow_rev", "g", "f"),
+    ):
+        module = make_module(name, body.format(first=first, second=second))
+        assert fnloom.build(module).nodes["a"].type is module.Child, name
+
+
+def test_input_takes_the_narrower_of_an_optional_and_a_plain_type() -> None:
+    """`int | None` and `int` consumers give `int`."""
+    module = make_module(
+        "view_narrow_optional",
+        "def f(a: int | None) -> int:\n    return 1\n"
+        "def g(a: int) -> int:\n    return 1\n",
+    )
+    assert fnloom.build(module).nodes["a"].type is int
+
+
 def test_every_unresolvable_annotation_is_listed_sorted_in_one_note() -> None:
     """Failures in several functions come in one note, by node name; rows all named."""
     module = make_module(

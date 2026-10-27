@@ -7,7 +7,7 @@ fnloom fixes Hamilton's quirks by default; a deviation needs a reason that holds
 accepts something dubious, fnloom raises. DROP: not carried over. DEFER: decided later.
 
 **Evidence.** The behaviours below were first reported by an earlier investigation (2026-10-22) against Hamilton
-1.90.0 and partly confirmed by reading its source. Rows Q4, Q5, Q6, Q7 and Q25 to Q36 have differential tests in
+1.90.0 and partly confirmed by reading its source. Rows Q4, Q5, Q6, Q7 and Q25 to Q43 have differential tests in
 `tests/differential/test_deliberate_differences.py`, each marked `deliberate("<id>")`, that assert Hamilton's
 behaviour and fnloom's side by side; Q3 and Q23 are covered by fnloom-only tests (`tests/test_driver.py`,
 `tests/test_binding.py` and the executor's unit tests). Every other row is not yet re-run for this repository and
@@ -48,6 +48,13 @@ becomes a differential test before it is relied on. Source line numbers are deli
 | Q34 | Every function node carries a `module` tag naming its module, beside the tags the author wrote; inputs carry no tags (`{}`). | FIX | A node's tags are only what the author wrote with `@tag`; its module is `NodeView.module`. Inputs carry no tags (`{}`) and their `module` is `None`, so the test compares inputs as `{}` on both sides. |
 | Q35 | A `@parameterize` row binding a parameter that has a default to `source("x")` makes `x` optional, but when `x` is not supplied the node raises `KeyError` instead of using the default. | FIX | The keyword is left out, so the function's own default applies, exactly as for a plain optional parameter. |
 | Q36 | `@tag` accepts a list of strings as a tag value, as well as a string. | REFUSE | A tag value must be a `str`; anything else is a `TypeError` when the decorator is applied, naming the tag. |
+| Q37 | `tuple[int, ...]` is not treated as a generic: the input check rejects `(1, 2)`, and a node returning `tuple[int, ...]` does not feed a `Sequence[int]` parameter, because the `...` is compared as a second argument. | FIX | `tuple[T, ...]` takes a tuple, as `list[T]` takes a list (its items unchecked, as in Hamilton), and feeds `Sequence[T]`: across kinds its one element type is what is compared. |
+| Q38 | A `NewType` over `int` takes no value (its values are plain `int`s at runtime, so even `1` is rejected), and a node returning it feeds neither `int` nor any type `int` would feed. | FIX | A `NewType` answers as its supertype: `1` fits it, and it feeds whatever its supertype feeds. Only the `NewType` itself (or `Any`) feeds a parameter annotated with it, as in Hamilton. |
+| Q39 | A node returning `Literal[1, 2]` feeds only `Literal[1, 2]` and `Any`, not `int`, `object` or a union holding `int`. | FIX | A `Literal` producer answers as the types of its values: it feeds a parameter when each value's type does. |
+| Q40 | A node returning a union (`int \| None`, `int \| str`) feeds only that same union and `Any`, not even `object`. | FIX | A union producer feeds a parameter when every member does, so `int \| None` feeds `object` and `int \| str \| None`; a union parameter still takes a producer that feeds one member. |
+| Q41 | `Annotated[T, ...]` is checked by exact type in the input check, so `True` fits `int` but not `Annotated[int, "m"]`, and `Child()` does not fit `Annotated[Base, "m"]`. | FIX | Metadata never changes an answer: `Annotated[T, ...]` is checked as `T`, on both the input and the edge check. |
+| Q42 | A parameter annotated with a plain (not runtime-checkable) `Protocol` and fed by a node returning a class makes the build raise the `TypeError` of `issubclass`, which names no node; a value that conforms to a `runtime_checkable` protocol is rejected by the input check. | FIX | A plain protocol cannot be checked at runtime, so it is no match (`False`), never an error; a `runtime_checkable` protocol takes any value that `isinstance` accepts. A plain-protocol input still takes no value but `None`, as in Hamilton. |
+| Q43 | The input check reads the first item of a value declared `Iterable[T]` to check it, so a generator or other iterator supplied as an input loses that item before the node runs, and is accepted or rejected by it. | FIX | An iterator is never looked inside: it is checked by its kind alone (it fits `Iterable[T]` and `Iterator[T]`, not `list[T]`), and reaches the node with every item. |
 
 ## Not yet decided
 

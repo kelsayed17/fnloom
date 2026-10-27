@@ -1,9 +1,11 @@
 """Each deliberate difference from Hamilton, asserted on both sides."""
 
-from typing import Any
+import collections.abc
+from typing import Annotated, Any
 
 import pytest
 from hamilton import driver as hamilton_driver
+from hamilton import htypes
 from hamilton.function_modifiers.base import InvalidDecoratorException
 from harness import (
     Nodes,
@@ -14,8 +16,20 @@ from harness import (
     run_fnloom,
     run_hamilton,
 )
+from test_semantics import DELIBERATE
+from type_matrix import (
+    TYPES,
+    Base,
+    Checkable,
+    Child,
+    fnloom_type,
+    fnloom_value,
+    hamilton_type,
+    hamilton_value,
+)
 
 import fnloom
+from fnloom._types import type_matches, value_matches
 from helpers import make_module
 
 
@@ -255,3 +269,140 @@ def f(x: int) -> int:
     assert node.tags["kind"] == ["a", "b"]
     with pytest.raises(TypeError, match="'kind'"):
         make_module("differential_list_tag_f", "from fnloom import tag\n" + body)
+
+
+def _pairs(quirk: str) -> list[tuple[str, str]]:
+    return [pair for pair, row in DELIBERATE.items() if row == quirk]
+
+
+@pytest.mark.deliberate("Q37")
+def test_q37_homogeneous_tuple() -> None:
+    """Hamilton refuses `(1, 2)` for `tuple[int, ...]` and its `Sequence[int]` edge."""
+    assert hamilton_value("tuple[int, ...]", "(1, 2)") is False
+    assert fnloom_value("tuple[int, ...]", "(1, 2)") is True
+    assert hamilton_type("tuple[int, ...]", "Sequence[int]") is False
+    assert fnloom_type("tuple[int, ...]", "Sequence[int]") is True
+    assert _pairs("Q37") == [
+        ("tuple[int, ...]", "(1, 2)"),
+        ("tuple[int, ...]", "Sequence[int]"),
+    ]
+
+
+@pytest.mark.deliberate("Q38")
+def test_q38_new_type_answers_as_its_supertype() -> None:
+    """Hamilton rejects each value of a `NewType` over `int` and each edge from it."""
+    for value in ("1", "True"):
+        assert hamilton_value("NewType(int)", value) is False, value
+        assert fnloom_value("NewType(int)", value) is True, value
+    edges = [pair for pair in _pairs("Q38") if pair[1] in TYPES]
+    assert [required for _, required in edges] == [
+        "int",
+        "object",
+        "int | None",
+        "Optional[int]",
+        "int | str",
+        "Annotated[int, 'm']",
+    ]
+    for produced, required in edges:
+        assert hamilton_type(produced, required) is False, required
+        assert fnloom_type(produced, required) is True, required
+
+
+@pytest.mark.deliberate("Q39")
+def test_q39_literal_producer_answers_as_its_values_types() -> None:
+    """Hamilton refuses a `Literal[1, 2]` node feeding `int` and every type over it."""
+    edges = _pairs("Q39")
+    assert [required for _, required in edges] == [
+        "int",
+        "object",
+        "int | None",
+        "Optional[int]",
+        "int | str",
+        "Annotated[int, 'm']",
+    ]
+    for produced, required in edges:
+        assert hamilton_type(produced, required) is False, required
+        assert fnloom_type(produced, required) is True, required
+    assert hamilton_type("Literal[1, 2]", "str") is False
+    assert fnloom_type("Literal[1, 2]", "str") is False
+
+
+@pytest.mark.deliberate("Q40")
+def test_q40_union_producer_feeds_object() -> None:
+    """Hamilton refuses a union producer feeding `object`; fnloom checks each member."""
+    edges = _pairs("Q40")
+    assert edges == [
+        ("int | None", "object"),
+        ("Optional[int]", "object"),
+        ("int | str", "object"),
+    ]
+    for produced, required in edges:
+        assert hamilton_type(produced, required) is False, produced
+        assert fnloom_type(produced, required) is True, produced
+    assert hamilton_type("int | None", "int") is False
+    assert fnloom_type("int | None", "int") is False
+
+
+@pytest.mark.deliberate("Q41")
+def test_q41_annotated_is_checked_as_its_type() -> None:
+    """Hamilton checks an `Annotated` input by exact type; fnloom as the bare type."""
+    assert hamilton_value("int", "True") is True
+    assert hamilton_value("Annotated[int, 'm']", "True") is False
+    assert fnloom_value("Annotated[int, 'm']", "True") is True
+    declared = Annotated[Base, "m"]
+    assert htypes.check_input_type(declared, Child()) is False  # ty: ignore[invalid-argument-type]  # Hamilton's hint is narrower than what it accepts
+    assert value_matches(declared, Child()) is True
+    assert _pairs("Q41") == [("Annotated[int, 'm']", "True")]
+
+
+class _HasSize:
+    """Conforms to `Checkable` without naming it."""
+
+    def size(self) -> int:
+        """Always 1."""
+        return 1
+
+
+@pytest.mark.deliberate("Q42")
+def test_q42_protocols() -> None:
+    """Hamilton raises `TypeError` on a plain-protocol edge; it rejects a conformer."""
+    edges = _pairs("Q42")
+    assert [produced for produced, _ in edges] == [
+        "int",
+        "float",
+        "bool",
+        "str",
+        "object",
+        "Base",
+        "Child",
+        "list",
+        "Sequence",
+        "runtime Protocol",
+    ]
+    for produced, required in edges:
+        assert hamilton_type(produced, required) == "TypeError", produced
+        assert fnloom_type(produced, required) is False, produced
+    assert hamilton_type("Protocol", "Protocol") is True
+    assert fnloom_type("Protocol", "Protocol") is True
+    assert htypes.check_input_type(Checkable, _HasSize()) is False
+    assert value_matches(Checkable, _HasSize()) is True
+    assert htypes.types_match(Checkable, _HasSize) is True  # ty: ignore[invalid-argument-type]  # Hamilton's hint is narrower than what it accepts
+    assert type_matches(_HasSize, Checkable) is True
+
+
+@pytest.mark.deliberate("Q43")
+def test_q43_an_iterator_is_not_consumed_by_the_input_check() -> None:
+    """Hamilton reads an iterator's first item to check it; fnloom does not."""
+    declared = collections.abc.Iterable[int]
+    hamilton_ok = (n for n in (1, 2, 3))
+    assert htypes.check_input_type(declared, hamilton_ok) is True
+    assert list(hamilton_ok) == [2, 3]
+    hamilton_bad = iter(["s", 2])
+    assert htypes.check_input_type(declared, hamilton_bad) is False
+    assert list(hamilton_bad) == [2]
+    fnloom_ok = (n for n in (1, 2, 3))
+    assert value_matches(declared, fnloom_ok) is True
+    assert list(fnloom_ok) == [1, 2, 3]
+    fnloom_unread = iter(["s", 2])
+    assert value_matches(declared, fnloom_unread) is True
+    assert list(fnloom_unread) == ["s", 2]

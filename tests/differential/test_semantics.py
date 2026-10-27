@@ -14,6 +14,14 @@ from harness import (
     run_fnloom,
     run_hamilton,
 )
+from type_matrix import (
+    TYPES,
+    VALUES,
+    fnloom_type,
+    fnloom_value,
+    hamilton_type,
+    hamilton_value,
+)
 
 import fnloom
 from helpers import make_module
@@ -233,3 +241,112 @@ def price(rate: Decimal) -> int:
     hamilton = nodes_hamilton([module])
     assert hamilton == Nodes(None, "NameError")
     assert nodes_fnloom([module]) == hamilton
+
+
+_PROTOCOL_PRODUCERS = [
+    "int",
+    "float",
+    "bool",
+    "str",
+    "object",
+    "Base",
+    "Child",
+    "list",
+    "Sequence",
+    "runtime Protocol",
+]
+_INT_SUPERTYPES = [
+    "int",
+    "object",
+    "int | None",
+    "Optional[int]",
+    "int | str",
+    "Annotated[int, 'm']",
+]
+DELIBERATE: dict[tuple[str, str], str] = {
+    ("tuple[int, ...]", "(1, 2)"): "Q37",
+    ("tuple[int, ...]", "Sequence[int]"): "Q37",
+    ("NewType(int)", "1"): "Q38",
+    ("NewType(int)", "True"): "Q38",
+    **dict.fromkeys((("NewType(int)", r) for r in _INT_SUPERTYPES), "Q38"),
+    **dict.fromkeys((("Literal[1, 2]", r) for r in _INT_SUPERTYPES), "Q39"),
+    ("int | None", "object"): "Q40",
+    ("Optional[int]", "object"): "Q40",
+    ("int | str", "object"): "Q40",
+    ("Annotated[int, 'm']", "True"): "Q41",
+    **dict.fromkeys(((p, "Protocol") for p in _PROTOCOL_PRODUCERS), "Q42"),
+}
+"""Matrix pairs where fnloom differs on purpose, each mapped to its register row.
+
+Keys are `(declared, value)` for the value check and `(produced, required)` for the
+type check; the two never share a key, as no value id is a type id.
+"""
+
+VALUE_PAIRS = [
+    (declared, value)
+    for declared in TYPES
+    for value in VALUES
+    if (declared, value) not in DELIBERATE
+]
+TYPE_PAIRS = [
+    (produced, required)
+    for produced in TYPES
+    for required in TYPES
+    if (produced, required) not in DELIBERATE
+]
+
+
+@pytest.mark.parametrize(
+    ("declared", "value"), VALUE_PAIRS, ids=[f"{d}-{v}" for d, v in VALUE_PAIRS]
+)
+def test_value_matches_agrees_with_hamilton(declared: str, value: str) -> None:
+    """A value fits a declaration exactly when Hamilton's input check says so."""
+    assert fnloom_value(declared, value) == hamilton_value(declared, value)
+
+
+@pytest.mark.parametrize(
+    ("produced", "required"), TYPE_PAIRS, ids=[f"{p}-{r}" for p, r in TYPE_PAIRS]
+)
+def test_type_matches_agrees_with_hamilton(produced: str, required: str) -> None:
+    """A producer feeds a parameter exactly when Hamilton's edge check says so."""
+    assert fnloom_type(produced, required) == hamilton_type(produced, required)
+
+
+def test_every_deliberate_pair_is_a_matrix_pair_that_differs() -> None:
+    """No stale entry: each listed pair is in the matrix, and the answers differ."""
+    for (left, right), quirk in DELIBERATE.items():
+        if right in VALUES:
+            assert fnloom_value(left, right) != hamilton_value(left, right), quirk
+        else:
+            assert right in TYPES, (left, right)
+            assert fnloom_type(left, right) != hamilton_type(left, right), quirk
+
+
+def test_input_takes_the_narrower_consumer_type_as_hamilton() -> None:
+    """`Base` and `Child` consumers of one input give it `Child` in both."""
+    module = make_module(
+        "differential_narrow",
+        """
+class Base:
+    pass
+
+class Child(Base):
+    pass
+
+def f(a: Base) -> int:
+    return 1
+
+def g(a: Child) -> int:
+    return 1
+""",
+    )
+    (hamilton,) = (
+        node.type
+        for node in hamilton_driver.Builder()
+        .with_modules(module)
+        .build()
+        .list_available_variables()
+        if node.name == "a"
+    )
+    assert hamilton is module.Child
+    assert fnloom.build(module).nodes["a"].type is hamilton

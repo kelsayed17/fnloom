@@ -6,6 +6,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from fnloom._decorators import Source, Value
+from fnloom._types import type_matches
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -33,10 +34,10 @@ class NodeView:
     """One node of a built graph: a function's node or an input.
 
     `type` is a function node's return annotation, or an input's type: the
-    annotation of the parameters that read it. `origin`, `module` and `doc` are
-    the function's, and `None` for an input; `params` follow the function's
-    declaration order and are empty for an input. `tags` are the ones written
-    with `@tag`, read-only.
+    narrowest annotation of the parameters that read it. `origin`, `module` and
+    `doc` are the function's, and `None` for an input; `params` follow the
+    function's declaration order and are empty for an input. `tags` are the ones
+    written with `@tag`, read-only.
     """
 
     name: str
@@ -76,8 +77,32 @@ def _describe(input_name: str, consumers: list[_Consumer]) -> str:
     return f"{input_name!r} is {uses}"
 
 
+_INCOMPATIBLE = object()
+
+
+def _narrowest(annotations: list[object]) -> object:
+    """The narrowest of `annotations` by `type_matches`, or `_INCOMPATIBLE`.
+
+    Each annotation in turn is either fed by the narrowest so far (it is wider,
+    and dropped) or feeds it (it is narrower, and replaces it); when both hold,
+    the earlier stays, as Hamilton keeps the type it saw first.
+    """
+    narrowest = annotations[0]
+    for annotation in annotations[1:]:
+        if type_matches(narrowest, annotation):
+            continue
+        if not type_matches(annotation, narrowest):
+            return _INCOMPATIBLE
+        narrowest = annotation
+    return narrowest
+
+
 def _input_types(nodes: Sequence[NodeDef]) -> dict[str, object]:
-    """Each input's type; `ValueError` listing every input whose consumers disagree."""
+    """Each input's type, the narrowest its consumers declare.
+
+    `ValueError` listing every input with two consumers whose types do not match
+    either way, naming all of that input's consumers.
+    """
     defined = {node.name for node in nodes}
     consumers: dict[str, list[_Consumer]] = {}
     for node in nodes:
@@ -89,11 +114,11 @@ def _input_types(nodes: Sequence[NodeDef]) -> dict[str, object]:
     conflicts: list[str] = []
     for name in sorted(consumers):
         found = sorted(consumers[name], key=lambda c: (c.node, c.param))
-        first = found[0].annotation
-        if all(c.annotation == first for c in found):
-            types[name] = first
-        else:
+        narrowest = _narrowest([c.annotation for c in found])
+        if narrowest is _INCOMPATIBLE:
             conflicts.append(_describe(name, found))
+        else:
+            types[name] = narrowest
     if conflicts:
         msg = "inputs have conflicting types: " + "; ".join(conflicts)
         raise ValueError(msg)
@@ -103,8 +128,8 @@ def _input_types(nodes: Sequence[NodeDef]) -> dict[str, object]:
 def node_views(nodes: Sequence[NodeDef]) -> Mapping[str, NodeView]:
     """The views of `nodes` and of the inputs they read, read-only, sorted by name.
 
-    `nodes` carry resolved annotations. `ValueError` when an input's consumers
-    disagree on its type.
+    `nodes` carry resolved annotations. `ValueError` when two of an input's
+    consumers declare types that match neither way.
     """
     no_tags = MappingProxyType[str, str]({})
     views = {
