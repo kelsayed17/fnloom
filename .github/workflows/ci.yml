@@ -1,0 +1,62 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# No job writes to the repository, so the token only reads.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        python: ["3.14", "3.14t"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: astral-sh/setup-uv@v6
+      - name: Install Python
+        run: uv python install ${{ matrix.python }}
+      - name: Sync dev environment
+        run: uv sync --python ${{ matrix.python }}
+      - name: Check
+        run: bash scripts/check.sh
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-version in Cargo.toml is only honest if the oldest toolchain builds it.
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - run: cargo check --workspace
+
+  instruction-counts:
+    # Instruction counts depend on the CPU architecture, the toolchain and libc, so this job
+    # pins all three to what crates/fnloom-core/benches/baseline.json was generated with:
+    # aarch64 Linux, in the rust:1.99.1 image. seccomp is relaxed because callgrind runs the
+    # benchmark under `setarch -R`, which Docker's default profile refuses.
+    runs-on: ubuntu-24.04-arm
+    container:
+      image: rust:1.99.1
+      options: --security-opt seccomp=unconfined
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install valgrind and the benchmark runner
+        run: |
+          apt-get update
+          apt-get install -y valgrind
+          cargo install gungraun-runner --version 0.18.2 --locked
+      - uses: astral-sh/setup-uv@v6
+      - name: Run the benchmarks
+        run: cargo bench -p fnloom-core --bench core -- --output-format=json > bench.jsonl
+      - name: Gate on the committed baseline
+        run: >
+          uv run --no-project --python 3.14 scripts/bench_gate.py
+          --baseline crates/fnloom-core/benches/baseline.json --results bench.jsonl

@@ -1,0 +1,20 @@
+{
+  "core::engine::build.chain_1000": 5770043,
+  "core::engine::build.chain_10000": 67085541,
+  "core::engine::build.fan_in_1000": 2534035,
+  "core::engine::build.fan_in_10000": 28481459,
+  "core::engine::build.layered_1000": 8084213,
+  "core::engine::build.layered_10000": 93932339,
+  "core::engine::prepare.chain_1000": 4554154,
+  "core::engine::prepare.chain_10000": 51038158,
+  "core::engine::prepare.fan_in_1000": 5833603,
+  "core::engine::prepare.fan_in_10000": 71078394,
+  "core::engine::prepare.layered_1000": 5851938,
+  "core::engine::prepare.layered_10000": 68395188,
+  "core::engine::run.chain_1000": 417666,
+  "core::engine::run.chain_10000": 4160192,
+  "core::engine::run.fan_in_1000": 1024226,
+  "core::engine::run.fan_in_10000": 13480851,
+  "core::engine::run.layered_1000": 534027,
+  "core::engine::run.layered_10000": 5035823
+}

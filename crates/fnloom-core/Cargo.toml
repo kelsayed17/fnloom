@@ -1,7 +1,21 @@
 [package]
 name = "fnloom-core"
 edition.workspace = true
+rust-version.workspace = true
 version.workspace = true
+license.workspace = true
 publish.workspace = true
 
 [dependencies]
+
+# Instruction-count benchmarks run under callgrind, which exists only on Linux, so the
+# harness is a Linux-only dev-dependency; see benches/core.rs for the choice and the pin.
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+gungraun = "=0.18.2"
+
+[[bench]]
+name = "core"
+harness = false
+
+[lints]
+workspace = true
