@@ -28,6 +28,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `Builder.without_input_type_checks()` turns the per-run checks off.
 - Wall-clock benchmarks against Hamilton, with a `rows` shape (one function with `n` `@parameterize` rows) and fnloom
   measured with input checks on and off, and a CI gate on the core's instruction counts.
+- A release workflow: a `vX.Y.Z` tag builds CPython 3.14 and 3.14t wheels for manylinux, musllinux, macOS and
+  Windows, and the sdist, smoke-tests each, and publishes them to PyPI through trusted publishing. CI's checks now run
+  on Windows too.
 - A documentation site, built with Zensical and published to GitHub Pages.
 - Markdown lint with rumdl, run by `scripts/check.sh`, so every page renders as written on the docs site.
 
