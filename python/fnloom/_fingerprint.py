@@ -136,27 +136,69 @@ def _tz_form(zone: object) -> object | None:
 def _record(value: object) -> object | None:
     """A named tuple's or dataclass instance's fields, or `None` for anything else.
 
-    A dataclass without fields keeps its state, if any, elsewhere, so it is refused;
-    so is one with a field never set (`init=False` without a default).
+    State set beyond the fields (by `__post_init__`, say, or later) follows them, by
+    name. A dataclass without fields keeps its state, if any, elsewhere, so it is
+    refused; so is one with a field never set (`init=False` without a default).
     """
     if isinstance(value, tuple) and hasattr(type(value), "_fields"):
-        return tuple(value)
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        items = tuple(value)
+        names = frozenset(type(value)._fields)  # ty: ignore[unresolved-attribute]
+    elif dataclasses.is_dataclass(value) and not isinstance(value, type):
         fields = dataclasses.fields(value)
         if not fields:
             return None
         items = tuple(getattr(value, field.name, _UNSET) for field in fields)
-        return None if any(item is _UNSET for item in items) else items
-    return None
+        if any(item is _UNSET for item in items):
+            return None
+        names = frozenset(field.name for field in fields)
+    else:
+        return None
+    extra = _extra_state(value, names)
+    return items if not extra else (items, extra)
+
+
+def _extra_state(value: object, known: frozenset[str]) -> tuple[object, ...]:
+    """`value`'s instance attributes outside `known`, as sorted `(name, value)` pairs.
+
+    Both its `__dict__` and any slots set, from every class in its MRO.
+    """
+    state: dict[str, object] = {
+        name: item
+        for name, item in getattr(value, "__dict__", {}).items()
+        if name not in known
+    }
+    for cls in type(value).__mro__:
+        slots = cls.__dict__.get("__slots__", ())
+        for slot in (slots,) if isinstance(slots, str) else slots:
+            if slot in {"__dict__", "__weakref__"}:
+                continue
+            # A private slot is stored under its mangled name.
+            name = (
+                f"_{cls.__name__.lstrip('_')}{slot}"
+                if slot.startswith("__") and not slot.endswith("__")
+                else slot
+            )
+            if name in known or name in state:
+                continue
+            item = getattr(value, name, _UNSET)
+            if item is not _UNSET:
+                state[name] = item
+    return tuple(sorted(state.items()))
 
 
 def _buffer(value: object) -> object | None:
-    """Any other object's C-contiguous buffer, as a memoryview, or `None`."""
+    """Any other object's C-contiguous buffer, as a memoryview, or `None`.
+
+    A subclass instance's attributes follow the buffer, by name.
+    """
     try:
         view = memoryview(value)  # ty: ignore[invalid-argument-type]
     except TypeError, ValueError:
         return None
-    return view if view.c_contiguous else None
+    if not view.c_contiguous:
+        return None
+    extra = _extra_state(value, frozenset())
+    return view if not extra else (view, extra)
 
 
 def _numpy(value: object) -> object | None:

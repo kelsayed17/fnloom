@@ -104,7 +104,8 @@ Cached runs against uncached ones and against Hamilton 1.90.0's `with_cache`, on
 `layered` graph of trivial nodes, the worst case for a cache: a node costs less to run than to look up. Milliseconds,
 cold / warm, medians over seven fresh processes, each the median of three cold runs (a new driver with an empty
 store) and the 21 warm runs after them. Uncached, cold is a first run and warm a steady one. fnloom runs a prepared
-plan; Hamilton, which has none, runs `execute`. Hamilton's memory store is its `InMemoryMetadataStore` with its
+plan; Hamilton, which has none, runs `execute`. So fnloom's cold and warm times leave out `prepare`, made once before
+the timed runs, while Hamilton's include the planning each `execute` does. Hamilton's memory store is its `InMemoryMetadataStore` with its
 `InMemoryResultStore`, and its disk store the default `with_cache(path=...)`.
 
 | shape | n | runtime | uncached | memory | disk |
@@ -134,8 +135,7 @@ byte, so on nodes doing real work it is a fixed microsecond each. Moving the mem
 Rust would cut it; the target as written, on trivial nodes, may need restating.
 
 Each key is hashed with one BLAKE3 call over its framed parts, rather than a streaming hasher fed a part at a time,
-which gives the same digests: the keys of the 200-node chain take 39 µs instead of 53, and its warm memory run 45 µs
-instead of 55.
+which gives the same digests.
 
 ## Why fan-in is fast
 

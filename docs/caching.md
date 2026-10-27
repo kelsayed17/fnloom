@@ -134,11 +134,12 @@ A node changes how it is cached with `@cache`, which records the policy and read
 | Policy | Runs | Stored | Nodes downstream are keyed by |
 | --- | --- | --- | --- |
 | `@cache()`, or no decorator | on a miss | yes | its key |
-| `@cache(behavior="recompute")` | always | yes | the fingerprint of its result |
+| `@cache(behavior="recompute")` | always | no | the fingerprint of its result |
 | `@cache(behavior="disable")` | always | never | nothing: they cannot be cached either, unless they `ignore` it |
 
-**`recompute`** is for a node that reads the outside world, as above. Its result must be fingerprintable
-([Fingerprints](#fingerprints)), or the nodes reading it cannot be cached.
+**`recompute`** is for a node that reads the outside world, as above. Its result is never stored, since the node
+always runs and nothing would read it back. Its result must be fingerprintable ([Fingerprints](#fingerprints)), or
+the nodes reading it cannot be cached.
 
 **`disable`** never stores the node's result and never versions it, so it suits a value that cannot or must not be
 pickled: a client, a connection, a lock.
@@ -193,7 +194,8 @@ run, `last` runs first, and `lot_value` hits when `last` returned the same price
 
 **`version="..."`** replaces the automatic code version with your own string, for a function the automatic one
 cannot cover, such as one that reads a mutable global or a file next to its module. Change the string whenever what
-the function returns may change.
+the function returns may change. It replaces the code version only: the values the node reads, a `@parameterize`
+row's `value()` constants and bindings included, are still part of its key.
 
 ```python
 # file: weights.py
@@ -255,10 +257,11 @@ These can be fingerprinted:
   and `frozenset` by member, in any order;
 - `datetime`, `date`, `time` and `timedelta`, with a time zone from `zoneinfo` or `datetime.timezone`; `Decimal`,
   `Fraction`, `UUID`, the `pathlib` paths and enum members;
-- dataclass instances and named tuples, by type and fields;
+- dataclass instances and named tuples, by type and fields, then any other attribute set on the instance (in its
+  `__dict__` or a slot, by `__post_init__` or later), by name;
 - numpy arrays, by dtype, shape and content; pandas and polars frames and series, by their columns' names, types and
-  values, their index and their name. fnloom never imports these libraries itself: it reads their values through the
-  modules your code already loaded.
+  values and their name, and a pandas one by its index too (polars has none). fnloom never imports these libraries
+  itself: it reads their values through the modules your code already loaded.
 
 Anything else cannot be fingerprinted, at any depth, and is never replaced by a constant, a `repr` or an `id`: a
 node reading it runs, and `explain_cache` names its type and where it sits in the value.
@@ -308,9 +311,10 @@ differ. It must hold everything that can change a node's result.
 **Limits.** Some values are fingerprinted by less than all their state, or refused although they look plain:
 
 - An object of a type fnloom does not know that exposes a buffer (a `bytes` subclass, a `ctypes` value) is hashed
-  by its type's name and its buffer, so state held outside the buffer is not seen.
-- A dataclass or a named tuple is fingerprinted by its fields alone: state set outside them, in `__init__` or by a
-  subclass, is not seen. Register a fingerprint for such a class.
+  by its type's name, its buffer and the attributes set on the instance, so state held elsewhere (in memory a
+  `ctypes` pointer reaches, say) is not seen.
+- A dataclass or a named tuple is fingerprinted by what the instance holds: state kept outside it, in a class
+  attribute or behind a property, is not seen. Register a fingerprint for such a class.
 - Classes are told apart by module and qualified name, so classes made at run time under one name (by
   `dataclasses.make_dataclass` in a loop, say) can share fingerprints.
 - `pandas.NaT` and `pytz` time zones are refused; use `zoneinfo` zones.
@@ -322,12 +326,14 @@ source text, so it works in a notebook too. It hashes:
 
 - the function's bytecode, constants and names, nested functions and comprehensions included; not its line numbers,
   comments or docstring, so moving or reformatting a function keeps its version;
-- its defaults and its closure;
+- its defaults and its closure, fingerprinted at build;
 - every global name it reads: a function or class of your own code by its own code version, recursively; a module of
   your own code by the attributes the function reads from it; a library function, class or module by its name and the
   version of the installed distribution, so upgrading a library misses; an immutable value (a number, a string,
-  `None`, an enum member, or a tuple or frozenset of these) by its fingerprint;
-- a `@parameterize` row's `value()` constants and its bindings.
+  `None`, an enum member, or a tuple or frozenset of these) by its fingerprint.
+
+A `@parameterize` row's `value()` constants and its bindings are not part of the code version: they are parameters
+of the node's key, fingerprinted once, at build, so `version=` does not replace them and a changed constant misses.
 
 **Anything else makes the function uncacheable**: a list, dict or set, or any other object, held in a global, a
 closure or a class attribute, can change between runs without fnloom seeing it. The node then always runs, the build
@@ -340,7 +346,9 @@ change, or change the version yourself when it does, give `@cache(version=...)`.
   driver keeps the version read at build until it is rebuilt;
 - code reached only by **dynamic import**, `importlib.import_module(name)` or `__import__(name)`;
 - **reflection at run time** on what the version leaves out: a function or class reading its own docstring, a class's
-  generic arguments (`__orig_bases__`), or the annotations of a method.
+  generic arguments (`__orig_bases__`), or the annotations of a method;
+- a **mutable default mutated after the build**: `def f(x, opts={"k": 1})` is fingerprinted with `{"k": 1}` at
+  build, and a later `f.__defaults__[0]["k"] = 2` is not seen.
 
 A node whose result depends on any of these should be given a `version=` or be `recompute`.
 
@@ -353,12 +361,12 @@ same way, runs nothing, and returns every computed node of the plan, by name, wi
 | `status` | Means | `reason` |
 | --- | --- | --- |
 | `hit` | the store holds the node's key | `None` |
-| `miss` | it does not, so a run runs and stores the node | `None`, or `"policy recompute"` for a `recompute` node, which always runs |
-| `uncacheable` | the node has no key: it always runs and is never stored | the global, the value path or the policy |
-| `unknown` | the key depends on a `recompute` node's result, which only a run knows | the `recompute` node |
+| `miss` | it does not, so a run runs and stores the node | `None`, or `"policy recompute"` for a `recompute` node, which always runs and is never stored |
+| `uncacheable` | the node has no key: it always runs and is never stored | why, for example the global (`"global 'WEIGHTS' of 'f' is a dict, ..."`), the value path (`"levels[0]: Level"`), the policy (`"policy disable"`), a source (`"reads uncacheable 'x'"`) or a failing fingerprint function (`"cannot fingerprint 'x' for the cache: ..."`) |
+| `unknown` | the key depends on a `recompute` node's result, which only a run knows | for example `"downstream of recompute node 'x'"`, or `"no key"` |
 
-`explain_cache` consults the store for **every** node with a key, including nodes upstream of a hit, which a run would
-neither load nor run. With a `DiskCache`, that reads every such entry from disk.
+`explain_cache` consults the store for **every** `default`-policy node with a key, including nodes upstream of a hit,
+which a run would neither load nor run. With a `DiskCache`, that reads every such entry from disk.
 
 ## Stores
 
@@ -380,9 +388,8 @@ corrupt, and a lookup is one file read.
 
 - Each entry starts with a header naming the format version, the serializer, the Python version, and the version of
   the library that defines the value's type. An entry written by another Python, serializer or library version is a
-  quiet miss, and the file is left for the next write to replace, so two interpreters sharing a directory do not undo
-  each other's work. One directory per interpreter is still the better layout, since each would replace the other's
-  entries as it writes.
+  quiet miss, and the file is left for the next write to replace: a read never deletes another interpreter's entry;
+  a write still replaces it. One directory per interpreter is the better layout.
 - An entry that cannot be read back (truncated, corrupt, or naming a class that moved) is a miss: it is removed, with
   a `CacheWarning`, and the node runs.
 - Writes go to a temporary file in the same directory that then replaces the entry, so a reader sees a whole entry

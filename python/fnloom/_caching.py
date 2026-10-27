@@ -5,7 +5,8 @@ version of each value it reads: an input's or override's fingerprint, a computed
 node's key, or a `recompute` node's result's fingerprint. `CacheRun` computes every
 key of a plan before anything runs, walks back from the outputs to the first nodes
 the store holds, and runs the plan with those as overrides, so the core prunes their
-upstream. Each node that runs is stored under its key as it succeeds. `explain`
+upstream. Each `default` node that runs is stored under its key as it succeeds;
+nothing else is ever looked up, so nothing else is stored. `explain`
 reports what a run would do with each computed node, running nothing.
 
 The cache never fails a run: a store that raises is a miss or a skipped write,
@@ -51,9 +52,10 @@ class CacheOutcome(NamedTuple):
     Attributes:
         status: `"hit"`: the store holds the node's key. `"miss"`: it does not, so
             the node runs and is stored; a `recompute` node is always one, with the
-            reason `"policy recompute"`. `"uncacheable"`: the node has no key, so it
-            always runs and is never stored. `"unknown"`: the key depends on the
-            result of a `recompute` node, which only a run knows.
+            reason `"policy recompute"`, and is never stored. `"uncacheable"`: the
+            node has no key, so it always runs and is never stored. `"unknown"`:
+            the key depends on the result of a `recompute` node, which only a run
+            knows.
         reason: Why a node is uncacheable or unknown, or is a `recompute` miss;
             `None` for a plain hit or miss.
     """
@@ -488,13 +490,15 @@ class CacheRun:
     ) -> Callable[[str, object], None]:
         """What stores each computed value as its node succeeds, and records it."""
         store = self._store
+        behaviors = self._behaviors
 
         def on_value(name: str, value: object) -> None:
             if values is not None:
                 values[name] = value
-            # A `disable` node has no static part, so no key: it is never stored.
+            # Only a `default` node is ever looked up, so only one is stored: a
+            # `disable` node has no key, and a `recompute` node always runs.
             key = keys[name]
-            if key is None:
+            if key is None or behaviors[name] != "default":
                 return
             try:
                 store.put(key, value)

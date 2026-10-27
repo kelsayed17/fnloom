@@ -3,7 +3,7 @@
 //! Every digest is one *node* in the shared framing ([`Framer`]): a one-byte [`Kind`],
 //! then each part as its length (`u64`, little-endian) and its bytes. A container's parts
 //! are its children's digests, so a fingerprint is a Merkle hash of the value's tree.
-//! `hash_parts` and cache keys use the same framing under their own kinds.
+//! `hash_parts` and cache keys use the same framing, both under [`Kind::Parts`].
 
 use std::fmt::Write as _;
 use std::mem;

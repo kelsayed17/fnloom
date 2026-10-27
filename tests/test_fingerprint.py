@@ -210,6 +210,73 @@ def test_declarations_win_and_fieldless_dataclasses_are_refused() -> None:
     assert fingerprint(_Declared(1, 2)) == fingerprint(_Declared(1, 3))
 
 
+@dataclass
+class _Scaled:
+    """A dataclass with state its `__post_init__` sets beyond its fields."""
+
+    x: float
+
+    def __post_init__(self) -> None:
+        self.scale = 1.0
+
+
+@dataclass(frozen=True)
+class _Slotted:
+    """A dataclass with a field."""
+
+    x: int
+
+
+class _SlottedMore(_Slotted):
+    """A subclass with a private slot that is not a field."""
+
+    __slots__ = ("__extra",)
+
+
+class _Labelled(NamedTuple):
+    a: int
+
+
+class _LabelledMore(_Labelled):
+    """A named tuple subclass with a `__dict__`."""
+
+
+class _Blob(bytes):
+    """A bytes subclass, which may hold attributes."""
+
+
+def test_state_beyond_a_records_fields_counts() -> None:
+    """Attributes set beyond the fields are part of the form, or refuse it."""
+    a, b = _Scaled(2.0), _Scaled(2.0)
+    assert fingerprint(a) == fingerprint(b)
+    b.scale = 10.0
+    assert fingerprint(a) != fingerprint(b)
+    b.scale = 1.0
+    assert fingerprint(a) == fingerprint(b)
+    vars(b)["scale"] = object()
+    with pytest.raises(UnfingerprintableError):
+        fingerprint(b)
+    # A slot set beyond the fields counts; one never set does not.
+    one, two = _SlottedMore(1), _SlottedMore(1)
+    assert fingerprint(one) == fingerprint(two)
+    object.__setattr__(two, "_SlottedMore__extra", 5)
+    assert fingerprint(one) != fingerprint(two)
+    plain, labelled = _LabelledMore(1), _LabelledMore(1)
+    labelled.note = "x"  # ty: ignore[unresolved-attribute]
+    assert fingerprint(plain) != fingerprint(labelled)
+
+
+def test_a_buffer_subclass_counts_its_attributes() -> None:
+    """A bytes subclass's `__dict__` is part of its form, or refuses it."""
+    plain, tagged = _Blob(b"ab"), _Blob(b"ab")
+    assert fingerprint(plain) == fingerprint(tagged)
+    tagged.tag = 1  # ty: ignore[unresolved-attribute]
+    assert fingerprint(plain) != fingerprint(tagged)
+    tagged.tag = object()  # ty: ignore[unresolved-attribute]
+    with pytest.raises(UnfingerprintableError):
+        fingerprint(tagged)
+
+
 def test_other_buffers_fingerprint_by_type_format_and_bytes() -> None:
     """An unknown object with a C-contiguous buffer fingerprints by type and buffer."""
     assert fingerprint(array("i", [1])) == fingerprint(array("i", [1]))

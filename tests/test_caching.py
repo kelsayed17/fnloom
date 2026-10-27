@@ -212,6 +212,51 @@ def test_recompute_runs_every_time_and_keys_downstream_by_result(
     assert _called(capsys) == ["text"]
 
 
+def test_an_input_set_after_construction_misses() -> None:
+    """A dataclass input that differs only beyond its fields is not a hit."""
+    module = make_module(
+        "cached_scaled",
+        """
+        from dataclasses import dataclass
+
+        @dataclass
+        class Cfg:
+            x: float
+
+            def __post_init__(self) -> None:
+                self.scale = 1.0
+
+        def scaled(cfg: Cfg) -> float:
+            return cfg.x * cfg.scale
+        """,
+    )
+    driver = _cached(module, MemoryCache())
+    plain, scaled = module.Cfg(2.0), module.Cfg(2.0)
+    scaled.scale = 10.0
+    assert driver.execute(["scaled"], inputs={"cfg": plain}) == {"scaled": 2.0}
+    assert driver.execute(["scaled"], inputs={"cfg": scaled}) == {"scaled": 20.0}
+
+
+def test_a_recompute_result_is_never_stored(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Only `default` nodes are looked up, so a `recompute` result is not written."""
+    file = tmp_path / "words.txt"
+    file.write_text("one two")
+    store = CountingCache()
+    driver = _cached(make_module("cached_loader_puts", LOADER), store)
+    inputs = {"path": str(file)}
+    for _ in range(2):
+        assert driver.execute(["text", "words"], inputs=inputs) == {
+            "text": "one two",
+            "words": 2,
+        }
+    assert _called(capsys) == ["text", "words", "text"]
+    # `words` once, on the first run; `text` never.
+    assert len(store.puts) == 1
+    assert len(store._entries) == 1  # noqa: SLF001  # what the store holds
+
+
 def test_a_recompute_node_behind_another_is_keyed_by_both_results(
     capsys: pytest.CaptureFixture[str], tmp_path: Path
 ) -> None:

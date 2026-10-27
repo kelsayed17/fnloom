@@ -271,10 +271,22 @@ class DiskCache:
         loads: Callable[[bytes], object] = pickle.loads,
         serializer: str = "pickle",
     ) -> None:
-        """Opens the store at `path`, pruning it to `max_bytes` if given."""
+        """Opens the store at `path`, pruning it to `max_bytes` if given.
+
+        Raises:
+            ValueError: `max_bytes` is negative.
+            TypeError: `serializer` is not a non-empty `str`: it names the pair, it
+                is not a module (pass `dumps` and `loads` for that).
+        """
         if max_bytes is not None and max_bytes < 0:
             msg = f"max_bytes must be at least 0 or None, not {max_bytes}"
             raise ValueError(msg)
+        if not isinstance(serializer, str) or not serializer:
+            msg = (
+                "serializer must be a non-empty str naming dumps and loads, "
+                f"not {serializer!r}"
+            )
+            raise TypeError(msg)
         self._path = Path(path)
         self._root = self._path / _LAYOUT
         self._max_bytes = max_bytes
@@ -333,7 +345,8 @@ class DiskCache:
         try:
             data = self._encode(value)
         except Exception as error:  # noqa: BLE001  # any failure skips the write
-            _warn(f"cannot serialize a {type(value).__qualname__} to cache it: {error}")
+            kind = type(value).__qualname__
+            _warn(f"cannot serialize a value of type {kind!r} to cache it: {error}")
             return
         path = self._file(key)
         temporary: str | None = None
