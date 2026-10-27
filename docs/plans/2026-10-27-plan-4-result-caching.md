@@ -28,8 +28,7 @@ is still unwritten. This plan does not depend on it, so it is Plan 4.
 **Out of this plan:** the observer hook that carries each node's cache outcome (spec §6 leaves its shape to the hooks
 plan); `explain_cache` reports the same outcomes now. Remote stores (spec §2).
 
-**Base:** branch `caching-design`, cut from the head of PR #4 (`plan-2-engine-surface`), whose `Plan::run_by_id`,
-`renames` and plan cache this plan uses. Rebase onto `main` once #4 is merged.
+**Base:** `main` after PR #4 (Plan 2), whose `Plan::run_by_id`, `renames` and plan cache this plan uses.
 
 ## Global Constraints
 
