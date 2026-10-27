@@ -1,7 +1,12 @@
 """Each deliberate difference from Hamilton, asserted on both sides."""
 
 import collections.abc
-from typing import Annotated, Any
+import importlib.util
+import inspect
+import pickle
+import sys
+import textwrap
+from typing import TYPE_CHECKING, Annotated, Any
 
 import pytest
 from hamilton import driver as hamilton_driver
@@ -30,8 +35,15 @@ from type_matrix import (
 )
 
 import fnloom
+from fnloom import CacheOutcome, CacheWarning, DiskCache
+from fnloom import _caching as fnloom_caching
 from fnloom._types import type_matches, value_matches
 from helpers import make_module
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+    from types import ModuleType
 
 
 @pytest.mark.deliberate("Q4")
@@ -536,3 +548,293 @@ def applied(table: Mapping[str, int], fn: Callable[[int], int]) -> int:
     inputs = {"table": {"a": 3}, "fn": _square}
     assert run_hamilton([module], ["applied"], inputs) == Outcome(None, "ValueError")
     assert run_fnloom([module], ["applied"], inputs) == Outcome({"applied": 9}, None)
+
+
+def _file_module(directory: Path, name: str, source: str) -> ModuleType:
+    """Writes `source` to `<directory>/<name>.py` and imports it as module `name`.
+
+    Hamilton versions a node by `inspect.getsource`, which needs a file: a module
+    built by `make_module` has none, so Hamilton would version every node as `None`.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{name}.py"
+    path.write_text(textwrap.dedent(source), encoding="utf-8")
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        msg = f"cannot load {path}"
+        raise ImportError(msg)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _hamilton_cached(
+    module: ModuleType,
+    path: Path,
+    *,
+    recompute: list[str] | None = None,
+    ignore: list[str] | None = None,
+) -> hamilton_driver.Driver:
+    """A Hamilton driver over `module` caching under `path`, with per-node behaviors."""
+    return (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_cache(path=path, recompute=recompute, ignore=ignore)
+        .build()
+    )
+
+
+def _fnloom_cached(module: ModuleType, path: Path) -> fnloom.Driver:
+    """A fnloom driver over `module` caching in a `DiskCache` under `path`."""
+    return fnloom.Builder().with_modules(module).with_cache(DiskCache(path)).build()
+
+
+@pytest.mark.deliberate("Q16")
+def test_q16_code_versions_are_made_once_at_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hamilton reads every node's source on every run; fnloom reads code at build."""
+    module = _file_module(
+        tmp_path / "code",
+        "differential_cache_source",
+        """
+        def a(x: int) -> int:
+            return x + 1
+
+        def b(a: int) -> int:
+            return a * 2
+        """,
+    )
+    read: list[object] = []
+    getsource = inspect.getsource
+
+    def counting_getsource(obj: Any) -> str:  # noqa: ANN401  # wraps `inspect.getsource`
+        read.append(obj)
+        return getsource(obj)
+
+    monkeypatch.setattr(inspect, "getsource", counting_getsource)
+    versioned: list[object] = []
+    code_version = fnloom_caching.code_version
+
+    def counting_code_version(fn: Callable[..., object]) -> bytes:
+        versioned.append(fn)
+        return code_version(fn)
+
+    monkeypatch.setattr(fnloom_caching, "code_version", counting_code_version)
+    hamilton = _hamilton_cached(module, tmp_path / "hamilton")
+    for _ in range(2):
+        read.clear()
+        assert hamilton.execute(["b"], inputs={"x": 1}) == {"b": 4}
+        # Each node's source, `a` and `b`, read again by the run.
+        assert sorted(fn.__name__ for fn in read) == ["a", "b"]  # ty: ignore[unresolved-attribute]  # each one is a node's function
+    read.clear()
+    driver = _fnloom_cached(module, tmp_path / "fnloom")
+    assert sorted(fn.__name__ for fn in versioned) == ["a", "b"]  # ty: ignore[unresolved-attribute]  # each one is a node's function
+    versioned.clear()
+    for _ in range(2):
+        assert driver.execute(["b"], inputs={"x": 1}) == {"b": 4}
+    assert read == []
+    assert versioned == []
+
+
+@pytest.mark.deliberate("Q46")
+def test_q46_equal_hashes_never_share_an_entry(tmp_path: Path) -> None:
+    """Hamilton serves `1` for a node returning `"1"`; fnloom keys by node (F1, F2)."""
+    module = _file_module(
+        tmp_path / "code",
+        "differential_cache_equal",
+        """
+        def a() -> int:
+            return 1
+
+        def b() -> str:
+            return "1"
+        """,
+    )
+    hamilton = _hamilton_cached(module, tmp_path / "hamilton")
+    assert hamilton.execute(["a", "b"]) == {"a": 1, "b": "1"}
+    assert hamilton.execute(["a", "b"]) == {"a": 1, "b": 1}
+    driver = _fnloom_cached(module, tmp_path / "fnloom")
+    assert driver.execute(["a", "b"]) == {"a": 1, "b": "1"}
+    second = driver.execute(["a", "b"])
+    assert second == {"a": 1, "b": "1"}
+    assert type(second["b"]) is str
+
+
+@pytest.mark.deliberate("Q47")
+def test_q47_a_nested_unhashable_input_is_not_a_constant(tmp_path: Path) -> None:
+    """Hamilton hits on a list whose `__slots__` item changed; fnloom reruns (F3)."""
+    module = _file_module(
+        tmp_path / "code",
+        "differential_cache_slots",
+        """
+        class Box:
+            __slots__ = ("size",)
+
+            def __init__(self, size: int) -> None:
+                self.size = size
+
+        def first_size(boxes: list) -> int:
+            return boxes[0].size
+        """,
+    )
+    box_type = vars(module)["Box"]
+    driver = _fnloom_cached(module, tmp_path / "fnloom")
+    runs = {
+        "hamilton": _hamilton_cached(module, tmp_path / "hamilton").execute,
+        "fnloom": driver.execute,
+    }
+    seen: dict[str, list[object]] = {}
+    for runtime, execute in runs.items():
+        box = box_type(1)
+        first = execute(["first_size"], inputs={"boxes": [box]})["first_size"]
+        box.size = 2
+        second = execute(["first_size"], inputs={"boxes": [box]})["first_size"]
+        seen[runtime] = [first, second]
+    assert seen == {"hamilton": [1, 1], "fnloom": [1, 2]}
+    outcome = driver.explain_cache(["first_size"], inputs={"boxes": [box_type(1)]})
+    assert outcome["first_size"].status == "uncacheable"
+    assert "boxes" in (outcome["first_size"].reason or "")
+
+
+HELPER = """
+C = {constant}
+
+def _offset(x: int) -> int:
+    return x + {offset}
+
+def shifted(x: int) -> int:
+    return _offset(x)
+
+def scaled(x: int) -> int:
+    return x * C
+"""
+
+
+@pytest.mark.deliberate("Q48")
+def test_q48_an_edited_helper_or_constant_changes_the_key(tmp_path: Path) -> None:
+    """Hamilton versions only the node's own source, so misses these edits (F4)."""
+    seen: dict[str, list[object]] = {"hamilton": [], "fnloom": []}
+    edits = ((1, 1), (100, 1), (100, 100))
+    for edit, (offset, constant) in enumerate(edits):
+        module = _file_module(
+            tmp_path / f"edit{edit}",
+            "differential_cache_helper",
+            HELPER.format(offset=offset, constant=constant),
+        )
+        hamilton = _hamilton_cached(module, tmp_path / "hamilton")
+        driver = _fnloom_cached(module, tmp_path / "fnloom")
+        for runtime, execute in (
+            ("hamilton", hamilton.execute),
+            ("fnloom", driver.execute),
+        ):
+            result = execute(["shifted", "scaled"], inputs={"x": 2})
+            seen[runtime].append((result["shifted"], result["scaled"]))
+    assert seen == {
+        "hamilton": [(3, 2), (3, 2), (3, 2)],
+        "fnloom": [(3, 2), (102, 2), (102, 200)],
+    }
+
+
+@pytest.mark.deliberate("Q50")
+def test_q50_a_client_is_never_pickled(tmp_path: Path) -> None:
+    """Hamilton's `ignore` still pickles a lock; fnloom's `disable` never stores it."""
+    hamilton_module = _file_module(
+        tmp_path / "code",
+        "differential_cache_lock_h",
+        """
+        import threading
+
+        def lock() -> threading.Lock:
+            return threading.Lock()
+
+        def guarded(lock: threading.Lock, n: int) -> int:
+            return n + 1
+        """,
+    )
+    hamilton = _hamilton_cached(hamilton_module, tmp_path / "hamilton", ignore=["lock"])
+    with pytest.raises(TypeError, match="pickle"):
+        hamilton.execute(["guarded"], inputs={"n": 1})
+    # Hamilton's `ignore` on a producer also drops it from every consumer's key.
+    chain = _file_module(
+        tmp_path / "code",
+        "differential_cache_ignored",
+        """
+        def p(x: int) -> int:
+            return x
+
+        def q(p: int) -> int:
+            return p * 10
+        """,
+    )
+    ignoring = _hamilton_cached(chain, tmp_path / "hamilton_chain", ignore=["p"])
+    assert ignoring.execute(["q"], inputs={"x": 1}) == {"q": 10}
+    assert ignoring.execute(["q"], inputs={"x": 2}) == {"q": 10}
+    # fnloom's `ignore` is a consumer's, per parameter, so `q` still reads `p`.
+    chained = _fnloom_cached(chain, tmp_path / "fnloom_chain")
+    assert chained.execute(["q"], inputs={"x": 1}) == {"q": 10}
+    assert chained.execute(["q"], inputs={"x": 2}) == {"q": 20}
+    # Only fnloom builds this twin, and it versions code objects, not source: no file.
+    fnloom_module = make_module(
+        "differential_cache_lock_f",
+        """
+        import threading
+
+        from fnloom import cache
+
+        @cache(behavior="disable")
+        def lock() -> threading.Lock:
+            return threading.Lock()
+
+        @cache(ignore=("lock",))
+        def guarded(lock: threading.Lock, n: int) -> int:
+            return n + 1
+        """,
+    )
+    driver = _fnloom_cached(fnloom_module, tmp_path / "fnloom")
+    assert driver.execute(["guarded"], inputs={"n": 1}) == {"guarded": 2}
+    assert driver.explain_cache(["guarded"], inputs={"n": 1}) == {
+        "guarded": CacheOutcome("hit", None),
+        "lock": CacheOutcome("uncacheable", "policy disable"),
+    }
+    assert driver.execute(["guarded"], inputs={"n": 1}) == {"guarded": 2}
+
+
+def _truncate_entries(directory: Path) -> int:
+    """Cuts every stored result under `directory` to half its length; how many."""
+    entries = [p for p in directory.rglob("*") if p.is_file() and p.suffix != ".db"]
+    for entry in entries:
+        data = entry.read_bytes()
+        entry.write_bytes(data[: len(data) // 2])
+    return len(entries)
+
+
+@pytest.mark.deliberate("Q51")
+def test_q51_a_truncated_entry_is_a_miss(tmp_path: Path) -> None:
+    """Hamilton's run raises on a truncated entry; fnloom's recomputes and warns."""
+    module = _file_module(
+        tmp_path / "code",
+        "differential_cache_truncated",
+        """
+        def numbers(n: int) -> list[int]:
+            return list(range(n))
+        """,
+    )
+    inputs = {"n": 50}
+    expected = {"numbers": list(range(50))}
+    hamilton = _hamilton_cached(module, tmp_path / "hamilton")
+    assert hamilton.execute(["numbers"], inputs=inputs) == expected
+    assert _truncate_entries(tmp_path / "hamilton") == 1
+    with pytest.raises(pickle.UnpicklingError, match="truncated"):
+        _hamilton_cached(module, tmp_path / "hamilton").execute(
+            ["numbers"], inputs=inputs
+        )
+    driver = _fnloom_cached(module, tmp_path / "fnloom")
+    assert driver.execute(["numbers"], inputs=inputs) == expected
+    assert _truncate_entries(tmp_path / "fnloom") == 1
+    with pytest.warns(CacheWarning, match="removed unreadable cache entry"):
+        assert driver.execute(["numbers"], inputs=inputs) == expected
+    assert driver.explain_cache(["numbers"], inputs=inputs) == {
+        "numbers": CacheOutcome("hit", None)
+    }

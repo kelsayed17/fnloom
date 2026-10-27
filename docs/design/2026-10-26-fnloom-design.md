@@ -47,7 +47,8 @@ outside Python.
 ### Non-goals (v1)
 
 - Hamilton's plugin ecosystem (dask, ray, spark, pandera, mlflow, …), UI/tracker integration, materializers,
-  caching, dynamic execution (`Parallelizable`/`Collect`). Dynamic execution is the first deferral to design next.
+  dynamic execution (`Parallelizable`/`Collect`). Dynamic execution is the first deferral to design next. Caching,
+  first listed here, has its own design (`2026-10-27-caching-design.md`) and is built.
 - Faster Python node bodies. A Python node still runs at Python speed.
 
 **Anti-goals** — the project fails even if every test passes if:
@@ -145,7 +146,7 @@ against Hamilton and green against fnloom.
 | Q7, Q21, Q22, Q23 | FIX: pass-through overrides, additive custom checks, type-checked overrides, every hook runs before errors are raised. |
 | Q8, Q11, Q26 | FIX: deterministic order everywhere, dict results everywhere, name-tie-broken topological execution. |
 | Q10 | Edge checks always on; input checks on by default with an explicit opt-out. |
-| Q16 | DEFER with caching. |
+| Q16 | FIX with caching: code versions are made once, at build (`2026-10-27-caching-design.md`). |
 | Q24 | KEEP a single result builder; hooks compose. |
 | Q9, Q17, Q18 (numeric widening, array shape/dtype contracts, length alignment) | Out of core: found against one consumer's numpy workloads, not Hamilton in general. Candidates for an opt-in policy, likely needed by the indicator library (§11). |
 
@@ -230,3 +231,5 @@ language: an earlier Rust port of numba kernels showed no compute speedup betwee
   model added; IR reduced to what v1 needs; numeric widening removed from the front end's duties; Python floor
   3.10 → 3.14 (maintainer); `abi3` dropped; edition 2024; benchmark gate moved to instruction counts; indicator-library
   requirements recorded; authoring API decided: name-wiring.
+- **2026-10-27:** caching leaves the non-goals (§2) and Q16 becomes a FIX: result caching is designed in
+  `2026-10-27-caching-design.md` and built in Plan 4.

@@ -133,8 +133,8 @@ dispatch.
 **Yes, if** you compute many derived values from a few inputs (features, metrics, pricing, signals), want each step
 to be a small function you can test on its own, and run the same graph many times in one process.
 
-**Not yet, if** you need Hamilton's adapters, result builders, async execution, `@config.when`, `@extract_columns` or
-caching. They're on the [roadmap](#status). fnloom is also not a scheduler. It doesn't retry, distribute or schedule
+**Not yet, if** you need Hamilton's adapters, result builders, async execution, `@config.when` or `@extract_columns`.
+They're on the [roadmap](#status). fnloom is also not a scheduler. It doesn't retry, distribute or schedule
 work, so pair it with an orchestrator if you need that.
 
 ## Install
@@ -155,7 +155,7 @@ uv run maturin develop --release
 
 - ✅ The Rust core and the native Python path
 - ✅ `@parameterize`, `@tag`, graph inspection and type checks
-- 📐 Result caching: designed, not yet built
+- ✅ [Result caching](https://kelsayed17.github.io/fnloom/caching/), in memory or on disk
 - 🔜 Configuration and `@extract_*`, then adapters and async execution, then visualisation
 
 The [design](https://kelsayed17.github.io/fnloom/design/2026-10-26-fnloom-design/) has the full plan. The name is

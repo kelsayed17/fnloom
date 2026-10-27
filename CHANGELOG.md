@@ -18,7 +18,7 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `PreparedPlan.run`; `node_names`, `what_is_upstream_of` and `what_is_downstream_of`.
 - The native binding `fnloom._core`, with a typed stub. A node's own exception propagates as itself, with a note
   naming the node; a Rust panic becomes a Python exception.
-- Differential tests against Apache Hamilton 1.90.0, and the register of deliberate differences (Q1–Q45).
+- Differential tests against Apache Hamilton 1.90.0, and the register of deliberate differences (Q1–Q51).
 - Decorators `fnloom.parameterize`, `source`, `value` and `tag`, with the `Source` and `Value` types they build. A
   decorator returns the function it was given, typed as itself. Tag values are strings only.
 - `Driver.nodes`, a mapping from node name to a `NodeView` (the node's type, parameters, tags and origin), and the
@@ -29,6 +29,15 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - Wall-clock benchmarks against Hamilton, with a `rows` shape (one function with `n` `@parameterize` rows) and fnloom
   measured with input checks on and off, and a CI gate on the core's instruction counts.
 - A documentation site, built with Zensical and published to GitHub Pages.
+- Result caching. `Builder.with_cache(store)` caches every node of a driver, keyed by the node's code version (read
+  once, at build) and the fingerprints of its inputs and overrides, chained from node to node; a run loads only the
+  stored results nearest its outputs. Stores `fnloom.MemoryCache` (least recently used eviction) and
+  `fnloom.DiskCache` (one file per key, atomic writes, version headers, pluggable serializer), the `CacheStore`
+  protocol, `MISSING` and `CacheWarning`: the cache never fails a run. The `@cache` decorator with
+  `behavior="recompute"` or `"disable"`, `ignore=` per consuming parameter and `version=`, recorded as a
+  `CachePolicy`. `fnloom.fingerprint`, `register_fingerprint` and the `__fnloom_fingerprint__` protocol, with
+  `UnfingerprintableError`. `Driver.explain_cache`, which reports each node's `CacheOutcome` and runs nothing. A guide,
+  [Caching](https://kelsayed17.github.io/fnloom/caching/), and cached-run benchmarks (`benches/cache.py`).
 - Markdown lint with rumdl, run by `scripts/check.sh`, so every page renders as written on the docs site.
 
 ### Changed
@@ -59,7 +68,7 @@ change the public API; such changes are listed under **Changed** and **Removed**
   returning `Annotated[Any, ...]` or an alias of `Any` feeds any parameter, as `Any` does (Q41, Q44).
 - An input check against a recursive alias such as `type Tree = list[Tree]` refuses a string instead of raising
   `RecursionError`.
-- The type stub `fnloom/_core.pyi` matches the extension: `Graph` and `ObserverBase` construct through `__new__`,
+- The type stub `fnloom/_core.pyi` matches the extension: `Graph`, `KeyPlan` and `ObserverBase` construct through `__new__`,
   and `Plan.run`'s `observers` defaults to `()` in its runtime signature too.
 
 [Unreleased]: https://github.com/kelsayed17/fnloom/commits/main

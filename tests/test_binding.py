@@ -411,3 +411,133 @@ def test_stub_lists_exactly_the_runtime_names() -> None:
     }
     runtime = {name for name in dir(_core) if not name.startswith("_")}
     assert stubbed == runtime
+
+
+ABSENT = b"\x00absent"
+
+
+def _chain_key_plan() -> _core.KeyPlan:
+    """The key plan of `a` (input) -> `b` -> `c` -> `d`."""
+    return _core.KeyPlan(
+        [
+            ("b", b"static b", [("a", "a", None)]),
+            ("c", b"static c", [("b", "b", None)]),
+            ("d", b"static d", [("c", "c", None), ("k", None, b"constant")]),
+        ]
+    )
+
+
+def test_key_plan_chains_versions() -> None:
+    """Keys chain from the inputs' versions, and `None` spreads downstream."""
+    plan = _chain_key_plan()
+    one = plan.keys({"a": b"one"})
+    two = plan.keys({"a": b"two"})
+    assert one == _chain_key_plan().keys({"a": b"one"})
+    for name in ("b", "c", "d"):
+        assert one[name] is not None
+        assert one[name] != two[name]
+    b, c = one["b"], one["c"]
+    assert b is not None
+    assert c is not None
+    assert b == _core.hash_parts([b"static b", b"a", b"one"])
+    assert c == _core.hash_parts([b"static c", b"b", b])
+    assert one["d"] == _core.hash_parts([b"static d", b"c", c, b"k", b"constant"])
+    assert plan.keys({"a": None}) == {"b": None, "c": None, "d": None}
+
+
+def test_key_plan_versions_override_computed_nodes() -> None:
+    """A computed node named in `versions` is read by that version, not its key."""
+    plan = _chain_key_plan()
+    keys = plan.keys({"a": b"one", "b": b"loaded"})
+    assert keys["c"] == _core.hash_parts([b"static c", b"b", b"loaded"])
+    assert plan.keys({"a": None, "b": b"loaded"})["c"] is not None
+
+
+def test_key_plan_uncacheable_static_parts_and_constants_give_none() -> None:
+    """A `None` static part or constant version makes that key and its readers' None."""
+    plan = _core.KeyPlan(
+        [
+            ("b", None, [("a", "a", None)]),
+            ("c", b"static c", [("b", "b", None)]),
+            ("e", b"static e", [("k", None, None)]),
+            ("f", b"static f", [("a", "a", None)]),
+        ]
+    )
+    keys = plan.keys({"a": b"one"})
+    assert keys["b"] is None
+    assert keys["c"] is None
+    assert keys["e"] is None
+    assert keys["f"] is not None
+
+
+def test_key_plan_marks_absent_optional_inputs() -> None:
+    """An absent source differs from one supplied as the fingerprint of `None`."""
+    plan = _core.KeyPlan([("b", b"static b", [("maybe", "maybe", None)])])
+    absent = plan.keys({})["b"]
+    supplied = plan.keys({"maybe": _core.fingerprint(None, lambda _: None)})["b"]
+    assert absent == _core.hash_parts([b"static b", b"maybe", ABSENT])
+    assert absent != supplied
+
+
+def test_key_plan_refuses_bad_entries() -> None:
+    """Duplicate nodes, forward reads and non-bytes versions are refused."""
+    with pytest.raises(ValueError, match="'b'"):
+        _core.KeyPlan([("b", b"s", []), ("b", b"s", [])])
+    with pytest.raises(ValueError, match="'c'"):
+        _core.KeyPlan([("b", b"s", [("c", "c", None)]), ("c", b"s", [])])
+    plan = _core.KeyPlan([("b", b"s", [("a", "a", None)])])
+    versions: Any = {"a": "text"}
+    with pytest.raises(TypeError):
+        plan.keys(versions)
+
+
+def test_on_value_sees_each_computed_node_once_in_order() -> None:
+    """`on_value` sees computed nodes in observer order, never inputs or overrides."""
+
+    def increment(c: int) -> int:
+        return c + 1
+
+    graph = _core.Graph(
+        [
+            ("b", [("a", True), ("maybe", False)], {}, _add_one),
+            ("c", [("b", True)], {}, _double),
+            ("d", [("c", True)], {}, increment),
+        ]
+    )
+    recorder = Recorder()
+    seen: list[tuple[str, object]] = []
+
+    def on_value(name: str, value: object) -> None:
+        seen.append((name, value))
+        recorder.events.append(("on_value", name))
+
+    plan = graph.prepare(["d"], ["a"], [])
+    assert plan.run({"a": 1}, {}, [recorder], on_value) == {"d": 5}
+    assert seen == [("b", 2), ("c", 4), ("d", 5)]
+    computed = [event[1] for event in recorder.events if event[0] == "pre_node"]
+    assert [name for name, _ in seen] == computed
+    for name in computed:
+        position = recorder.events.index(("on_value", name))
+        assert recorder.events[position - 1] == ("post_node", name, True)
+    seen.clear()
+    assert graph.prepare(["d"], [], ["c"]).run({}, {"c": 10}, (), on_value) == {"d": 11}
+    assert seen == [("d", 11)]
+
+
+def test_on_value_errors_propagate_like_an_observer_error() -> None:
+    """An exception from `on_value` is raised as itself and stops the run."""
+    recorder = Recorder()
+    calls: list[str] = []
+
+    def on_value(name: str, _value: object) -> None:
+        calls.append(name)
+        msg = f"refused {name}"
+        raise RuntimeError(msg)
+
+    plan = _chain().prepare(["c"], ["a"], [])
+    with pytest.raises(RuntimeError, match="refused b") as info:
+        plan.run({"a": 1}, {}, [recorder], on_value)
+    assert not getattr(info.value, "__notes__", [])
+    assert calls == ["b"]
+    assert recorder.events[-1] == ("post_graph", False)
+    assert ("pre_node", "c") not in recorder.events

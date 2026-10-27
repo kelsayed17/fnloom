@@ -44,6 +44,8 @@ dev = [
     "maturin>=1.15,<2",
     # The behavioural oracle for the differential tests; pinned so the oracle never drifts.
     "apache-hamilton==1.90.0",
+    # Generated graphs for the caching equality property.
+    "hypothesis>=6.150",
 ]
 # The documentation site (`uv run --group docs zensical serve` to preview it).
 docs = ["zensical>=0.0.73"]

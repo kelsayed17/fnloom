@@ -149,6 +149,6 @@ tested against Hamilton side by side.
 !!! note "Status: pre-alpha"
 
     fnloom isn't on PyPI yet, so [build it from source](getting-started.md). The Rust core, the native Python path,
-    `@parameterize`, `@tag`, graph inspection and type checks are done. Caching is designed but not yet built.
+    `@parameterize`, `@tag`, graph inspection, type checks and [result caching](caching.md) are done.
     Configuration, adapters and async execution come later; [the design](design/2026-10-26-fnloom-design.md) has the
     full plan.

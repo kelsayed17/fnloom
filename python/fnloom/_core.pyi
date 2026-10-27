@@ -1,9 +1,27 @@
 from collections.abc import Callable, Sequence
 from typing import Any, Self, final
 
-__all__ = ["Graph", "ObserverBase", "Plan", "_panic_for_test", "core_version"]
+__all__ = [
+    "Graph",
+    "KeyPlan",
+    "ObserverBase",
+    "Plan",
+    "UnfingerprintableError",
+    "_panic_for_test",
+    "core_version",
+    "fingerprint",
+    "hash_parts",
+]
 
 def core_version() -> str: ...
+def fingerprint(
+    value: object, fallback: Callable[[object], object | None]
+) -> bytes: ...
+def hash_parts(parts: Sequence[bytes]) -> bytes: ...
+
+class UnfingerprintableError(TypeError):
+    path: str
+    type_name: str
 
 # Compiled only with the `test-hooks` feature, which release builds never enable.
 def _panic_for_test() -> None: ...
@@ -32,8 +50,19 @@ class Plan:
         inputs: dict[str, Any],
         overrides: dict[str, Any],
         observers: Sequence[ObserverBase] = (),
+        on_value: Callable[[str, object], None] | None = None,
     ) -> dict[str, object]: ...
     def steps(self) -> list[tuple[str, str]]: ...
+
+@final
+class KeyPlan:
+    def __new__(
+        cls,
+        nodes: list[
+            tuple[str, bytes | None, list[tuple[str, str | None, bytes | None]]]
+        ],
+    ) -> Self: ...
+    def keys(self, versions: dict[str, bytes | None]) -> dict[str, bytes | None]: ...
 
 class ObserverBase:
     def __new__(cls, *_args: object, **_kwargs: object) -> Self: ...

@@ -67,6 +67,13 @@ def _rows(n: int, spelling: Spelling) -> str:
     )
 
 
+def module_source(shape: Shape, n: int, spelling: Spelling = "fnloom") -> str:
+    """Returns the source of `make_module(shape, n, spelling)`."""
+    if shape == "rows":
+        return _rows(n, spelling)
+    return {"chain": _chain, "fan_in": _fan_in, "layered": _layered}[shape](n)
+
+
 def make_module(shape: Shape, n: int, spelling: Spelling = "fnloom") -> ModuleType:
     """Returns a fresh module of `n` nodes (`n` parameters, for `fan_in`) in `shape`.
 
@@ -76,10 +83,7 @@ def make_module(shape: Shape, n: int, spelling: Spelling = "fnloom") -> ModuleTy
     (the first sources `seed`). Only `rows` differs by `spelling`: the decorators come
     from Hamilton or from fnloom.
     """
-    if shape == "rows":
-        source = _rows(n, spelling)
-    else:
-        source = {"chain": _chain, "fan_in": _fan_in, "layered": _layered}[shape](n)
+    source = module_source(shape, n, spelling)
     module = ModuleType(f"bench_{shape}_{n}_{next(_counter)}")
     # Hamilton finds a function's module through `sys.modules`.
     sys.modules[module.__name__] = module

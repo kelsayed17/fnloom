@@ -20,6 +20,8 @@ doctest = false
 test-hooks = []
 
 [dependencies]
+# Fingerprints and cache keys: compiled in, so hashing adds no Python dependency.
+blake3 = "1"
 fnloom-core = { path = "../fnloom-core" }
 # No `extension-module` feature: PyO3 0.30 deprecates it in favour of the
 # PYO3_BUILD_EXTENSION_MODULE variable, which maturin (>= 1.9.4) sets for its own builds,

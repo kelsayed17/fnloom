@@ -2,7 +2,9 @@
 #![deny(unsafe_code)]
 
 mod errors;
+mod fingerprint;
 mod graph;
+mod keys;
 mod observer;
 mod plan;
 
@@ -31,7 +33,16 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(core_version, module)?)?;
     #[cfg(feature = "test-hooks")]
     module.add_function(wrap_pyfunction!(_panic_for_test, module)?)?;
+    module.add_function(wrap_pyfunction!(fingerprint::fingerprint, module)?)?;
+    module.add_function(wrap_pyfunction!(fingerprint::hash_parts, module)?)?;
+    module.add(
+        "UnfingerprintableError",
+        module
+            .py()
+            .get_type::<fingerprint::UnfingerprintableError>(),
+    )?;
     module.add_class::<graph::Graph>()?;
     module.add_class::<plan::Plan>()?;
+    module.add_class::<keys::KeyPlan>()?;
     module.add_class::<observer::ObserverBase>()
 }

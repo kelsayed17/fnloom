@@ -1,7 +1,8 @@
 # fnloom — result caching, design
 
-**Status:** approved by the maintainer, 2026-10-27; to be built in Plan 4
-(`docs/plans/2026-10-27-plan-4-result-caching.md`). Written without a question round, at the maintainer's request,
+**Status:** approved by the maintainer, 2026-10-27; built in Plan 4
+(`docs/plans/2026-10-27-plan-4-result-caching.md`). The user guide is `docs/caching.md`, and the measured targets of
+§8 are in `docs/benchmarks.md`. Written without a question round, at the maintainer's request,
 from a study of Hamilton 1.90.0's cache (most faults reproduced against the installed wheel). Every call in this
 document is the author's unless it says otherwise; §11 lists them so any can be changed. It extends the main design
 (`2026-10-26-fnloom-design.md`), which lists caching as a v1 non-goal; building this moves it into scope.
@@ -334,3 +335,24 @@ FIX.
 - The order of the plan's tasks. A sensible one: fingerprints, then code versions, then keys and the memory store,
   then the hit frontier and pruning, then the disk store, then the policies and `explain_cache`, then the register
   rows and benchmarks.
+
+## 13. As built (Plan 4)
+
+Where the code departs from the sections above, each with its reason. The sections above stay as approved.
+
+- **F6 / Q49 is kept, not fixed.** A node's behavior is part of its key, so `recompute` and `default` are separate key
+  spaces, and a default run after a recompute run serves the default space's entries, consistently for the node and
+  its consumers. Replacing across policies would need a double write or consumers keyed by value.
+- **`recompute` results are not stored** (§3 step 4): only `default` nodes are ever looked up, so a stored recompute
+  result would never be read.
+- **The backward walk and `MemoryCache` are Python, not Rust** (§8). Keys, fingerprints and key plans are Rust; the
+  cold-run target is missed, see `docs/benchmarks.md`.
+- **The stores live in the private `fnloom._stores`**, used through `fnloom` (`fnloom.cache` is the decorator).
+- **`serializer=` is the pair's name**, a non-empty `str`; the pair itself is `dumps=` and `loads=`.
+- **Canonical forms are stricter than §5's list**: exact types (a subclass is refused unless registered), a time
+  zone's identity and a datetime's fold, a pandas index's dtype, and a type's own declaration or registration before
+  any built-in form.
+- **Records count their instance state**: a dataclass or named tuple, and a buffer subclass, fingerprint any
+  attribute set beyond their fields or buffer, by name, or are refused.
+- **A class counts through all its attributes**, its metaclass and its bases, not its methods alone (§4).
+- **Mutable defaults are fingerprinted at build** (a known limit): a default mutated after the build is not seen.

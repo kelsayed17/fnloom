@@ -1,5 +1,6 @@
 //! The Python `Plan`, and the evaluator that calls each node's Python function.
 
+use std::cell::RefCell;
 use std::sync::Arc;
 
 use fnloom_core::node::{Node, NodeId};
@@ -45,10 +46,16 @@ impl Plan {
     /// Each value is read from `inputs` or `overrides` by its node's interned name, and
     /// each output is keyed by it, so a run makes no name strings. Extra keys are ignored.
     /// Every observer sees every event, in sequence order. The GIL is held throughout.
+    ///
+    /// `on_value(name, value)` is called with each computed node's name and value right
+    /// after that node succeeds and every observer has seen its `post_node`, before any
+    /// downstream node runs; never for an input, an override or a skipped optional input.
+    /// It is driven as one more observer, so an exception from it is raised like an
+    /// observer's: as itself, after the closing `post_graph(ok=False)`.
     // PyO3 renders the `Vec::new()` default as `Ellipsis`, so the signature says `()` itself.
     #[pyo3(
-        signature = (inputs, overrides, observers = Vec::new()),
-        text_signature = "($self, /, inputs, overrides, observers=())"
+        signature = (inputs, overrides, observers = Vec::new(), on_value = None),
+        text_signature = "($self, /, inputs, overrides, observers=(), on_value=None)"
     )]
     fn run<'py>(
         &self,
@@ -56,15 +63,29 @@ impl Plan {
         inputs: &Bound<'py, PyDict>,
         overrides: &Bound<'py, PyDict>,
         observers: Vec<Bound<'py, ObserverBase>>,
+        on_value: Option<Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyDict>> {
+        let graph = self.graph.get();
+        let keywords = graph.keywords();
+        // The value of the node just computed, handed from the evaluator to `on_value`.
+        let latest = RefCell::new(None);
         let mut adapters: Vec<PyObserver<'py>> =
             observers.into_iter().map(PyObserver::new).collect();
+        let collect_values = on_value.is_some();
+        let mut value_hook = on_value.map(|callback| ValueHook {
+            callback,
+            keywords,
+            latest: &latest,
+        });
         let mut hooks: Vec<&mut dyn Observer<PyErr>> = adapters
             .iter_mut()
             .map(|adapter| adapter as &mut dyn Observer<PyErr>)
+            .chain(
+                value_hook
+                    .as_mut()
+                    .map(|hook| hook as &mut dyn Observer<PyErr>),
+            )
             .collect();
-        let graph = self.graph.get();
-        let keywords = graph.keywords();
         // A failed lookup (a key whose `__eq__` raises) is kept and raised after the run.
         let mut failure = None;
         let lookup = |action, id: NodeId| {
@@ -88,6 +109,7 @@ impl Plan {
                 py,
                 graph,
                 keywords,
+                latest: collect_values.then_some(&latest),
             },
             lookup,
             &mut hooks,
@@ -144,6 +166,8 @@ struct Caller<'py, 'g> {
     graph: &'g Graph,
     /// The graph's interned node names, by node id.
     keywords: &'g [Py<PyString>],
+    /// Where each computed value is left for `on_value`; `None` when there is none.
+    latest: Option<&'g RefCell<Option<(NodeId, Value)>>>,
 }
 
 impl Evaluate<Py<PyAny>> for Caller<'_, '_> {
@@ -156,7 +180,37 @@ impl Evaluate<Py<PyAny>> for Caller<'_, '_> {
         function: &Py<PyAny>,
         args: &[Arg<'_, Value>],
     ) -> PyResult<Value> {
-        caught(|| self.call(node.id, function, args))
+        let value = caught(|| self.call(node.id, function, args))?;
+        if let Some(latest) = self.latest {
+            *latest.borrow_mut() = Some((node.id, Arc::clone(&value)));
+        }
+        Ok(value)
+    }
+}
+
+/// Calls `on_value` with each computed node's name and value, as the last observer.
+struct ValueHook<'py, 'g> {
+    callback: Bound<'py, PyAny>,
+    /// The graph's interned node names, by node id.
+    keywords: &'g [Py<PyString>],
+    /// The value the evaluator left for the node just computed.
+    latest: &'g RefCell<Option<(NodeId, Value)>>,
+}
+
+impl Observer<PyErr> for ValueHook<'_, '_> {
+    fn post_node(&mut self, node: &str, ok: bool) -> PyResult<()> {
+        let Some((id, value)) = self.latest.borrow_mut().take() else {
+            return Ok(());
+        };
+        if !ok {
+            return Ok(());
+        }
+        let py = self.callback.py();
+        let name = self.keywords.get(id.index()).map_or_else(
+            || PyString::intern(py, node),
+            |keyword| keyword.bind(py).clone(),
+        );
+        caught(|| self.callback.call1((name, value.bind(py))).map(drop))
     }
 }
 
