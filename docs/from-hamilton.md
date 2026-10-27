@@ -41,6 +41,7 @@ The decorators fnloom has so far take the same arguments as Hamilton's. Usually 
 | `@parameterize(row={"param": source("node")})` | The same |
 | `@parameterize(row={"param": value(v)})` | The same. `v` is passed as is, never copied, as in Hamilton |
 | `@tag(owner="data")` | The same, imported from `fnloom`. A value must be a `str`, not a list (Q36) |
+| `@cache(behavior="recompute")`, `@cache(behavior="disable")` | The same, imported from `fnloom` ([Caching](#caching)) |
 | A row as `(bindings, docstring)`, `group(...)`, `parameterize_sources`, `parameterize_values` | Not yet. A row is a mapping |
 
 </div>
@@ -77,15 +78,36 @@ The decorators fnloom has so far take the same arguments as Hamilton's. Usually 
 
 </div>
 
+## Caching
+
+fnloom's cache keeps Hamilton's names for what they mean, and differs wherever Hamilton's cache can return a wrong
+value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](caching.md).
+
+<div class="fl-compare" markdown>
+
+| | Hamilton 1.90.0 | fnloom |
+| --- | --- | --- |
+| Turning it on | `Builder().with_cache(path=...)` | `Builder().with_cache(fnloom.DiskCache(path))`, or `fnloom.MemoryCache()` |
+| Per-node behavior | `@cache(behavior=...)`, or lists of names given to `with_cache` | `@cache(behavior=...)` on the function only |
+| `ignore` | `@cache(behavior="ignore")` on the producer hides it from every consumer | `@cache(ignore=("name",))` on a consumer, per parameter; the producer is `disable` (Q50) |
+| A code version | The function's source, hashed on every run | Its code, helpers, constants and libraries, read once at build (Q16, Q48) |
+| A helper or global the node reads | Not seen | Seen; a mutable global makes the node uncacheable unless it gives `@cache(version=...)` |
+| A value that cannot be hashed, nested in a list | A constant hash | The nodes reading it run, and `explain_cache` says why (Q47) |
+| `@cache(format=...)`, result stores per format | Supported | Not there: `DiskCache` takes one `dumps`/`loads` pair |
+| A corrupt stored entry | Fails the run | A miss, with a `CacheWarning` (Q51) |
+| What a run did with each node | A log that reports a hit on every lookup | `driver.explain_cache(...)` |
+
+</div>
+
 ## Not there yet
 
-fnloom is pre-alpha. The core, the native path, `@parameterize`, `@tag`, graph inspection and type checks are done.
+fnloom is pre-alpha. The core, the native path, `@parameterize`, `@tag`, graph inspection, type checks and result
+caching are done.
 These Hamilton features come next, roughly in this order:
 
 1. **Configuration and more decorators:** `@config.when`, `@extract_columns` and `@extract_fields`.
-2. **Result caching**, already [designed](design/2026-10-27-caching-design.md).
-3. **Adapters and lifecycle hooks**, result builders and async execution.
-4. **Graph visualisation.**
-5. **Dynamic execution**, materializers, `@subdag`, `@check_output` and `@pipe`.
+2. **Adapters and lifecycle hooks**, result builders and async execution.
+3. **Graph visualisation.**
+4. **Dynamic execution**, materializers, `@subdag`, `@check_output` and `@pipe`.
 
 If your pipeline depends on one of these, it's worth waiting for it before you switch.

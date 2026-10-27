@@ -6,7 +6,9 @@ import pytest
 
 import fnloom
 from fnloom._decorators import (
+    CachePolicy,
     Decorations,
+    cache,
     decorations,
     parameterize,
     source,
@@ -193,3 +195,86 @@ def test_every_non_str_tag_is_listed_sorted_in_one_message() -> None:
         "tag 'area': value must be str, got list; "
         "tag 'zone': value must be str, got int"
     )
+
+
+def test_cache_records_a_policy_and_returns_the_function() -> None:
+    """`cache` stores a frozen policy and hands back the same function."""
+
+    def g(x: int) -> int:
+        return x
+
+    assert cache(behavior="recompute")(g) is g
+    assert decorations(g).cache == CachePolicy("recompute", frozenset(), None)
+    assert decorations(f).cache is None
+
+
+def test_cache_records_ignore_and_version() -> None:
+    """`ignore` becomes a frozenset and `version` is kept as given."""
+
+    def g(x: int, y: int) -> int:
+        return x + y
+
+    cache(ignore=("y", "x"), version="2")(g)
+    assert decorations(g).cache == CachePolicy("default", frozenset("xy"), "2")
+
+
+def test_cache_composes_with_parameterize_and_tag_in_either_order() -> None:
+    """Stacking order does not change the recorded metadata."""
+
+    @cache(behavior="disable")
+    @tag(owner="a")
+    @parameterize(r={"x": source("up")})
+    def over(x: int) -> int:
+        return x
+
+    @parameterize(r={"x": source("up")})
+    @tag(owner="a")
+    @cache(behavior="disable")
+    def under(x: int) -> int:
+        return x
+
+    assert decorations(over) == decorations(under)
+    assert decorations(over).cache == CachePolicy("disable", frozenset(), None)
+    assert decorations(over).tags == {"owner": "a"}
+
+
+def test_cache_errors() -> None:
+    """Each bad argument names every culprit, sorted."""
+    with pytest.raises(ValueError, match="'default', 'recompute', 'disable'"):
+        cache(behavior="never")  # ty: ignore[invalid-argument-type]
+
+    def g(x: int) -> int:
+        return x
+
+    with pytest.raises(ValueError, match="'a', 'b'"):
+        cache(ignore=("b", "x", "a"))(g)
+    assert decorations(g).cache is None
+
+    cache()(g)
+    with pytest.raises(ValueError, match="apply cache once"):
+        cache(behavior="disable")(g)
+
+    for bad in ("", 2):
+        with pytest.raises(TypeError, match="version"):
+            cache(version=bad)  # ty: ignore[invalid-argument-type]
+    with pytest.raises(TypeError, match="int, int"):
+        cache(ignore=(1, 2))  # ty: ignore[invalid-argument-type]
+    with pytest.raises(TypeError, match="not one str"):
+        cache(ignore="x")
+
+
+def test_cache_does_not_evaluate_annotations() -> None:
+    """An annotation naming something undefined is fine at decoration time."""
+
+    @cache(ignore=("x",))
+    def g(x: Undefined) -> Undefined:  # noqa: F821  # ty: ignore[unresolved-reference]
+        return x
+
+    assert decorations(g).cache is not None
+
+
+def test_cache_names_are_exported() -> None:
+    """`cache` and `CachePolicy` are public."""
+    for name in ("cache", "CachePolicy"):
+        assert hasattr(fnloom, name)
+        assert name in fnloom.__all__

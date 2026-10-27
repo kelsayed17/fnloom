@@ -2,11 +2,15 @@
 
 import annotationlib
 import inspect
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from types import MappingProxyType
+from typing import Literal
 
 _ATTRIBUTE = "__fnloom__"
+
+# How a node uses the result cache: see `cache`.
+type CacheBehavior = Literal["default", "recompute", "disable"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,12 +27,28 @@ class Value:
     value: object
 
 
+@dataclass(frozen=True, slots=True)
+class CachePolicy:
+    """What `@cache` recorded: how the node uses the result cache.
+
+    Attributes:
+        behavior: `"default"`, `"recompute"` or `"disable"`.
+        ignore: Parameters left out of this node's cache key.
+        version: The user's own code version, or None for the automatic one.
+    """
+
+    behavior: CacheBehavior
+    ignore: frozenset[str]
+    version: str | None
+
+
 @dataclass(frozen=True)
 class Decorations:
-    """What the decorators recorded on one function: parameterize rows and tags."""
+    """What the decorators recorded on one function: rows, tags and cache policy."""
 
     rows: Mapping[str, Mapping[str, Source | Value]] | None
     tags: Mapping[str, str]
+    cache: CachePolicy | None = None
 
 
 def source(name: str) -> Source:
@@ -49,7 +69,7 @@ def decorations(fn: Callable[..., object]) -> Decorations:
     return _UNDECORATED
 
 
-# What a plain function records: no rows and no tags. One object, shared.
+# What a plain function records: no rows, tags or cache policy. One object, shared.
 _UNDECORATED = Decorations(None, MappingProxyType[str, str]({}))
 
 
@@ -137,6 +157,59 @@ def tag[F: Callable[..., object]](**tags: str) -> Callable[[F], F]:
             raise ValueError(msg)
         merged = MappingProxyType({**current.tags, **tags})
         setattr(fn, _ATTRIBUTE, replace(current, tags=merged))
+        return fn
+
+    return apply
+
+
+# The values of `CacheBehavior`.
+_BEHAVIORS = ("default", "recompute", "disable")
+
+
+def cache[F: Callable[..., object]](
+    *,
+    behavior: CacheBehavior = "default",
+    ignore: Iterable[str] = (),
+    version: str | None = None,
+) -> Callable[[F], F]:
+    """Records the node's cache policy; the build reads it, nothing runs here."""
+    # Typed as `object`: a caller may pass anything, whatever the hint says.
+    given_behavior: object = behavior
+    given_version: object = version
+    if given_behavior not in _BEHAVIORS:
+        allowed = ", ".join(repr(b) for b in _BEHAVIORS)
+        msg = f"cache behavior {given_behavior!r} is not one of {allowed}"
+        raise ValueError(msg)
+    if given_version is not None and (
+        not isinstance(given_version, str) or not given_version
+    ):
+        msg = f"cache version must be a non-empty str, got {given_version!r}"
+        raise TypeError(msg)
+    if isinstance(ignore, str):
+        msg = "cache ignore must be an iterable of parameter names, not one str"
+        raise TypeError(msg)
+    names: list[object] = list(ignore)
+    not_str = sorted(type(n).__name__ for n in names if not isinstance(n, str))
+    if not_str:
+        listed = ", ".join(not_str)
+        msg = f"cache ignore names must be str, got: {listed}"
+        raise TypeError(msg)
+    policy = CachePolicy(behavior, frozenset(str(n) for n in names), version)
+
+    def apply(fn: F) -> F:
+        current = decorations(fn)
+        if current.cache is not None:
+            msg = "function already has a cache policy; apply cache once"
+            raise ValueError(msg)
+        # Names only: annotations are evaluated at build, not when decorating.
+        forward = annotationlib.Format.FORWARDREF
+        params = set(inspect.signature(fn, annotation_format=forward).parameters)
+        unknown = sorted(policy.ignore - params)
+        if unknown:
+            listed = ", ".join(repr(n) for n in unknown)
+            msg = f"the function does not have the parameters named by ignore: {listed}"
+            raise ValueError(msg)
+        setattr(fn, _ATTRIBUTE, replace(current, cache=policy))
         return fn
 
     return apply
