@@ -10,6 +10,7 @@ import pytest
 
 import fnloom
 from fnloom import NodeView, Param, Source, Value
+from fnloom._view import NodeViews
 from helpers import make_module
 
 if TYPE_CHECKING:
@@ -371,3 +372,32 @@ def price(ok: int, rate: Prices) -> int:
     assert raised.value.__notes__ == [
         "resolving the annotation of parameter 'rate' of node 'price'"
     ]
+
+
+def test_an_input_view_is_made_once_when_first_read() -> None:
+    """Input views are made on first read and kept; reading a type makes none."""
+    module = make_module(
+        "view_lazy_inputs",
+        "def total(a: int, b: str) -> int:\n    return a\n",
+    )
+    nodes = fnloom.build(module).nodes
+    assert isinstance(nodes, NodeViews)
+    assert nodes.type_of("b") is str
+    names = ["a", "b", "total"]
+    assert len(nodes) == len(names)
+    assert "a" in nodes
+    assert "missing" not in nodes
+    assert nodes["a"] is nodes["a"]
+    assert nodes["a"] == NodeView(
+        name="a",
+        type=int,
+        is_input=True,
+        origin=None,
+        module=None,
+        params=(),
+        tags={},
+        doc=None,
+    )
+    assert list(nodes) == names
+    with pytest.raises(KeyError):
+        nodes["missing"]

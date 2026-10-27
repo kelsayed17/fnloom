@@ -12,35 +12,35 @@ that single sample.
 
 | shape | n | build | first execute | steady execute | prepare |
 | --- | ---: | --- | --- | --- | ---: |
-| chain | 10 | 0.515 / 0.408 / 0.220 | 0.109 / 0.040 / 0.014 | 0.049 / 0.005 / 0.003 | 0.019 / 0.012 |
-| chain | 100 | 2.239 / 3.664 / 1.722 † | 0.388 / 0.066 / 0.041 | 0.349 / 0.019 / 0.018 | 0.030 / 0.017 |
-| chain | 1,000 | 17.7 / 16.5 / 15.0 | `RecursionError` / 0.341 / 0.219 | `RecursionError` / 0.148 / 0.137 | 0.151 / 0.064 |
-| chain | 10,000 | 214.9 / 167.6 / 198.3 | `RecursionError` / 4.091 / 2.446 | `RecursionError` / 1.586 / 1.464 | 1.857 / 0.694 |
-| fan_in | 10 | 0.176 / 0.144 / 0.082 | 0.070 / 0.073 / 0.011 | 0.036 / 0.011 / 0.003 | 0.020 / 0.006 |
-| fan_in | 100 | 0.347 / 0.592 / 0.533 † | 0.317 / 0.212 / 0.075 | 0.283 / 0.108 / 0.029 | 0.068 / 0.031 |
-| fan_in | 1,000 | 3.600 / 5.491 / 5.545 † | 3.132 / 1.849 / 0.846 | 2.898 / 1.237 / 0.493 | 0.496 / 0.339 |
-| fan_in | 10,000 | 32.4 / 57.4 / 71.4 † | 45.2 / 33.0 / 22.6 | 42.0 / 26.3 / 18.8 | 7.142 / 3.811 |
-| layered | 10 | 0.292 / 0.226 / 0.168 | 0.064 / 0.049 / 0.012 | 0.037 / 0.004 / 0.004 | 0.017 / 0.005 |
-| layered | 100 | 2.081 / 1.816 / 1.759 | 0.427 / 0.066 / 0.044 | 0.385 / 0.021 / 0.020 | 0.034 / 0.026 |
-| layered | 1,000 | 19.9 / 20.1 / 18.4 † | 3.956 / 0.375 / 0.263 | 3.886 / 0.183 / 0.182 | 0.163 / 0.074 |
-| layered | 10,000 | 241.8 / 268.1 / 222.9 † | `RecursionError` / 4.277 / 2.807 | `RecursionError` / 1.857 / 1.823 | 2.028 / 0.759 |
-| rows | 10 | 0.260 / 0.167 / 0.108 | 0.076 / 0.056 / 0.012 | 0.040 / 0.006 / 0.004 | 0.013 / 0.004 |
-| rows | 100 | 1.843 / 0.825 / 0.801 | 0.350 / 0.075 / 0.053 | 0.314 / 0.036 / 0.034 | 0.028 / 0.013 |
-| rows | 1,000 | 61.4 / 9.485 / 8.165 | `RecursionError` / 0.596 / 0.423 | `RecursionError` / 0.348 / 0.341 | 0.157 / 0.063 |
-| rows | 10,000 | 5,145.4 / 143.6 / 105.3 | `RecursionError` / 6.059 / 4.288 | `RecursionError` / 3.703 / 3.554 | 1.709 / 0.513 |
+| chain | 10 | 0.417 / 0.430 / 0.127 † | 0.093 / 0.050 / 0.013 | 0.038 / 0.005 / 0.003 | 0.015 / 0.006 |
+| chain | 100 | 2.041 / 2.902 / 1.038 † | 0.365 / 0.071 / 0.087 | 0.306 / 0.018 / 0.017 | 0.029 / 0.016 |
+| chain | 1,000 | 19.9 / 13.2 / 13.6 | `RecursionError` / 0.387 / 0.287 | `RecursionError` / 0.164 / 0.137 | 0.168 / 0.079 |
+| chain | 10,000 | 208.7 / 109.7 / 135.5 | `RecursionError` / 3.281 / 2.133 | `RecursionError` / 1.338 / 1.332 | 1.845 / 0.692 |
+| fan_in | 10 | 0.178 / 0.112 / 0.054 | 0.070 / 0.348 / 0.018 | 0.037 / 0.015 / 0.003 | 0.017 / 0.208 |
+| fan_in | 100 | 0.343 / 0.227 / 0.178 | 0.298 / 0.229 / 0.062 | 0.265 / 0.133 / 0.029 | 0.066 / 0.028 |
+| fan_in | 1,000 | 2.941 / 1.895 / 1.642 | 2.749 / 2.174 / 0.826 | 2.729 / 1.540 / 0.482 | 0.574 / 0.307 |
+| fan_in | 10,000 | 67.7 / 22.7 / 18.0 | 42.4 / 39.3 / 22.6 | 41.8 / 31.6 / 18.9 | 6.952 / 3.571 |
+| layered | 10 | 0.292 / 0.146 / 0.109 | 0.065 / 0.042 / 0.011 | 0.037 / 0.005 / 0.003 | 0.012 / 0.005 |
+| layered | 100 | 2.099 / 1.119 / 1.106 | 0.412 / 0.062 / 0.044 | 0.385 / 0.021 / 0.020 | 0.037 / 0.019 |
+| layered | 1,000 | 19.8 / 33.4 / 11.5 † | 3.955 / 0.414 / 0.267 | 3.857 / 0.182 / 0.180 | 0.171 / 0.074 |
+| layered | 10,000 | 210.6 / 186.1 / 123.8 | `RecursionError` / 4.344 / 2.816 | `RecursionError` / 1.850 / 1.821 | 1.974 / 0.764 |
+| rows | 10 | 0.233 / 0.120 / 0.077 | 0.067 / 0.044 / 0.011 | 0.038 / 0.006 / 0.005 | 0.011 / 0.004 |
+| rows | 100 | 1.813 / 0.658 / 0.609 | 0.348 / 0.076 / 0.052 | 0.315 / 0.036 / 0.034 | 0.027 / 0.013 |
+| rows | 1,000 | 60.7 / 7.688 / 7.112 | `RecursionError` / 0.520 / 0.430 | `RecursionError` / 0.343 / 0.368 | 0.157 / 0.059 |
+| rows | 10,000 | 5,167.8 / 132.9 / 90.1 | `RecursionError` / 5.735 / 4.345 | `RecursionError` / 3.491 / 3.468 | 2.479 / 0.633 |
 
 Measured on an Apple M2 Pro with 16 GB, macOS 27.0, CPython 3.14.9, `apache-hamilton==1.90.0`, and a release build
 of the extension, on 2026-10-27.
 
 **Steady execution**, the cost of running a prepared plan again, is where fnloom differs most: with checks on it is
-1.6 to 21 times faster than Hamilton's `execute` wherever both finish, because the plan is compiled once and each run
-is a loop over its steps in Rust. The low end is `fan_in`, 1.6 times at 10,000 parameters, where one Python call with
+1.3 to 21 times faster than Hamilton's `execute` wherever both finish, because the plan is compiled once and each run
+is a loop over its steps in Rust. The low end is `fan_in`, 1.3 times at 10,000 parameters, where one Python call with
 10,000 keyword arguments is most of the cost for both.
 
 **The cost of input checks** is the gap between the two fnloom figures. Per run it is small next to the call itself
-(steady execution, checks on against off, differs by at most 0.15 ms on every `chain`, `layered` and `rows` graph, and
-by 0.08 to 7.5 ms on the `fan_in` graphs of 100 parameters or more, where every one of the `n` inputs is checked). On
-`fan_in` that is more than half of the steady time at 1,000 parameters (1.237 against 0.493 ms).
+(steady execution, checks on against off, differs by at most 0.03 ms on every `chain`, `layered` and `rows` graph, and
+by 0.1 to 12.7 ms on the `fan_in` graphs of 100 parameters or more, where every one of the `n` inputs is checked). On
+`fan_in` that is more than half of the steady time at 1,000 parameters (1.540 against 0.482 ms).
 
 ### Where Hamilton raises
 
@@ -48,40 +48,35 @@ Hamilton builds the 1,000- and 10,000-node chains, the 10,000-node layered graph
 graphs, then raises `RecursionError` on the first `execute`: its graph walk recurses once per level of depth. fnloom
 runs all 16 cases, with checks on and off, and every answer it gives is checked against the shape's closed form.
 
-### Build: the rows where fnloom with checks on is slower
+### Build: re-measured
 
 The design calls a row where fnloom is reliably slower a bug. The table's build column is one sample per cell, with
-Hamilton running first in the same process, so it cannot settle this: it marks six builds †, re-measured below, and
-three of them are reliably slower. They were re-measured with one fresh process per sample, nine samples per runtime
-and case, the two runtimes alternating which goes first, on a release build, timing only the build call (medians, ms,
-Hamilton / fnloom). The three `fan_in` rows were measured again after the scan speedups of the whole-branch review
-(no `dataclasses.replace` per parameter, no identity check of an undecorated function's bindings, no default `Source`
-made for a parameter its row binds, and a `NamedTuple` for each input's consumers); those are the post-fix figures
-below, in place of the earlier 0.402 / 0.633, 3.078 / 5.344 and 31.8 / 56.5. The main table's `fan_in` build cells
-are still the earlier single samples.
+Hamilton running first in the same process, so it cannot settle this. The builds it marks †, and the `fan_in` builds
+that were reliably slower before the speedups below ([#5](https://github.com/kelsayed17/fnloom/issues/5),
+[#6](https://github.com/kelsayed17/fnloom/issues/6), [#7](https://github.com/kelsayed17/fnloom/issues/7)), were
+re-measured with one fresh process per sample, nine samples per runtime and case, the two runtimes alternating which
+goes first, on a release build, timing only the build call (medians, ms, Hamilton / fnloom):
 
 | shape | n | Hamilton / fnloom | verdict |
 | --- | ---: | --- | --- |
-| chain | 100 | 2.040 / 1.693 | fnloom faster |
-| layered | 1,000 | 21.974 / 20.300 | fnloom faster |
-| layered | 10,000 | 215.8 / 206.0 | fnloom faster |
-| fan_in | 100 | 0.419 / 0.542 (post-fix) | **slower, [#5](https://github.com/kelsayed17/fnloom/issues/5)** |
-| fan_in | 1,000 | 4.290 / 4.491 (post-fix) | **slower, [#6](https://github.com/kelsayed17/fnloom/issues/6)** |
-| fan_in | 10,000 | 33.0 / 49.8 (post-fix) | **slower, [#7](https://github.com/kelsayed17/fnloom/issues/7)** |
+| chain | 10 | 0.362 / 0.201 | fnloom faster |
+| chain | 100 | 2.034 / 1.208 | fnloom faster |
+| layered | 1,000 | 21.871 / 14.044 | fnloom faster |
+| fan_in | 100 | 0.407 / 0.278 | fnloom faster (was 0.419 / 0.542) |
+| fan_in | 1,000 | 4.508 / 1.982 | fnloom faster (was 4.290 / 4.491) |
+| fan_in | 10,000 | 33.3 / 21.1 | fnloom faster (was 33.0 / 49.8) |
 
-Only `fan_in` builds are reliably slower, by 1.05 to 1.5 times after the fixes (1.6 to 1.8 before; Hamilton's own
-1,000-parameter median moved from 3.078 to 4.290 ms between the two runs, so that row's narrower gap is partly noise),
-and each has an issue, linked in the table. The other † cells in the table, and the 10-parameter `fan_in` first
-execute (0.073 against 0.070 ms), were not reliably slower. The checks-on and checks-off builds do the same build
-work, since input checks run per run, so their differences in the table (for example chain 100, 3.664 against 1.722
-ms) are noise.
+No build is reliably slower. The 10-parameter `fan_in` first execute, re-measured the same way, was not slower either
+(0.077 against 0.068 ms). The checks-on and checks-off builds do the same build work, since input checks run per
+run, so their differences in the table (for example layered 1,000, 33.4 against 11.5 ms) are noise.
 
-The remaining cost is per-parameter Python work in the scan and the node views, not type resolution. A `cProfile` of
-one post-fix fnloom build of `fan_in` with 10,000 parameters (0.107 s under the profiler, which inflates it) splits
-the build into the scan, 45% (`collect`, 0.048 s, of which one `inspect.signature` call is 21% of the build and binding
-each parameter, `_bind`, 20%); resolving the annotations, 16% (`resolve`, 0.017 s, of which `typing.get_type_hints`
-is 7%); the node views, 31% (`node_views`, 0.033 s, of which working out the input types is 17%); making the native
-graph, 6% (`_graph_of`); and the edge checks, 2%.
+The `fan_in` builds were slow from per-parameter Python work, not from the Rust core, which is under a fifth of the
+build. They are now faster from four changes: an ordinary function's parameters are read off its code object, with
+`inspect.signature` kept for wrapped functions, a `__signature__` and the unsupported kinds; resolving annotations
+keeps every parameter whose annotation was already a value, such as `int`, instead of making it again, and skips
+plain classes when it looks for type aliases; an input read by one parameter is typed without comparing consumers;
+and an input's `NodeView` is made when `Driver.nodes` first reads it, not at build, while the input checks read
+each input's type without making its view.
 
 ## Why fan-in is fast
 

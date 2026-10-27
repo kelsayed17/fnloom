@@ -32,6 +32,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Changed
 
+- Building a graph does less Python work per parameter, so a function with many parameters builds faster than in
+  Hamilton (`fan_in` with 10,000 parameters: 21.1 against 33.3 ms). An input's `NodeView` is made when `Driver.nodes`
+  first reads it.
 - Annotations are resolved at build with `typing.get_type_hints(include_extras=True)`, so an annotation that cannot be
   resolved is now a `NameError` (or, for a missing attribute such as `decimal.Missing`, an `AttributeError`) at build,
   with a note naming every failing node and parameter. Undecorated functions whose string annotations resolve behave

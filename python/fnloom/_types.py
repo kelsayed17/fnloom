@@ -77,10 +77,15 @@ def read_aliases(annotation: object) -> None:
     not resolve raises then: reading them all at build raises that `NameError` or
     `AttributeError` once, where the build can name the annotation (Q44).
     """
+    if isinstance(annotation, type):
+        # A class, the common case, holds no alias.
+        return
     seen: set[int] = set()
     pending = [annotation]
     while pending:
         current = pending.pop()
+        if isinstance(current, type):
+            continue
         if isinstance(current, list | tuple):
             pending.extend(typing.cast("collections.abc.Sequence[object]", current))
             continue

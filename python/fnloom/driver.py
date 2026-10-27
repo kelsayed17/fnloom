@@ -2,13 +2,12 @@
 
 import inspect
 import threading
-from types import MappingProxyType
 from typing import TYPE_CHECKING, Protocol
 
 from fnloom import _core, _types
 from fnloom._decorators import Source
 from fnloom._scan import NodeDef, collect, core_inputs, resolve
-from fnloom._view import NodeView, node_views
+from fnloom._view import NodeView, NodeViews, node_views
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -75,15 +74,19 @@ def _mismatches(checks: Sequence[_Check], values: Mapping[str, object]) -> list[
     ]
 
 
-def _edge_mismatches(views: Mapping[str, NodeView]) -> list[str]:
-    """A line for each parameter that a function node feeds with a type it rejects."""
+def _edge_mismatches(functions: Mapping[str, NodeView]) -> list[str]:
+    """A line for each parameter that a function node feeds with a type it rejects.
+
+    `functions` are the function nodes' views; a parameter reading anything else
+    reads an input, and has no edge to check.
+    """
     found: list[str] = []
-    for view in views.values():
+    for view in functions.values():
         for p in view.params:
             if not isinstance(p.binding, Source):
                 continue
-            upstream = views[p.binding.name]
-            if upstream.is_input or _types.type_matches(upstream.type, p.annotation):
+            upstream = functions.get(p.binding.name)
+            if upstream is None or _types.type_matches(upstream.type, p.annotation):
                 continue
             found.append(
                 f"{view.name}.{p.name} requires "
@@ -167,8 +170,8 @@ class Driver:
         """Wraps a native graph; `Builder` is the way to make one from modules."""
         self._graph = graph
         self._check_inputs = check_inputs
-        self._nodes: Mapping[str, NodeView] = (
-            MappingProxyType[str, NodeView]({}) if nodes is None else nodes
+        self._nodes = (
+            nodes if isinstance(nodes, NodeViews) else NodeViews(nodes or {}, {})
         )
         # Insertion order is recency order: a hit moves its plan to the end.
         self._plans: dict[_PlanKey, PreparedPlan] = {}
@@ -216,7 +219,8 @@ class Driver:
 
     def _declared(self, names: list[str]) -> tuple[_Check, ...]:
         """Each of `names` with its node's type; a name with no view goes unchecked."""
-        return tuple((n, self._nodes[n].type) for n in names if n in self._nodes)
+        # By type, not view: the views of many inputs are never made at all.
+        return tuple((n, self._nodes.type_of(n)) for n in names if n in self._nodes)
 
     def execute(
         self,
@@ -290,7 +294,7 @@ class Builder:
         nodes = resolve(collect(self._modules))
         views = node_views(nodes)
         graph = _graph_of(nodes)
-        if mismatches := _edge_mismatches(views):
+        if mismatches := _edge_mismatches(views.functions):
             raise ValueError("\n".join(mismatches))
         return Driver(graph, views, check_inputs=self._check_inputs)
 

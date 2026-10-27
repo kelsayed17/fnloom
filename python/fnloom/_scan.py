@@ -85,16 +85,71 @@ def _check_param(fn_name: str, param: inspect.Parameter, annotated: set[str]) ->
         raise ValueError(msg)
 
 
+# A parameter as the scan reads it: its name, whether it has a default, and its
+# annotation as written.
+type _Parameter = tuple[str, bool, object]
+
+# Code flags that mark a `*args` or `**kwargs` parameter.
+_VARIADIC = inspect.CO_VARARGS | inspect.CO_VARKEYWORDS
+
+
+def _plain_parameters(
+    fn: Callable[..., object], annotations: Mapping[str, object]
+) -> list[_Parameter] | None:
+    """`fn`'s parameters read off its code object, or `None` when that would not do.
+
+    A function whose signature is not its code's, one that is wrapped or carries a
+    `__signature__`, or one with a positional-only, `*args` or `**kwargs`
+    parameter, or an unannotated one, is left to `inspect.signature`, which also
+    reports the first unsupported parameter. Reading the code object directly is
+    much cheaper for a function with many parameters.
+    """
+    if hasattr(fn, "__wrapped__") or hasattr(fn, "__signature__"):
+        return None
+    code = getattr(fn, "__code__", None)
+    if code is None or code.co_posonlyargcount or code.co_flags & _VARIADIC:
+        return None
+    positional = code.co_argcount
+    names = code.co_varnames[: positional + code.co_kwonlyargcount]
+    first_default = positional - len(getattr(fn, "__defaults__", None) or ())
+    keyword_defaults = getattr(fn, "__kwdefaults__", None) or {}
+    parameters: list[_Parameter] = []
+    for index, name in enumerate(names):
+        if name not in annotations:
+            return None
+        if index < positional:
+            has_default = index >= first_default
+        else:
+            has_default = name in keyword_defaults
+        parameters.append((name, has_default, annotations[name]))
+    return parameters
+
+
+def _signature_parameters(
+    name: str, fn: Callable[..., object], annotations: Mapping[str, object]
+) -> list[_Parameter]:
+    """`fn`'s parameters by `inspect.signature`; `ValueError` on the first bad one."""
+    annotated = set(annotations)
+    signature = inspect.signature(fn, annotation_format=annotationlib.Format.FORWARDREF)
+    parameters: list[_Parameter] = []
+    for p in signature.parameters.values():
+        _check_param(name, p, annotated)
+        parameters.append(
+            (p.name, p.default is not inspect.Parameter.empty, p.annotation)
+        )
+    return parameters
+
+
 def _bind(
-    parameters: Sequence[inspect.Parameter], row: Mapping[str, Source | Value]
+    parameters: Sequence[_Parameter], row: Mapping[str, Source | Value]
 ) -> tuple[Param, ...]:
     """Binds each parameter to the row's source or value, or to its own name."""
     params: list[Param] = []
-    for p in parameters:
+    for name, has_default, annotation in parameters:
         # A `Source` is made only for a parameter the row does not bind.
-        binding = row[p.name] if p.name in row else Source(p.name)
-        required = isinstance(binding, Value) or p.default is inspect.Parameter.empty
-        params.append(Param(p.name, binding, required, p.annotation))
+        binding = row[name] if name in row else Source(name)
+        required = not has_default or isinstance(binding, Value)
+        params.append(Param(name, binding, required, annotation))
     return tuple(params)
 
 
@@ -138,14 +193,9 @@ def _node_defs(
     if "return" not in annotations:
         msg = f"{name!r}: return has no type annotation"
         raise ValueError(msg)
-    annotated = set(annotations)
-    parameters = tuple(
-        inspect.signature(
-            fn, annotation_format=annotationlib.Format.FORWARDREF
-        ).parameters.values()
-    )
-    for p in parameters:
-        _check_param(name, p, annotated)
+    parameters = _plain_parameters(fn, annotations)
+    if parameters is None:
+        parameters = _signature_parameters(name, fn, annotations)
     recorded = decorations(fn)
     if recorded.rows is None:
         # A plain function is one node, of its own name, binding nothing, so each
@@ -310,8 +360,12 @@ def resolve(nodes: Sequence[NodeDef]) -> list[NodeDef]:
     resolved: list[NodeDef] = []
     for node in nodes:
         hints = values[id(node.origin)]
+        # A parameter whose annotation was already a value, such as `int`, is kept.
         params = tuple(
-            Param(p.name, p.binding, p.required, hints[p.name]) for p in node.params
+            p
+            if hints[p.name] is p.annotation
+            else Param(p.name, p.binding, p.required, hints[p.name])
+            for p in node.params
         )
         resolved.append(replace(node, params=params, returns=hints["return"]))
     return resolved

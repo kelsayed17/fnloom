@@ -1,15 +1,16 @@
 """Read-only descriptions of a built graph's nodes."""
 
 import inspect
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, NamedTuple, override
 
 from fnloom._decorators import Source, Value
 from fnloom._types import type_matches
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterator, Sequence
 
     from fnloom._scan import NodeDef
 
@@ -103,16 +104,22 @@ def _input_types(nodes: Sequence[NodeDef]) -> dict[str, object]:
     either way, naming all of that input's consumers.
     """
     defined = {node.name for node in nodes}
-    consumers: dict[str, list[_Consumer]] = {}
+    # Plain (node, param, annotation) tuples: a `_Consumer` is made only for an
+    # input read more than once, the only kind whose consumers are compared.
+    consumers: dict[str, list[tuple[str, str, object]]] = {}
     for node in nodes:
         for p in node.params:
             if isinstance(p.binding, Source) and p.binding.name not in defined:
-                consumer = _Consumer(node.name, p.name, p.annotation)
+                consumer = (node.name, p.name, p.annotation)
                 consumers.setdefault(p.binding.name, []).append(consumer)
     types: dict[str, object] = {}
     conflicts: list[str] = []
     for name in sorted(consumers):
-        found = sorted(consumers[name], key=lambda c: (c.node, c.param))
+        read = consumers[name]
+        if len(read) == 1:
+            types[name] = read[0][2]
+            continue
+        found = sorted((_Consumer(*c) for c in read), key=lambda c: (c.node, c.param))
         narrowest = _narrowest([c.annotation for c in found])
         if narrowest is _INCOMPATIBLE:
             conflicts.append(_describe(name, found))
@@ -124,28 +131,80 @@ def _input_types(nodes: Sequence[NodeDef]) -> dict[str, object]:
     return types
 
 
-def node_views(nodes: Sequence[NodeDef]) -> Mapping[str, NodeView]:
+_NO_TAGS = MappingProxyType[str, str]({})
+
+
+class NodeViews(Mapping[str, NodeView]):
+    """Every node of a built graph by name, inputs included: read-only, sorted.
+
+    A function node's view is made at build. An input's view is made when it is
+    first read and then kept, so a graph with many inputs pays only for the views
+    that are read.
+    """
+
+    def __init__(
+        self, functions: Mapping[str, NodeView], inputs: Mapping[str, object]
+    ) -> None:
+        """Holds the function nodes' views, and each input's type by name."""
+        self._functions = functions
+        self._inputs = inputs
+        self._made: dict[str, NodeView] = {}
+        self._names: list[str] | None = None
+
+    def type_of(self, name: str) -> object:
+        """The type of node or input `name`, without making an input's view."""
+        if (view := self._functions.get(name)) is not None:
+            return view.type
+        return self._inputs[name]
+
+    @property
+    def functions(self) -> Mapping[str, NodeView]:
+        """The function nodes' views alone, by name, in no set order."""
+        return self._functions
+
+    @override
+    def __getitem__(self, name: str) -> NodeView:
+        """The view of node or input `name`; `KeyError` when there is none."""
+        if (view := self._functions.get(name)) is not None:
+            return view
+        if (view := self._made.get(name)) is not None:
+            return view
+        type_ = self._inputs[name]
+        view = NodeView(name, type_, True, None, None, (), _NO_TAGS, None)  # noqa: FBT003  # every field, in order
+        # One view per input, even when two threads read it at once.
+        return self._made.setdefault(name, view)
+
+    @override
+    def __contains__(self, name: object) -> bool:
+        """Whether `name` is a node or input of the graph."""
+        return name in self._functions or name in self._inputs
+
+    @override
+    def __iter__(self) -> Iterator[str]:
+        """The names of every node and input, sorted."""
+        if self._names is None:
+            self._names = sorted([*self._functions, *self._inputs])
+        return iter(self._names)
+
+    @override
+    def __len__(self) -> int:
+        """How many nodes and inputs the graph has."""
+        return len(self._functions) + len(self._inputs)
+
+    @override
+    def __repr__(self) -> str:
+        """The views as a dict, sorted by name."""
+        return f"{type(self).__name__}({dict(self)!r})"
+
+
+def node_views(nodes: Sequence[NodeDef]) -> NodeViews:
     """The views of `nodes` and of the inputs they read, read-only, sorted by name.
 
     `nodes` carry resolved annotations. `ValueError` when two of an input's
     consumers declare types that match neither way.
     """
-    no_tags = MappingProxyType[str, str]({})
-    views = {
-        name: NodeView(
-            name=name,
-            type=type_,
-            is_input=True,
-            origin=None,
-            module=None,
-            params=(),
-            tags=no_tags,
-            doc=None,
-        )
-        for name, type_ in _input_types(nodes).items()
-    }
-    for node in nodes:
-        views[node.name] = NodeView(
+    functions = {
+        node.name: NodeView(
             name=node.name,
             type=node.returns,
             is_input=False,
@@ -155,4 +214,6 @@ def node_views(nodes: Sequence[NodeDef]) -> Mapping[str, NodeView]:
             tags=MappingProxyType(dict(node.tags)),
             doc=inspect.getdoc(node.origin),
         )
-    return MappingProxyType(dict(sorted(views.items())))
+        for node in nodes
+    }
+    return NodeViews(functions, _input_types(nodes))

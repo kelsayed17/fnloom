@@ -1,5 +1,7 @@
 """Tests for `fnloom._scan.collect`: which functions are nodes, which are bad."""
 
+import inspect
+
 import pytest
 
 from fnloom import Source
@@ -89,6 +91,44 @@ def test_default_parameter_is_optional() -> None:
     )
     assert node.module == "scan_default"
     assert node.returns is int
+
+
+SIGNATURES = """
+import functools
+
+def mixed(a: int, b: int = 2, *, c: int, d: int = 4) -> int:
+    return a + b + c + d
+
+def _inner(a: int, b: int = 2) -> int:
+    return a + b
+
+@functools.wraps(_inner)
+def wrapped(*args: int, **kwargs: int) -> int:
+    return _inner(*args, **kwargs)
+
+def _shape(x: int = 1) -> int:
+    return x
+
+def signed(x: int) -> int:
+    return x
+
+# The signature, not the code, gives `x` a default.
+signed.__signature__ = inspect.signature(_shape)
+"""
+
+
+def test_parameters_are_read_as_inspect_signature_reads_them() -> None:
+    """Defaults, keyword-only parameters, `functools.wraps` and `__signature__`."""
+    module = make_module("scan_signatures", "import inspect\n" + SIGNATURES)
+    nodes = {node.name: node for node in collect([module])}
+    for name in ("mixed", "wrapped", "signed"):
+        expected = [
+            (p.name, p.default is inspect.Parameter.empty)
+            for p in inspect.signature(getattr(module, name)).parameters.values()
+        ]
+        assert [(p.name, p.required) for p in nodes[name].params] == expected, name
+    assert [p.name for p in nodes["wrapped"].params] == ["a", "b"]
+    assert [p.required for p in nodes["signed"].params] == [False]
 
 
 def test_unresolvable_annotations_are_accepted() -> None:
