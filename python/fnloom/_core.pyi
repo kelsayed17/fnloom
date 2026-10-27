@@ -2,6 +2,14 @@ from collections.abc import Callable, Sequence
 from typing import Any, final
 
 def core_version() -> str: ...
+def fingerprint(
+    value: object, fallback: Callable[[object], object | None]
+) -> bytes: ...
+def hash_parts(parts: Sequence[bytes]) -> bytes: ...
+
+class UnfingerprintableError(TypeError):
+    path: str
+    type_name: str
 
 # Compiled only with the `test-hooks` feature, which release builds never enable.
 def _panic_for_test() -> None: ...
