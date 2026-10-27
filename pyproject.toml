@@ -10,7 +10,30 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.14"
-classifiers = ["Typing :: Typed"]
+authors = [{ name = "Khaled Elsayed", email = "4119211+kelsayed17@users.noreply.github.com" }]
+keywords = ["dataflow", "dag", "pipeline", "hamilton", "feature-engineering", "rust", "pyo3"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: Free Threading :: 2 - Beta",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
+
+[project.urls]
+Homepage = "https://github.com/kelsayed17/fnloom"
+Documentation = "https://kelsayed17.github.io/fnloom/"
+Repository = "https://github.com/kelsayed17/fnloom"
+Issues = "https://github.com/kelsayed17/fnloom/issues"
+Changelog = "https://github.com/kelsayed17/fnloom/blob/main/CHANGELOG.md"
+Security = "https://github.com/kelsayed17/fnloom/security/policy"
 
 [dependency-groups]
 dev = [
@@ -21,6 +44,8 @@ dev = [
     # The behavioural oracle for the differential tests; pinned so the oracle never drifts.
     "apache-hamilton==1.90.0",
 ]
+# The documentation site (`uv run --group docs zensical serve` to preview it).
+docs = ["zensical>=0.0.73"]
 
 [tool.maturin]
 manifest-path = "crates/fnloom-py/Cargo.toml"

@@ -1,0 +1,136 @@
+/* fnloom's colours: a deep indigo ground, lilac threads and one amber thread. */
+:root {
+  --fl-ink: #1e1b4b;
+  --fl-violet: #5b4bc4;
+  --fl-lilac: #c4b5fd;
+  --fl-amber: #f59e0b;
+}
+
+[data-md-color-scheme="default"] {
+  --md-primary-fg-color: var(--fl-ink);
+  --md-primary-fg-color--light: #2e2a6b;
+  --md-primary-fg-color--dark: #120f33;
+  --md-accent-fg-color: var(--fl-violet);
+  --md-typeset-a-color: var(--fl-violet);
+}
+
+[data-md-color-scheme="slate"] {
+  --md-primary-fg-color: var(--fl-lilac);
+  --md-primary-fg-color--light: #ddd3fe;
+  --md-primary-fg-color--dark: #a78bfa;
+  /* Text on the lilac: indigo, since white on a light lilac is hard to read. */
+  --md-primary-bg-color: var(--fl-ink);
+  --md-primary-bg-color--light: rgba(30, 27, 75, 0.7);
+  --md-accent-fg-color: var(--fl-amber);
+  --md-typeset-a-color: var(--fl-lilac);
+}
+
+/* The landing page's hero: the logo, the name, one sentence and the ways in. */
+.fl-hero {
+  display: grid;
+  grid-template-columns: 9rem 1fr;
+  gap: 1.5rem 2rem;
+  align-items: center;
+  margin: 1rem 0 2.5rem;
+}
+
+/* Until the logo exists, the text takes the whole row. */
+.fl-hero:not(:has(img)) {
+  grid-template-columns: 1fr;
+}
+
+.fl-hero img {
+  width: 9rem;
+  height: 9rem;
+  border-radius: 1.6rem;
+  box-shadow: 0 0.6rem 2rem rgba(91, 75, 196, 0.35);
+}
+
+.md-typeset .fl-hero h1 {
+  margin: 0 0 0.4rem;
+  font-weight: 800;
+  letter-spacing: -0.02em;
+}
+
+.fl-hero p {
+  margin: 0 0 1rem;
+  font-size: 1.05rem;
+}
+
+.md-typeset .fl-hero .md-button {
+  margin: 0.2rem 0.4rem 0.2rem 0;
+}
+
+/* On a phone the hero stacks: a smaller logo, then the text, then buttons that share rows. */
+@media screen and (max-width: 44.9375em) {
+  .fl-hero {
+    grid-template-columns: 1fr;
+    gap: 1rem;
+    margin: 0 0 1.5rem;
+  }
+
+  .fl-hero img {
+    width: 4rem;
+    height: 4rem;
+    border-radius: 0.9rem;
+    box-shadow: 0 0.3rem 1rem rgba(91, 75, 196, 0.35);
+  }
+
+  .fl-hero p {
+    font-size: 0.85rem;
+  }
+
+  .md-typeset .fl-hero p:has(> .md-button) {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+
+  .md-typeset .fl-hero .md-button {
+    flex: 1 1 0;
+    margin: 0;
+    padding-inline: 1em;
+    text-align: center;
+    white-space: nowrap;
+  }
+
+  .md-typeset .fl-hero .md-button--primary {
+    flex-basis: 100%;
+  }
+}
+
+/* Feature cards: a coloured icon above each title. */
+.md-typeset .grid.cards .fl-icon {
+  color: var(--md-accent-fg-color);
+}
+
+/* Wide tables read better a little smaller, with each row named in bold. */
+.md-typeset table:not([class]) {
+  font-size: 0.7rem;
+}
+
+.md-typeset table:not([class]) td:first-child {
+  font-weight: 600;
+}
+
+/* The comparison's fnloom column: tinted, so it reads as the answer. */
+.fl-compare table td:last-child,
+.fl-compare table th:last-child {
+  background-color: color-mix(in srgb, var(--md-accent-fg-color) 9%, transparent);
+}
+
+/* A wide table still scrolls on a phone; its first column stays put, so each row keeps its name. */
+@media screen and (max-width: 44.9375em) {
+  .md-typeset .md-typeset__scrollwrap table:not([class]) {
+    overflow: visible;
+  }
+
+  .md-typeset table:not([class]) th:first-child,
+  .md-typeset table:not([class]) td:first-child {
+    position: sticky;
+    left: 0;
+    z-index: 1;
+    background-color: var(--md-default-bg-color);
+    box-shadow: inset -1px 0 0 var(--md-typeset-table-color);
+  }
+}

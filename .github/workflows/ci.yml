@@ -1,43 +1,56 @@
 name: ci
+
 on:
   push:
     branches: [main]
   pull_request:
 
-# No job writes to the repository, so the token only reads.
 permissions:
-  contents: read
+  contents: read # checkout only
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   check:
+    name: Check (${{ matrix.os }}, Python ${{ matrix.python }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
         python: ["3.14", "3.14t"]
+    env:
+      PYTHON: ${{ matrix.python }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: stable
           components: clippy, rustfmt
-      - uses: astral-sh/setup-uv@v6
-      - name: Install Python
-        run: uv python install ${{ matrix.python }}
-      - name: Sync dev environment
-        run: uv sync --python ${{ matrix.python }}
-      - name: Check
-        run: bash scripts/check.sh
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+      - run: uv python install "$PYTHON"
+      - run: uv sync --locked --python "$PYTHON"
+      - run: bash scripts/check.sh
 
   msrv:
+    name: Minimum Rust version
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       # rust-version in Cargo.toml is only honest if the oldest toolchain builds it.
-      - uses: dtolnay/rust-toolchain@1.85.0
-      - run: cargo check --workspace
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: "1.85.0"
+      - run: cargo check --workspace --locked
 
   instruction-counts:
+    name: Core instruction counts
     # Instruction counts depend on the CPU architecture, the toolchain and libc, so this job
     # pins all three to what crates/fnloom-core/benches/baseline.json was generated with:
     # aarch64 Linux, in the rust:1.99.1 image. seccomp is relaxed because callgrind runs the
@@ -47,16 +60,30 @@ jobs:
       image: rust:1.99.1
       options: --security-opt seccomp=unconfined
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Install valgrind and the benchmark runner
         run: |
           apt-get update
           apt-get install -y valgrind
           cargo install gungraun-runner --version 0.18.2 --locked
-      - uses: astral-sh/setup-uv@v6
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
       - name: Run the benchmarks
-        run: cargo bench -p fnloom-core --bench core -- --output-format=json > bench.jsonl
+        run: cargo bench --locked -p fnloom-core --bench core -- --output-format=json > bench.jsonl
       - name: Gate on the committed baseline
         run: >
           uv run --no-project --python 3.14 scripts/bench_gate.py
           --baseline crates/fnloom-core/benches/baseline.json --results bench.jsonl
+
+  zizmor:
+    name: Workflow security audit
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout
+      security-events: write # upload zizmor's SARIF results to code scanning
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: zizmorcore/zizmor-action@53290badfa369cb0bf7ad16342cb62c2fa47ac7b # v0.8.0

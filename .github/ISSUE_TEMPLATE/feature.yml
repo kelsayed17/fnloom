@@ -1,0 +1,22 @@
+name: Feature request
+description: Something a dataflow graph of plain functions should do that fnloom does not.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What you have to write or work around today, and why it is a common need.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed shape
+      description: How it would look in a module of node functions, or in a call to the Driver.
+      render: python
+  - type: textarea
+    id: references
+    attributes:
+      label: References
+      description: How Hamilton or another library handles it, if one does.

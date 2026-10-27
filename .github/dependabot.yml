@@ -1,0 +1,35 @@
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    ignore:
+      # The differential tests' oracle: pinned on purpose, and moved only with the quirk register.
+      - dependency-name: apache-hamilton
+    groups:
+      dependencies:
+        patterns: ["*"]
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    ignore:
+      # Pinned to the last release that builds on the MSRV, 1.85; see crates/fnloom-core/benches/core.rs.
+      - dependency-name: gungraun
+    groups:
+      crates:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]
