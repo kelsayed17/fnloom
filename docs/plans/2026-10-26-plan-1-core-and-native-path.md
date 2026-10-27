@@ -1,6 +1,7 @@
 # fnloom Plan 1: Rust core and native Python path
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+**Status:** done. Every task below was built, tested and merged to `main` on 2026-10-27. The plan is kept as written,
+as the record of what was decided, apart from the updates noted where they apply.
 
 **Goal:** A Rust graph core (build, validate, plan, execute) behind a PyO3 binding, a minimal native Python front end that turns plain functions into nodes, a differential harness that runs the same programs under Hamilton 1.90.0 and fnloom, and a benchmark harness.
 
@@ -20,7 +21,7 @@
 - Authoring API: name-wiring (design §9, decided 2026-10-26).
 - `fnloom-core` has zero dependencies and `#![forbid(unsafe_code)]`.
 - A Rust panic never crosses the FFI boundary as anything but a Python exception.
-- **Clean code (operator, 2026-10-26), enforced by tools, every one blocking in `scripts/check.sh`:**
+- **Clean code (maintainer, 2026-10-26), enforced by tools, every one blocking in `scripts/check.sh`:**
   - **ty, strict:** `[tool.ty.rules] all = "error"`, `[tool.ty.analysis] respect-type-ignore-comments = false`,
     `python-version = "3.14"`, over `python/`, `tests/`, `benches/` and `scripts/`. A suppression is
     `# ty: ignore[<rule>]` with its reason on the same line. Pin `ty` in the dev group (0.0.89 or newer).
@@ -43,7 +44,7 @@
 - No recursion over graph depth anywhere (Hamilton's depth-first walk is recursive).
 - Exceptions: unknown names, missing required inputs, cycles, duplicate node names raise `ValueError`; a bare `str` for `final_vars` raises `TypeError`.
 - The Hamilton oracle is pinned at `apache-hamilton==1.90.0`.
-- **Clean history (operator, 2026-10-26).** One logical commit per task, linear on `main`: no WIP, fixup, "address
+- **Clean history (maintainer, 2026-10-26).** One logical commit per task, linear on `main`: no WIP, fixup, "address
   review" or revert-then-redo commits. If a task needs a correction before it is pushed, amend or squash it; never
   push a broken intermediate state. Each commit builds and passes `scripts/check.sh` on its own. Messages are
   `area: imperative summary` with a short body saying why. No force-push once the repo is public.
@@ -92,12 +93,12 @@ benches/generate.py  benches/run.py
 **Interfaces:**
 - Produces: importable `fnloom` package; `fnloom._core.core_version() -> str`; `scripts/check.sh` exits non-zero on any failure.
 
-- [ ] **Step 1: Write the failing test** `tests/test_smoke.py::test_core_version_is_a_string`: `import fnloom._core as c; assert isinstance(c.core_version(), str) and c.core_version()`.
-- [ ] **Step 2: Run** `uv run pytest tests/test_smoke.py -v`. Expected: FAIL, `ModuleNotFoundError: fnloom`.
-- [ ] **Step 3: Scaffold.** Set the workspace `edition = "2024"` in `Cargo.toml`. `pyproject.toml` with `[build-system] maturin`, `[tool.maturin] manifest-path = "crates/fnloom-py/Cargo.toml"`, `python-source = "python"`, `module-name = "fnloom._core"`, `requires-python = ">=3.14"`, a `dev` dependency group (`pytest`, `ruff`, `ty>=0.0.89`, `maturin`, `apache-hamilton==1.90.0`), and the ruff and ty configuration from Global Constraints. `Cargo.toml` gets the `[workspace.lints]` tables from Global Constraints, and each crate `[lints] workspace = true`. `fnloom-py` is a `cdylib` named `_core` with `pyo3` (feature `extension-module`) and a `#[pyfunction] core_version() -> &'static str` returning `env!("CARGO_PKG_VERSION")`. `python/fnloom/__init__.py` re-exports nothing yet.
-- [ ] **Step 4: Write `scripts/check.sh`** (`set -euo pipefail`): `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`, `cargo test --workspace`, `uv run maturin develop`, `uv run ruff check`, `uv run ruff format --check`, `uv run ty check`, `uv run pytest`. Run `rustup component add clippy rustfmt` first if missing. `.github/workflows/ci.yml` runs the same steps (the repo's Actions availability is unverified; the script is the gate either way).
-- [ ] **Step 5: Run** `uv sync && uv run maturin develop && uv run pytest tests/test_smoke.py -v`. Expected: PASS. Then `bash scripts/check.sh`: expected exit 0.
-- [ ] **Step 6: Commit** `build: workspace, maturin packaging, check script`.
+- [x] **Step 1: Write the failing test** `tests/test_smoke.py::test_core_version_is_a_string`: `import fnloom._core as c; assert isinstance(c.core_version(), str) and c.core_version()`.
+- [x] **Step 2: Run** `uv run pytest tests/test_smoke.py -v`. Expected: FAIL, `ModuleNotFoundError: fnloom`.
+- [x] **Step 3: Scaffold.** Set the workspace `edition = "2024"` in `Cargo.toml`. `pyproject.toml` with `[build-system] maturin`, `[tool.maturin] manifest-path = "crates/fnloom-py/Cargo.toml"`, `python-source = "python"`, `module-name = "fnloom._core"`, `requires-python = ">=3.14"`, a `dev` dependency group (`pytest`, `ruff`, `ty>=0.0.89`, `maturin`, `apache-hamilton==1.90.0`), and the ruff and ty configuration from Global Constraints. `Cargo.toml` gets the `[workspace.lints]` tables from Global Constraints, and each crate `[lints] workspace = true`. `fnloom-py` is a `cdylib` named `_core` with `pyo3` (feature `extension-module`) and a `#[pyfunction] core_version() -> &'static str` returning `env!("CARGO_PKG_VERSION")`. `python/fnloom/__init__.py` re-exports nothing yet.
+- [x] **Step 4: Write `scripts/check.sh`** (`set -euo pipefail`): `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps`, `cargo test --workspace`, `uv run maturin develop`, `uv run ruff check`, `uv run ruff format --check`, `uv run ty check`, `uv run pytest`. Run `rustup component add clippy rustfmt` first if missing. `.github/workflows/ci.yml` runs the same steps (the repo's Actions availability is unverified; the script is the gate either way).
+- [x] **Step 5: Run** `uv sync && uv run maturin develop && uv run pytest tests/test_smoke.py -v`. Expected: PASS. Then `bash scripts/check.sh`: expected exit 0.
+- [x] **Step 6: Commit** `build: workspace, maturin packaging, check script`.
 
 ### Task 2: Core IR and `Graph::build`
 
@@ -116,11 +117,11 @@ benches/generate.py  benches/run.py
   - `pub enum BuildError { DuplicateName { name: String }, Cycle { path: Vec<String> } }` (`Display`, `Error`)
   - `impl<P> Graph<P> { pub fn build(specs: Vec<NodeSpec<P>>) -> Result<Graph<P>, BuildError>; pub fn nodes(&self) -> &[Node<P>]; pub fn node(&self, id: NodeId) -> &Node<P>; pub fn id_of(&self, name: &str) -> Option<NodeId> }`
 
-- [ ] **Step 1: Write failing tests** in `graph.rs`: `build_synthesises_input_nodes_for_unresolved_parameters` (spec `b(a)`, graph has `a` as `NodeKind::Input` with `payload.is_none()`); `build_rejects_duplicate_names` (two specs named `x` give `DuplicateName{name:"x"}`); `build_reports_a_cycle_with_its_path` (`a(b)`, `b(a)` gives `Cycle` whose path contains `a` and `b`); `build_of_zero_specs_is_an_empty_graph`; `node_ids_follow_sorted_name_order`.
-- [ ] **Step 2: Run** `cargo test -p fnloom-core`. Expected: FAIL (items undefined).
-- [ ] **Step 3: Implement** the types and `build`. Assign ids in sorted-name order; synthesise `Input` nodes for any dependency name that is not a spec; detect cycles with an iterative three-colour DFS (no recursion).
-- [ ] **Step 4: Run** `cargo test -p fnloom-core`. Expected: PASS.
-- [ ] **Step 5: Commit** `core: node IR and Graph::build`.
+- [x] **Step 1: Write failing tests** in `graph.rs`: `build_synthesises_input_nodes_for_unresolved_parameters` (spec `b(a)`, graph has `a` as `NodeKind::Input` with `payload.is_none()`); `build_rejects_duplicate_names` (two specs named `x` give `DuplicateName{name:"x"}`); `build_reports_a_cycle_with_its_path` (`a(b)`, `b(a)` gives `Cycle` whose path contains `a` and `b`); `build_of_zero_specs_is_an_empty_graph`; `node_ids_follow_sorted_name_order`.
+- [x] **Step 2: Run** `cargo test -p fnloom-core`. Expected: FAIL (items undefined).
+- [x] **Step 3: Implement** the types and `build`. Assign ids in sorted-name order; synthesise `Input` nodes for any dependency name that is not a spec; detect cycles with an iterative three-colour DFS (no recursion).
+- [x] **Step 4: Run** `cargo test -p fnloom-core`. Expected: PASS.
+- [x] **Step 5: Commit** `core: node IR and Graph::build`.
 
 ### Task 3: Graph queries
 
@@ -130,11 +131,11 @@ benches/generate.py  benches/run.py
 - Consumes: Task 2's `Graph`.
 - Produces: on `Graph<P>`: `pub fn upstream_of(&self, names: &[&str]) -> Result<Vec<NodeId>, PlanError>`, `pub fn downstream_of(&self, names: &[&str]) -> Result<Vec<NodeId>, PlanError>`, `pub fn between(&self, from: &str, to: &str) -> Result<Vec<NodeId>, PlanError>`. All results sorted by `NodeId`, excluding the starting nodes themselves. `PlanError::UnknownNodes(Vec<String>)` is introduced in `error.rs` here (more variants in Task 4).
 
-- [ ] **Step 1: Write failing tests** on a diamond `a -> b, a -> c, b -> d, c -> d`: `upstream_of(["d"])` is `[a,b,c]`; `downstream_of(["a"])` is `[b,c,d]`; `between("a","d")` is `[b,c]`; `upstream_of(["nope"])` is `UnknownNodes(["nope"])`.
-- [ ] **Step 2: Run** `cargo test -p fnloom-core queries`. Expected: FAIL.
-- [ ] **Step 3: Implement** with iterative worklists over precomputed forward/backward adjacency stored in `Graph`.
-- [ ] **Step 4: Run** `cargo test -p fnloom-core`. Expected: PASS.
-- [ ] **Step 5: Commit** `core: upstream, downstream and between queries`.
+- [x] **Step 1: Write failing tests** on a diamond `a -> b, a -> c, b -> d, c -> d`: `upstream_of(["d"])` is `[a,b,c]`; `downstream_of(["a"])` is `[b,c,d]`; `between("a","d")` is `[b,c]`; `upstream_of(["nope"])` is `UnknownNodes(["nope"])`.
+- [x] **Step 2: Run** `cargo test -p fnloom-core queries`. Expected: FAIL.
+- [x] **Step 3: Implement** with iterative worklists over precomputed forward/backward adjacency stored in `Graph`.
+- [x] **Step 4: Run** `cargo test -p fnloom-core`. Expected: PASS.
+- [x] **Step 5: Commit** `core: upstream, downstream and between queries`.
 
 ### Task 4: `Request`, `Plan` and `Graph::prepare`
 
@@ -151,11 +152,11 @@ benches/generate.py  benches/run.py
   - `impl<P> Graph<P> { pub fn prepare(&self, request: &Request) -> Result<Plan, PlanError> }`
 - Semantics (quirk register Q3, Q4, Q5, Q7): `UnknownInputs` for any `inputs` name that is not an `Input` node; `UnknownOverrides` for any override name that is not a node; an override replaces its node and cuts its upstream; an override satisfies a missing input and beats a supplied one; a `Required` edge to an unsupplied, non-overridden input is `MissingInputs`; an `Optional` edge to an unsupplied input becomes `SkipOptionalInput` and is omitted from the consumer's `args`; an output that is itself an unsupplied input is `MissingInputs`.
 
-- [ ] **Step 1: Write failing tests** in `plan.rs`, each asserting the exact variant and sorted names: `unknown_output_is_refused`; `unknown_input_name_is_refused` (Q4); `unknown_override_name_is_refused` (Q5); `missing_required_input_lists_all_missing_sorted`; `override_cuts_its_upstream` (an input only upstream of an overridden node is not required); `override_satisfies_a_missing_input_and_beats_a_supplied_one` (Q7); `optional_input_not_supplied_is_skipped_and_omitted_from_args`; `empty_outputs_give_an_empty_plan`; `supplying_an_input_nothing_needs_is_valid`; `release_lists_intermediates_after_last_use_and_never_outputs`; `execution_order_is_independent_of_output_order` (outputs `[d, b]` and `[b, d]` give identical `steps()`).
-- [ ] **Step 2: Run** `cargo test -p fnloom-core plan`. Expected: FAIL.
-- [ ] **Step 3: Implement** `prepare`: iterative reverse traversal from outputs honouring overrides; Kahn topological order with ties broken by `NodeId` (ids are assigned in name order, so this is the name tie-break of Q26); compute `release` from last-use positions.
-- [ ] **Step 4: Run** `cargo test -p fnloom-core`. Expected: PASS.
-- [ ] **Step 5: Commit** `core: Request, Plan and Graph::prepare`.
+- [x] **Step 1: Write failing tests** in `plan.rs`, each asserting the exact variant and sorted names: `unknown_output_is_refused`; `unknown_input_name_is_refused` (Q4); `unknown_override_name_is_refused` (Q5); `missing_required_input_lists_all_missing_sorted`; `override_cuts_its_upstream` (an input only upstream of an overridden node is not required); `override_satisfies_a_missing_input_and_beats_a_supplied_one` (Q7); `optional_input_not_supplied_is_skipped_and_omitted_from_args`; `empty_outputs_give_an_empty_plan`; `supplying_an_input_nothing_needs_is_valid`; `release_lists_intermediates_after_last_use_and_never_outputs`; `execution_order_is_independent_of_output_order` (outputs `[d, b]` and `[b, d]` give identical `steps()`).
+- [x] **Step 2: Run** `cargo test -p fnloom-core plan`. Expected: FAIL.
+- [x] **Step 3: Implement** `prepare`: iterative reverse traversal from outputs honouring overrides; Kahn topological order with ties broken by `NodeId` (ids are assigned in name order, so this is the name tie-break of Q26); compute `release` from last-use positions.
+- [x] **Step 4: Run** `cargo test -p fnloom-core`. Expected: PASS.
+- [x] **Step 5: Commit** `core: Request, Plan and Graph::prepare`.
 
 ### Task 5: Execution with `Evaluate` and `Observer`
 
@@ -164,17 +165,17 @@ benches/generate.py  benches/run.py
 **Interfaces:**
 - Consumes: Task 4's `Plan`, `Step`, `Action`.
 - Produces:
-  - `pub trait Evaluate<P> { type Value: Clone; type Error; fn evaluate(&mut self, node: &Node<P>, args: &[(&str, Self::Value)]) -> Result<Self::Value, Self::Error>; }`
+  - `pub trait Evaluate<P> { type Value: Clone; type Error; fn evaluate(&mut self, node: &Node<P>, args: &[Arg<'_, Self::Value>]) -> Result<Self::Value, Self::Error>; }`, where `Arg { node, name, value }` (updated after review: the binding needed each argument's `NodeId` to look up names interned at build; the plan first had `(&str, Self::Value)` pairs)
   - `pub trait Observer<E> { fn pre_graph(&mut self) -> Result<(), E> { Ok(()) } fn pre_node(&mut self, node: &str) -> Result<(), E> { Ok(()) } fn post_node(&mut self, node: &str, ok: bool) -> Result<(), E> { Ok(()) } fn post_graph(&mut self, ok: bool) -> Result<(), E> { Ok(()) } }` (generic error, so the binding keeps a hook's original Python exception)
   - `pub enum RunError<E> { Node { node: String, source: E }, Observers { event: &'static str, errors: Vec<E> } }`
   - `impl Plan { pub fn run<P, V: Evaluate<P>>(&self, graph: &Graph<P>, eval: &mut V, inputs: &BTreeMap<String, V::Value>, overrides: &BTreeMap<String, V::Value>, observers: &mut [&mut dyn Observer<V::Error>]) -> Result<BTreeMap<String, V::Value>, RunError<V::Error>> }`
 - Semantics: steps run in plan order; released values are dropped; `UseInput`/`UseOverride` read from the maps; a present `None`-like value is still supplied (presence is by key); on a node error, `post_graph(false)` still runs, then the node error is returned; per Q23 every observer's hook for an event runs, then all errors are returned together as `RunError::Observers`.
 
-- [ ] **Step 1: Write failing tests** with a test `Evaluate` over `i64` that adds its args: `runs_a_diamond_and_returns_only_requested_outputs`; `a_none_valued_input_counts_as_supplied` (use `Option<i64>` values); `released_intermediates_are_dropped` (a counting value type); `a_node_error_returns_node_name_and_still_calls_post_graph_false`; `every_observer_runs_for_an_event_before_errors_are_returned` (two observers, first fails in `post_node`, second still saw the node, result is `Observers{errors.len()==1}`); `a_chain_of_ten_thousand_nodes_runs_without_stack_overflow`.
-- [ ] **Step 2: Run** `cargo test -p fnloom-core run`. Expected: FAIL.
-- [ ] **Step 3: Implement** `run` as a single loop over `steps()`; build `args` as `(&str, Value)` clones from a `Vec<Option<Value>>` slot table indexed by `NodeId`.
-- [ ] **Step 4: Run** `cargo test --workspace`. Expected: PASS (the ten-thousand-node test in a debug build too).
-- [ ] **Step 5: Commit** `core: executor with Evaluate and Observer seams`.
+- [x] **Step 1: Write failing tests** with a test `Evaluate` over `i64` that adds its args: `runs_a_diamond_and_returns_only_requested_outputs`; `a_none_valued_input_counts_as_supplied` (use `Option<i64>` values); `released_intermediates_are_dropped` (a counting value type); `a_node_error_returns_node_name_and_still_calls_post_graph_false`; `every_observer_runs_for_an_event_before_errors_are_returned` (two observers, first fails in `post_node`, second still saw the node, result is `Observers{errors.len()==1}`); `a_chain_of_ten_thousand_nodes_runs_without_stack_overflow`.
+- [x] **Step 2: Run** `cargo test -p fnloom-core run`. Expected: FAIL.
+- [x] **Step 3: Implement** `run` as a single loop over `steps()`; build `args` as `Arg` values, cloned from a `Vec<Option<Value>>` slot table indexed by `NodeId`.
+- [x] **Step 4: Run** `cargo test --workspace`. Expected: PASS (the ten-thousand-node test in a debug build too).
+- [x] **Step 5: Commit** `core: executor with Evaluate and Observer seams`.
 
 ### Task 6: PyO3 binding
 
@@ -188,11 +189,11 @@ benches/generate.py  benches/run.py
   - `class ObserverBase`: Python subclasses may define `pre_graph`, `pre_node`, `post_node`, `post_graph`; `Plan.run(..., observers=[...])` accepts them. Observer errors raise the original exception objects: an `ExceptionGroup` when several fail, the exception itself when one does.
 - Error mapping: `BuildError` and `PlanError` raise `ValueError` (message names the culprits); a node's own exception propagates unchanged with `add_note(f"in node {name!r}")`.
 
-- [ ] **Step 1: Write failing tests** in `tests/test_binding.py`: `test_prepare_and_run_a_chain`; `test_unknown_output_raises_value_error_naming_it`; `test_node_exception_keeps_its_class_and_gets_a_note` (`ZeroDivisionError`, note contains the node name); `test_observers_see_post_graph_false_on_failure`; `test_a_rust_panic_becomes_a_python_exception` (expose a `_core._panic_for_test()` compiled only under a `test-hooks` feature, assert `pyo3_runtime.PanicException`-style `BaseException` is raised and the interpreter survives); `test_ten_thousand_node_chain` (build via generated functions); `test_stub_lists_exactly_the_runtime_names` (the public names in `_core.pyi` equal `dir(fnloom._core)` minus dunders).
-- [ ] **Step 2: Run** `uv run maturin develop && uv run pytest tests/test_binding.py -v`. Expected: FAIL.
-- [ ] **Step 3: Implement** the classes. `P` is `Py<PyAny>` (the function); `Value` is `Py<PyAny>`; `evaluate` calls the function with `kwargs` built from `args`. Hold the GIL for the whole run (threads are a later plan).
-- [ ] **Step 4: Run** the same command plus `cargo test --workspace`. Expected: PASS.
-- [ ] **Step 5: Commit** `py: Graph, Plan and observer bindings`.
+- [x] **Step 1: Write failing tests** in `tests/test_binding.py`: `test_prepare_and_run_a_chain`; `test_unknown_output_raises_value_error_naming_it`; `test_node_exception_keeps_its_class_and_gets_a_note` (`ZeroDivisionError`, note contains the node name); `test_observers_see_post_graph_false_on_failure`; `test_a_rust_panic_becomes_a_python_exception` (expose a `_core._panic_for_test()` compiled only under a `test-hooks` feature, assert `pyo3_runtime.PanicException`-style `BaseException` is raised and the interpreter survives); `test_ten_thousand_node_chain` (build via generated functions); `test_stub_lists_exactly_the_runtime_names` (the public names in `_core.pyi` equal `dir(fnloom._core)` minus dunders).
+- [x] **Step 2: Run** `uv run maturin develop && uv run pytest tests/test_binding.py -v`. Expected: FAIL.
+- [x] **Step 3: Implement** the classes. `P` is `Py<PyAny>` (the function); `Value` is `Py<PyAny>`; `evaluate` calls the function with `kwargs` built from `args`. Hold the GIL for the whole run (threads are a later plan).
+- [x] **Step 4: Run** the same command plus `cargo test --workspace`. Expected: PASS.
+- [x] **Step 5: Commit** `py: Graph, Plan and observer bindings`.
 
 ### Task 7: Native front end and `Driver`
 
@@ -209,11 +210,11 @@ Implements name-wiring (design §9).
   - `class Driver`: `execute(final_vars: Sequence[str], inputs: Mapping[str, object] | None = None, overrides: Mapping[str, object] | None = None) -> dict[str, object]`; `prepare(final_vars, inputs=None, overrides=None) -> PreparedPlan` where `PreparedPlan.run(inputs: Mapping[str, object] | None = None, overrides: Mapping[str, object] | None = None) -> dict[str, object]` reuses the compiled plan for the same input and override *names*; `node_names() -> list[str]`; `what_is_upstream_of(*names: str) -> list[str]`; `what_is_downstream_of(*names: str) -> list[str]`.
 - Scan rules (Hamilton behaviour, each pinned by the differential tests in Task 8): a function is a node if it is public (no leading underscore), is a function, and was defined in that module; every parameter and the return value needs an annotation, else `ValueError`; a parameter with a default is `required=False`; the same node name in two modules is `ValueError` naming both modules.
 
-- [ ] **Step 1: Write failing tests**: `test_scan.py::test_underscore_and_imported_functions_are_not_nodes`; `::test_missing_annotation_raises_value_error`; `::test_default_parameter_is_optional`; `::test_duplicate_name_across_modules_names_both_modules`; `test_driver.py::test_execute_chain`; `::test_builder_and_build_shortcut_give_the_same_graph`; `::test_with_modules_returns_a_new_builder`; `::test_bare_string_final_vars_raises_type_error` (Q6); `::test_execute_empty_list_returns_empty_dict`; `::test_build_from_zero_modules_is_empty`; `::test_prepare_reuses_plan_across_runs` (the node function is called once per run, and `prepare` is invoked once, observed through a counter on a wrapper); `::test_ten_thousand_node_chain_executes`.
-- [ ] **Step 2: Run** `uv run pytest tests/test_scan.py tests/test_driver.py -v`. Expected: FAIL.
-- [ ] **Step 3: Implement** `_scan.collect` with `inspect.signature` and `annotationlib.get_annotations` (resolve forward references; add `test_scan.py::test_forward_reference_annotation_is_accepted`) (annotation values are checked for presence only; type checking is Plan 2), and `Driver` over `_core.Graph`. Cache prepared plans keyed by `(tuple(final_vars), frozenset(inputs), frozenset(overrides))`.
-- [ ] **Step 4: Run** `bash scripts/check.sh`. Expected: exit 0 (tests pass, `ty check` reports 0 diagnostics, ruff and Clippy clean).
-- [ ] **Step 5: Commit** `python: native front end and Driver`.
+- [x] **Step 1: Write failing tests**: `test_scan.py::test_underscore_and_imported_functions_are_not_nodes`; `::test_missing_annotation_raises_value_error`; `::test_default_parameter_is_optional`; `::test_duplicate_name_across_modules_names_both_modules`; `test_driver.py::test_execute_chain`; `::test_builder_and_build_shortcut_give_the_same_graph`; `::test_with_modules_returns_a_new_builder`; `::test_bare_string_final_vars_raises_type_error` (Q6); `::test_execute_empty_list_returns_empty_dict`; `::test_build_from_zero_modules_is_empty`; `::test_prepare_reuses_plan_across_runs` (the node function is called once per run, and `prepare` is invoked once, observed through a counter on a wrapper); `::test_ten_thousand_node_chain_executes`.
+- [x] **Step 2: Run** `uv run pytest tests/test_scan.py tests/test_driver.py -v`. Expected: FAIL.
+- [x] **Step 3: Implement** `_scan.collect` with `inspect.signature` and `annotationlib.get_annotations` (resolve forward references; add `test_scan.py::test_forward_reference_annotation_is_accepted`) (annotation values are checked for presence only; type checking is Plan 2), and `Driver` over `_core.Graph`. Cache prepared plans keyed by `(tuple(final_vars), frozenset(inputs), frozenset(overrides))`.
+- [x] **Step 4: Run** `bash scripts/check.sh`. Expected: exit 0 (tests pass, `ty check` reports 0 diagnostics, ruff and Clippy clean).
+- [x] **Step 5: Commit** `python: native front end and Driver`.
 
 ### Task 8: Differential harness against Hamilton 1.90.0
 
@@ -223,11 +224,11 @@ Implements name-wiring (design §9).
 - Produces: in `conftest.py`, `@dataclass(frozen=True) class Outcome: values: dict[str, object] | None; error: str | None` (`error` is the exception class name); `run_hamilton(module, outputs, inputs, overrides) -> Outcome` using `hamilton.driver.Builder().with_modules(module).build().execute(...)`; `run_fnloom(module, outputs, inputs, overrides) -> Outcome`; a marker `@pytest.mark.deliberate("Q4")` that requires the id to exist in `docs/quirk-register.md`.
 - The conftest sets `HAMILTON_AUTOLOAD_EXTENSIONS=0` and the telemetry-off variable (confirm its exact name in the installed wheel's `telemetry.py`) before importing Hamilton, and runs both runtimes on the same fixture module object.
 
-- [ ] **Step 1: Write failing tests**, one per behaviour, comparing `run_hamilton(...) == run_fnloom(...)`: `test_chain`, `test_diamond`, `test_optional_input_used_when_supplied`, `test_optional_input_default_when_not_supplied`, `test_required_input_missing_same_exception_class`, `test_unknown_output_same_exception_class`, `test_override_cuts_upstream`, `test_cycle_same_exception_class` (fixture built from a module with mutually dependent functions), `test_duplicate_across_modules_same_exception_class`.
-- [ ] **Step 2: Run** `uv run pytest tests/differential -v`. Expected: FAIL until the harness exists. Once it exists, any test failing because Hamilton and fnloom disagree must be settled by reading the register: either fix fnloom, or (if the register already lists a deliberate difference) move the case to `test_deliberate_differences.py`. Never edit an expected value to make a test pass.
-- [ ] **Step 3: Write the deliberate-difference tests**, each asserting Hamilton's behaviour *and* fnloom's: `test_q4_unknown_input_name` (`@deliberate("Q4")`: Hamilton returns values, fnloom raises `ValueError`); `test_q5_misspelled_override`; `test_q6_bare_string_final_vars` (Hamilton splits characters, fnloom `TypeError`); `test_q7_override_naming_an_input` (Hamilton refuses when the input is not supplied, fnloom accepts); `test_deep_chain_hamilton_recursion_error` (Hamilton `RecursionError` at 5,000 nodes, fnloom succeeds; record as a new register row `Q25` in `docs/quirk-register.md` in this task).
-- [ ] **Step 4: Run** `uv run pytest tests/differential -v`. Expected: PASS. Record in the commit message any behaviour where Hamilton surprised the register.
-- [ ] **Step 5: Commit** `tests: differential harness against Hamilton 1.90.0`.
+- [x] **Step 1: Write failing tests**, one per behaviour, comparing `run_hamilton(...) == run_fnloom(...)`: `test_chain`, `test_diamond`, `test_optional_input_used_when_supplied`, `test_optional_input_default_when_not_supplied`, `test_required_input_missing_same_exception_class`, `test_unknown_output_same_exception_class`, `test_override_cuts_upstream`, `test_cycle_same_exception_class` (fixture built from a module with mutually dependent functions), `test_duplicate_across_modules_same_exception_class`.
+- [x] **Step 2: Run** `uv run pytest tests/differential -v`. Expected: FAIL until the harness exists. Once it exists, any test failing because Hamilton and fnloom disagree must be settled by reading the register: either fix fnloom, or (if the register already lists a deliberate difference) move the case to `test_deliberate_differences.py`. Never edit an expected value to make a test pass.
+- [x] **Step 3: Write the deliberate-difference tests**, each asserting Hamilton's behaviour *and* fnloom's: `test_q4_unknown_input_name` (`@deliberate("Q4")`: Hamilton returns values, fnloom raises `ValueError`); `test_q5_misspelled_override`; `test_q6_bare_string_final_vars` (Hamilton splits characters, fnloom `TypeError`); `test_q7_override_naming_an_input` (Hamilton refuses when the input is not supplied, fnloom accepts); `test_deep_chain_hamilton_recursion_error` (Hamilton `RecursionError` at 5,000 nodes, fnloom succeeds; record as a new register row `Q25` in `docs/quirk-register.md` in this task).
+- [x] **Step 4: Run** `uv run pytest tests/differential -v`. Expected: PASS. Record in the commit message any behaviour where Hamilton surprised the register.
+- [x] **Step 5: Commit** `tests: differential harness against Hamilton 1.90.0`.
 
 ### Task 9: Benchmark harness
 
@@ -236,11 +237,11 @@ Implements name-wiring (design §9).
 **Interfaces:**
 - Produces: `benches/generate.py::make_module(shape: Literal["chain", "fan_in", "layered"], n: int) -> types.ModuleType` (generated source executed into a module; every function annotated; `fan_in` is one function with `n` parameters); `benches/run.py` prints JSON lines `{"shape", "n", "runtime", "build_ms", "first_execute_ms", "steady_execute_ms", "error"}` for `runtime in {"hamilton", "fnloom"}` and `n in {10, 100, 1000, 10000}`, taking the median of 7 steady runs after one warm run. A runtime that raises records its exception class in `error` and null timings.
 
-- [ ] **Step 1: Write a failing test** `tests/test_bench_generate.py::test_generated_chain_has_n_nodes_and_executes` (n=50 under fnloom, result equals the closed form) and `::test_fan_in_has_one_wide_function`.
-- [ ] **Step 2: Run** `uv run pytest tests/test_bench_generate.py -v`. Expected: FAIL.
-- [ ] **Step 3: Implement** `generate.py` and `run.py`.
-- [ ] **Step 4: Run** `uv run python benches/run.py > /tmp/bench.jsonl` (use the session scratchpad, not `/tmp`, if running under the agent) and `uv run pytest -v`. Expected: PASS; the JSON has 24 rows. Paste the table of medians into `benches/README.md` with the machine description; state plainly any row where fnloom is slower than Hamilton, since the design calls that a bug.
-- [ ] **Step 5: Commit** `bench: generated-graph harness and first numbers`.
+- [x] **Step 1: Write a failing test** `tests/test_bench_generate.py::test_generated_chain_has_n_nodes_and_executes` (n=50 under fnloom, result equals the closed form) and `::test_fan_in_has_one_wide_function`.
+- [x] **Step 2: Run** `uv run pytest tests/test_bench_generate.py -v`. Expected: FAIL.
+- [x] **Step 3: Implement** `generate.py` and `run.py`.
+- [x] **Step 4: Run** `uv run python -m benches.run > bench.jsonl` and `uv run pytest -v`. Expected: PASS; the JSON has 24 rows. Paste the table of medians into `benches/README.md` (since moved to `docs/benchmarks.md`) with the machine description; state plainly any row where fnloom is slower than Hamilton, since the design calls that a bug.
+- [x] **Step 5: Commit** `bench: generated-graph harness and first numbers`.
 
 ### Task 10: Instruction-count regression gate for the core
 
@@ -251,11 +252,11 @@ Implements name-wiring (design §9).
 - Produces: `cargo bench -p fnloom-core --bench core` reporting instruction counts for build, prepare and run on chain, fan-in and layered graphs at 1,000 and 10,000 nodes; `scripts/bench_gate.py --baseline crates/fnloom-core/benches/baseline.json` exits 1 if any count rises more than 2% over the baseline.
 - Harness: a callgrind-based Rust benchmark crate. Check the current name, maintenance and licence first (it was published as `iai-callgrind`; a successor name may exist) and record the choice in the bench file's header comment. Linux only; skipped with a message on macOS.
 
-- [ ] **Step 1: Write a failing test** `scripts/test_bench_gate.py::test_gate_fails_on_a_three_percent_rise_and_passes_on_one` (synthetic JSON in, exit codes out).
-- [ ] **Step 2: Run** `uv run pytest scripts/test_bench_gate.py -v`. Expected: FAIL.
-- [ ] **Step 3: Implement** the benches and the gate script; generate `baseline.json` on the CI Linux runner and commit it.
-- [ ] **Step 4: Run** the gate against its own baseline on Linux. Expected: exit 0. Then on a branch that adds a deliberate extra pass over the nodes, expected: exit 1. Discard that branch.
-- [ ] **Step 5: Commit** `bench: instruction-count regression gate for the core`.
+- [x] **Step 1: Write a failing test** `scripts/test_bench_gate.py::test_gate_fails_on_a_three_percent_rise_and_passes_on_one` (synthetic JSON in, exit codes out).
+- [x] **Step 2: Run** `uv run pytest scripts/test_bench_gate.py -v`. Expected: FAIL.
+- [x] **Step 3: Implement** the benches and the gate script; generate `baseline.json` on the CI Linux runner and commit it.
+- [x] **Step 4: Run** the gate against its own baseline on Linux. Expected: exit 0. Then on a branch that adds a deliberate extra pass over the nodes, expected: exit 1. Discard that branch.
+- [x] **Step 5: Commit** `bench: instruction-count regression gate for the core`.
 
 ---
 

@@ -1,7 +1,7 @@
 # fnloom — design
 
-**Status:** v2. Approved by the operator 2026-10-26 (v1), revised the same day after an audit (§12). Nothing in this
-document is built. Facts about Hamilton were read in the `apache-hamilton 1.90.0` wheel (source-read, not run)
+**Status:** v2. Approved by the maintainer 2026-10-26 (v1), revised the same day after an audit (§12). Plan 1, the
+Rust core and the native Python path, is built; the rest of the v1 scope (§5) is not yet. Facts about Hamilton were read in the `apache-hamilton 1.90.0` wheel (source-read, not run)
 unless marked otherwise; `docs/quirk-register.md` says which behaviours are still unverified.
 
 ## 1. Intent
@@ -15,7 +15,7 @@ as a Python wheel. The reasons, as an earlier investigation of Hamilton found th
 no typing for decorated functions, a heavy dependency set, and an executor that cannot be reasoned about or reused
 outside Python.
 
-**Direction (operator, 2026-10-26).**
+**Direction (maintainer, 2026-10-26).**
 - fnloom will be open source, Apache-2.0. Nothing consumer-specific lives in this repository.
 - It must be **fast, stable and superior to Hamilton**.
 - There is **no Hamilton compatibility layer**. Existing Hamilton code is not expected to run unchanged; consumers
@@ -59,7 +59,7 @@ the Rust core changes:
   a 3.7–4.3x gain on scalar graphs, on one consumer's workload; not re-measured for a general one.
 - Later: parallel scheduling on free-threaded Python 3.14t (§8) and nodes that are not Python at all (§11).
 
-**No go/no-go gate (operator, 2026-10-26): this is a full rebuild.** The whole v1 scope (§5) is built regardless.
+**No go/no-go gate (maintainer, 2026-10-26): this is a full rebuild.** The whole v1 scope (§5) is built regardless.
 Speed is measured from the first commit:
 - **Report.** Build, `prepare`, first-execute and steady-execute wall-clock medians against Hamilton 1.90.0, on
   generated graph shapes (chain, fan-in, layered) at 10, 100, 1,000 and 10,000 nodes, plus Hamilton example graphs
@@ -100,7 +100,7 @@ Hamilton in the test group only), `benches/`, `docs/`.
 ## 5. Scope of v1, as capabilities
 
 Wiring is by name (§9). The entry point and the decorators keep Hamilton's names and shapes so the API feels like
-Hamilton (operator, 2026-10-26): `Builder().with_modules(...).with_config(...).build()` (with `fnloom.build(...)` as a
+Hamilton (maintainer, 2026-10-26): `Builder().with_modules(...).with_config(...).build()` (with `fnloom.build(...)` as a
 shortcut), `parameterize`, `source`, `value`, `tag`, `config.when*`, `extract_fields`, `extract_columns`. Same name
 means same intent, not identical behaviour: every difference is a register row. Hamilton's equivalent is given for orientation only.
 
@@ -124,7 +124,7 @@ v1.x, in this order: execution visualisation, output validators, parameterize su
 
 ## 6. Where fnloom differs from Hamilton
 
-**Settled by the operator (2026-10-26): fnloom fixes Hamilton's quirks by default.** It keeps Hamilton's behaviour
+**Settled by the maintainer (2026-10-26): fnloom fixes Hamilton's quirks by default.** It keeps Hamilton's behaviour
 where Hamilton is right, and deliberately differs where Hamilton is wrong or silently accepts a mistake. A deviation
 needs a reason that holds for any user, and each one is a row in `docs/quirk-register.md` with a test that is red
 against Hamilton and green against fnloom.
@@ -166,13 +166,13 @@ against Hamilton and green against fnloom.
 - **Open source.** Everything in the repository must be publishable: no consumer-private code, data, paths or
   decisions. The repository was re-created from its tree when it went public, so superseded commits do not exist.
 - **Licence:** Apache-2.0.
-- **Python 3.14 or later (operator, 2026-10-26).** The front end reads annotations through `annotationlib`
+- **Python 3.14 or later (maintainer, 2026-10-26).** The front end reads annotations through `annotationlib`
   (deferred evaluation, PEP 649/749), and both the default and the free-threaded (`3.14t`) interpreters are build
   targets.
 - **Wheels:** per-interpreter builds, not the stable ABI (`abi3`). As understood when this was written, `abi3`
   cannot target free-threaded CPython, which is the route to running Python nodes in parallel. Re-check PyO3's
   current documentation before the first release.
-- **Clean code, enforced (operator, 2026-10-26).** Python passes ty in strict mode (every rule an error) and ruff
+- **Clean code, enforced (maintainer, 2026-10-26).** Python passes ty in strict mode (every rule an error) and ruff
   with every rule selected; Rust passes Clippy with `pedantic` and the panic-prone restriction lints denied, plus
   `missing_docs`. No suppression without a stated reason, no dead or commented-out code, every public item
   documented. The exact configuration lives in the plans and in `pyproject.toml` / `Cargo.toml`.
@@ -180,14 +180,14 @@ against Hamilton and green against fnloom.
 
 ## 9. Decided: authoring API
 
-**Name-wiring (operator, 2026-10-26).** A function's name is its node and its parameter names are its edges, as in
+**Name-wiring (maintainer, 2026-10-26).** A function's name is its node and its parameter names are its edges, as in
 Hamilton; decorators cover everything else (§5). Plain-function programs therefore run unchanged under both runtimes
 in the differential tests, and only decorated programs need a fnloom spelling beside the Hamilton one. No questions
 are open.
 
 ## 10. Calls made in this design (change any of them)
 
-- **Package structure and API:** designed for fnloom, not mirroring Hamilton's names or paths (operator,
+- **Package structure and API:** designed for fnloom, not mirroring Hamilton's names or paths (maintainer,
   2026-10-26).
 - **Coverage:** phased from §5 toward Hamilton's useful core; the plugin ecosystem is out.
 - **Type checks:** behaviour-ported in the Python front end, agreeing with Hamilton 1.90.0 on a stated matrix of type
@@ -198,7 +198,7 @@ are open.
   hook API arrives with the adapters plan.
 - **Hamilton baseline:** pinned at 1.90.0; newer releases are followed only by an explicit decision, with a
   report-only canary against the newest one.
-- **No go/no-go gate** (operator); instruction-count regression gate in CI (§3).
+- **No go/no-go gate** (maintainer); instruction-count regression gate in CI (§3).
 
 ## 11. Downstream: the indicator library (not part of fnloom)
 
@@ -219,5 +219,5 @@ language: an earlier Rust port of numba kernels showed no compute speedup betwee
 - **v2 (2026-10-26), after an audit:** scope rewritten as capabilities; compatibility-layer remnants and references
   to the deleted contract removed; anti-goal on copying aligned with §8; execution order made explicit (Q26); async
   model added; IR reduced to what v1 needs; numeric widening removed from the front end's duties; Python floor
-  3.10 → 3.14 (operator); `abi3` dropped; edition 2024; benchmark gate moved to instruction counts; indicator-library
+  3.10 → 3.14 (maintainer); `abi3` dropped; edition 2024; benchmark gate moved to instruction counts; indicator-library
   requirements recorded; authoring API decided: name-wiring.

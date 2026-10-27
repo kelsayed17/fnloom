@@ -1,0 +1,78 @@
+# The documentation site, built from docs/ by Zensical (`uv run --group docs zensical serve` to preview it).
+
+[project]
+site_name = "fnloom"
+site_description = "A Rust dataflow engine on Hamilton's model: plain Python functions are nodes, wired by parameter name"
+site_url = "https://kelsayed17.github.io/fnloom/"
+repo_url = "https://github.com/kelsayed17/fnloom"
+repo_name = "kelsayed17/fnloom"
+edit_uri = "edit/main/docs/"
+copyright = "Copyright &copy; 2026 Khaled Elsayed. Apache-2.0 licence. Not affiliated with the Apache Hamilton project."
+extra_css = ["stylesheets/extra.css"]
+
+nav = [
+  { "Home" = "index.md" },
+  { "Guides" = [
+    "getting-started.md",
+    "writing-nodes.md",
+    "running.md",
+    "errors.md",
+    "rust-core.md",
+  ] },
+  { "Hamilton" = [
+    "from-hamilton.md",
+    { "Differences from Hamilton" = "quirk-register.md" },
+    "benchmarks.md",
+  ] },
+  { "Project" = [
+    { "Design" = "design/2026-10-26-fnloom-design.md" },
+    { "Plan 1" = "plans/2026-10-26-plan-1-core-and-native-path.md" },
+    { "Changelog" = "https://github.com/kelsayed17/fnloom/blob/main/CHANGELOG.md" },
+    { "Contributing" = "https://github.com/kelsayed17/fnloom/blob/main/CONTRIBUTING.md" },
+  ] },
+]
+
+[project.theme]
+language = "en"
+features = [
+  "content.action.edit",
+  "content.code.copy",
+  "navigation.footer",
+  "navigation.instant",
+  "navigation.sections",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+]
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme)"
+toggle.icon = "lucide/sun-moon"
+toggle.name = "Switch to light mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to system preference"
+
+[project.markdown_extensions]
+admonition = {}
+attr_list = {}
+md_in_html = {}
+tables = {}
+toc.permalink = true
+pymdownx.details = {}
+pymdownx.emoji.emoji_generator = "zensical.extensions.emoji.to_svg"
+pymdownx.emoji.emoji_index = "zensical.extensions.emoji.twemoji"
+pymdownx.highlight = {}
+pymdownx.inlinehilite = {}
+pymdownx.snippets.check_paths = true
+pymdownx.superfences = {}
+pymdownx.tabbed.alternate_style = true

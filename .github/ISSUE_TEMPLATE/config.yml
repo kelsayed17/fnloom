@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/kelsayed17/fnloom/security/advisories/new
+    about: Please report security problems privately, not as an issue.
+  - name: Read the documentation
+    url: https://kelsayed17.github.io/fnloom/
+    about: Guides to writing nodes, running graphs, and how fnloom differs from Hamilton.

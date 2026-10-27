@@ -1,0 +1,35 @@
+name: Bug report
+description: fnloom behaves differently from its documentation.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >
+        Thanks for reporting. For a security problem (a crash in the native extension, a panic that escapes as
+        something other than a Python exception, a value reaching the wrong run), do not open an issue: use private
+        vulnerability reporting instead (see SECURITY.md).
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+      description: >
+        If Hamilton behaves differently, say how, and check docs/quirk-register.md first: the difference may be
+        deliberate.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: A module of node functions and the `fnloom.build(...).execute(...)` call that shows it.
+      render: python
+    validations:
+      required: true
+  - type: textarea
+    id: versions
+    attributes:
+      label: Versions
+      description: The fnloom commit (`git rev-parse HEAD`), and the output of `python --version` and `rustc --version`.
+      render: text
+    validations:
+      required: true

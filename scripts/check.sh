@@ -14,6 +14,8 @@ cargo fmt --check
 cargo clippy --workspace --all-targets --features test-hooks -- -D warnings
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
 cargo test --workspace
+# The Rust guide (docs/rust-core.md) includes this example, so it must run, not only compile.
+cargo run --quiet -p fnloom-core --example embed
 # test-hooks exposes the deliberate-panic hook; release builds never enable it.
 uv run maturin develop --features test-hooks
 # No more syncing from here on: a sync would reinstall the project without test-hooks.
