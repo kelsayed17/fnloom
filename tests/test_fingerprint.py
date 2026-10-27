@@ -7,7 +7,7 @@ import os
 import subprocess
 import sys
 from array import array
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
 from pathlib import PurePosixPath, PureWindowsPath
@@ -187,6 +187,20 @@ class _Declared:
 
     def __fnloom_fingerprint__(self) -> int:
         return self.x
+
+
+@dataclass(frozen=True)
+class _Unset:
+    """A dataclass with a field its `__init__` never sets."""
+
+    x: int
+    y: int = field(init=False)
+
+
+def test_a_dataclass_with_an_unset_field_is_refused() -> None:
+    """A field never set has no value to fingerprint, so the instance is refused."""
+    with pytest.raises(UnfingerprintableError):
+        fingerprint(_Unset(1))
 
 
 def test_declarations_win_and_fieldless_dataclasses_are_refused() -> None:

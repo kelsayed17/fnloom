@@ -33,6 +33,9 @@ if TYPE_CHECKING:
 # Registered canonical forms, by the exact type they were registered for.
 _REGISTRY: dict[type, Callable[[Any], object]] = {}
 
+# What `getattr` gives for a dataclass field never set.
+_UNSET = object()
+
 
 def fingerprint(value: object) -> bytes:
     """The 32-byte fingerprint of `value`'s type and content.
@@ -133,7 +136,8 @@ def _tz_form(zone: object) -> object | None:
 def _record(value: object) -> object | None:
     """A named tuple's or dataclass instance's fields, or `None` for anything else.
 
-    A dataclass without fields keeps its state, if any, elsewhere, so it is refused.
+    A dataclass without fields keeps its state, if any, elsewhere, so it is refused;
+    so is one with a field never set (`init=False` without a default).
     """
     if isinstance(value, tuple) and hasattr(type(value), "_fields"):
         return tuple(value)
@@ -141,7 +145,8 @@ def _record(value: object) -> object | None:
         fields = dataclasses.fields(value)
         if not fields:
             return None
-        return tuple(getattr(value, field.name) for field in fields)
+        items = tuple(getattr(value, field.name, _UNSET) for field in fields)
+        return None if any(item is _UNSET for item in items) else items
     return None
 
 
