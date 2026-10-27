@@ -14,7 +14,8 @@ runs, so it can drive payloads other than Python functions.
 1. **Specs.** Each node is a `NodeSpec<P>`: a name, the names it reads (`InputSpec`, each `Required` or `Optional`),
    tags, and a payload `P` owned by you.
 2. **Build.** `Graph::build(specs)` checks for duplicate names and cycles, makes an input node of every name that is
-   read but not declared, and gives each node a `NodeId` in sorted name order.
+   read but not declared, and gives each node a `NodeId` in sorted name order. A node's `kind` is
+   `NodeKind::Function(payload)` or `NodeKind::Input`, so only function nodes carry a payload.
 3. **Prepare.** `graph.prepare(&request)` turns a `Request` (outputs, input names, override names) into a `Plan`: the
    steps to run, in topological order with ties broken by id, and the values each step releases.
 4. **Run.** `plan.run(&graph, &mut evaluator, &inputs, &overrides, &mut observers)` executes the steps and returns
@@ -34,9 +35,10 @@ It prints `x = 1: c = 114` and `x = 2: c = 116`. Run it with `cargo run -p fnloo
 ## Evaluate
 
 `Evaluate<P>` is the seam that runs payloads. It names the value type flowing along edges (`Value: Clone`) and the
-error a payload can raise. The executor calls `evaluate(node, args)` once per computed step, with the arguments as
-`Arg { node, name, value }` sorted by id; `node` lets an embedder key per-node data by `NodeId::index`, as the Python
-binding does for its interned keyword names. An optional input that was not supplied is simply absent from `args`.
+error a payload can raise. The executor calls `evaluate(node, payload, args)` once per computed step, with the node's
+payload already taken out of its `NodeKind::Function`, and the arguments as `Arg { node, name, value }` sorted by
+id; an argument's `node` lets an embedder key per-node data by `NodeId::index`, as the Python binding does for its
+interned keyword names. An optional input that was not supplied is simply absent from `args`.
 
 ## Observers
 

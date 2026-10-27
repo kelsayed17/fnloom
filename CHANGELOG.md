@@ -22,4 +22,10 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - Wall-clock benchmarks against Hamilton, and a CI gate on the core's instruction counts.
 - A documentation site, built with Zensical and published to GitHub Pages.
 
+### Changed
+
+- `fnloom-core`: `NodeKind::Function` carries the node's payload, replacing the `Node::payload` field with the
+  `Node::payload()` accessor, and `Evaluate::evaluate` receives the payload as an argument, so an evaluator never
+  meets a function node without one.
+
 [Unreleased]: https://github.com/kelsayed17/fnloom/commits/main

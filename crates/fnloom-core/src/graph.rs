@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{BuildError, PlanError};
-use crate::node::{Edge, Node, NodeId, NodeKind, NodeSpec};
+use crate::node::{Edge, InputSpec, Node, NodeId, NodeKind, NodeSpec};
 
 /// An immutable, acyclic dependency graph whose node ids follow sorted name order.
 #[derive(Debug)]
@@ -62,13 +62,19 @@ impl<P> Graph<P> {
         &self.nodes[id.index()]
     }
 
+    /// The id of the node called `name`, if any.
+    #[must_use]
+    pub fn id_of(&self, name: &str) -> Option<NodeId> {
+        self.ids.get(name).copied()
+    }
+
     /// Nodes the named nodes depend on, directly or transitively, excluding the named nodes.
     ///
     /// # Errors
     ///
     /// `PlanError::UnknownNodes` listing every unknown name.
     pub fn upstream_of(&self, names: &[&str]) -> Result<Vec<NodeId>, PlanError> {
-        let starts = self.resolve(names)?;
+        let starts = self.lookup(names.iter().copied(), PlanError::UnknownNodes, |_| true)?;
         Ok(self.reach_upstream(&starts))
     }
 
@@ -78,7 +84,7 @@ impl<P> Graph<P> {
     ///
     /// `PlanError::UnknownNodes` listing every unknown name.
     pub fn downstream_of(&self, names: &[&str]) -> Result<Vec<NodeId>, PlanError> {
-        let starts = self.resolve(names)?;
+        let starts = self.lookup(names.iter().copied(), PlanError::UnknownNodes, |_| true)?;
         Ok(self.reach_downstream(&starts))
     }
 
@@ -88,50 +94,77 @@ impl<P> Graph<P> {
     ///
     /// `PlanError::UnknownNodes` listing every unknown name among `from` and `to`.
     pub fn between(&self, from: &str, to: &str) -> Result<Vec<NodeId>, PlanError> {
-        let ends = self.resolve(&[from, to])?;
-        let (Some(&from), Some(&to)) = (ends.first(), ends.last()) else {
+        self.lookup([from, to], PlanError::UnknownNodes, |_| true)?;
+        let (Some(from), Some(to)) = (self.id_of(from), self.id_of(to)) else {
             return Ok(Vec::new());
         };
-        let below = self.reach_downstream(&[from]);
-        let above: BTreeSet<NodeId> = self.reach_upstream(&[to]).into_iter().collect();
-        Ok(below.into_iter().filter(|id| above.contains(id)).collect())
+        let above = self.reach_upstream(&[to]);
+        Ok(self
+            .reach_downstream(&[from])
+            .into_iter()
+            .filter(|id| above.binary_search(id).is_ok())
+            .collect())
     }
 
-    /// Ids of `names`, or every unknown name sorted and de-duplicated.
-    fn resolve(&self, names: &[&str]) -> Result<Vec<NodeId>, PlanError> {
-        let (known, unknown): (Vec<_>, Vec<_>) = names
-            .iter()
-            .map(|&name| self.id_of(name).ok_or(name))
-            .partition(Result::is_ok);
-        if unknown.is_empty() {
-            return Ok(known.into_iter().flatten().collect());
+    /// The nodes that read from `id`, in id order.
+    pub(crate) fn dependents(&self, id: NodeId) -> &[NodeId] {
+        self.dependents.get(id.index()).map_or(&[], Vec::as_slice)
+    }
+
+    /// Ids of the names whose node passes `accept`, sorted and de-duplicated; otherwise every
+    /// other name, sorted and de-duplicated, wrapped by `error`.
+    pub(crate) fn lookup<'a>(
+        &self,
+        names: impl IntoIterator<Item = &'a str>,
+        error: fn(Vec<String>) -> PlanError,
+        accept: fn(&Node<P>) -> bool,
+    ) -> Result<Vec<NodeId>, PlanError> {
+        let mut found = BTreeSet::new();
+        let mut rejected = BTreeSet::new();
+        for name in names {
+            match self.id_of(name).filter(|&id| accept(self.node(id))) {
+                Some(id) => found.insert(id),
+                None => rejected.insert(name),
+            };
         }
-        let unknown: BTreeSet<String> = unknown
-            .into_iter()
-            .filter_map(Result::err)
-            .map(str::to_owned)
-            .collect();
-        Err(PlanError::UnknownNodes(unknown.into_iter().collect()))
+        if rejected.is_empty() {
+            Ok(found.into_iter().collect())
+        } else {
+            Err(error(rejected.into_iter().map(str::to_owned).collect()))
+        }
     }
 
     fn reach_upstream(&self, starts: &[NodeId]) -> Vec<NodeId> {
-        reach(starts, |id| self.node(id).inputs.iter().map(|e| e.node))
-    }
-
-    fn reach_downstream(&self, starts: &[NodeId]) -> Vec<NodeId> {
-        reach(starts, |id| {
-            self.dependents
-                .get(id.index())
-                .into_iter()
-                .flatten()
-                .copied()
+        self.reach(starts, |id| {
+            self.node(id).inputs.iter().map(|edge| edge.node)
         })
     }
 
-    /// The id of the node called `name`, if any.
-    #[must_use]
-    pub fn id_of(&self, name: &str) -> Option<NodeId> {
-        self.ids.get(name).copied()
+    fn reach_downstream(&self, starts: &[NodeId]) -> Vec<NodeId> {
+        self.reach(starts, |id| self.dependents(id).iter().copied())
+    }
+
+    /// Iterative worklist reachability; the result is sorted and excludes `starts` themselves.
+    fn reach<I>(&self, starts: &[NodeId], neighbours: impl Fn(NodeId) -> I) -> Vec<NodeId>
+    where
+        I: Iterator<Item = NodeId>,
+    {
+        let mut seen = vec![false; self.nodes.len()];
+        for start in starts {
+            seen[start.index()] = true;
+        }
+        let mut found = Vec::new();
+        let mut work = starts.to_vec();
+        while let Some(current) = work.pop() {
+            for next in neighbours(current) {
+                if !std::mem::replace(&mut seen[next.index()], true) {
+                    found.push(next);
+                    work.push(next);
+                }
+            }
+        }
+        found.sort_unstable();
+        found
     }
 }
 
@@ -140,31 +173,10 @@ fn forward_adjacency<P>(nodes: &[Node<P>]) -> Vec<Vec<NodeId>> {
     let mut dependents = vec![Vec::new(); nodes.len()];
     for node in nodes {
         for edge in &node.inputs {
-            if let Some(list) = dependents.get_mut(edge.node.index()) {
-                list.push(node.id);
-            }
+            dependents[edge.node.index()].push(node.id);
         }
     }
     dependents
-}
-
-/// Iterative worklist reachability; the result is sorted and excludes `starts` themselves.
-fn reach<I>(starts: &[NodeId], neighbours: impl Fn(NodeId) -> I) -> Vec<NodeId>
-where
-    I: Iterator<Item = NodeId>,
-{
-    let mut seen: BTreeSet<NodeId> = starts.iter().copied().collect();
-    let mut found = BTreeSet::new();
-    let mut work: Vec<NodeId> = starts.to_vec();
-    while let Some(current) = work.pop() {
-        for next in neighbours(current) {
-            if seen.insert(next) {
-                found.insert(next);
-                work.push(next);
-            }
-        }
-    }
-    found.into_iter().collect()
 }
 
 fn index_by_name<P>(specs: Vec<NodeSpec<P>>) -> Result<BTreeMap<String, NodeSpec<P>>, BuildError> {
@@ -193,28 +205,26 @@ fn make_node<P>(
     spec: Option<NodeSpec<P>>,
     ids: &BTreeMap<String, NodeId>,
 ) -> Node<P> {
-    let Some(spec) = spec else {
-        return Node {
+    match spec {
+        Some(spec) => Node {
+            id,
+            inputs: resolve_edges(&spec.inputs, ids),
+            name: spec.name,
+            kind: NodeKind::Function(spec.payload),
+            tags: spec.tags,
+        },
+        None => Node {
             id,
             name: name.to_owned(),
             kind: NodeKind::Input,
             inputs: Vec::new(),
             tags: BTreeMap::new(),
-            payload: None,
-        };
-    };
-    Node {
-        id,
-        name: spec.name,
-        kind: NodeKind::Function,
-        inputs: resolve_edges(&spec.inputs, ids),
-        tags: spec.tags,
-        payload: Some(spec.payload),
+        },
     }
 }
 
 /// Resolves inputs to edges, keeping the first of any repeated dependency.
-fn resolve_edges(inputs: &[crate::node::InputSpec], ids: &BTreeMap<String, NodeId>) -> Vec<Edge> {
+fn resolve_edges(inputs: &[InputSpec], ids: &BTreeMap<String, NodeId>) -> Vec<Edge> {
     let mut seen = BTreeSet::new();
     inputs
         .iter()
@@ -283,31 +293,16 @@ fn cycle_path(stack: &[(NodeId, usize)], back_to: NodeId) -> Vec<NodeId> {
 #[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
 mod tests {
     use super::*;
-    use crate::node::{Dependency, InputSpec};
-
-    fn spec(name: &str, deps: &[&str]) -> NodeSpec<()> {
-        NodeSpec {
-            name: name.to_owned(),
-            inputs: deps
-                .iter()
-                .map(|d| InputSpec {
-                    name: (*d).to_owned(),
-                    dependency: Dependency::Required,
-                })
-                .collect(),
-            tags: BTreeMap::new(),
-            payload: (),
-        }
-    }
+    use crate::testing::{names, node};
 
     #[test]
     fn build_synthesises_input_nodes_for_unresolved_parameters() {
-        let graph = Graph::build(vec![spec("b", &["a"])]).unwrap();
+        let graph = Graph::build(vec![node("b", &["a"])]).unwrap();
         let a = graph.node(graph.id_of("a").unwrap());
-        assert_eq!(a.kind, NodeKind::Input);
-        assert!(a.payload.is_none());
+        assert!(a.is_input());
+        assert!(a.payload().is_none());
         let b = graph.node(graph.id_of("b").unwrap());
-        assert_eq!(b.kind, NodeKind::Function);
+        assert_eq!(b.kind, NodeKind::Function(()));
         assert_eq!(
             b.inputs.iter().map(|e| e.node).collect::<Vec<_>>(),
             vec![a.id]
@@ -316,7 +311,7 @@ mod tests {
 
     #[test]
     fn build_rejects_duplicate_names() {
-        let err = Graph::build(vec![spec("x", &[]), spec("x", &[])]).unwrap_err();
+        let err = Graph::build(vec![node("x", &[]), node("x", &[])]).unwrap_err();
         assert_eq!(
             err,
             BuildError::DuplicateName {
@@ -327,7 +322,7 @@ mod tests {
 
     #[test]
     fn build_reports_a_cycle_with_its_path() {
-        let err = Graph::build(vec![spec("a", &["b"]), spec("b", &["a"])]).unwrap_err();
+        let err = Graph::build(vec![node("a", &["b"]), node("b", &["a"])]).unwrap_err();
         let BuildError::Cycle { path } = err else {
             unreachable!("expected a cycle, got {err}");
         };
@@ -336,7 +331,7 @@ mod tests {
 
     #[test]
     fn build_treats_a_self_dependency_as_a_cycle() {
-        let err = Graph::build(vec![spec("a", &["a"])]).unwrap_err();
+        let err = Graph::build(vec![node("a", &["a"])]).unwrap_err();
         assert!(matches!(err, BuildError::Cycle { .. }));
     }
 
@@ -350,7 +345,7 @@ mod tests {
     #[test]
     fn node_ids_follow_sorted_name_order() {
         let graph =
-            Graph::build(vec![spec("m", &["z"]), spec("c", &[]), spec("a", &["m"])]).unwrap();
+            Graph::build(vec![node("m", &["z"]), node("c", &[]), node("a", &["m"])]).unwrap();
         let names: Vec<&str> = graph.nodes().iter().map(|n| n.name.as_str()).collect();
         assert_eq!(names, ["a", "c", "m", "z"]);
         for (position, node) in graph.nodes().iter().enumerate() {
@@ -361,7 +356,7 @@ mod tests {
     #[test]
     fn build_accepts_a_deep_chain_without_recursion() {
         let specs: Vec<_> = (0..50_000)
-            .map(|i| spec(&format!("n{i:06}"), &[&format!("n{:06}", i + 1)]))
+            .map(|i| node(&format!("n{i:06}"), &[&format!("n{:06}", i + 1)]))
             .collect();
         assert!(Graph::build(specs).is_ok());
     }
@@ -371,16 +366,12 @@ mod tests {
 
         fn diamond() -> Graph<()> {
             Graph::build(vec![
-                spec("a", &[]),
-                spec("b", &["a"]),
-                spec("c", &["a"]),
-                spec("d", &["b", "c"]),
+                node("a", &[]),
+                node("b", &["a"]),
+                node("c", &["a"]),
+                node("d", &["b", "c"]),
             ])
             .unwrap()
-        }
-
-        fn names(graph: &Graph<()>, ids: &[NodeId]) -> Vec<String> {
-            ids.iter().map(|&id| graph.node(id).name.clone()).collect()
         }
 
         #[test]
@@ -407,10 +398,10 @@ mod tests {
         #[test]
         fn between_excludes_branches_off_the_path() {
             let g = Graph::build(vec![
-                spec("b", &["a"]),
-                spec("c", &["b"]),
-                spec("side", &["a"]),
-                spec("tail", &["c"]),
+                node("b", &["a"]),
+                node("c", &["b"]),
+                node("side", &["a"]),
+                node("tail", &["c"]),
             ])
             .unwrap();
             assert_eq!(names(&g, &g.between("a", "c").unwrap()), ["b"]);
@@ -460,7 +451,7 @@ mod tests {
         #[test]
         fn queries_walk_a_deep_chain_without_recursion() {
             let specs: Vec<_> = (0..50_000)
-                .map(|i| spec(&format!("n{i:06}"), &[&format!("n{:06}", i + 1)]))
+                .map(|i| node(&format!("n{i:06}"), &[&format!("n{:06}", i + 1)]))
                 .collect();
             let g = Graph::build(specs).unwrap();
             assert_eq!(g.upstream_of(&["n000000"]).unwrap().len(), 50_000);

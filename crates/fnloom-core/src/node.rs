@@ -46,11 +46,11 @@ pub struct NodeSpec<P> {
 }
 
 /// How a node gets its value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum NodeKind {
-    /// Computed by its payload from its inputs.
-    Function,
-    /// Supplied by the caller at run time; has no payload.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NodeKind<P> {
+    /// Computed by this payload from the node's inputs.
+    Function(P),
+    /// Supplied by the caller at run time.
     Input,
 }
 
@@ -70,12 +70,27 @@ pub struct Node<P> {
     pub id: NodeId,
     /// Unique node name.
     pub name: String,
-    /// Function or caller-supplied input.
-    pub kind: NodeKind,
+    /// A function with its payload, or a caller-supplied input.
+    pub kind: NodeKind<P>,
     /// Resolved inputs, in declaration order.
     pub inputs: Vec<Edge>,
     /// Free-form key/value tags.
     pub tags: BTreeMap<String, String>,
-    /// The executable payload; `None` for `NodeKind::Input`.
-    pub payload: Option<P>,
+}
+
+impl<P> Node<P> {
+    /// Whether the caller supplies this node's value.
+    #[must_use]
+    pub const fn is_input(&self) -> bool {
+        matches!(self.kind, NodeKind::Input)
+    }
+
+    /// The payload of a function node; `None` for an input.
+    #[must_use]
+    pub const fn payload(&self) -> Option<&P> {
+        match &self.kind {
+            NodeKind::Function(payload) => Some(payload),
+            NodeKind::Input => None,
+        }
+    }
 }

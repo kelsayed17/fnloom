@@ -1,11 +1,11 @@
 //! Turning a request into a validated, reusable execution plan.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::collections::{BTreeSet, BinaryHeap};
 
 use crate::error::PlanError;
 use crate::graph::Graph;
-use crate::node::{Dependency, NodeId, NodeKind};
+use crate::node::{Dependency, Node, NodeId, NodeKind};
 
 /// What to compute and what the caller supplies.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -67,9 +67,12 @@ impl Plan {
 
 /// A request whose names have been resolved to ids.
 struct Resolved {
-    outputs: BTreeSet<NodeId>,
-    supplied: BTreeSet<NodeId>,
-    overrides: BTreeSet<NodeId>,
+    /// The requested outputs, sorted and de-duplicated.
+    outputs: Vec<NodeId>,
+    /// Whether the caller supplies each node, by id.
+    supplied: Vec<bool>,
+    /// Whether the caller overrides each node, by id.
+    overrides: Vec<bool>,
 }
 
 impl<P> Graph<P> {
@@ -84,140 +87,135 @@ impl<P> Graph<P> {
     /// `MissingInputs`, each listing its names sorted and de-duplicated.
     pub fn prepare(&self, request: &Request) -> Result<Plan, PlanError> {
         let resolved = self.resolve_request(request)?;
-        let (needed, required) = self.walk(&resolved);
-        self.check_missing(&resolved, &required)?;
-        let actions: BTreeMap<NodeId, Action> = needed
-            .iter()
-            .map(|&id| (id, self.action_for(id, &resolved)))
-            .collect();
+        let actions = self.plan_actions(&resolved)?;
         let order = self.topological_order(&actions);
         Ok(Plan {
             steps: self.build_steps(&order, &actions, &resolved.outputs),
-            outputs: resolved.outputs.into_iter().collect(),
+            outputs: resolved.outputs,
         })
     }
 
     fn resolve_request(&self, request: &Request) -> Result<Resolved, PlanError> {
-        let outputs = self.lookup(request.outputs.iter(), PlanError::UnknownOutputs, |_| true)?;
-        let supplied = self.lookup(request.inputs.iter(), PlanError::UnknownInputs, |kind| {
-            kind == NodeKind::Input
-        })?;
+        let outputs = self.lookup(
+            request.outputs.iter().map(String::as_str),
+            PlanError::UnknownOutputs,
+            |_| true,
+        )?;
+        let supplied = self.lookup(
+            request.inputs.iter().map(String::as_str),
+            PlanError::UnknownInputs,
+            Node::is_input,
+        )?;
         let overrides = self.lookup(
-            request.overrides.iter(),
+            request.overrides.iter().map(String::as_str),
             PlanError::UnknownOverrides,
             |_| true,
         )?;
         Ok(Resolved {
             outputs,
-            supplied,
-            overrides,
+            supplied: self.mask(&supplied),
+            overrides: self.mask(&overrides),
         })
     }
 
-    /// Ids of the names whose node passes `accept`, or the offending names via `error`.
-    fn lookup<'a>(
-        &self,
-        names: impl Iterator<Item = &'a String>,
-        error: fn(Vec<String>) -> PlanError,
-        accept: fn(NodeKind) -> bool,
-    ) -> Result<BTreeSet<NodeId>, PlanError> {
-        let mut found = BTreeSet::new();
-        let mut rejected = BTreeSet::new();
-        for name in names {
-            match self.id_of(name).filter(|&id| accept(self.node(id).kind)) {
-                Some(id) => found.insert(id),
-                None => rejected.insert(name.clone()),
-            };
+    /// A flag per node, set for `ids`.
+    fn mask(&self, ids: &[NodeId]) -> Vec<bool> {
+        let mut mask = vec![false; self.nodes().len()];
+        for id in ids {
+            mask[id.index()] = true;
         }
-        if rejected.is_empty() {
-            Ok(found)
-        } else {
-            Err(error(rejected.into_iter().collect()))
-        }
+        mask
     }
 
-    /// Iterative reverse walk from the outputs.
+    /// The action of every node the outputs need, by id; `None` for the rest.
     ///
-    /// Returns the needed nodes and the `Input` nodes some planned edge requires.
-    fn walk(&self, resolved: &Resolved) -> (BTreeSet<NodeId>, BTreeSet<NodeId>) {
-        let mut needed: BTreeSet<NodeId> = resolved.outputs.clone();
-        let mut required: BTreeSet<NodeId> = resolved
-            .outputs
-            .iter()
-            .copied()
-            .filter(|&id| self.node(id).kind == NodeKind::Input)
-            .collect();
-        let mut work: Vec<NodeId> = needed.iter().copied().collect();
+    /// An iterative reverse walk from the outputs, which stops at overrides and inputs.
+    ///
+    /// # Errors
+    ///
+    /// `PlanError::MissingInputs` naming each input that is neither supplied nor overridden yet
+    /// is requested or read by a required edge of a computed node.
+    fn plan_actions(&self, resolved: &Resolved) -> Result<Vec<Option<Action>>, PlanError> {
+        let mut actions = vec![None; self.nodes().len()];
+        let mut missing = BTreeSet::new();
+        for &id in &resolved.outputs {
+            let action = self.action_for(id, resolved);
+            if action == Action::SkipOptionalInput {
+                missing.insert(id);
+            }
+            actions[id.index()] = Some(action);
+        }
+        let mut work = resolved.outputs.clone();
         while let Some(id) = work.pop() {
-            if resolved.overrides.contains(&id) {
+            if actions[id.index()] != Some(Action::Compute) {
                 continue;
             }
             for edge in &self.node(id).inputs {
-                if edge.dependency == Dependency::Required
-                    && self.node(edge.node).kind == NodeKind::Input
-                {
-                    required.insert(edge.node);
+                let input = edge.node;
+                if actions[input.index()].is_none() {
+                    actions[input.index()] = Some(self.action_for(input, resolved));
+                    work.push(input);
                 }
-                if needed.insert(edge.node) {
-                    work.push(edge.node);
+                if edge.dependency == Dependency::Required
+                    && actions[input.index()] == Some(Action::SkipOptionalInput)
+                {
+                    missing.insert(input);
                 }
             }
         }
-        (needed, required)
-    }
-
-    fn check_missing(
-        &self,
-        resolved: &Resolved,
-        required: &BTreeSet<NodeId>,
-    ) -> Result<(), PlanError> {
-        let missing: Vec<String> = required
-            .iter()
-            .filter(|id| !resolved.supplied.contains(id) && !resolved.overrides.contains(id))
-            .map(|&id| self.node(id).name.clone())
-            .collect();
         if missing.is_empty() {
-            Ok(())
+            Ok(actions)
         } else {
-            Err(PlanError::MissingInputs(missing))
+            Err(PlanError::MissingInputs(
+                missing
+                    .into_iter()
+                    .map(|id| self.node(id).name.clone())
+                    .collect(),
+            ))
         }
     }
 
-    /// The action for a needed node; unsupplied inputs reaching here are optional ones.
+    /// The action for a needed node; an input that is not supplied is taken to be optional.
     fn action_for(&self, id: NodeId, resolved: &Resolved) -> Action {
-        if resolved.overrides.contains(&id) {
+        if resolved.overrides[id.index()] {
             return Action::UseOverride;
         }
         match self.node(id).kind {
-            NodeKind::Function => Action::Compute,
-            NodeKind::Input if resolved.supplied.contains(&id) => Action::UseInput,
+            NodeKind::Function(_) => Action::Compute,
+            NodeKind::Input if resolved.supplied[id.index()] => Action::UseInput,
             NodeKind::Input => Action::SkipOptionalInput,
         }
     }
 
     /// Kahn's algorithm over the planned nodes; the ready set pops the smallest id first.
-    fn topological_order(&self, actions: &BTreeMap<NodeId, Action>) -> Vec<NodeId> {
-        let mut waiting: BTreeMap<NodeId, usize> = BTreeMap::new();
-        let mut consumers: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
-        for (&id, &action) in actions {
-            let deps = self.planned_dependencies(id, action);
-            waiting.insert(id, deps.len());
-            for dep in deps {
-                consumers.entry(dep).or_default().push(id);
-            }
-        }
-        let mut ready: BinaryHeap<Reverse<NodeId>> = waiting
+    ///
+    /// Only computed nodes wait, each for all of its inputs, which the walk planned too.
+    fn topological_order(&self, actions: &[Option<Action>]) -> Vec<NodeId> {
+        let mut waiting: Vec<usize> = self
+            .nodes()
             .iter()
-            .filter(|&(_, &count)| count == 0)
-            .map(|(&id, _)| Reverse(id))
+            .zip(actions)
+            .map(|(node, &action)| {
+                if action == Some(Action::Compute) {
+                    node.inputs.len()
+                } else {
+                    0
+                }
+            })
             .collect();
-        let mut order = Vec::with_capacity(actions.len());
+        let mut ready: BinaryHeap<Reverse<NodeId>> = self
+            .nodes()
+            .iter()
+            .filter(|node| actions[node.id.index()].is_some() && waiting[node.id.index()] == 0)
+            .map(|node| Reverse(node.id))
+            .collect();
+        let mut order = Vec::new();
         while let Some(Reverse(id)) = ready.pop() {
             order.push(id);
-            for &consumer in consumers.get(&id).into_iter().flatten() {
-                if let Some(count) = waiting.get_mut(&consumer) {
-                    *count -= 1;
-                    if *count == 0 {
+            for &consumer in self.dependents(id) {
+                if actions[consumer.index()] == Some(Action::Compute) {
+                    waiting[consumer.index()] -= 1;
+                    if waiting[consumer.index()] == 0 {
                         ready.push(Reverse(consumer));
                     }
                 }
@@ -226,109 +224,63 @@ impl<P> Graph<P> {
         order
     }
 
-    /// Nodes that must be ordered before `id`: only computed nodes have any.
-    fn planned_dependencies(&self, id: NodeId, action: Action) -> Vec<NodeId> {
-        if action == Action::Compute {
-            self.node(id).inputs.iter().map(|edge| edge.node).collect()
-        } else {
-            Vec::new()
-        }
-    }
-
     fn build_steps(
         &self,
         order: &[NodeId],
-        actions: &BTreeMap<NodeId, Action>,
-        outputs: &BTreeSet<NodeId>,
+        actions: &[Option<Action>],
+        outputs: &[NodeId],
     ) -> Vec<Step> {
         let mut steps: Vec<Step> = order
             .iter()
-            .map(|&node| {
-                let action = actions.get(&node).copied().unwrap_or(Action::Compute);
-                Step {
+            .filter_map(|&node| {
+                let action = actions[node.index()]?;
+                Some(Step {
                     node,
                     action,
                     args: self.passed_args(node, action, actions),
                     release: Vec::new(),
-                }
+                })
             })
             .collect();
-        let last_use = last_use_positions(&steps);
-        for (&node, &position) in &last_use {
-            if !outputs.contains(&node) {
-                if let Some(step) = steps.get_mut(position) {
-                    step.release.push(node);
+        // For each node passed as an argument, the position of the last step that reads it.
+        let mut last_use = vec![None; self.nodes().len()];
+        for (position, step) in steps.iter().enumerate() {
+            for &arg in &step.args {
+                last_use[arg.index()] = Some(position);
+            }
+        }
+        for (node, position) in self.nodes().iter().zip(last_use) {
+            if let Some(position) = position {
+                if outputs.binary_search(&node.id).is_err() {
+                    steps[position].release.push(node.id);
                 }
             }
         }
         steps
     }
 
-    /// Dependencies of a computed node that actually receive a value, sorted by id.
-    fn passed_args(
-        &self,
-        id: NodeId,
-        action: Action,
-        actions: &BTreeMap<NodeId, Action>,
-    ) -> Vec<NodeId> {
-        let args: BTreeSet<NodeId> = self
-            .planned_dependencies(id, action)
-            .into_iter()
-            .filter(|dep| actions.get(dep) != Some(&Action::SkipOptionalInput))
-            .collect();
-        args.into_iter().collect()
-    }
-}
-
-/// For each node passed as an argument, the position of the last step that consumes it.
-fn last_use_positions(steps: &[Step]) -> BTreeMap<NodeId, usize> {
-    let mut last = BTreeMap::new();
-    for (position, step) in steps.iter().enumerate() {
-        for &arg in &step.args {
-            last.insert(arg, position);
+    /// The inputs of a computed node that actually receive a value, sorted by id.
+    fn passed_args(&self, id: NodeId, action: Action, actions: &[Option<Action>]) -> Vec<NodeId> {
+        if action != Action::Compute {
+            return Vec::new();
         }
+        let mut args: Vec<NodeId> = self
+            .node(id)
+            .inputs
+            .iter()
+            .map(|edge| edge.node)
+            .filter(|input| actions[input.index()] != Some(Action::SkipOptionalInput))
+            .collect();
+        args.sort_unstable();
+        args
     }
-    last
 }
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
 mod tests {
     use super::*;
-    use crate::node::{InputSpec, NodeSpec};
-
-    fn spec(name: &str, deps: &[(&str, Dependency)]) -> NodeSpec<()> {
-        NodeSpec {
-            name: name.to_owned(),
-            inputs: deps
-                .iter()
-                .map(|&(d, dependency)| InputSpec {
-                    name: d.to_owned(),
-                    dependency,
-                })
-                .collect(),
-            tags: BTreeMap::new(),
-            payload: (),
-        }
-    }
-
-    fn node(name: &str, deps: &[&str]) -> NodeSpec<()> {
-        let required: Vec<(&str, Dependency)> =
-            deps.iter().map(|&d| (d, Dependency::Required)).collect();
-        spec(name, &required)
-    }
-
-    fn request(outputs: &[&str], inputs: &[&str], overrides: &[&str]) -> Request {
-        Request {
-            outputs: outputs.iter().map(|s| (*s).to_owned()).collect(),
-            inputs: inputs.iter().map(|s| (*s).to_owned()).collect(),
-            overrides: overrides.iter().map(|s| (*s).to_owned()).collect(),
-        }
-    }
-
-    fn strings(names: &[&str]) -> Vec<String> {
-        names.iter().map(|s| (*s).to_owned()).collect()
-    }
+    use crate::testing::{names, node, request, spec, strings};
 
     /// a, b <- a, c <- a, d <- b, c; `x` is an input of `a`.
     fn diamond() -> Graph<()> {
@@ -339,10 +291,6 @@ mod tests {
             node("d", &["b", "c"]),
         ])
         .unwrap()
-    }
-
-    fn names(graph: &Graph<()>, ids: &[NodeId]) -> Vec<String> {
-        ids.iter().map(|&id| graph.node(id).name.clone()).collect()
     }
 
     fn step_summary(graph: &Graph<()>, plan: &Plan) -> Vec<(String, Action)> {

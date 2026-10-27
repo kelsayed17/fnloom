@@ -9,3 +9,6 @@ pub mod graph;
 pub mod node;
 pub mod plan;
 pub mod run;
+
+#[cfg(test)]
+mod testing;

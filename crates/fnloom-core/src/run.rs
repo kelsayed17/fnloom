@@ -16,7 +16,8 @@ pub trait Evaluate<P> {
     /// The error a node's payload can raise.
     type Error;
 
-    /// Runs `node`'s payload on `args`, sorted by input id (equivalently by name).
+    /// Runs `payload`, the payload of the function node `node`, on `args`, sorted by input id
+    /// (equivalently by name).
     ///
     /// # Errors
     ///
@@ -24,6 +25,7 @@ pub trait Evaluate<P> {
     fn evaluate(
         &mut self,
         node: &Node<P>,
+        payload: &P,
         args: &[Arg<'_, Self::Value>],
     ) -> Result<Self::Value, Self::Error>;
 }
@@ -148,6 +150,23 @@ impl<E> Hooks<'_, '_, E> {
             .filter_map(|observer| event(&mut **observer).err())
             .collect()
     }
+
+    /// Delivers one event like `fire`, failing with `RunError::Observers` if any observer did.
+    fn check(
+        &mut self,
+        name: &'static str,
+        event: impl FnMut(&mut dyn Observer<E>) -> Result<(), E>,
+    ) -> Result<(), RunError<E>> {
+        let errors = self.fire(event);
+        if errors.is_empty() {
+            Ok(())
+        } else {
+            Err(RunError::Observers {
+                event: name,
+                errors,
+            })
+        }
+    }
 }
 
 impl<E> RunError<E> {
@@ -195,24 +214,17 @@ impl Plan {
     ) -> Result<BTreeMap<String, V::Value>, RunError<V::Error>> {
         let slots = self.seed(graph, inputs, overrides)?;
         let mut hooks = Hooks { observers };
-        let started = hooks.fire(|observer| observer.pre_graph());
-        let outcome = if started.is_empty() {
-            self.execute(graph, eval, slots, &mut hooks)
-        } else {
-            Err(RunError::Observers {
-                event: "pre_graph",
-                errors: started,
-            })
-        };
-        let ok = outcome.is_ok();
-        let closing = hooks.fire(|observer| observer.post_graph(ok));
+        let outcome = hooks
+            .check("pre_graph", |observer| observer.pre_graph())
+            .and_then(|()| self.execute(graph, eval, slots, &mut hooks));
         match outcome {
-            Ok(values) if closing.is_empty() => Ok(values),
-            Ok(_) => Err(RunError::Observers {
-                event: "post_graph",
-                errors: closing,
-            }),
-            Err(failure) => Err(failure.with_closing(closing)),
+            Ok(values) => hooks
+                .check("post_graph", |observer| observer.post_graph(true))
+                .map(|()| values),
+            Err(failure) => {
+                let closing = hooks.fire(|observer| observer.post_graph(false));
+                Err(failure.with_closing(closing))
+            }
         }
     }
 
@@ -297,26 +309,18 @@ fn compute<P, V: Evaluate<P>>(
     slots: &[Option<V::Value>],
 ) -> Result<V::Value, RunError<V::Error>> {
     let node = graph.node(step.node);
+    let Some(payload) = node.payload() else {
+        return Err(broken(format!(
+            "input node '{}' planned to compute",
+            node.name
+        )));
+    };
     let args = gather(graph, step, slots)?;
-    let before = hooks.fire(|observer| observer.pre_node(&node.name));
-    if !before.is_empty() {
-        return Err(RunError::Observers {
-            event: "pre_node",
-            errors: before,
-        });
-    }
-    match eval.evaluate(node, &args) {
-        Ok(value) => {
-            let after = hooks.fire(|observer| observer.post_node(&node.name, true));
-            if after.is_empty() {
-                Ok(value)
-            } else {
-                Err(RunError::Observers {
-                    event: "post_node",
-                    errors: after,
-                })
-            }
-        }
+    hooks.check("pre_node", |observer| observer.pre_node(&node.name))?;
+    match eval.evaluate(node, payload, &args) {
+        Ok(value) => hooks
+            .check("post_node", |observer| observer.post_node(&node.name, true))
+            .map(|()| value),
         Err(source) => Err(RunError::Node {
             node: node.name.clone(),
             source,
@@ -358,32 +362,7 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
-    use crate::node::{Dependency, InputSpec, NodeSpec};
-    use crate::plan::Request;
-
-    fn spec(name: &str, deps: &[&str], payload: i64) -> NodeSpec<i64> {
-        NodeSpec {
-            name: name.to_owned(),
-            inputs: deps
-                .iter()
-                .map(|&d| InputSpec {
-                    name: d.to_owned(),
-                    dependency: Dependency::Required,
-                })
-                .collect(),
-            tags: BTreeMap::new(),
-            payload,
-        }
-    }
-
-    fn request(outputs: &[&str], inputs: &[&str], overrides: &[&str]) -> Request {
-        let owned = |names: &[&str]| names.iter().map(|s| (*s).to_owned()).collect();
-        Request {
-            outputs: outputs.iter().map(|s| (*s).to_owned()).collect(),
-            inputs: owned(inputs),
-            overrides: owned(overrides),
-        }
-    }
+    use crate::testing::{node, request, valued};
 
     fn map<V: Clone>(pairs: &[(&str, V)]) -> BTreeMap<String, V> {
         pairs
@@ -395,10 +374,10 @@ mod tests {
     /// a <- x, b <- a, c <- a, d <- b, c; payloads 1, 10, 100, 1000.
     fn diamond() -> Graph<i64> {
         Graph::build(vec![
-            spec("a", &["x"], 1),
-            spec("b", &["a"], 10),
-            spec("c", &["a"], 100),
-            spec("d", &["b", "c"], 1000),
+            valued("a", &["x"], 1),
+            valued("b", &["a"], 10),
+            valued("c", &["a"], 100),
+            valued("d", &["b", "c"], 1000),
         ])
         .unwrap()
     }
@@ -414,7 +393,12 @@ mod tests {
         type Value = i64;
         type Error = String;
 
-        fn evaluate(&mut self, node: &Node<i64>, args: &[Arg<'_, i64>]) -> Result<i64, String> {
+        fn evaluate(
+            &mut self,
+            node: &Node<i64>,
+            payload: &i64,
+            args: &[Arg<'_, i64>],
+        ) -> Result<i64, String> {
             self.calls.push((
                 node.name.clone(),
                 args.iter().map(|a| (a.name.to_owned(), a.value)).collect(),
@@ -422,7 +406,7 @@ mod tests {
             if self.fail_on == Some(node.name.as_str()) {
                 return Err(format!("{} failed", node.name));
             }
-            Ok(node.payload.unwrap() + args.iter().map(|a| a.value).sum::<i64>())
+            Ok(payload + args.iter().map(|a| a.value).sum::<i64>())
         }
     }
 
@@ -502,6 +486,7 @@ mod tests {
         fn evaluate(
             &mut self,
             _node: &Node<()>,
+            _payload: &(),
             args: &[Arg<'_, Option<i64>>],
         ) -> Result<Option<i64>, String> {
             Ok(Some(i64::try_from(args.len()).unwrap()))
@@ -510,16 +495,7 @@ mod tests {
 
     #[test]
     fn a_none_valued_input_counts_as_supplied() {
-        let g = Graph::build(vec![NodeSpec {
-            name: "out".to_owned(),
-            inputs: vec![InputSpec {
-                name: "x".to_owned(),
-                dependency: Dependency::Required,
-            }],
-            tags: BTreeMap::new(),
-            payload: (),
-        }])
-        .unwrap();
+        let g = Graph::build(vec![node("out", &["x"])]).unwrap();
         let plan = g.prepare(&request(&["out"], &["x"], &[])).unwrap();
         let out = plan
             .run(
@@ -624,6 +600,7 @@ mod tests {
         fn evaluate(
             &mut self,
             node: &Node<i64>,
+            payload: &i64,
             args: &[Arg<'_, Counted>],
         ) -> Result<Counted, String> {
             self.seen.push((node.name.clone(), self.live.get()));
@@ -632,7 +609,7 @@ mod tests {
                     .map(|a| (format!("{}<-{}", node.name, a.name), a.value.value)),
             );
             let sum = args.iter().map(|a| a.value.value).sum::<i64>();
-            Ok(Counted::new(node.payload.unwrap() + sum, &self.live))
+            Ok(Counted::new(payload + sum, &self.live))
         }
     }
 
@@ -640,9 +617,9 @@ mod tests {
     fn released_intermediates_are_dropped() {
         let live = Rc::new(Cell::new(0));
         let g = Graph::build(vec![
-            spec("a", &["x"], 1),
-            spec("b", &["a"], 1),
-            spec("c", &["b"], 1),
+            valued("a", &["x"], 1),
+            valued("b", &["a"], 1),
+            valued("c", &["b"], 1),
         ])
         .unwrap();
         let plan = g.prepare(&request(&["c"], &["x"], &[])).unwrap();
@@ -671,10 +648,10 @@ mod tests {
     fn an_override_cuts_one_branch_but_the_other_still_runs() {
         let live = Rc::new(Cell::new(0));
         let g = Graph::build(vec![
-            spec("a", &["x"], 1),
-            spec("b", &["a"], 10),
-            spec("c", &["a"], 100),
-            spec("d", &["b", "c"], 1000),
+            valued("a", &["x"], 1),
+            valued("b", &["a"], 10),
+            valued("c", &["a"], 100),
+            valued("d", &["b", "c"], 1000),
         ])
         .unwrap();
         let plan = g.prepare(&request(&["d"], &["x"], &["b"])).unwrap();
@@ -884,10 +861,28 @@ mod tests {
     }
 
     #[test]
+    fn a_plan_that_computes_an_input_of_another_graph_is_a_broken_plan() {
+        let planned = Graph::build(vec![valued("a", &["x"], 1)]).unwrap();
+        let plan = planned.prepare(&request(&["a"], &["x"], &[])).unwrap();
+        // The same ids in other roles: `a` is an input here, and `b` has the id `x` had.
+        let other = Graph::build(vec![valued("b", &["a"], 1)]).unwrap();
+        let err = plan
+            .run(
+                &other,
+                &mut Adder::default(),
+                &map(&[("b", 5)]),
+                &BTreeMap::new(),
+                &mut [],
+            )
+            .unwrap_err();
+        assert_eq!(err, broken("input node 'a' planned to compute".to_owned()));
+    }
+
+    #[test]
     fn a_chain_of_ten_thousand_nodes_runs_without_stack_overflow() {
         let last = 10_000;
         let specs: Vec<_> = (0..last)
-            .map(|i| spec(&format!("n{i:05}"), &[&format!("n{:05}", i + 1)], 1))
+            .map(|i| valued(&format!("n{i:05}"), &[&format!("n{:05}", i + 1)], 1))
             .collect();
         let g = Graph::build(specs).unwrap();
         let tail = format!("n{last:05}");
