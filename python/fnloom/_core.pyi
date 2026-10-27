@@ -38,8 +38,19 @@ class Plan:
         inputs: dict[str, Any],
         overrides: dict[str, Any],
         observers: Sequence[ObserverBase] = (),
+        on_value: Callable[[str, object], None] | None = None,
     ) -> dict[str, object]: ...
     def steps(self) -> list[tuple[str, str]]: ...
+
+@final
+class KeyPlan:
+    def __init__(
+        self,
+        nodes: list[
+            tuple[str, bytes | None, list[tuple[str, str | None, bytes | None]]]
+        ],
+    ) -> None: ...
+    def keys(self, versions: dict[str, bytes | None]) -> dict[str, bytes | None]: ...
 
 class ObserverBase:
     def pre_graph(self) -> None: ...
