@@ -1,7 +1,30 @@
 # Benchmarks
 
-fnloom against Hamilton 1.90.0 on generated graphs, by wall clock. The design requires fnloom to be faster on build
-and on prepared execution; a row where it is reliably slower is a bug.
+fnloom against Apache Hamilton 1.90.0 on generated graphs, by wall clock. fnloom is meant to be faster at building a graph
+and at running a prepared plan, so a row where it's reliably slower counts as a bug.
+
+## At a glance
+
+<div class="grid cards" markdown>
+
+-   :lucide-repeat:{ .lg .fl-icon } **2.5× to 24× faster repeat runs**
+
+    Running a prepared plan again, wherever both finish. A 1,000-node layered graph: 4.35 ms in Hamilton,
+    0.21 ms in fnloom.
+
+-   :lucide-hammer:{ .lg .fl-icon } **Every graph builds faster**
+
+    At least 1.5× faster on every shape, and 41× on 10,000 `@parameterize` rows (5.3 s against 0.13 s).
+
+-   :lucide-infinity:{ .lg .fl-icon } **Runs what Hamilton can't**
+
+    Hamilton raises `RecursionError` on 5 of the 16 graphs. fnloom runs all of them, and checks every answer.
+
+-   :lucide-gauge:{ .lg .fl-icon } **Microseconds per run**
+
+    A 10-node chain runs in about 1.9 µs per `PreparedPlan.run`, input type checks included.
+
+</div>
 
 ## Results
 
@@ -32,14 +55,14 @@ sample.
 Measured on an Apple M2 Pro with 16 GB, macOS 27.0, CPython 3.14.9, `apache-hamilton==1.90.0`, and a release build
 of the extension, on 2026-10-27.
 
-**Steady execution**, the cost of running a prepared plan again, is where fnloom differs most: with checks on it is
+**Steady execution**, the cost of running a prepared plan again, is where fnloom differs most. With checks on, it's
 2.5 to 24 times faster than Hamilton's `execute` wherever both finish, because the plan is compiled once and each run
-is a loop over its steps in Rust. The low end is `fan_in`, 2.5 times at 10,000 parameters, where one Python call with
+is a loop over its steps in Rust. The low end is `fan_in` at 10,000 parameters (2.5×), where one Python call with
 10,000 keyword arguments is most of the cost for both.
 
-**The cost of input checks** is the gap between the two fnloom figures, and it is now within noise: steady execution,
-checks on against off, differs by at most 0.05 ms on every graph. A check against a plain class, such as `int`, is
-compiled once per plan to one `isinstance` call; only a generic, a union and the like take the general check.
+**Input checks are close to free.** The gap between the two fnloom figures is within noise: steady execution with
+checks on and off differs by at most 0.05 ms on every graph. A check against a plain class such as `int` is compiled
+once per plan into one `isinstance` call. Only generics, unions and the like take the general path.
 
 ### Where Hamilton raises
 

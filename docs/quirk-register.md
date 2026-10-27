@@ -1,17 +1,29 @@
 # Hamilton quirk register
 
-Every place fnloom deliberately differs from Apache Hamilton 1.90.0, with the disposition and the test that pins it.
-fnloom fixes Hamilton's quirks by default; a deviation needs a reason that holds for any user.
+Every place fnloom deliberately differs from Apache Hamilton 1.90.0, what it does instead, and the test that pins it.
+fnloom fixes Hamilton's quirks by default, but each change needs a reason that holds for any user, not just one
+workload.
 
-**Dispositions.** KEEP: reproduce Hamilton. FIX: deliberately different, with a test. REFUSE: Hamilton silently
-accepts something dubious, fnloom raises. DROP: not carried over. DEFER: decided later.
+!!! tip "Just moving code over?"
 
-**Evidence.** The behaviours below were first reported by an earlier investigation (2026-10-22) against Hamilton
-1.90.0 and partly confirmed by reading its source. Rows Q4, Q5, Q6, Q7, Q10, Q16, Q22, Q25 to Q48, Q50 and Q51 have differential tests in
-`tests/differential/test_deliberate_differences.py`, each marked `deliberate("<id>")`, that assert Hamilton's
-behaviour and fnloom's side by side; Q3 and Q23 are covered by fnloom-only tests (`tests/test_driver.py`,
-`tests/test_binding.py` and the executor's unit tests), and Q49, a KEEP row, by `tests/test_caching.py`. Every other row is not yet re-run for this repository and
-becomes a differential test before it is relied on. Source line numbers are deliberately omitted.
+    [Coming from Hamilton](from-hamilton.md) summarises the rows that affect your code. This page is the full
+    reference.
+
+**What the dispositions mean:**
+
+- **KEEP**: fnloom does what Hamilton does.
+- **FIX**: deliberately different, with a test.
+- **REFUSE**: Hamilton silently accepts something dubious; fnloom raises.
+- **DROP**: not carried over.
+- **DEFER**: to be decided later.
+
+**Evidence.** The behaviours below were first reported by an earlier investigation (2026-10-22) against Hamilton 1.90.0
+and partly confirmed by reading its source. Rows Q4, Q5, Q6, Q7, Q10, Q16, Q22, Q25 to Q48, Q50 and Q51 have
+differential tests in `tests/differential/test_deliberate_differences.py`, each marked `deliberate("<id>")`, that
+assert Hamilton's behaviour and fnloom's side by side; Q3 and Q23 are covered by fnloom-only tests
+(`tests/test_driver.py`, `tests/test_binding.py` and the executor's unit tests), and Q49, a KEEP row, by
+`tests/test_caching.py`. Every other row is not yet re-run for this repository and becomes a differential test before
+it is relied on. Source line numbers are deliberately omitted.
 
 | ID | Hamilton behaviour | Disposition | fnloom behaviour |
 |---|---|---|---|

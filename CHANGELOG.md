@@ -38,6 +38,7 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `CachePolicy`. `fnloom.fingerprint`, `register_fingerprint` and the `__fnloom_fingerprint__` protocol, with
   `UnfingerprintableError`. `Driver.explain_cache`, which reports each node's `CacheOutcome` and runs nothing. A guide,
   [Caching](https://kelsayed17.github.io/fnloom/caching/), and cached-run benchmarks (`benches/cache.py`).
+- Markdown lint with rumdl, run by `scripts/check.sh`, so every page renders as written on the docs site.
 
 ### Changed
 
@@ -55,5 +56,7 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - `fnloom-core`: `NodeKind::Function` carries the node's payload, replacing the `Node::payload` field with the
   `Node::payload()` accessor, and `Evaluate::evaluate` receives the payload as an argument, so an evaluator never
   meets a function node without one.
+- The README and docs are rewritten to be easier to read, with a graph diagram, a comparison with Apache Hamilton and
+  pages that read well on a phone. Apache Hamilton is named as an incubating project.
 
 [Unreleased]: https://github.com/kelsayed17/fnloom/commits/main

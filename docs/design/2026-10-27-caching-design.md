@@ -32,7 +32,8 @@ F1 to F21 in the study; §9 maps each to its fix here.
 
 ## 2. Goals, non-goals, anti-goals
 
-**Goals**
+### Goals
+
 1. **A hit is never wrong.** For a node that is a pure function of its parameters, a cache hit returns a value equal
    to what running the node would return. When fnloom cannot be sure of that, it runs the node, and says why.
 2. **Cheap when it hits.** A hit costs a hash and a lookup, never a re-read of source code or a database commit. A
@@ -44,13 +45,15 @@ F1 to F21 in the study; §9 maps each to its fix here.
 5. **Two tiers, one model.** An in-memory store for runs in one process and an on-disk store for runs across
    processes, with the same keys and the same rules.
 
-**Non-goals (this design)**
+### Non-goals (this design)
+
 - Remote or shared network stores (object storage, Redis). The store interface leaves room for them.
 - Deciding by itself whether a function reads external state (files, clocks, the network). That is declared (§6).
 - Caching inside dynamic execution (`Parallelizable`/`Collect`), which fnloom does not have yet.
 - Hamilton's cache API, store layout or files. There is no compatibility layer.
 
 **Anti-goals.** The project fails, even if every test passes, if:
+
 - a stored value can be returned for a different node, or for different arguments, than the one that produced it;
 - an unrecognised value turns into a constant fingerprint, anywhere, at any depth;
 - a corrupt or unreadable stored entry fails a run instead of being recomputed;
@@ -64,6 +67,7 @@ Every node in a run gets a **key**, a 256-bit hash. A stored result is found by 
 nodes, or one node with two sets of arguments, can never share an entry (F1).
 
 A node's key hashes, in a fixed, length-prefixed encoding (F9):
+
 - the key schema version;
 - the node's identity: its name, and its function's module and qualified name;
 - its **code version** (§4);
@@ -71,6 +75,7 @@ A node's key hashes, in a fixed, length-prefixed encoding (F9):
   that will be passed or a marker for an optional input that is not supplied (distinct from `None`).
 
 A value's **version** depends on where it comes from:
+
 - **An input or override:** the value's **fingerprint** (§5), computed once per run.
 - **A computed node:** that node's key. Versions chain from the inputs down, like a Merkle tree. A computed value is
   never fingerprinted, so a large intermediate DataFrame costs nothing to version (F18). The chaining loses a hit
@@ -107,23 +112,24 @@ constants (F4).
 
 fnloom computes each code version **once, at build**, from code objects, not source text. Notebooks, where source
 text is unavailable, work too. The code version of a function hashes:
+
 - its code object: bytecode, constants (nested code objects recursively, so lambdas and comprehensions count), and
   names;
 - its defaults and keyword-only defaults, by fingerprint;
 - its closure cells, treated like globals;
 - every global name the code reads, resolved in the function's globals at build:
-  - **a function or class defined in the user's own code:** its code version, recursively, with cycles cut. A class
-    counts through the functions in its body. User code means a module that is neither the standard library nor
-    installed in site-packages.
-  - **a module of the user's own code,** read by attribute (`helpers.f`): the code versions of the attributes whose
-    names the code reads;
-  - **a standard-library or installed function, class or module:** its qualified name and the version of the
-    distribution that provides it, so a library upgrade changes the key;
-  - **an immutable value** (`int`, `str`, `bytes`, `float`, `bool`, `None`, an enum member, or a tuple or frozenset of
-    these): its fingerprint;
-  - **anything else** (a list, dict or set, or any other object): the function cannot be cached. A mutable global may
-    change between runs without fnloom seeing it, so caching such a function could return a wrong result. The build
-    reports it, and `@cache(version=...)` lets the user vouch for it (§6).
+    - **a function or class defined in the user's own code:** its code version, recursively, with cycles cut. A class
+      counts through the functions in its body. User code means a module that is neither the standard library nor
+      installed in site-packages.
+    - **a module of the user's own code,** read by attribute (`helpers.f`): the code versions of the attributes whose
+      names the code reads;
+    - **a standard-library or installed function, class or module:** its qualified name and the version of the
+      distribution that provides it, so a library upgrade changes the key;
+    - **an immutable value** (`int`, `str`, `bytes`, `float`, `bool`, `None`, an enum member, or a tuple or frozenset of
+      these): its fingerprint;
+    - **anything else** (a list, dict or set, or any other object): the function cannot be cached. A mutable global may
+      change between runs without fnloom seeing it, so caching such a function could return a wrong result. The build
+      reports it, and `@cache(version=...)` lets the user vouch for it (§6).
 - a `@parameterize` row's `value()` constants and its bindings.
 
 **Known limit.** A global rebound after the build, by assignment from outside the function or a reload, is not seen
@@ -136,6 +142,7 @@ any node. Each fingerprint starts with a tag for the value's exact type, so `1`,
 differ, as do `[1, 2]` and `(1, 2)` (F2).
 
 **Built in:**
+
 - `None`, `bool`, `int`, `float` (by bit pattern, so `-0.0` and `0.0` differ, with every NaN the same), `complex`,
   `str`, `bytes`, `bytearray`;
 - `tuple` and `list`, by element and in order;
@@ -209,6 +216,7 @@ Both stores implement one small interface: `get(key) -> value | MISSING`, `put(k
 is safe to share between threads, and between drivers in one process.
 
 **`MemoryCache(max_entries=..., max_bytes=None)`.**
+
 - Holds the result objects themselves, so a hit costs a lookup and no copy. A node that mutates a value it received
   already corrupts every other reader in the same run. With the cache on, that corruption also reaches later runs.
   The documentation says so plainly: cached nodes must not mutate their arguments (F7).
@@ -217,6 +225,7 @@ is safe to share between threads, and between drivers in one process.
 - Safe under free-threaded Python. Per-key work never holds a lock that a node call needs.
 
 **`DiskCache(path, max_bytes=None, serializer=pickle)`.**
+
 - **Layout:** one file per key, at `<path>/v1/<first two hex digits>/<key in hex>`. There is no index database, so
   there is nothing to lock or corrupt. The key is the file name, so a lookup is one `open`.
 - **Writes are atomic:** a temporary file in the same directory, then `os.replace`. Concurrent writers of one key
@@ -243,6 +252,7 @@ is safe to share between threads, and between drivers in one process.
   store's file I/O and serializer.
 
 **Performance targets**, added to `docs/benchmarks.md` as rows against Hamilton's `with_cache` on the same shapes:
+
 - in memory, a hit costs at most 1 µs of overhead per node;
 - a fully cached run of a 200-node chain of trivial nodes costs at most about twice the same run uncached;
 - a cold run (all misses) costs at most 1.5 times an uncached run, with the memory store;
