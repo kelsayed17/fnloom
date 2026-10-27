@@ -2,7 +2,9 @@
 
 import pytest
 
-from fnloom._scan import ParamDef, collect
+from fnloom import Source
+from fnloom._scan import collect
+from fnloom._view import Param
 from helpers import make_module
 
 
@@ -81,8 +83,12 @@ def test_default_parameter_is_optional() -> None:
         "scan_default", "def f(a: int, b: int = 2) -> int:\n    return a + b\n"
     )
     (node,) = collect([module])
-    assert node.params == (ParamDef("a", required=True), ParamDef("b", required=False))
+    assert node.params == (
+        Param("a", Source("a"), required=True, annotation=int),
+        Param("b", Source("b"), required=False, annotation=int),
+    )
     assert node.module == "scan_default"
+    assert node.returns is int
 
 
 def test_unresolvable_annotations_are_accepted() -> None:
@@ -104,10 +110,10 @@ def test_unresolvable_annotations_are_accepted() -> None:
     )
     nodes = {n.name: n for n in collect([module])}
     assert sorted(nodes) == ["f", "g"]
-    assert nodes["g"].params == (
-        ParamDef("a", required=True),
-        ParamDef("b", required=False),
-    )
+    assert [(p.name, p.required) for p in nodes["g"].params] == [
+        ("a", True),
+        ("b", False),
+    ]
 
 
 def test_duplicate_name_across_modules_names_both_modules() -> None:

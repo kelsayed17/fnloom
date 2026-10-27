@@ -4,6 +4,7 @@ from typing import Any
 
 import pytest
 from hamilton import driver as hamilton_driver
+from hamilton.function_modifiers.base import InvalidDecoratorException
 from harness import (
     Nodes,
     Outcome,
@@ -178,3 +179,33 @@ def test_q31_inputs_and_overrides_are_keyword_only() -> None:
     assert hamilton.execute(["c"], {"b": 10}) == {"c": 20}
     with pytest.raises(TypeError):
         fnloom.build(module).execute(["c"], {"b": 10})  # ty: ignore[too-many-positional-arguments]  # the positional call is the point
+
+
+@pytest.mark.deliberate("Q33")
+def test_q33_row_naming_an_unknown_parameter() -> None:
+    """Both refuse the row when decorating; only fnloom's error is a `ValueError`."""
+    body = """
+@parameterize(out={"missing": source("a")})
+def f(x: int) -> int:
+    return x
+"""
+    hamilton_header = "from hamilton.function_modifiers import parameterize, source\n"
+    with pytest.raises(InvalidDecoratorException, match="missing") as hamilton:
+        make_module("differential_unknown_h", hamilton_header + body)
+    assert not isinstance(hamilton.value, ValueError)
+    with pytest.raises(ValueError, match="'missing'"):
+        make_module(
+            "differential_unknown_f", "from fnloom import parameterize, source\n" + body
+        )
+
+
+@pytest.mark.deliberate("Q35")
+def test_q35_defaulted_parameter_bound_to_an_unsupplied_source() -> None:
+    """Hamilton raises `KeyError`; fnloom omits the keyword, so the default applies."""
+    inputs = {"numbers": [1, 2, 3]}
+    assert run_hamilton([load_fixture("rows_h")], ["shifted_total"], inputs) == (
+        Outcome(None, "KeyError")
+    )
+    assert run_fnloom([load_fixture("rows_f")], ["shifted_total"], inputs) == (
+        Outcome({"shifted_total": 106}, None)
+    )

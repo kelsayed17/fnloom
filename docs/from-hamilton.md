@@ -15,6 +15,22 @@ purpose is a row in [the register of differences](quirk-register.md), with a tes
 - **`execute`.** `execute(final_vars, inputs=..., overrides=...)` returns a dict of the requested outputs, in the
   order requested.
 
+## Decorators
+
+The decorators fnloom has so far take the same arguments as Hamilton's; only the import changes.
+
+<div class="fl-compare" markdown>
+
+| Hamilton 1.90.0 | fnloom |
+| --- | --- |
+| `from hamilton.function_modifiers import parameterize, source, value` | `from fnloom import parameterize, source, value` |
+| `@parameterize(row={"param": source("node")})` | The same |
+| `@parameterize(row={"param": value(v)})` | The same; `v` is passed itself, uncopied, as in Hamilton |
+| `@tag(owner="data")` | `from fnloom import tag`, the same; values are `str` |
+| A row as `(bindings, docstring)`, `group(...)`, `parameterize_sources`, `parameterize_values` | Not yet; a row is a mapping |
+
+</div>
+
 ## What changes in your code
 
 <div class="fl-compare" markdown>
@@ -42,6 +58,8 @@ purpose is a row in [the register of differences](quirk-register.md), with a tes
 | Execution order | Depends on the order of outputs and parameters | Topological, ties broken by name (Q26) |
 | `*args`, `**kwargs`, positional-only | Treated as inputs | `ValueError` at build (Q29) |
 | `async def` and generator functions | The coroutine or generator is the value | `ValueError` at build (Q32) |
+| A row naming no parameter of its function | `InvalidDecoratorException` | `ValueError`, both when decorating (Q33) |
+| A row's defaulted parameter bound to an unsupplied `source()` | `KeyError` when run | The default applies (Q35) |
 
 </div>
 
@@ -49,8 +67,8 @@ purpose is a row in [the register of differences](quirk-register.md), with a tes
 
 Plan 1 is the core and the native path. These Hamilton features come in later plans, in roughly this order:
 
-1. Decorators and configuration: `@parameterize`, `@extract_columns`, `@extract_fields`, `@tag`, `@config.when`,
-   `source` and `value`, with type checks on edges and inputs.
+1. More decorators and configuration: `@extract_columns`, `@extract_fields` and `@config.when`, with type checks on
+   edges and inputs. `@parameterize`, `source`, `value` and `@tag` are here.
 2. Adapters and lifecycle hooks, result builders, and async execution.
 3. Graph visualisation.
 4. Dynamic execution, caching, materializers, `@subdag`, `@check_output` and `@pipe`.

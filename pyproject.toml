@@ -97,3 +97,11 @@ respect-type-ignore-comments = false
 
 [tool.ty.rules]
 all = "error"
+
+# The `*_h.py` fixtures use Hamilton's decorators, which are unannotated (Q1); the
+# `*_f.py` twins, identical but for the import, are checked in full.
+[[tool.ty.overrides]]
+include = ["tests/differential/fixtures/*_h.py"]
+
+[tool.ty.overrides.rules]
+dynamic-function-decorator-return = "ignore"

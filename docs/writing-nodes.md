@@ -1,7 +1,7 @@
 # Writing nodes
 
 fnloom wires a graph by name, as Hamilton does: **a function's name is its node, and its parameter names are its
-edges.** There is nothing to register and nothing to decorate.
+edges.** There is nothing to register, and a plain function needs no decorator.
 
 ## Which functions are nodes
 
@@ -108,6 +108,51 @@ driver.execute(["message"], inputs={"base": 21})
 `with_modules` returns a new builder rather than changing the one it was called on, so a builder can be shared and
 extended. Passing the same module twice adds its nodes once. The same name defined in two different modules is a
 `ValueError` naming both.
+
+## One function, several nodes
+
+`@parameterize` makes one node per row from a single function. Each keyword names a node, and its mapping binds some
+of the function's parameters: `source("x")` reads the parameter from node or input `x`, and `value(v)` passes the
+constant `v`. The function itself is not a node, unless a row takes its name.
+
+```python
+# file: thresholds.py
+from fnloom import parameterize, source, value
+
+
+@parameterize(
+    above_low={"limit": value(10)},
+    above_high={"limit": source("high_limit")},
+)
+def above(readings: list[int], limit: int) -> int:
+    """How many readings exceed the limit."""
+    return sum(reading > limit for reading in readings)
+```
+
+```python
+import fnloom
+import thresholds
+
+driver = fnloom.build(thresholds)
+driver.node_names()
+# -> ['above_high', 'above_low', 'high_limit', 'readings']
+driver.execute(
+    ["above_low", "above_high"],
+    inputs={"readings": [5, 12, 30], "high_limit": 20},
+)
+# -> {'above_low': 2, 'above_high': 1}
+```
+
+- A parameter a row does not mention reads the node of its own name, as in a plain function: `readings` above.
+- Rows are ordinary nodes, so one row can `source()` another, including a row of the same function.
+- A parameter with a default that a row binds to `source("x")` makes `x` optional: when `x` is not supplied, the
+  function is called without that parameter and its default applies. Hamilton raises `KeyError` there (Q35).
+- A `value()` is passed as the object itself on every call, never a copy, so a node that changes a bound list
+  changes it for the next run too.
+- A row naming a parameter the function does not have is a `ValueError` when the decorator is applied (Q33).
+
+The decorator returns the function unchanged, so it can still be called directly and keeps its signature for type
+checkers.
 
 ## What is refused
 

@@ -4,7 +4,7 @@ import threading
 from typing import TYPE_CHECKING, Protocol
 
 from fnloom import _core
-from fnloom._scan import NodeDef, collect
+from fnloom._scan import NodeDef, collect, core_inputs
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
@@ -173,12 +173,9 @@ class Driver:
 
 
 def _graph_of(nodes: list[NodeDef]) -> _core.Graph:
-    """Builds the native graph for scanned nodes, passing functions unwrapped."""
+    """Builds the native graph for scanned nodes: their core inputs and payloads."""
     return _core.Graph(
-        [
-            (n.name, [(p.name, p.required) for p in n.params], dict(n.tags), n.fn)
-            for n in nodes
-        ]
+        [(n.name, core_inputs(n.params), dict(n.tags), n.payload) for n in nodes]
     )
 
 

@@ -7,7 +7,7 @@ fnloom fixes Hamilton's quirks by default; a deviation needs a reason that holds
 accepts something dubious, fnloom raises. DROP: not carried over. DEFER: decided later.
 
 **Evidence.** The behaviours below were first reported by an earlier investigation (2026-10-22) against Hamilton
-1.90.0 and partly confirmed by reading its source. Rows Q4, Q5, Q6, Q7 and Q25 to Q32 have differential tests in
+1.90.0 and partly confirmed by reading its source. Rows Q4, Q5, Q6, Q7, Q25 to Q33 and Q35 have differential tests in
 `tests/differential/test_deliberate_differences.py`, each marked `deliberate("<id>")`, that assert Hamilton's
 behaviour and fnloom's side by side; Q3 and Q23 are covered by fnloom-only tests (`tests/test_driver.py`,
 `tests/test_binding.py` and the executor's unit tests). Every other row is not yet re-run for this repository and
@@ -44,6 +44,8 @@ becomes a differential test before it is relied on. Source line numbers are deli
 | Q30 | `final_vars` may name an output by passing its function. | DEFER | `TypeError`: mapping a callable to its node names depends on decorators, which come in the next plan. |
 | Q31 | `execute(final_vars, overrides, display_graph, inputs)` takes `overrides` second, so a positional mapping is read as overrides. | FIX | `inputs` and `overrides` are keyword-only on `execute`, `prepare` and `PreparedPlan.run`; a positional mapping is a `TypeError`. |
 | Q32 | An `async def` or generator function is accepted as a node, and the sync driver returns the un-awaited coroutine or the generator object as its value. | REFUSE | `ValueError` at build naming the function: nodes are called synchronously, and calling these does not run the body to a value. |
+| Q33 | A `@parameterize` row naming a parameter the function does not have raises `InvalidDecoratorException`, an `Exception` subclass that is not a `ValueError`, when the decorator is applied. | FIX | `ValueError`, also when the decorator is applied, listing every unknown row parameter, sorted, like every other malformed-function error. |
+| Q35 | A `@parameterize` row binding a parameter that has a default to `source("x")` makes `x` optional, but when `x` is not supplied the node raises `KeyError` instead of using the default. | FIX | The keyword is left out, so the function's own default applies, exactly as for a plain optional parameter. |
 
 ## Not yet decided
 

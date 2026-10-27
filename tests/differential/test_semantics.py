@@ -136,3 +136,54 @@ def test_scanning_finds_the_same_nodes(case: str) -> None:
     expected = "ValueError" if case.startswith("unannotated") else None
     assert hamilton.error == expected
     assert nodes_fnloom([module]) == hamilton
+
+
+ROWS = [
+    "bound_seen",
+    "first",
+    "second",
+    "shifted_total",
+    "squared",
+    "sum_once",
+    "sum_twice",
+]
+
+
+@pytest.mark.parametrize("bump", [None, 7], ids=["without_optional", "with_optional"])
+def test_rows_compute_the_same_values(bump: int | None) -> None:
+    """Every row node gives the same value, with and without the optional input.
+
+    Without `bump`, `shifted_total` is left out: Hamilton fails it (Q35).
+    """
+    inputs: dict[str, object] = {"numbers": [1, 2, 3], "start": 3}
+    outputs = list(ROWS)
+    if bump is None:
+        outputs.remove("shifted_total")
+    else:
+        inputs["bump"] = bump
+    hamilton = run_hamilton([load_fixture("rows_h")], outputs, inputs)
+    assert hamilton.error is None
+    assert run_fnloom([load_fixture("rows_f")], outputs, inputs) == hamilton
+
+
+def test_rows_list_the_same_nodes() -> None:
+    """Rows are nodes, their function is not, and their sources are inputs, in both."""
+    hamilton = nodes_hamilton([load_fixture("rows_h")])
+    assert hamilton.error is None
+    assert nodes_fnloom([load_fixture("rows_f")]) == hamilton
+
+
+def test_value_object_is_passed_by_identity() -> None:
+    """A bound list is the same object on every call, so its mutations persist."""
+    seen: dict[str, list[object]] = {}
+    for runtime, run, fixture in (
+        ("hamilton", run_hamilton, "rows_h"),
+        ("fnloom", run_fnloom, "rows_f"),
+    ):
+        module = load_fixture(fixture)
+        results = [
+            run([module], ["bound_seen"], {"start": start}).values for start in (1, 2)
+        ]
+        seen[runtime] = [results, list(module.BOUND)]
+    assert seen["hamilton"] == [[{"bound_seen": True}] * 2, [1, 2]]
+    assert seen["fnloom"] == seen["hamilton"]
