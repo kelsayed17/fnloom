@@ -22,5 +22,6 @@ uv run maturin develop --features test-hooks
 export UV_NO_SYNC=1
 uv run ruff check
 uv run ruff format --check
+uv run rumdl check .
 uv run ty check
 uv run pytest

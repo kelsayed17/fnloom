@@ -1,8 +1,8 @@
 # The Rust core
 
-`fnloom-core` is the engine under the Python front end: the node model, the graph, the planner and the executor. It
-is a Rust crate of its own, with no dependencies and `#![forbid(unsafe_code)]`, and it is generic over what a node
-runs, so it can drive payloads other than Python functions.
+`fnloom-core` is the engine under the Python front end: the node model, the graph, the planner and the executor. It's
+a Rust crate of its own, with no dependencies and `#![forbid(unsafe_code)]`. It's generic over what a node runs, so
+you can use it to drive payloads other than Python functions.
 
 !!! note "Not on crates.io"
 

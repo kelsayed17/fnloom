@@ -1,8 +1,9 @@
 # fnloom — design
 
-**Status:** v2. Approved by the maintainer 2026-10-26 (v1), revised the same day after an audit (§12). Plan 1, the
-Rust core and the native Python path, is built; the rest of the v1 scope (§5) is not yet. Facts about Hamilton were read in the `apache-hamilton 1.90.0` wheel (source-read, not run)
-unless marked otherwise; `docs/quirk-register.md` says which behaviours are still unverified.
+**Status:** v2. Approved by the maintainer 2026-10-26 (v1), revised the same day after an audit (§12). Plan 1, the Rust
+core and the native Python path, is built; the rest of the v1 scope (§5) is not yet. Facts about Hamilton were read in
+the `apache-hamilton 1.90.0` wheel (source-read, not run) unless marked otherwise; `docs/quirk-register.md` says which
+behaviours are still unverified.
 
 ## 1. Intent
 
@@ -16,6 +17,7 @@ no typing for decorated functions, a heavy dependency set, and an executor that 
 outside Python.
 
 **Direction (maintainer, 2026-10-26).**
+
 - fnloom will be open source, Apache-2.0. Nothing consumer-specific lives in this repository.
 - It must be **fast, stable and superior to Hamilton**.
 - There is **no Hamilton compatibility layer**. Existing Hamilton code is not expected to run unchanged; consumers
@@ -25,7 +27,8 @@ outside Python.
 
 ## 2. Goals, non-goals, anti-goals
 
-**Goals**
+### Goals
+
 1. **Proven behaviour.** Where fnloom keeps a Hamilton behaviour, it produces the same values and the same exception
    classes, proven differentially against Hamilton 1.90.0 (§7). Where it deliberately differs, the difference is a
    register row with a test.
@@ -41,12 +44,14 @@ outside Python.
 7. **Open to non-Python nodes.** The core is generic over its node payload and its value type, so Rust-native nodes
    (§11) can be added without changing the core.
 
-**Non-goals (v1)**
+### Non-goals (v1)
+
 - Hamilton's plugin ecosystem (dask, ray, spark, pandera, mlflow, …), UI/tracker integration, materializers,
   caching, dynamic execution (`Parallelizable`/`Collect`). Dynamic execution is the first deferral to design next.
 - Faster Python node bodies. A Python node still runs at Python speed.
 
 **Anti-goals** — the project fails even if every test passes if:
+
 - Hamilton code is copied wholesale, or any copied code lacks its Apache-2.0 attribution (§8).
 - A behaviour differs from Hamilton without a register row and a test.
 
@@ -54,6 +59,7 @@ outside Python.
 
 Nodes are Python callables, so for a graph of heavy nodes the Python calls dominate and Rust changes little. What
 the Rust core changes:
+
 - Graph build, cycle detection, ordering, upstream/downstream queries and planning leave Python.
 - A prepared plan removes the per-`execute` re-walk. An earlier investigation reported a ~0.02 ms floor per call and
   a 3.7–4.3x gain on scalar graphs, on one consumer's workload; not re-measured for a general one.
@@ -61,6 +67,7 @@ the Rust core changes:
 
 **No go/no-go gate (maintainer, 2026-10-26): this is a full rebuild.** The whole v1 scope (§5) is built regardless.
 Speed is measured from the first commit:
+
 - **Report.** Build, `prepare`, first-execute and steady-execute wall-clock medians against Hamilton 1.90.0, on
   generated graph shapes (chain, fan-in, layered) at 10, 100, 1,000 and 10,000 nodes, plus Hamilton example graphs
   once they are translated (§7). Published per release with the machine description.
@@ -72,10 +79,10 @@ Speed is measured from the first commit:
 
 Three layers; the boundary between the first two is the IR.
 
-1. **Python front end** (`fnloom`): reads functions, signatures, annotations (`annotationlib`, including forward references) and
-   decorators, resolves config, and lowers everything to node definitions. It must be Python because it introspects
-   live objects at import time. It owns anything that needs Python's type system, notably the edge and input type
-   checks (§10), which reach the core as a callback run at build time.
+1. **Python front end** (`fnloom`): reads functions, signatures, annotations (`annotationlib`, including forward
+    references) and decorators, resolves config, and lowers everything to node definitions. It must be Python because it
+    introspects live objects at import time. It owns anything that needs Python's type system, notably the edge and
+    input type checks (§10), which reach the core as a callback run at build time.
 2. **IR** (`fnloom-core`): in v1 a node is `{ name, kind (function | input), inputs: [ { name, dependency
    (required | optional) } ], tags, payload }`. Defaults are not in the IR: an optional input that is not supplied is
    omitted from the call, and Python applies the function's own default. The IR grows only with the feature that needs
@@ -102,7 +109,8 @@ Hamilton in the test group only), `benches/`, `docs/`.
 Wiring is by name (§9). The entry point and the decorators keep Hamilton's names and shapes so the API feels like
 Hamilton (maintainer, 2026-10-26): `Builder().with_modules(...).with_config(...).build()` (with `fnloom.build(...)` as a
 shortcut), `parameterize`, `source`, `value`, `tag`, `config.when*`, `extract_fields`, `extract_columns`. Same name
-means same intent, not identical behaviour: every difference is a register row. Hamilton's equivalent is given for orientation only.
+means same intent, not identical behaviour: every difference is a register row. Hamilton's equivalent is given for
+orientation only.
 
 | Capability | Hamilton equivalent |
 |---|---|
@@ -144,10 +152,10 @@ against Hamilton and green against fnloom.
 ## 7. Proof
 
 1. **Differential tests.** Each behaviour is exercised by a program run under Hamilton 1.90.0 and under fnloom, with
-   values (bitwise where the types allow) and exception classes compared. For plain-function programs both runtimes
-   load the same module. For decorated programs the test carries the Hamilton spelling and the fnloom spelling side
-   by side; the decorator translation lives in test code, never in the product. With name-wiring (§9), every plain-function
-   program is shared as is.
+    values (bitwise where the types allow) and exception classes compared. For plain-function programs both runtimes
+    load the same module. For decorated programs the test carries the Hamilton spelling and the fnloom spelling side by
+    side; the decorator translation lives in test code, never in the product. With name-wiring (§9), every
+    plain-function program is shared as is.
 2. **A test per deliberate difference**, red against Hamilton and green against fnloom.
 3. **Hamilton's own tests and examples** as a corpus: run from the pinned upstream wheel, never vendored; fnloom
    versions are translations written here. Apache-2.0 permits this; any test text adapted closely enough to count as
@@ -204,6 +212,7 @@ are open.
 
 A separate open-source library, built on fnloom, with TA-Lib as its oracle and speed as its claim. It is not
 designed here; this section lists what fnloom must not rule out, so that v1 choices leave room for it:
+
 - **Mixed graphs.** A Python-driven graph whose nodes are a mix of Python and Rust. The core is already generic over
   `P` and `V`; the binding's Python-only payload and value types are the part that will change.
 - **A value type that keeps arrays out of Python** between two Rust nodes (a zero-copy array or buffer value).

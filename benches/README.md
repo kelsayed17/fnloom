@@ -1,6 +1,6 @@
 # Benchmarks
 
-Wall-clock timings of fnloom against Hamilton 1.90.0 on generated graphs. The results, how to run them and what each
+Wall-clock timings of fnloom against Apache Hamilton 1.90.0 on generated graphs. The results, how to run them and what each
 column means are on the [benchmarks page](../docs/benchmarks.md)
 ([on the docs site](https://kelsayed17.github.io/fnloom/benchmarks/)).
 

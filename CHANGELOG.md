@@ -29,6 +29,7 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - Wall-clock benchmarks against Hamilton, with a `rows` shape (one function with `n` `@parameterize` rows) and fnloom
   measured with input checks on and off, and a CI gate on the core's instruction counts.
 - A documentation site, built with Zensical and published to GitHub Pages.
+- Markdown lint with rumdl, run by `scripts/check.sh`, so every page renders as written on the docs site.
 
 ### Changed
 
@@ -46,5 +47,7 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - `fnloom-core`: `NodeKind::Function` carries the node's payload, replacing the `Node::payload` field with the
   `Node::payload()` accessor, and `Evaluate::evaluate` receives the payload as an argument, so an evaluator never
   meets a function node without one.
+- The README and docs are rewritten to be easier to read, with a graph diagram, a comparison with Apache Hamilton and
+  pages that read well on a phone. Apache Hamilton is named as an incubating project.
 
 [Unreleased]: https://github.com/kelsayed17/fnloom/commits/main

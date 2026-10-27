@@ -1,5 +1,5 @@
 ---
-title: A Rust dataflow engine for plain Python functions
+title: Plain Python functions, a fast Rust dataflow engine
 hide:
   - toc
 ---
@@ -10,9 +10,9 @@ hide:
 
 # fnloom
 
-**Plain Python functions are nodes, their parameter names are edges, and a Rust core plans and runs the graph.**
-fnloom is a dataflow engine on [Apache Hamilton](https://github.com/apache/hamilton)'s model, rebuilt for speed,
-determinism and fewer surprises.
+**Write plain Python functions. Get a fast, strict, deterministic dataflow graph.**
+fnloom uses the [Apache Hamilton (incubating)](https://github.com/apache/hamilton) model you may already know, with the planner and
+executor rebuilt in Rust.
 
 [Get started](getting-started.md){ .md-button .md-button--primary }
 [Coming from Hamilton](from-hamilton.md){ .md-button }
@@ -24,48 +24,48 @@ determinism and fewer surprises.
 
 <div class="grid cards" markdown>
 
--   :lucide-function-square:{ .lg .fl-icon } **Functions are the graph**
+-   :lucide-function-square:{ .lg .fl-icon } **Your functions are the graph**
 
     ---
 
-    A function's name is its node and its parameter names are its edges. No decorators, no registration, no
-    configuration object: write the module, build the driver.
+    A function's name is a node, and its parameter names are the edges. No decorators, no registration, no config
+    objects. Your code stays plain Python you can call and test on its own.
 
     [:lucide-arrow-right: Writing nodes](writing-nodes.md)
 
--   :lucide-zap:{ .lg .fl-icon } **Plan once, run many times**
+-   :lucide-zap:{ .lg .fl-icon } **Up to 24× faster repeat runs**
 
     ---
 
-    `prepare` compiles a request into a plan you keep; each run is a loop over its steps. A steady run of a
-    1,000-node graph takes about a fifth of a millisecond.
+    Compile a request once with `prepare`, then run it as often as you like. A 1,000-node graph runs in about
+    0.2 ms, where Hamilton takes over 4 ms.
 
     [:lucide-arrow-right: Running a graph](running.md) · [Benchmarks](benchmarks.md)
 
--   :lucide-list-ordered:{ .lg .fl-icon } **The same order every time**
+-   :lucide-shield-check:{ .lg .fl-icon } **Mistakes fail loudly, and early**
 
     ---
 
-    Nodes run in topological order with ties broken by name, whatever order you list the outputs in. Every listing is
-    sorted.
-
-    [:lucide-arrow-right: Execution order](running.md#execution-order)
-
--   :lucide-infinity:{ .lg .fl-icon } **Any depth, any cycle caught**
-
-    ---
-
-    Nothing recurses over graph depth, so a chain of 50,000 nodes builds and runs. A cycle is a `ValueError` naming
-    it, raised when you build.
+    A misspelled input, a cycle, a type mismatch or an `async def` node raises a clear error naming the culprit,
+    before any node runs. Hamilton accepts several of these silently.
 
     [:lucide-arrow-right: Errors](errors.md)
 
--   :lucide-shield-check:{ .lg .fl-icon } **Mistakes are refused**
+-   :lucide-list-ordered:{ .lg .fl-icon } **The same order, every run**
 
     ---
 
-    A misspelled input or override, a bare string of outputs, an `async def` node: Hamilton accepts each silently,
-    and fnloom raises naming the culprit.
+    Nodes run in topological order with ties broken by name, however you list the outputs. Logs and side effects
+    never shuffle between runs.
+
+    [:lucide-arrow-right: Execution order](running.md#execution-order)
+
+-   :lucide-infinity:{ .lg .fl-icon } **No depth limit**
+
+    ---
+
+    Nothing recurses over the graph, so a 50,000-node chain builds and runs. Hamilton hits `RecursionError` at
+    around 1,000.
 
     [:lucide-arrow-right: Differences from Hamilton](quirk-register.md)
 
@@ -73,7 +73,7 @@ determinism and fewer surprises.
 
     ---
 
-    `fnloom-core` has no dependencies and no `unsafe`. Its graph, planner and executor are generic over what a node
+    `fnloom-core` has no dependencies and no `unsafe`. Its graph, planner and executor don't care what a node
     runs.
 
     [:lucide-arrow-right: The Rust core](rust-core.md)
@@ -82,7 +82,7 @@ determinism and fewer surprises.
 
 ## A graph in one screen
 
-A module of plain functions:
+Start with a module of plain functions:
 
 ```python
 # file: pricing.py
@@ -101,8 +101,20 @@ def label(discounted: float, currency: str = "EUR") -> str:
     return f"{discounted:.2f} {currency}"
 ```
 
-`price` and `quantity` are no function's name, so they are inputs; `discount` and `currency` have defaults, so they
-are optional inputs. Build a driver from the module and ask for what you want:
+fnloom reads this graph from it. `price` and `quantity` aren't the name of any function, so they're inputs. `discount`
+and `currency` have defaults, so they're optional (dashed):
+
+```mermaid
+flowchart TD
+    price([price]) --> total
+    quantity([quantity]) --> total
+    total --> discounted
+    discount([discount?]) -.-> discounted
+    discounted --> label
+    currency([currency?]) -.-> label
+```
+
+Build a driver and ask for what you want. Only the functions your outputs need will run:
 
 ```python
 import fnloom
@@ -115,8 +127,28 @@ driver.execute(["label"], inputs={"price": 2.5, "quantity": 4, "discount": 0.1})
 # -> {'label': '9.00 EUR'}
 ```
 
-!!! note "Status"
+## Why not just use Hamilton?
 
-    fnloom is pre-release and not yet on PyPI: [build it from source](getting-started.md). Plan 1, the Rust core and
-    the native Python path, is done. Decorators, configuration, adapters and async execution come in later plans; see
-    [the design](design/2026-10-26-fnloom-design.md).
+fnloom keeps what makes Hamilton pleasant and fixes what bites. A few highlights:
+
+<div class="fl-compare" markdown>
+
+| | Hamilton 1.90.0 | fnloom |
+| --- | --- | --- |
+| A chain of 1,000+ nodes | `RecursionError` | Runs at any depth |
+| A dependency cycle | `RecursionError` when run | `ValueError` naming the cycle |
+| A misspelled input | Silently ignored | `ValueError` naming it |
+| Execution order | Depends on how you list outputs | Always the same |
+| Running a request again | Re-planned every call | `prepare` once, `run` many times |
+
+</div>
+
+Every difference is deliberate, tested against Hamilton itself, and listed in the
+[register of differences](quirk-register.md).
+
+!!! note "Status: pre-alpha"
+
+    fnloom isn't on PyPI yet, so [build it from source](getting-started.md). The Rust core, the native Python path,
+    `@parameterize`, `@tag`, graph inspection and type checks are done. Caching is designed but not yet built.
+    Configuration, adapters and async execution come later; [the design](design/2026-10-26-fnloom-design.md) has the
+    full plan.

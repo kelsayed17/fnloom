@@ -11,7 +11,7 @@ license = "Apache-2.0"
 license-files = ["LICENSE"]
 requires-python = ">=3.14"
 authors = [{ name = "Khaled Elsayed", email = "4119211+kelsayed17@users.noreply.github.com" }]
-keywords = ["dataflow", "dag", "pipeline", "hamilton", "feature-engineering", "rust", "pyo3"]
+keywords = ["dataflow", "dag", "pipeline", "apache-hamilton", "feature-engineering", "rust", "pyo3"]
 classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Developers",
@@ -37,9 +37,10 @@ Security = "https://github.com/kelsayed17/fnloom/security/policy"
 
 [dependency-groups]
 dev = [
-    "pytest>=8",
-    "ruff>=0.15",
-    "ty>=0.0.89",
+    "pytest>=9.1",
+    "ruff>=0.17",
+    "ty>=0.0.92",
+    "rumdl>=0.3",
     "maturin>=1.15,<2",
     # The behavioural oracle for the differential tests; pinned so the oracle never drifts.
     "apache-hamilton==1.90.0",
@@ -90,6 +91,24 @@ ignore = [
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"
+
+# Markdown lint. The docs site renders with Python-Markdown, so nested lists need four-space indents.
+[tool.rumdl]
+flavor = "mkdocs"
+line-length = 120
+exclude = [".venv", "target", "site"]
+# GitHub renders the README's centred header and badges only as HTML.
+# The plans quote whole signatures as single code spans, which cannot wrap.
+per-file-ignores = { "README.md" = ["MD033"], ".github/*.md" = ["MD041"], "docs/plans/*.md" = ["MD013"] }
+
+# A page's front-matter title is its HTML title, not a second heading.
+[tool.rumdl.MD025]
+front-matter-title = ""
+
+[tool.rumdl.MD013]
+line-length = 120
+tables = false
+code-blocks = false
 
 [tool.ty.environment]
 python-version = "3.14"
