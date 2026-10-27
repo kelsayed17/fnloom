@@ -6,7 +6,7 @@ mechanical ways.
 
 fnloom isn't a drop-in replacement, though. There's no `hamilton` module to import and no compatibility layer.
 Hamilton 1.90.0 is fnloom's test oracle: every place the two differ on purpose is a row in
-[the register of differences](quirk-register.md), with a test that checks both sides.
+[the register of differences](quirk-register.md), and most rows have a test that checks both sides.
 
 ## What you get by switching
 

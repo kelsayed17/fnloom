@@ -45,7 +45,11 @@ impl Plan {
     /// Each value is read from `inputs` or `overrides` by its node's interned name, and
     /// each output is keyed by it, so a run makes no name strings. Extra keys are ignored.
     /// Every observer sees every event, in sequence order. The GIL is held throughout.
-    #[pyo3(signature = (inputs, overrides, observers = Vec::new()))]
+    // PyO3 renders the `Vec::new()` default as `Ellipsis`, so the signature says `()` itself.
+    #[pyo3(
+        signature = (inputs, overrides, observers = Vec::new()),
+        text_signature = "($self, /, inputs, overrides, observers=())"
+    )]
     fn run<'py>(
         &self,
         py: Python<'py>,

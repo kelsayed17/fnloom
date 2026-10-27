@@ -56,7 +56,8 @@ what they opened. An error from `post_graph` is reported alongside the run's out
   with every offending name sorted; `UnknownNodes` from the lineage queries.
 - `RunError<E>`: `Node` (a payload failed, with any observer errors raised while handling it), `Observers` (the
   first failing event and every error raised in it), `MissingValues` (a map lacked a name the plan reads; raised
-  before any hook fires), or `BrokenPlan` (the plan was run on a graph it was not prepared from).
+  before any hook fires), or `BrokenPlan` (the plan's own state is inconsistent, which is a bug). Run a plan only on
+  the graph it was prepared from: on another graph it may read the wrong nodes, or panic.
 
 ## Guarantees
 

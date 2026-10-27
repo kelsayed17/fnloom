@@ -4,7 +4,8 @@ build-backend = "maturin"
 
 [project]
 name = "fnloom"
-version = "0.0.0"
+# maturin reads the version from the Cargo workspace, so the wheel and `core_version()` agree.
+dynamic = ["version"]
 description = "A Rust dataflow engine: plain Python functions are nodes, wired by parameter name."
 readme = "README.md"
 license = "Apache-2.0"
@@ -16,7 +17,6 @@ classifiers = [
     "Development Status :: 2 - Pre-Alpha",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
-    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
     "Programming Language :: Python :: 3.14",

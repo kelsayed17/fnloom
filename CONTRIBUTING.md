@@ -21,8 +21,8 @@ One script runs every check, and CI runs the same one:
 bash scripts/check.sh
 ```
 
-It runs rustfmt, Clippy, rustdoc, the Rust tests, maturin, ruff, rumdl (Markdown lint), ty and pytest, in that order,
-and stops at the first failure.
+It runs rustfmt, Clippy, rustdoc, the Rust tests, the embedding example, maturin, ruff, rumdl (Markdown lint), ty
+and pytest, in that order, and stops at the first failure.
 
 - **Lints are strict.** Clippy denies `pedantic` and the panic lints (`unwrap_used`, `expect_used`, `panic`); ruff
   selects every rule; ty treats every rule as an error. Fix the cause of a finding. When a suppression is the right

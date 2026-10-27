@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# The one gate: every step is blocking, and CI runs the same steps.
+# The one gate: every step is blocking, and CI runs the same steps. Cargo steps are --locked, so a
+# stale Cargo.lock fails here instead of resolving fresh crates.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -11,13 +12,13 @@ export PYO3_PYTHON
 
 cargo fmt --check
 # test-hooks on, so the feature-gated code is linted too.
-cargo clippy --workspace --all-targets --features test-hooks -- -D warnings
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
-cargo test --workspace
+cargo clippy --locked --workspace --all-targets --features test-hooks -- -D warnings
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps
+cargo test --locked --workspace
 # The Rust guide (docs/rust-core.md) includes this example, so it must run, not only compile.
-cargo run --quiet -p fnloom-core --example embed
+cargo run --locked --quiet -p fnloom-core --example embed
 # test-hooks exposes the deliberate-panic hook; release builds never enable it.
-uv run maturin develop --features test-hooks
+uv run maturin develop --locked --features test-hooks
 # No more syncing from here on: a sync would reinstall the project without test-hooks.
 export UV_NO_SYNC=1
 uv run ruff check

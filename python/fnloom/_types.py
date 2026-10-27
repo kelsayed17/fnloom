@@ -113,17 +113,29 @@ def _element_args(annotation: object) -> tuple[object, ...]:
     return args
 
 
-def _first_fits(element: object, value: object) -> bool:
+# The (element type, string) questions already being asked in one check. A
+# string's first item is a string, so under a recursive alias (`type Tree =
+# list[Tree]`) the same question comes round again; it is answered `False`.
+type _Asked = tuple[tuple[object, str], ...]
+
+
+def _first_fits(element: object, value: object, asked: _Asked) -> bool:
     """Whether the first item of the collection `value` fits `element`.
 
     An empty collection always fits.
     """
     for item in typing.cast("collections.abc.Iterable[object]", value):
-        return _fits(element, item)
+        if isinstance(item, str):
+            if (element, item) in asked:
+                return False
+            asked = (*asked, (element, item))
+        return _fits(element, item, asked)
     return True
 
 
-def _fits_generic(declared: object, origin: object, value: object) -> bool:
+def _fits_generic(
+    declared: object, origin: object, value: object, asked: _Asked
+) -> bool:
     """A parameterized collection: its kind, then at most its first element.
 
     Only a sequence or an iterable has its first element checked; another
@@ -142,23 +154,23 @@ def _fits_generic(declared: object, origin: object, value: object) -> bool:
             if not isinstance(value, group):
                 return False
             args = _element_args(declared)
-            return not args or _first_fits(args[0], value)
+            return not args or _first_fits(args[0], value, asked)
     return origin in _BY_KIND and isinstance(value, typing.cast("type", origin))
 
 
-def _fits(declared: object, value: object) -> bool:  # noqa: PLR0911  # one return per form
+def _fits(declared: object, value: object, asked: _Asked = ()) -> bool:  # noqa: PLR0911  # one return per form
     declared = _strip(declared)
     if declared is Any or isinstance(declared, TypeVar):
         return True
     if isinstance(declared, NewType):
-        return _fits(declared.__supertype__, value)
+        return _fits(declared.__supertype__, value, asked)
     if _is_union(declared):
-        return any(_fits(member, value) for member in typing.get_args(declared))
+        return any(_fits(member, value, asked) for member in typing.get_args(declared))
     origin = typing.get_origin(declared)
     if origin is Literal:
         return value in typing.get_args(declared)
     if origin is not None:
-        return _fits_generic(declared, origin, value)
+        return _fits_generic(declared, origin, value, asked)
     if not isinstance(declared, type):
         return False
     try:
@@ -171,7 +183,9 @@ def value_matches(declared: object, value: object) -> bool:
     """Whether `value`, supplied as an input or override, fits the `declared` type.
 
     `None` fits every declaration, as in Hamilton. A parameterized collection is
-    checked by its kind and, for a sequence or set, by its first element only.
+    checked by its kind and, for a sequence or set, by its first element only;
+    a value whose class is exactly the declared one (a `list` for `list[int]`)
+    is checked by its class alone, its items unread.
     """
     return value is None or _fits(declared, value)
 
@@ -235,13 +249,14 @@ def type_matches(produced: object, required: object) -> bool:  # noqa: PLR0911  
     `NewType` as its supertype. Generics match by kind, and by their arguments
     when both sides name them.
     """
+    if produced == required:
+        return True
+    # Stripped first, so `Annotated[Any, ...]` and an alias of `Any` answer as `Any`.
+    produced, required = _strip(produced), _strip(required)
     if produced is Any:
         return True
     if isinstance(produced, TypeVar) or isinstance(required, TypeVar):
         return produced == required
-    if produced == required:
-        return True
-    produced, required = _strip(produced), _strip(required)
     if required is Any or produced == required:
         return True
     if isinstance(produced, NewType):

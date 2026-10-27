@@ -143,8 +143,8 @@ fnloom keeps what makes Hamilton pleasant and fixes what bites. A few highlights
 
 </div>
 
-Every difference is deliberate, tested against Hamilton itself, and listed in the
-[register of differences](quirk-register.md).
+Every difference is deliberate and listed in the [register of differences](quirk-register.md), and most are
+tested against Hamilton side by side.
 
 !!! note "Status: pre-alpha"
 

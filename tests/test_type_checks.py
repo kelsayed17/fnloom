@@ -207,3 +207,44 @@ def test_unreached_override_is_still_checked() -> None:
     driver = build(make_module("checks_unreached_override", CHAIN))
     with pytest.raises(ValueError, match=r"^c: expected int, got str$"):
         driver.execute(["b"], inputs={"a": 1}, overrides={"c": "x"})
+
+
+GENERIC = """
+def total(prices: list[int], cap: int | None) -> int:
+    return sum(prices)
+
+def capped(total: int, cap: int | None) -> int:
+    return total if cap is None else min(total, cap)
+"""
+
+
+def test_inputs_and_overrides_of_generic_types_are_checked() -> None:
+    """A value failing a generic or a union is refused, not only a plain class."""
+    driver = build(make_module("checks_generic", GENERIC))
+    with pytest.raises(ValueError, match="expected") as raised:
+        driver.execute(["total"], inputs={"prices": ("a",), "cap": "x"})
+    assert str(raised.value).splitlines() == [
+        "cap: expected int | None, got str",
+        "prices: expected list[int], got tuple",
+    ]
+    with pytest.raises(
+        ValueError, match=re.escape("cap: expected int | None, got str")
+    ):
+        driver.execute(["capped"], overrides={"total": 5, "cap": "x"})
+
+
+def test_a_recursive_alias_builds_and_checks_its_inputs() -> None:
+    """`type Tree = list[Tree]` builds, and a string input is refused cleanly."""
+    module = make_module(
+        "checks_tree",
+        """
+type Tree = list[Tree]
+
+def size(tree: Tree) -> int:
+    return len(tree)
+""",
+    )
+    driver = build(module)
+    assert driver.execute(["size"], inputs={"tree": [[], [[]]]}) == {"size": 2}
+    with pytest.raises(ValueError, match=re.escape("tree: expected Tree, got str")):
+        driver.execute(["size"], inputs={"tree": "leaf"})

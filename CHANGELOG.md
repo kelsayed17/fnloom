@@ -49,5 +49,17 @@ change the public API; such changes are listed under **Changed** and **Removed**
   meets a function node without one.
 - The README and docs are rewritten to be easier to read, with a graph diagram, a comparison with Apache Hamilton and
   pages that read well on a phone. Apache Hamilton is named as an incubating project.
+- The package version comes from the Cargo workspace (`dynamic = ["version"]`), so the wheel and
+  `fnloom._core.core_version()` always agree, and `fnloom.__version__` reports it.
+- `scripts/check.sh` runs every Cargo step with `--locked`, and CI pins the instruction-count image by digest.
+
+### Fixed
+
+- An edge check now strips `Annotated` and PEP 695 aliases before it looks for `Any` or a `TypeVar`, so a node
+  returning `Annotated[Any, ...]` or an alias of `Any` feeds any parameter, as `Any` does (Q41, Q44).
+- An input check against a recursive alias such as `type Tree = list[Tree]` refuses a string instead of raising
+  `RecursionError`.
+- The type stub `fnloom/_core.pyi` matches the extension: `Graph` and `ObserverBase` construct through `__new__`,
+  and `Plan.run`'s `observers` defaults to `()` in its runtime signature too.
 
 [Unreleased]: https://github.com/kelsayed17/fnloom/commits/main
