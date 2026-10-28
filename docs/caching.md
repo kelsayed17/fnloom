@@ -399,7 +399,8 @@ the write, and warns with `fnloom.CacheWarning`. A miss is `MISSING`, never `Non
 return. `with_cache` refuses an object without these three methods. fnloom has two; they live in the private module
 `fnloom._stores`, so use them through `fnloom`: `fnloom.MemoryCache`, `fnloom.DiskCache`, `fnloom.CacheStore`,
 `fnloom.MISSING` and `fnloom.CacheWarning`. (`fnloom.cache` is the decorator.) One store can be shared by several
-drivers in one process.
+drivers in one process. A pickled driver takes its store along: a `DiskCache` reopens the same directory, and a
+`MemoryCache` arrives empty (see [Pickling and process pools](running.md#pickling-and-process-pools)).
 
 **`MemoryCache(max_entries=100_000, max_bytes=None)`** holds the results themselves, so a hit costs a lookup and no
 copy (hence the [purity contract](#the-purity-contract)). Past either bound it evicts the least recently used entries.

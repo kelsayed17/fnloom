@@ -76,6 +76,8 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | Execution order | Depends on the order of outputs and parameters | Topological, ties broken by name (Q26) |
 | `*args`, `**kwargs`, positional-only | Treated as inputs | `ValueError` at build (Q29) |
 | `async def` and generator functions | The coroutine or generator is the value | `ValueError` at build (Q32) |
+| A function passed where a module goes | An empty graph | `TypeError` (Q52) |
+| A module with no nodes, such as a package that only re-exports | Builds; its nodes are unknown at `execute` | `ValueError` at build, saying why each function was skipped (Q53) |
 | A row naming no parameter of its function | `InvalidDecoratorException` | `ValueError`, when decorating (Q33) |
 | A row's defaulted parameter bound to an unsupplied `source()` | `KeyError` when run | The default applies (Q35) |
 

@@ -1,5 +1,6 @@
 """Tests for `Builder`, `build`, `Driver` and `PreparedPlan`."""
 
+import types
 from typing import override
 
 import pytest
@@ -114,6 +115,67 @@ def test_execute_empty_list_returns_empty_dict() -> None:
 def test_build_from_zero_modules_is_empty() -> None:
     """A driver over no modules has no nodes."""
     assert build().node_names() == []
+
+
+def _node(a: int) -> int:
+    return a
+
+
+@pytest.mark.parametrize(
+    ("bad", "described"),
+    [
+        (_node, "function '_node'"),
+        (Builder, "type 'Builder'"),
+        (3, "int"),
+        ("drv_name", "str"),
+    ],
+)
+def test_a_non_module_is_a_type_error(bad: object, described: str) -> None:
+    """`build`, `with_modules` and `Builder` refuse anything but a module, naming it."""
+    module = make_module("drv_good", CHAIN)
+    expected = f"^expected a module, got {described}$"
+    with pytest.raises(TypeError, match=expected):
+        build(bad)  # ty: ignore[invalid-argument-type]  # the wrong type is the point
+    with pytest.raises(TypeError, match=expected):
+        Builder().with_modules(module, bad)  # ty: ignore[invalid-argument-type]  # the wrong type is the point
+    with pytest.raises(TypeError, match=expected):
+        Builder((bad,))  # ty: ignore[invalid-argument-type]  # the wrong type is the point
+
+
+def test_a_module_with_no_node_is_refused_with_reasons() -> None:
+    """A re-exporting module is refused at build, each skipped function explained."""
+    make_module("drv_impl", "def total(a: int) -> int:\n    return a\n")
+    reexports = make_module(
+        "drv_reexports",
+        """
+        from drv_impl import total
+
+        def _helper(a: int) -> int:
+            return a
+        """,
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^module 'drv_reexports' has no nodes: '_helper' is private, "
+            r"'total' is defined in 'drv_impl'$"
+        ),
+    ):
+        build(reexports)
+
+
+def test_every_module_with_no_node_is_listed() -> None:
+    """Each empty module is named, in the order given, alongside a good one."""
+    good = make_module("drv_good", CHAIN)
+    blank = types.ModuleType("drv_blank")
+    handmade = types.ModuleType("drv_handmade")
+    handmade.f = _node  # ty: ignore[unresolved-attribute]  # a hand-built module
+    with pytest.raises(ValueError, match="no nodes") as raised:
+        build(blank, good, handmade)
+    assert str(raised.value) == (
+        "module 'drv_blank' has no nodes: it defines no functions; "
+        f"module 'drv_handmade' has no nodes: 'f' is defined in {__name__!r}"
+    )
 
 
 def test_prepare_reuses_plan_across_runs() -> None:

@@ -256,6 +256,20 @@ def _scan_module(module: ModuleType) -> list[NodeDef]:
     ]
 
 
+def _skipped(module: ModuleType) -> str:
+    """Why `module` has no node: each function it holds, and why it is not one."""
+    reasons = sorted(
+        f"{name!r} is defined in {value.__module__!r}"
+        if value.__module__ != module.__name__
+        else f"{name!r} is private"
+        for name, value in vars(module).items()
+        if inspect.isfunction(value)
+    )
+    if not reasons:
+        return f"module {module.__name__!r} has no nodes: it defines no functions"
+    return f"module {module.__name__!r} has no nodes: {', '.join(reasons)}"
+
+
 def _definition(node: NodeDef) -> str:
     """How `node` was written: as a function, or as a row of a parameterized one."""
     function = getattr(node.origin, "__name__", node.name)
@@ -279,19 +293,27 @@ def _duplicate(first: NodeDef, second: NodeDef) -> str:
 def collect(modules: Sequence[ModuleType]) -> list[NodeDef]:
     """Returns the nodes of `modules`; `ValueError` on a malformed or duplicate one.
 
-    Every duplicate name is listed, sorted by name, in one `ValueError`.
+    Every duplicate name is listed, sorted by name, in one `ValueError`. A module
+    with no node is refused too, before duplicates, every such module in one
+    `ValueError` naming each function it holds and why that is not a node (Q53).
 
     Annotations are read without being evaluated; `resolve` evaluates them.
     """
     seen: dict[str, NodeDef] = {}
     clashes: list[tuple[str, str]] = []
+    empty: list[str] = []
     # Modules hash by identity, so this drops repeats of one module, keeping the first.
     for module in dict.fromkeys(modules):
-        for node in _scan_module(module):
+        nodes = _scan_module(module)
+        if not nodes:
+            empty.append(_skipped(module))
+        for node in nodes:
             if node.name in seen:
                 clashes.append((node.name, _duplicate(seen[node.name], node)))
             else:
                 seen[node.name] = node
+    if empty:
+        raise ValueError("; ".join(empty))
     if clashes:
         # Sorted by node name; a name clashing more than once keeps scan order.
         clashes.sort(key=lambda clash: clash[0])

@@ -1,7 +1,10 @@
 """Read-only descriptions of a built graph's nodes."""
 
 import inspect
-from collections.abc import Mapping
+
+# `Callable` is imported for real: `NodeView`'s signature annotates with it, and
+# `inspect.signature` resolves that at run time.
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, NamedTuple, override
@@ -10,7 +13,7 @@ from fnloom._decorators import Source, Value
 from fnloom._types import type_matches
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator, Sequence
+    from collections.abc import Iterator, Sequence
 
     from fnloom._scan import NodeDef
 

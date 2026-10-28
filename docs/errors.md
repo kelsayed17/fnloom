@@ -31,6 +31,8 @@ driver = fnloom.build(pricing)
 
 | Mistake | Raises |
 | --- | --- |
+| Something that is not a module, such as a function, passed to `build` or `with_modules` | `TypeError: expected a module, got function 'f'` |
+| A module that contributes no node, such as a package that only re-exports functions defined elsewhere, each function listed with why it isn't a node | `ValueError: module 'pkg' has no nodes: '_g' is private, 'f' is defined in 'pkg.impl'` |
 | The same node name in two modules | `ValueError: node 'f' is defined in both 'first' and 'second'` |
 | A dependency cycle | `ValueError: dependency cycle: 'a' -> 'b' -> 'a'` |
 | A parameter or the return without an annotation | `ValueError: 'f': parameter 'a' has no type annotation` |
@@ -42,8 +44,9 @@ driver = fnloom.build(pricing)
 
 ## When you execute or prepare
 
-Each error lists every offending name, sorted. A request is checked in the order below, and the first kind of mistake
-found is the one raised:
+Each error lists every offending name, sorted. A missing input also names each node that needs it, or says that you
+requested it as an output. A request is checked in the order below, and the first kind of mistake found is the one
+raised:
 
 ```python
 driver.execute(["nope"])
@@ -53,7 +56,9 @@ driver.execute(["label"], inputs={"price": 1.0, "quantity": 2, "typo": 3})
 driver.execute(["label"], overrides={"tota": 5.0})
 # raises ValueError: unknown overrides: 'tota'
 driver.execute(["label"], inputs={"price": 1.0})
-# raises ValueError: missing inputs: 'quantity'
+# raises ValueError: missing inputs: 'quantity' (needed by 'total')
+driver.execute(["total", "price"])
+# raises ValueError: missing inputs: 'price' (requested as an output, needed by 'total'); 'quantity' (needed by 'total')
 ```
 
 !!! tip "Replacing a function's value"

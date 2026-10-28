@@ -87,6 +87,11 @@ ignore = [
     "TC003", # resolved at build, so imported for real, not under TYPE_CHECKING
     "UP037", # a quoted name nested in a generic is a case under test
 ]
+# Public signatures resolve under `inspect.signature`, so their annotations' names exist at run time.
+"python/fnloom/{driver,_stores,_view}.py" = [
+    "TC001", # an application import naming a public annotation is imported for real
+    "TC003", # likewise a standard library import
+]
 "scripts/test_*.py" = [
     "S101", # pytest tests are asserts
 ]

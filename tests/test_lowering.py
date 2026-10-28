@@ -259,9 +259,13 @@ def test_private_decorated_function_yields_no_nodes() -> None:
 @parameterize(out={"x": source("a")})
 def _f(x: int) -> int:
     return x
+
+
+def g(a: int) -> int:
+    return a
 """,
     )
-    assert collect([module]) == []
+    assert [node.name for node in collect([module])] == ["g"]
 
 
 def test_decorated_function_imported_elsewhere_is_one_node_set() -> None:

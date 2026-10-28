@@ -1,21 +1,23 @@
 """The user-facing `Builder`, `Driver` and `PreparedPlan`."""
 
+import importlib
 import inspect
+import sys
 import threading
-from typing import TYPE_CHECKING, Any, Protocol
+
+# Imported for real, not under TYPE_CHECKING: the public signatures annotate with
+# them, and `inspect.signature` resolves those annotations at run time.
+from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
+from types import ModuleType
+from typing import Any, Protocol, override
 
 from fnloom import _core, _types
 from fnloom._caching import Cache, CacheOutcome, CacheRun
 from fnloom._decorators import Source
 from fnloom._scan import NodeDef, collect, core_inputs, resolve
+from fnloom._stores import CacheStore
 from fnloom._view import NodeView, NodeViews, node_views
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
-    from collections.abc import Set as AbstractSet
-    from types import ModuleType
-
-    from fnloom._stores import CacheStore
 
 type _PlanKey = tuple[tuple[str, ...], frozenset[str], frozenset[str]]
 # A request's final_vars (a list or tuple, copied), its input and override names,
@@ -153,7 +155,13 @@ def _edge_mismatches(functions: Mapping[str, NodeView]) -> list[str]:
 
 
 class PreparedPlan:
-    """A plan compiled for fixed outputs and fixed input and override names."""
+    """A plan compiled for fixed outputs and fixed input and override names.
+
+    Pickled or copied, a plan is its driver and its request: loading it rebuilds
+    the driver (see `Driver`) and prepares the same request again. Pickled together
+    with its driver, or with other plans of one driver, they share one rebuilt
+    driver.
+    """
 
     def __init__(
         self,
@@ -179,6 +187,25 @@ class PreparedPlan:
         self._input_names = input_names
         self._override_names = override_names
         self._input_checks, self._override_checks = checks
+        # The driver that prepared this plan, which pickling rebuilds it through.
+        self._driver: Driver | None = None
+
+    @override
+    def __reduce__(
+        self,
+    ) -> tuple[Callable[..., PreparedPlan], tuple[Driver, _PlanKey]]:
+        """The driver and the request, prepared again on load; see the class."""
+        if self._driver is None:
+            msg = "cannot pickle a PreparedPlan made without a Driver"
+            raise TypeError(msg)
+        return _prepare_again, (
+            self._driver,
+            (self._outputs, self._input_names, self._override_names),
+        )
+
+    def __copy__(self) -> PreparedPlan:
+        """The plan itself: nothing about a plan changes once it is compiled."""
+        return self
 
     def run(
         self,
@@ -249,6 +276,12 @@ class Driver:
     `Builder` (or its shorthand `build`); the constructor takes an already built
     native graph, the views of its nodes, whether runs check the types of inputs
     and overrides, and the cache, if runs use one.
+
+    A driver made by a `Builder` pickles, and copies with `copy.deepcopy`, as that
+    builder: loading it imports its modules by name and builds again, with the
+    same type-check setting and store, so it can go to a process pool. Its compiled
+    plans are not carried over. A driver made from a native graph directly does not
+    pickle.
     """
 
     def __init__(
@@ -272,6 +305,34 @@ class Driver:
         # The last request and its plan, which is the most recently used one, so a
         # repeat of it, the common case in a loop, skips the key and the lock.
         self._last: _LastRequest | None = None
+        # The builder that built this driver, which pickling rebuilds it from.
+        self._builder: Builder | None = None
+
+    @override
+    def __reduce__(self) -> tuple[Callable[[Builder], Driver], tuple[Builder]]:
+        """The builder, built again on load; see the class."""
+        if self._builder is None:
+            msg = (
+                "cannot pickle a Driver made from a native graph; "
+                "make it with Builder or build to pickle it"
+            )
+            raise TypeError(msg)
+        return Builder.build, (self._builder,)
+
+    def __copy__(self) -> Driver:
+        """A driver over the same graph, store and settings, with no compiled plans.
+
+        Cheap, unlike pickling: nothing is rebuilt, and a driver made from a native
+        graph copies too.
+        """
+        copied = Driver(
+            self._graph,
+            self._nodes,
+            check_inputs=self._check_inputs,
+            cache=self._cache,
+        )
+        copied._builder = self._builder
+        return copied
 
     def prepare(
         self,
@@ -317,12 +378,14 @@ class Driver:
             list(outputs), sorted(input_names), sorted(override_names)
         )
         checks = self._checks(plan, override_names) if self._check_inputs else ((), ())
-        if self._cache is None:
-            return PreparedPlan(plan, outputs, input_names, override_names, checks)
-        cached = CacheRun(
-            self._cache, self._graph, plan, outputs, input_names, override_names
-        )
-        return PreparedPlan(cached, outputs, input_names, override_names, checks)
+        runnable: _Runnable = plan
+        if self._cache is not None:
+            runnable = CacheRun(
+                self._cache, self._graph, plan, outputs, input_names, override_names
+            )
+        prepared = PreparedPlan(runnable, outputs, input_names, override_names, checks)
+        prepared._driver = self  # noqa: SLF001  # the driver's own plan
+        return prepared
 
     def _checks(
         self, plan: _core.Plan, override_names: frozenset[str]
@@ -400,6 +463,16 @@ class Driver:
         return sorted({*names, *self._graph.downstream_of(list(names))})
 
 
+def _prepare_again(driver: Driver, key: _PlanKey) -> PreparedPlan:
+    """Prepares a pickled plan's request on its rebuilt driver."""
+    outputs, input_names, override_names = key
+    return driver.prepare(
+        outputs,
+        inputs=dict.fromkeys(input_names),
+        overrides=dict.fromkeys(override_names),
+    )
+
+
 def _graph_of(nodes: list[NodeDef]) -> _core.Graph:
     """Builds the native graph for scanned nodes: their core inputs and payloads."""
     return _core.Graph(
@@ -408,8 +481,51 @@ def _graph_of(nodes: list[NodeDef]) -> _core.Graph:
     )
 
 
+def _checked_modules(modules: Sequence[object]) -> tuple[ModuleType, ...]:
+    """`modules` as a tuple; `TypeError` naming the first item that is not a module.
+
+    A function or a class is a common slip for its module, and would otherwise
+    build no nodes at all (Q52).
+    """
+    checked: list[ModuleType] = []
+    for item in modules:
+        if not isinstance(item, ModuleType):
+            name = getattr(item, "__qualname__", None)
+            what = type(item).__name__ + ("" if name is None else f" {name!r}")
+            msg = f"expected a module, got {what}"
+            raise TypeError(msg)
+        checked.append(item)
+    return tuple(checked)
+
+
+def _importable_name(module: ModuleType) -> str:
+    """`module`'s name, which imports it; `TypeError` when it does not."""
+    name = module.__name__
+    if sys.modules.get(name) is not module:
+        msg = (
+            f"cannot pickle: module {name!r} is not importable by its name, "
+            "so it cannot be loaded again"
+        )
+        raise TypeError(msg)
+    return name
+
+
+def _builder_of(
+    names: tuple[str, ...],
+    check_inputs: bool,  # noqa: FBT001  # pickle passes arguments positionally
+    store: CacheStore | None,
+) -> Builder:
+    """A pickled builder, its modules imported again by name."""
+    modules = tuple(importlib.import_module(name) for name in names)
+    return Builder(modules, check_inputs=check_inputs, store=store)
+
+
 class Builder:
-    """Accumulates modules, then builds a `Driver`; methods return new builders."""
+    """Accumulates modules, then builds a `Driver`; methods return new builders.
+
+    A builder pickles as the names of its modules, which must import them, its
+    type-check setting and its store, which must pickle too.
+    """
 
     def __init__(
         self,
@@ -421,13 +537,25 @@ class Builder:
         """Starts with the given modules (none by default), checking input types.
 
         `store`, when given, caches the results of the driver's runs in it.
+        `TypeError` when an item of `modules` is not a module.
         """
-        self._modules = modules
+        self._modules = _checked_modules(modules)
         self._check_inputs = check_inputs
         self._store = store
 
+    @override
+    def __reduce__(
+        self,
+    ) -> tuple[Callable[..., Builder], tuple[tuple[str, ...], bool, CacheStore | None]]:
+        """The modules' names and the settings, imported again on load."""
+        names = tuple(_importable_name(module) for module in self._modules)
+        return _builder_of, (names, self._check_inputs, self._store)
+
     def with_modules(self, *modules: ModuleType) -> Builder:
-        """Returns a new builder with `modules` appended to this one's."""
+        """Returns a new builder with `modules` appended to this one's.
+
+        `TypeError` when an item is not a module, such as a function.
+        """
         return Builder(
             (*self._modules, *modules),
             check_inputs=self._check_inputs,
@@ -460,6 +588,10 @@ class Builder:
     def build(self) -> Driver:
         """Scans the modules and returns a `Driver`; `ValueError` on a bad node.
 
+        A module that contributes no node is a `ValueError` too, naming the module
+        and why each of its functions was skipped: defined in another module (a
+        re-export), or private.
+
         Annotations are evaluated here: a name that does not resolve raises its
         `NameError` (`AttributeError` for a missing attribute), with a note naming
         the node. Every edge is type checked: a node whose return type a parameter
@@ -472,7 +604,9 @@ class Builder:
         if mismatches := _edge_mismatches(views.functions):
             raise ValueError("\n".join(mismatches))
         cache = None if self._store is None else Cache.of(self._store, nodes)
-        return Driver(graph, views, check_inputs=self._check_inputs, cache=cache)
+        driver = Driver(graph, views, check_inputs=self._check_inputs, cache=cache)
+        driver._builder = self  # noqa: SLF001  # the builder's own driver
+        return driver
 
 
 def build(*modules: ModuleType) -> Driver:

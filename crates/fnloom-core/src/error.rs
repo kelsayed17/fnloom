@@ -51,8 +51,33 @@ pub enum PlanError {
     UnknownInputs(Vec<String>),
     /// Overrides that do not exist in the graph.
     UnknownOverrides(Vec<String>),
-    /// Required inputs that are neither supplied nor overridden.
-    MissingInputs(Vec<String>),
+    /// Required inputs that are neither supplied nor overridden, each with what needs it.
+    MissingInputs(Vec<MissingInput>),
+}
+
+/// A required input that is neither supplied nor overridden, and what needs it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MissingInput {
+    /// The input's name.
+    pub name: String,
+    /// Whether the input was itself requested as an output.
+    pub requested: bool,
+    /// The planned nodes reading it by a required edge, sorted.
+    pub consumers: Vec<String>,
+}
+
+impl fmt::Display for MissingInput {
+    /// `'x' (needed by 'a', 'b')`, `'x' (requested as an output)`, or both reasons.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut reasons = Vec::new();
+        if self.requested {
+            reasons.push("requested as an output".to_owned());
+        }
+        if !self.consumers.is_empty() {
+            reasons.push(format!("needed by {}", quoted(&self.consumers, ", ")));
+        }
+        write!(f, "'{}' ({})", self.name, reasons.join(", "))
+    }
 }
 
 impl fmt::Display for PlanError {
@@ -64,7 +89,10 @@ impl fmt::Display for PlanError {
             Self::UnknownOverrides(names) => {
                 write!(f, "unknown overrides: {}", quoted(names, ", "))
             }
-            Self::MissingInputs(names) => write!(f, "missing inputs: {}", quoted(names, ", ")),
+            Self::MissingInputs(missing) => {
+                let listed: Vec<String> = missing.iter().map(ToString::to_string).collect();
+                write!(f, "missing inputs: {}", listed.join("; "))
+            }
         }
     }
 }

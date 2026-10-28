@@ -243,6 +243,29 @@ The view is made once, when the graph is built, and annotations are evaluated th
 - if two functions annotate the same input with types that disagree, the build raises a `ValueError` naming the input
   and each function.
 
+## Pickling and process pools
+
+A driver pickles, and copies with `copy.deepcopy`, so you can hand it to a `concurrent.futures.ProcessPoolExecutor`
+or any other tool that pickles its arguments. It is pickled as the recipe it was built from: the names of its
+modules, whether it checks input types, and its cache store. Loading it imports those modules by name and builds the
+driver again, so its compiled plans don't travel; each process compiles its own.
+
+```python
+import pickle
+
+again = pickle.loads(pickle.dumps(driver))
+again.execute(["total"], inputs={"price": 2.0, "quantity": 3})
+# -> {'total': 6.0}
+```
+
+- Every module must be importable by its name, in the process that loads the driver. A module you made by hand, or
+  one that isn't in `sys.modules` under its own name, makes pickling raise a `TypeError` naming it.
+- A prepared plan pickles too. It's pickled as its driver and its request, and loading it prepares the same request
+  on the rebuilt driver. Plans pickled together with their driver, such as several tasks in one call, share one
+  rebuilt driver.
+- A `DiskCache` reopens the same directory, so worker processes share its entries with you. A `MemoryCache` comes
+  back empty, with the same bounds: its entries belong to the process that stored them.
+
 ## Exceptions from your functions
 
 When one of your functions raises, the run stops and the exception reaches you unchanged, with a note naming the

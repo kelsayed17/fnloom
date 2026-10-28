@@ -18,7 +18,7 @@ workload.
 - **DEFER**: to be decided later.
 
 **Evidence.** The behaviours below were first reported by an earlier investigation (2026-10-22) against Hamilton 1.90.0
-and partly confirmed by reading its source. Rows Q4, Q5, Q6, Q7, Q10, Q16, Q22, Q25 to Q48, Q50 and Q51 have
+and partly confirmed by reading its source. Rows Q4, Q5, Q6, Q7, Q10, Q16, Q22, Q25 to Q48 and Q50 to Q53 have
 differential tests in `tests/differential/test_deliberate_differences.py`, each marked `deliberate("<id>")`, that
 assert Hamilton's behaviour and fnloom's side by side; Q3 and Q23 are covered by fnloom-only tests
 (`tests/test_driver.py`, `tests/test_binding.py` and the executor's unit tests), and Q49, a KEEP row, by
@@ -75,6 +75,8 @@ it is relied on. Source line numbers are deliberately omitted.
 | Q49 | F6: a `recompute` run does not replace the stored value, so the next default run serves the value from before the recompute. | KEEP | The same value: a node's policy is part of its key, so `default` and `recompute` never share an entry (a `recompute` result is not stored at all), and a default run after a recompute serves the earlier default entries for the node and everything downstream, consistently, never a recompute result beside downstream entries keyed before it. A node that reads the outside world must stay `recompute` (purity is declared). Pinned by `test_a_policy_switch_never_mixes_key_spaces` in `tests/test_caching.py`. |
 | Q50 | F10, F11: `ignore` is set on the producer and drops it from every consumer's key, so a consumer hits after the producer's value changed; and the producer's result is still pickled, so a node producing a lock or a client fails the run with `TypeError`. | FIX | `@cache(behavior="disable")` on the producer never stores or versions its result; `@cache(ignore=("name",))` on a consumer leaves only that parameter out of that consumer's key, so it hits, while every other consumer still reads the producer. |
 | Q51 | F12: a truncated or corrupt stored result fails the run with the unpickling error. | FIX | Entries are written atomically, and any entry that cannot be read is a miss: it is removed with a `CacheWarning` and the node recomputes. |
+| Q52 | Something that is not a module, such as a function, passed to `Builder.with_modules` builds an empty graph, without error: the mistake surfaces at `execute` as an unknown output. | REFUSE | `build`, `Builder.with_modules` and the `Builder` constructor raise `TypeError: expected a module, got function 'f'`, naming the first item that is not a module (any `types.ModuleType` is one). |
+| Q53 | A module that contributes no node builds an empty part of the graph, without error: a package whose `__init__` only re-exports functions defined in its submodules, a module of private helpers, or a hand-built `types.ModuleType` whose functions' `__module__` names another module. The user finds out at `execute`, as an unknown output (Hamilton issue #1281). | REFUSE | Build raises one `ValueError` naming every such module and each function it holds with why it is not a node: `'f' is defined in 'pkg.impl'` (a re-export, a node of the module that defines it) or `'_g' is private`; a module with no functions at all says so. Building from no modules at all is still an empty driver. |
 
 ## Not yet decided
 
