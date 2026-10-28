@@ -100,7 +100,8 @@ event by position, so a new field never breaks a hook.
     - `outputs`: the requested outputs, each once, in request order.
     - `inputs` and `overrides`: the values given.
     - `nodes`: the nodes this run will report, in the order it reports them. That is the order they run in
-      ([Execution order](running.md#execution-order)), which never changes from one run to the next.
+      ([Execution order](running.md#execution-order)), which never changes from one run to the next. It's empty when a
+      value check fails, since no node runs.
 - **`NodeStart`**
     - `run_id`
     - `node`: the node's [`NodeView`](running.md#inspecting-a-graph), with its name, tags, type and function.

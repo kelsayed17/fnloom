@@ -399,7 +399,9 @@ class _HookedPlan(PreparedPlan):
 
     Chosen when the plan is compiled, so a driver with no hooks never runs this.
     A run checks its names first, which fires nothing, then fires `before_run`,
-    checks the values, runs, and fires `after_run` (decision 4).
+    raises a failed value check, runs, and fires `after_run` (decision 4). The
+    values are checked before `before_run`, which then lists no nodes when they
+    fail, since none will run; their error is raised after it.
     """
 
     def __init__(  # noqa: PLR0913  # the prepared plan's parts, and its hooks
@@ -433,17 +435,23 @@ class _HookedPlan(PreparedPlan):
             or given_overrides.keys() != self._override_names
         ):
             self._refuse_names(given_inputs, given_overrides)
+        # Worked out first, so `RunStart.nodes` is empty when the checks fail and
+        # no node will run (R5); raised after `before_run`, as Hamilton raises it.
+        mismatches: list[str] = []
+        if self._input_checks or self._override_checks:
+            mismatches = _mismatches(self._input_checks, given_inputs)
+            mismatches += _mismatches(self._override_checks, given_overrides)
         dispatch = _hooks.Dispatch(self._hooks, self._views, None)
         error: BaseException | None = None
         try:
             dispatch.start(
-                self._outputs, given_inputs, given_overrides, self._views.names
+                self._outputs,
+                given_inputs,
+                given_overrides,
+                () if mismatches else self._views.names,
             )
-            if self._input_checks or self._override_checks:
-                mismatches = _mismatches(self._input_checks, given_inputs)
-                mismatches += _mismatches(self._override_checks, given_overrides)
-                if mismatches:
-                    _raise_mismatches(mismatches)
+            if mismatches:
+                _raise_mismatches(mismatches)
             values = self._plan.run(given_inputs, given_overrides, dispatch.observers())
         except BaseException as caught:  # noqa: BLE001  # raised by `end`, after `after_run`
             error = caught

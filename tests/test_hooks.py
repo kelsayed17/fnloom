@@ -339,11 +339,16 @@ def test_before_run_precedes_the_value_checks() -> None:
         (False, missing.value, None),
         (False, mistyped.value, None),
     ]
+    # No node runs after a failed value check, so neither run lists any (R5).
     starts = hook.of(RunStart)
     assert [(s.outputs, dict(s.inputs), s.nodes) for s in starts] == [
         (("c",), {}, ()),
-        (("c",), {"x": "1"}, ("a", "b", "c")),
+        (("c",), {"x": "1"}, ()),
     ]
+    assert [e.nodes for e in ends] == [(), ()]
+    # The same request with good values lists the nodes it runs.
+    driver.execute(["c"], inputs={"x": 1})
+    assert hook.of(RunStart)[-1].nodes == ("a", "b", "c")
 
 
 def test_strict_overrides_are_checked_after_before_run() -> None:
@@ -636,6 +641,9 @@ def test_prepared_plan_runs_fire_the_hooks() -> None:
     with pytest.raises(ValueError, match="x: expected int, got str"):
         plan.run(inputs={"x": "1"})
     assert _stages(hook.log) == [("before_run", None), ("after_run", None)]
+    # A failed value check runs no node, so the run lists none (R5).
+    assert hook.of(RunStart)[-1].nodes == ()
+    assert hook.of(RunEnd)[-1].nodes == ()
 
 
 def test_a_driver_without_hooks_has_none() -> None:
