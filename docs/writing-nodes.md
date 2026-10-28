@@ -449,7 +449,7 @@ be called that way are refused when you build, each with a `ValueError` naming t
 | A positional-only parameter (`def f(a, /)`) | It cannot be passed by keyword. |
 | `*args` or `**kwargs` | Neither binds one named argument as a parameter. |
 | A missing parameter or return annotation | Every edge is typed where it is declared. |
-| `async def`, or a generator function | Calling one returns a coroutine or generator, not the node's value. |
+| A generator function, sync or async, and an `async def` given to `build()` | Calling one returns a generator or a coroutine, not the node's value. [`build_async()`](running.md#async) awaits an `async def`. |
 | A dependency cycle, including a function reading itself | A cycle has no order to run in; the error names the cycle. |
 
 Hamilton silently accepts the first, second and fourth, and overflows the stack on a cycle. See

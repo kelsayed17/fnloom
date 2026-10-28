@@ -178,6 +178,39 @@ What closed most of the gap:
   versions of what the node reads. The parameter names and `value()` constants that used to be framed into every key
   are hashed once, at build, into the static part, so a node reading one value hashes 32 bytes.
 
+## Async
+
+`AsyncDriver` against Hamilton 1.90.0's `async_driver.Builder`, whose result is a dict, on the `chain` and `layered`
+graphs of trivial nodes, once with every node an `async def` and once with every node a plain function. fnloom runs
+in both `sync_nodes` modes. Milliseconds, first / steady: a first run on a new driver, then the median of the 21 runs
+after it, each row the median over five fresh processes. fnloom runs a prepared plan; Hamilton, which has none, runs
+`execute`.
+
+| shape | n | nodes | Hamilton | fnloom, `thread` | fnloom, `inline` |
+| --- | ---: | --- | --- | --- | --- |
+| chain | 100 | async | 5.413 / 5.421 | 0.102 / 0.077 | 0.105 / 0.077 |
+| chain | 100 | sync | 5.335 / 5.434 | 3.928 / 3.428 | 0.082 / 0.055 |
+| chain | 1,000 | async | 54.7 / 53.9 | 0.824 / 0.780 | 0.833 / 0.790 |
+| chain | 1,000 | sync | 55.4 / 54.8 | 34.7 / 34.1 | 0.620 / 0.583 |
+| layered | 100 | async | 2.328 / 2.042 | 0.119 / 0.089 | 0.120 / 0.091 |
+| layered | 100 | sync | 2.286 / 2.043 | 3.149 / 2.317 | 0.098 / 0.068 |
+| layered | 1,000 | async | 22.9 / 22.2 | 0.994 / 0.936 | 0.990 / 0.932 |
+| layered | 1,000 | sync | 23.6 / 22.8 | 24.2 / 23.2 | 0.753 / 0.702 |
+
+Measured on the machine above, with CPython 3.14.8 and a release build, on 2026-10-28. fnloom runs a graph 22 to 98
+times faster than Hamilton wherever both run nodes on the loop: every `async` row, and the `inline` column. The
+generated `async def` nodes never suspend. fnloom starts each node's task eagerly, so a node that doesn't suspend
+finishes with no turn of the loop; Hamilton schedules a task for every node. A node that awaits real I/O pays for its
+suspensions on either.
+
+**`thread` is slower for cheap sync nodes, by design.** Each sync node is a trip through `asyncio.to_thread`: the call
+is queued to the default executor, a worker thread wakes to run it, and the loop wakes again for the result. That costs
+about 34 µs per node on the chain, where the nodes run one after another, and about 23 µs on the layered graph, where
+ten at a time are in flight. A trivial node costs well under 1 µs, so the trip is the whole cost, and a 1,000-node chain
+takes 34 ms. On the chain that's still faster than Hamilton; on the layered graph it's up to 13% slower. The thread is
+what keeps the loop free while a sync node runs (Q65), which Hamilton doesn't do, so the `thread` column isn't a
+like-for-like comparison. For a graph of cheap sync nodes, `sync_nodes="inline"` is, and it's the fastest column.
+
 ## Why fan-in is fast
 
 A node with `n` parameters is called with `n` keyword arguments. CPython binds a keyword to a parameter by identity
@@ -211,6 +244,16 @@ It prints 12 JSON lines (`shape`, `n`, `runtime`, `store`, `cold_ms`, `warm_ms`,
 `error`), one per shape, runtime and store (`none`, `memory` or `disk`). `warm_loads` is how many entries a warm fnloom
 run loads, counted on a separate, untimed driver. The graphs are written to files and imported, since Hamilton's cache
 versions a function by its source, and every answer is checked against the shape's closed form.
+
+The async runs have their own script too, also a fresh process per sample:
+
+```bash
+uv run python -m benches.async_ > async.jsonl
+```
+
+It prints 24 JSON lines (`shape`, `n`, `nodes`, `runtime`, `first_ms`, `run_ms`, `processes`, `error`), one per
+shape, kind of node (`async` or `sync`) and runtime (`hamilton`, `fnloom-thread` or `fnloom-inline`). Every answer
+is checked against the shape's closed form.
 
 ### What is timed
 

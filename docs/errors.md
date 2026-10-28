@@ -37,7 +37,10 @@ driver = fnloom.build(pricing)
 | A dependency cycle | `ValueError: dependency cycle: 'a' -> 'b' -> 'a'` |
 | A parameter or the return without an annotation | `ValueError: 'f': parameter 'a' has no type annotation` |
 | A positional-only, `*args` or `**kwargs` parameter | `ValueError: 'f': *args parameter 'a' is not supported` |
-| An `async def` or generator function | `ValueError: 'f': async function is not supported; nodes are called synchronously` |
+| An `async def` given to `build()` (use [`build_async()`](running.md#async)) | `ValueError: 'f': async function is not supported by build(), which calls nodes synchronously; build it with build_async()` |
+| A generator function, sync or async, given to either build | `ValueError: 'f': generator function is not supported; nodes are called synchronously` |
+| `build_async(sync_nodes=...)` with anything but `"thread"` or `"inline"` | `ValueError: sync_nodes must be 'inline' or 'thread', not 'loop'` |
+| `with_cache` and `build_async` together, which don't work together yet | `NotImplementedError: build_async() does not support with_cache yet; build without a cache, or use build()` |
 | An annotation naming something that does not exist at run time, such as an import under `TYPE_CHECKING` | `NameError: name 'Decimal' is not defined`, with a note naming the node and the parameter |
 | Functions annotating the same input with types neither of which feeds the other (`Base` and `Child` are fine: the input is `Child`) | `ValueError: inputs have conflicting types: 'a' is int in 'f', str in 'g'` |
 | A node whose return type a parameter it feeds does not accept, one line per such parameter, sorted (see [Type checks](running.md#type-checks)) | `ValueError: g.f requires int but f returns str` |
@@ -116,3 +119,11 @@ plan.run(inputs={"price": 1.0})
 Your function's own exception reaches you unchanged, with a note naming the node (see
 [Running a graph](running.md#exceptions-from-your-functions)). Lineage queries raise
 `ValueError: unknown nodes: ...` for a name that isn't in the graph.
+
+An `AsyncDriver` raises a failed node's exception the same way, after cancelling the nodes still running (see
+[Async](running.md#async)). On an `AsyncDriver`, a sync node that returns a coroutine or another awaitable is an
+error, never a value:
+
+```text
+TypeError: node 'f' is a sync function but returned coroutine, an awaitable; make it an async def, so the async driver awaits it
+```

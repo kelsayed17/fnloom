@@ -213,13 +213,32 @@ def _payload(
     return call, {}
 
 
-def _node_defs(
-    module: ModuleType, name: str, fn: Callable[..., object]
-) -> list[NodeDef]:
-    """One node for a plain function; one per row for a parameterized one."""
-    if (kind := _unsupported_function_kind(fn)) is not None:
+def _check_kind(name: str, fn: Callable[..., object], *, awaits: bool) -> None:
+    """`ValueError` when calling `fn` would not run its body to a value (Q32).
+
+    With `awaits`, an `async def` is accepted: the async driver awaits it.
+    """
+    kind = _unsupported_function_kind(fn)
+    if kind is None or (awaits and kind == "async function"):
+        return
+    if kind == "async function":
+        msg = (
+            f"{name!r}: async function is not supported by build(), which calls "
+            "nodes synchronously; build it with build_async()"
+        )
+    else:
         msg = f"{name!r}: {kind} is not supported; nodes are called synchronously"
-        raise ValueError(msg)
+    raise ValueError(msg)
+
+
+def _node_defs(
+    module: ModuleType, name: str, fn: Callable[..., object], *, awaits: bool
+) -> list[NodeDef]:
+    """One node for a plain function; one per row for a parameterized one.
+
+    With `awaits`, as `build_async` scans, an `async def` is a node too (Q32).
+    """
+    _check_kind(name, fn, awaits=awaits)
     annotations = annotationlib.get_annotations(
         fn, format=annotationlib.Format.FORWARDREF
     )
@@ -369,7 +388,10 @@ class Scanned(NamedTuple):
 
 
 def collect(
-    modules: Sequence[ModuleType], config: Mapping[str, object] = _NO_CONFIG
+    modules: Sequence[ModuleType],
+    config: Mapping[str, object] = _NO_CONFIG,
+    *,
+    awaits: bool = False,
 ) -> list[NodeDef]:
     """Returns the nodes of `modules`; `ValueError` on a malformed or duplicate one.
 
@@ -377,15 +399,19 @@ def collect(
     with no node is refused too, before duplicates, every such module in one
     `ValueError` naming each function it holds and why that is not a node (Q53).
 
-    `config` selects among `@config.when*` variants (see `scan`).
+    `config` selects among `@config.when*` variants (see `scan`), and `awaits`
+    accepts `async def` nodes, as `build_async` does.
 
     Annotations are read without being evaluated; `resolve` evaluates them.
     """
-    return scan(modules, config).nodes
+    return scan(modules, config, awaits=awaits).nodes
 
 
 def scan(
-    modules: Sequence[ModuleType], config: Mapping[str, object] = _NO_CONFIG
+    modules: Sequence[ModuleType],
+    config: Mapping[str, object] = _NO_CONFIG,
+    *,
+    awaits: bool = False,
 ) -> Scanned:
     """`collect`, with the reason each node that no variant gave is absent.
 
@@ -404,7 +430,7 @@ def scan(
     seen: dict[str, NodeDef] = {}
     clashes: list[tuple[str, str]] = []
     for module, name, fn in found:
-        for node in _node_defs(module, name, fn):
+        for node in _node_defs(module, name, fn, awaits=awaits):
             if node.name in seen:
                 clashes.append((node.name, _duplicate(seen[node.name], node)))
             else:

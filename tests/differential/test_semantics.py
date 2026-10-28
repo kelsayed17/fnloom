@@ -1,9 +1,10 @@
 """Behaviour fnloom keeps from Hamilton: same values or same exception class."""
 
+import asyncio
 import copy
 import inspect
 import pickle
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from hamilton import driver as hamilton_driver
@@ -34,7 +35,7 @@ from fnloom import _types
 from helpers import make_module
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Coroutine
 
 
 def pickle_round_trip(value: object) -> object:
@@ -675,3 +676,68 @@ def test_extract_columns_refuses_a_list_and_no_columns() -> None:
         extract_columns()
     with pytest.raises(ValueError, match="got no columns"):
         fnloom.extract_columns()
+
+
+# A graph mixing async and sync nodes, with an optional input.
+_ASYNC_GRAPH = """
+import asyncio
+
+
+async def doubled(x: int) -> int:
+    await asyncio.sleep(0)
+    return x * 2
+
+
+def plus_one(doubled: int) -> int:
+    return doubled + 1
+
+
+async def shifted(doubled: int, plus_one: int, offset: int = 0) -> int:
+    await asyncio.sleep(0)
+    return doubled * plus_one + offset
+
+
+def scaled(shifted: int, doubled: int) -> int:
+    return shifted - doubled
+"""
+# Hamilton's AsyncDriver warns on 3.14 from its own code (Q13).
+_HAMILTON_ASYNC_WARNING = (
+    "ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning"
+)
+
+
+@pytest.mark.filterwarnings(_HAMILTON_ASYNC_WARNING)
+def test_async_driver_computes_the_same_values() -> None:
+    """Hamilton's `AsyncDriver`, through its builder, and fnloom's agree on values."""
+    from hamilton import async_driver  # noqa: PLC0415  # only this test needs it
+
+    module = make_module("semantics_async", _ASYNC_GRAPH)
+    outputs = ["scaled", "shifted", "plus_one", "doubled"]
+    requests: list[tuple[dict[str, object], dict[str, object]]] = [
+        ({"x": 2}, {}),
+        ({"x": 2, "offset": 5}, {}),
+        ({}, {"doubled": 10}),
+        ({"x": 1}, {"plus_one": 0}),
+    ]
+
+    async def hamilton() -> list[dict[str, object]]:
+        # Typed as the sync builder's `build`, which this one makes a coroutine.
+        pending: object = async_driver.Builder().with_modules(module).build()
+        built = await cast("Coroutine[Any, Any, async_driver.AsyncDriver]", pending)
+        return [
+            await built.execute(outputs, inputs=inputs, overrides=overrides)
+            for inputs, overrides in requests
+        ]
+
+    async def runs(driver: fnloom.AsyncDriver) -> list[dict[str, object]]:
+        return [
+            await driver.execute(outputs, inputs=inputs, overrides=overrides)
+            for inputs, overrides in requests
+        ]
+
+    expected = asyncio.run(hamilton())
+    assert expected[0] == {"doubled": 4, "plus_one": 5, "scaled": 16, "shifted": 20}
+    for sync_nodes in ("thread", "inline"):
+        builder = fnloom.Builder().with_modules(module)
+        driver = builder.build_async(sync_nodes=sync_nodes)
+        assert asyncio.run(runs(driver)) == expected

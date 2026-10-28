@@ -287,3 +287,64 @@ broken.execute(["ratio"], inputs={"numerator": 1, "denominator": 0})
 ```
 
 Python prints the note, `in node 'ratio'`, under the traceback. It's also in the exception's `__notes__`.
+
+## Async
+
+`Builder.build_async()` builds an `AsyncDriver`, for a graph with `async def` nodes. Building is synchronous, like
+`build()`; only running awaits. `execute` is a coroutine, and returns the same dict as the sync driver, in the order
+you asked for:
+
+```python
+# file: rates.py
+import asyncio
+
+
+async def rate(currency: str) -> float:
+    """The exchange rate, as a remote service would return it."""
+    await asyncio.sleep(0)
+    return {"EUR": 1.0, "USD": 1.5}[currency]
+
+
+def converted(rate: float, amount: float) -> float:
+    """The amount in the currency."""
+    return amount * rate
+```
+
+```python
+import asyncio
+
+import rates
+
+async_driver = fnloom.Builder().with_modules(rates).build_async()
+asyncio.run(
+    async_driver.execute(
+        ["converted", "rate"], inputs={"currency": "USD", "amount": 10.0}
+    )
+)
+# -> {'converted': 15.0, 'rate': 1.5}
+```
+
+Everything else is the sync driver's: inputs, overrides, the type checks and their errors, lineage, `nodes` and
+`config`. `prepare` is synchronous too, and returns a plan whose `run` is a coroutine:
+
+```python
+async_plan = async_driver.prepare(
+    ["converted"], inputs={"currency": "EUR", "amount": 0.0}
+)
+asyncio.run(async_plan.run(inputs={"currency": "EUR", "amount": 4.0}))
+# -> {'converted': 4.0}
+```
+
+**How nodes run.** A node starts as soon as everything it reads is ready, so independent `async def` nodes await
+concurrently. A sync node runs in a worker thread, through `asyncio.to_thread`, so the event loop keeps running while
+it does. A thread costs tens of microseconds, which is more than a cheap node such as `converted`. For a graph of
+cheap sync nodes, `build_async(sync_nodes="inline")` runs them on the loop instead. The nodes `@extract_fields` and
+`@extract_columns` generate always run on the loop.
+
+**When a node fails,** the run cancels every node still running, waits for each `async def` node to stop, and raises
+the failed node's own exception, with the same note naming the node as the sync driver adds. There's no
+`ExceptionGroup`, so `except ZeroDivisionError` works as it does with `Driver`. A sync node in a thread can't be
+interrupted: the run doesn't wait for it, and drops its result when it comes.
+
+**Not yet:** `with_cache` and `build_async` together raise `NotImplementedError`. An async driver made by a builder
+pickles as that builder, as a `Driver` does.

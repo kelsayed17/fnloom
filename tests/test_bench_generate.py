@@ -5,6 +5,7 @@ import sys
 from typing import TYPE_CHECKING
 
 import pytest
+from benches import async_
 from benches.generate import (
     discard,
     generated,
@@ -134,3 +135,17 @@ def test_extract_shape_has_one_producer_and_n_consumers_in_both_spellings() -> N
         }
         names: list[str | Callable[..., object] | hamilton_driver.Variable] = [*outputs]
         assert built.execute(names, inputs=inputs) == expected
+
+
+@pytest.mark.parametrize("nodes", ["async", "sync"])
+@pytest.mark.parametrize("runtime", ["hamilton", "fnloom-thread", "fnloom-inline"])
+def test_async_benchmark_samples_every_runtime(
+    nodes: async_.Nodes, runtime: async_.Runtime
+) -> None:
+    """Each async benchmark sample runs its graph and checks the closed form."""
+    source = async_._source("layered", 20, nodes)  # noqa: SLF001  # the graph it times
+    assert ("async def " in source) == (nodes == "async")
+    taken = async_.sample("layered", 20, nodes, runtime)
+    assert taken.error is None
+    assert taken.first_ms is not None
+    assert taken.run_ms is not None

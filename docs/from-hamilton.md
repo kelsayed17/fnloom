@@ -84,7 +84,13 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | A dependency cycle | `RecursionError` when executed | `ValueError` naming it, at build (Q27) |
 | Execution order | Depends on the order of outputs and parameters | Topological, ties broken by name (Q26) |
 | `*args`, `**kwargs`, positional-only | Treated as inputs | `ValueError` at build (Q29) |
-| `async def` and generator functions | The coroutine or generator is the value | `ValueError` at build (Q32) |
+| `async def` and generator functions | The coroutine or generator is the value | `ValueError` at `build()`; `build_async()` awaits an `async def` (Q32) |
+| Building an async driver | `await async_driver.Builder()...build()` | `Builder().build_async()`, not awaited (Q12) |
+| An async driver's result | A DataFrame from `AsyncDriver(...)`; a dict, sorted by name, from its builder | The sync driver's dict, in request order (Q11) |
+| A sync node in an async driver | Runs on the event loop, which stops while it does | Runs in `asyncio.to_thread`, or on the loop with `sync_nodes="inline"` (Q65) |
+| A failing node in an async driver | Its siblings keep running after `execute` raises | They're cancelled; its own exception is raised once, noted with its name (Q66) |
+| Inputs to an async driver | Types unchecked; `NotImplementedError` or `KeyError` for a missing one | Checked as the sync driver checks them, with the same errors (Q67) |
+| Hamilton's `AsyncDriver` on Python 3.14 | `DeprecationWarning` on every node; breaks on 3.16 | No warning (Q13) |
 | A function passed where a module goes | An empty graph | `TypeError` (Q52) |
 | A module with no nodes, such as a package that only re-exports | Builds; its nodes are unknown at `execute` | `ValueError` at build, saying why each function was skipped (Q53) |
 | A row naming no parameter of its function | `InvalidDecoratorException` | `ValueError`, when decorating (Q33) |
@@ -130,10 +136,10 @@ value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](
 ## Not there yet
 
 fnloom is pre-alpha. The core, the native path, `@parameterize`, `@tag`, `@config`, `@extract_fields`,
-`@extract_columns`, graph inspection, type checks and result caching are done. These Hamilton features come next,
-roughly in this order:
+`@extract_columns`, graph inspection, type checks, result caching and the async driver are done. These Hamilton
+features come next, roughly in this order:
 
-1. **Adapters and lifecycle hooks**, result builders and async execution.
+1. **Adapters and lifecycle hooks**, and result builders.
 2. **Graph visualisation.**
 3. **Dynamic execution**, materializers, `@subdag`, `@check_output` and `@pipe`.
 

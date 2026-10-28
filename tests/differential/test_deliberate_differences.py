@@ -1,5 +1,6 @@
 """Each deliberate difference from Hamilton, asserted on both sides."""
 
+import asyncio
 import collections.abc
 import importlib.util
 import inspect
@@ -7,9 +8,12 @@ import pickle
 import sys
 import textwrap
 import types
-from typing import TYPE_CHECKING, Annotated, Any, TypedDict
+import warnings
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated, Any, TypedDict, cast
 
 import pytest
+from hamilton import async_driver as hamilton_async
 from hamilton import driver as hamilton_driver
 from hamilton import htypes
 from hamilton.function_modifiers.base import InvalidDecoratorException
@@ -42,8 +46,7 @@ from fnloom._types import type_matches, value_matches
 from helpers import make_module
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-    from pathlib import Path
+    from collections.abc import Callable, Coroutine
     from types import ModuleType
 
 
@@ -1795,3 +1798,259 @@ def test_q64_columns_are_checked_at_run() -> None:
         driver.execute(["a"])
     with pytest.raises(ValueError, match=r"no column 'zz'; it returned 'b', 'c'"):
         driver.execute(["zz"])
+
+
+_ASYNC = """
+import asyncio
+
+
+async def doubled(x: int) -> int:
+    await asyncio.sleep(0)
+    return x * 2
+
+
+def plus_one(doubled: int) -> int:
+    return doubled + 1
+
+
+async def total(plus_one: int, doubled: int) -> int:
+    return plus_one + doubled
+"""
+# Hamilton's AsyncDriver warns on 3.14 from its own code; Q13 asserts it.
+_HAMILTON_ASYNC_WARNING = (
+    "ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning"
+)
+
+
+async def _hamilton_async(module: ModuleType) -> hamilton_async.AsyncDriver:
+    """Hamilton's async driver through its builder, which gives a dict result."""
+    # Typed as the sync builder's `build`, which this one overrides with a coroutine.
+    pending: object = hamilton_async.Builder().with_modules(module).build()
+    return await cast("Coroutine[Any, Any, hamilton_async.AsyncDriver]", pending)
+
+
+@pytest.mark.deliberate("Q11")
+@pytest.mark.filterwarnings(_HAMILTON_ASYNC_WARNING)
+def test_q11_async_results_are_dicts_in_request_order() -> None:
+    """Hamilton gives a DataFrame, or a dict sorted by key; fnloom the sync dict."""
+    pd = pytest.importorskip("pandas")
+    module = make_module("differential_q11", _ASYNC)
+    request = ["total", "doubled"]
+
+    async def hamilton() -> tuple[object, object]:
+        built = await _hamilton_async(module)
+        direct = hamilton_async.AsyncDriver({}, module)
+        return (
+            await built.execute(request, inputs={"x": 3}),
+            await direct.execute(request, inputs={"x": 3}),
+        )
+
+    by_builder, by_constructor = asyncio.run(hamilton())
+    assert isinstance(by_builder, dict)
+    assert list(by_builder.items()) == [("doubled", 6), ("total", 13)]
+    assert isinstance(by_constructor, pd.DataFrame)
+    driver = fnloom.Builder().with_modules(module).build_async()
+    result = asyncio.run(driver.execute(request, inputs={"x": 3}))
+    assert type(result) is dict
+    assert list(result.items()) == [("total", 13), ("doubled", 6)]
+
+
+@pytest.mark.deliberate("Q12")
+def test_q12_building_is_synchronous() -> None:
+    """Hamilton's async `build` is a coroutine; fnloom's `build_async` the driver."""
+    module = make_module("differential_q12", _ASYNC)
+    pending = hamilton_async.Builder().with_modules(module).build()
+    assert inspect.iscoroutine(pending)
+    pending.close()
+    driver = fnloom.Builder().with_modules(module).build_async()
+    assert isinstance(driver, fnloom.AsyncDriver)
+    plan = driver.prepare(["total"], inputs={"x": 0})
+    assert isinstance(plan, fnloom.AsyncPreparedPlan)
+    assert asyncio.run(plan.run(inputs={"x": 1})) == {"total": 5}
+
+
+@pytest.mark.deliberate("Q13")
+def test_q13_the_deprecation_warning_is_hamiltons() -> None:
+    """On 3.14, Hamilton's AsyncDriver warns `DeprecationWarning`; fnloom's doesn't."""
+    module = make_module("differential_q13", _ASYNC)
+
+    async def hamilton() -> object:
+        return await (await _hamilton_async(module)).execute(["total"], inputs={"x": 1})
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert asyncio.run(hamilton()) == {"total": 5}
+    hamilton_warnings = {
+        (Path(w.filename).parent.name, Path(w.filename).name, str(w.message))
+        for w in caught
+        if issubclass(w.category, DeprecationWarning)
+    }
+    assert hamilton_warnings == {
+        (
+            "hamilton",
+            "async_driver.py",
+            (
+                "'asyncio.iscoroutinefunction' is deprecated and slated for removal "
+                "in Python 3.16; use inspect.iscoroutinefunction() instead"
+            ),
+        )
+    }
+    driver = fnloom.Builder().with_modules(module).build_async()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert asyncio.run(driver.execute(["total"], inputs={"x": 1})) == {"total": 5}
+    assert [w for w in caught if issubclass(w.category, DeprecationWarning)] == []
+
+
+_SLEEPER = """
+import asyncio
+import time
+
+LOG: list[str] = []
+
+
+def slow(x: int) -> int:
+    time.sleep(0.2)
+    LOG.append("slept")
+    return x
+
+
+async def ticker(x: int) -> int:
+    await asyncio.sleep(0.05)
+    LOG.append("tick")
+    return x
+"""
+
+
+@pytest.mark.deliberate("Q65")
+@pytest.mark.filterwarnings(_HAMILTON_ASYNC_WARNING)
+def test_q65_sync_nodes_run_off_the_loop() -> None:
+    """Hamilton's sync node stops the loop, so the ticker waits; fnloom's doesn't."""
+    request = ["slow", "ticker"]
+    hamilton_module = make_module("differential_q65_h", _SLEEPER)
+
+    async def hamilton() -> object:
+        built = await _hamilton_async(hamilton_module)
+        return await built.execute(request, inputs={"x": 1})
+
+    assert asyncio.run(hamilton()) == {"slow": 1, "ticker": 1}
+    assert hamilton_module.LOG == ["slept", "tick"]
+    for sync_nodes, order in (
+        ("thread", ["tick", "slept"]),
+        ("inline", ["slept", "tick"]),
+    ):
+        module = make_module(f"differential_q65_{sync_nodes}", _SLEEPER)
+        driver = (
+            fnloom.Builder().with_modules(module).build_async(sync_nodes=sync_nodes)
+        )
+        assert asyncio.run(driver.execute(request, inputs={"x": 1})) == {
+            "slow": 1,
+            "ticker": 1,
+        }
+        assert list(module.LOG) == order, sync_nodes
+
+
+_FAILING = """
+import asyncio
+
+LOG: list[str] = []
+FINISHED = asyncio.Event()
+
+
+async def boom(x: int) -> int:
+    await asyncio.sleep(0)
+    raise KeyError("boom")
+
+
+async def sibling(x: int) -> int:
+    try:
+        await asyncio.sleep(0.2)
+    except asyncio.CancelledError:
+        LOG.append("cancelled")
+        raise
+    LOG.append("finished")
+    FINISHED.set()
+    return x
+"""
+
+
+@pytest.mark.deliberate("Q66")
+@pytest.mark.filterwarnings(_HAMILTON_ASYNC_WARNING)
+def test_q66_a_failure_cancels_its_siblings() -> None:
+    """Hamilton leaves the sibling running after it raises; fnloom cancels it."""
+    request = ["sibling", "boom"]
+    hamilton_module = make_module("differential_q66_h", _FAILING)
+
+    async def hamilton() -> BaseException:
+        built = await _hamilton_async(hamilton_module)
+        with pytest.raises(KeyError) as info:
+            await built.execute(request, inputs={"x": 1})
+        assert hamilton_module.LOG == []
+        await asyncio.wait_for(hamilton_module.FINISHED.wait(), 10.0)
+        return info.value
+
+    hamilton_error = asyncio.run(hamilton())
+    assert getattr(hamilton_error, "__notes__", None) is None
+    assert hamilton_module.LOG == ["finished"]
+    module = make_module("differential_q66_f", _FAILING)
+    driver = fnloom.Builder().with_modules(module).build_async()
+
+    async def fnloom_run() -> BaseException:
+        with pytest.raises(KeyError) as info:
+            await driver.execute(request, inputs={"x": 1})
+        return info.value
+
+    error = asyncio.run(fnloom_run())
+    assert type(error) is type(hamilton_error)
+    assert error.args == hamilton_error.args == ("boom",)
+    assert error.__notes__ == ["in node 'boom'"]
+    assert module.LOG == ["cancelled"]
+
+
+_TYPED = """
+def typed(x: int) -> int:
+    return x
+"""
+
+
+@pytest.mark.deliberate("Q67")
+@pytest.mark.filterwarnings(_HAMILTON_ASYNC_WARNING)
+def test_q67_requests_are_checked_as_the_sync_driver_checks_them() -> None:
+    """Hamilton checks no type and raises other errors; fnloom raises the sync ones."""
+    module = make_module("differential_q67", _TYPED)
+    requests: list[tuple[list[str], dict[str, object]]] = [
+        (["typed"], {"x": "str"}),
+        (["typed"], {}),
+        (["x"], {}),
+    ]
+
+    async def hamilton() -> list[object]:
+        built = await _hamilton_async(module)
+        outcomes: list[object] = []
+        for request, inputs in requests:
+            try:
+                outcomes.append(await built.execute(request, inputs=inputs))
+            except (NotImplementedError, KeyError) as error:
+                outcomes.append((type(error).__name__, str(error)))
+        return outcomes
+
+    assert asyncio.run(hamilton()) == [
+        {"typed": "str"},
+        ("NotImplementedError", "x was expected to be passed in but was not."),
+        ("KeyError", "'x'"),
+    ]
+    sync = fnloom.build(module)
+    driver = fnloom.Builder().with_modules(module).build_async()
+    messages: list[str] = []
+    for request, inputs in requests:
+        with pytest.raises(ValueError) as sync_info:  # noqa: PT011  # compared below
+            sync.execute(request, inputs=inputs)
+        with pytest.raises(ValueError) as async_info:  # noqa: PT011  # compared below
+            asyncio.run(driver.execute(request, inputs=inputs))
+        assert str(async_info.value) == str(sync_info.value), request
+        messages.append(str(async_info.value))
+    assert messages == [
+        "x: expected int, got str",
+        "missing inputs: 'x' (needed by 'typed')",
+        "missing inputs: 'x' (requested as an output)",
+    ]

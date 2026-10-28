@@ -26,12 +26,21 @@ from fnloom._stores import (
     MemoryCache,
 )
 from fnloom._view import NodeView, Param
-from fnloom.driver import Builder, Driver, PreparedPlan, build
+from fnloom.driver import (
+    AsyncDriver,
+    AsyncPreparedPlan,
+    Builder,
+    Driver,
+    PreparedPlan,
+    build,
+)
 
 __version__ = _version("fnloom")
 
 __all__ = [
     "MISSING",
+    "AsyncDriver",
+    "AsyncPreparedPlan",
     "Builder",
     "CacheOutcome",
     "CachePolicy",
