@@ -255,7 +255,8 @@ is safe to share between threads, and between drivers in one process.
 
 - in memory, a hit costs at most 1 µs of overhead per node;
 - a fully cached run of a 200-node chain of trivial nodes costs at most about twice the same run uncached;
-- a cold run (all misses) costs at most 1.5 times an uncached run, with the memory store;
+- a cold run (all misses) costs at most 0.25 µs of overhead per node over an uncached run, with the memory store
+  (restated 2026-10-28 from "at most 1.5 times an uncached run"; see §13);
 - a requested output that hits loads one entry, whatever the size of the graph above it.
 
 ## 9. Hamilton's faults and what fixes them
@@ -347,8 +348,12 @@ Where the code departs from the sections above, each with its reason. The sectio
   result would never be read.
 - **The backward walk and `MemoryCache` were Python, not Rust** (§8), in 0.1.0. The Plan 4 follow-up (issue #10)
   moved both into the binding, as §8 placed them: a plain `MemoryCache` is walked and written with no Python call per
-  node, and any other store, a `MemoryCache` subclass included, takes the Python path. The cold-run target is still
-  missed, by less (2.2× and 1.9×, from 6.0× and 5.5×); see `docs/benchmarks.md`.
+  node, and any other store, a `MemoryCache` subclass included, takes the Python path. A cold run went from 6.0× and
+  5.5× an uncached one to 2.2× and 1.9×; see `docs/benchmarks.md`.
+- **The cold-run target is restated per node** (§8), at the maintainer's call, 2026-10-28: at most 0.25 µs of
+  overhead per node, not 1.5 times an uncached run. On trivial nodes a ratio cannot reach 1.5: one BLAKE3 block per
+  key, about 75 ns, is already half of an uncached trivial node, about 0.16 µs, and a weaker key would risk a wrong
+  hit. The overhead is per node, not per byte, so a fixed bound per node says what a user pays.
 - **The stores live in the private `fnloom._stores`**, used through `fnloom` (`fnloom.cache` is the decorator).
 - **`serializer=` is the pair's name**, a non-empty `str`; the pair itself is `dumps=` and `loads=`.
 - **Canonical forms are stricter than §5's list**: exact types (a subclass is refused unless registered), a time

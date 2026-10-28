@@ -149,14 +149,15 @@ The targets of the caching design (§8), with fnloom's figures:
 | --- | --- | --- | --- |
 | A memory hit costs at most 1 µs of overhead per node (warm run / n) | 0.10 µs | 0.08 µs | met |
 | A warm run costs at most about twice an uncached one (warm / uncached steady) | 0.67× | 0.43× | met |
-| A cold run costs at most 1.5 times an uncached one, with `MemoryCache` (cold / uncached first) | 2.24× | 1.86× | **missed** |
+| A cold run costs at most 0.25 µs of overhead per node, with `MemoryCache` ((cold − uncached first) / n) | 0.19 µs (2.24×) | 0.17 µs (1.86×) | met |
 | A requested output that hits loads one entry | 1 entry | 10 entries, one per output | met |
 
-**The cold target is missed, by less.** It was 5.99× and 5.45× on the same day before
-[#10](https://github.com/kelsayed17/fnloom/issues/10). A cold run now pays about 0.19 µs per node over an uncached
-one, where an uncached trivial node costs about 0.16 µs. Most of that is the key, one BLAKE3 compression per 64 bytes
-read, about 75 ns, which alone is half of a trivial node. The rest is a lookup and a store in the native memory store.
-The cost is per node, not per byte, so on nodes doing real work it is a fixed fraction of a microsecond each.
+**The cold target is now per node.** It was "at most 1.5 times an uncached run", and a cold run cost 5.99× and 5.45×
+on the same day before [#10](https://github.com/kelsayed17/fnloom/issues/10). A cold run now pays about 0.19 µs per
+node over an uncached one, where an uncached trivial node costs about 0.16 µs. Most of that is the key, one BLAKE3
+compression per 64 bytes read, about 75 ns, which alone is half of a trivial node, so no ratio near 1.5 is reachable
+on trivial nodes without a weaker key. The rest is a lookup and a store in the native memory store. The cost is per
+node, not per byte, so the design now bounds it per node: at most 0.25 µs.
 
 What closed most of the gap:
 

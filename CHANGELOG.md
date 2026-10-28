@@ -21,6 +21,7 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - A cold cached run is 2.7 to 2.9 times faster with `MemoryCache`, and a warm one 2.1 to 3.3 times faster: a plain
   `MemoryCache` keeps its entries in the native extension, which walks it and stores each result with no call into
   Python per node (issue #10). A subclass of `MemoryCache` is used through its methods, like any other store.
+  The caching design's cold-run target is restated as at most 0.25 µs of overhead per node, which it meets.
 - Cache keys are BLAKE3 keyed by each node's static part (schema `fnloom-cache-2`), so a node reading one value
   hashes one block. Entries written by 0.1.0 are misses, and are replaced as nodes run.
 

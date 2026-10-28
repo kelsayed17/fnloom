@@ -67,7 +67,7 @@ and the design's change log takes a row when the item is approved.
 
 | Item | Plan |
 |---|---|
-| A cold run with `MemoryCache` costs 5–6× an uncached run, against a target of 1.5× (issue #10) | Plan 4 follow-up: now 2.2× and 1.9×, with the walk and the memory store native. The target needs restating for trivial nodes: one BLAKE3 block costs half an uncached trivial node |
+| A cold run with `MemoryCache` costs 5–6× an uncached run, against a target of 1.5× (issue #10) | Done in the Plan 4 follow-up: 2.2× and 1.9×, with the walk and the memory store native, about 0.19 µs per node. The target is restated as at most 0.25 µs per node, since one BLAKE3 block costs half an uncached trivial node |
 
 ### Public helpers fnloom keeps private
 
