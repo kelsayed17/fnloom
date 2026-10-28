@@ -6,6 +6,7 @@ import inspect
 import pickle
 import sys
 import textwrap
+import types
 from typing import TYPE_CHECKING, Annotated, Any
 
 import pytest
@@ -838,3 +839,49 @@ def test_q51_a_truncated_entry_is_a_miss(tmp_path: Path) -> None:
     assert driver.explain_cache(["numbers"], inputs=inputs) == {
         "numbers": CacheOutcome("hit", None)
     }
+
+
+def _plain_function(a: int) -> int:
+    return a
+
+
+@pytest.mark.deliberate("Q52")
+def test_q52_a_function_passed_as_a_module() -> None:
+    """Hamilton builds nothing from a function, failing at execute; fnloom refuses."""
+    assert nodes_hamilton([_plain_function]) == Nodes([], None)  # ty: ignore[invalid-argument-type]  # the wrong type is the point
+    assert run_hamilton([_plain_function], ["_plain_function"], {"a": 1}) == Outcome(  # ty: ignore[invalid-argument-type]  # the wrong type is the point
+        None, "ValueError"
+    )
+    assert nodes_fnloom([_plain_function]) == Nodes(None, "TypeError")  # ty: ignore[invalid-argument-type]  # the wrong type is the point
+    with pytest.raises(TypeError, match=r"^expected a module, got function"):
+        fnloom.Builder().with_modules(_plain_function)  # ty: ignore[invalid-argument-type]  # the wrong type is the point
+
+
+@pytest.mark.deliberate("Q53")
+def test_q53_a_module_with_no_node() -> None:
+    """Hamilton builds a re-exporting module as empty; fnloom refuses it, saying why."""
+    make_module("q53_impl", "def total(a: int) -> int:\n    return a\n")
+    reexports = make_module("q53_reexports", "from q53_impl import total\n")
+    assert nodes_hamilton([reexports]) == Nodes([], None)
+    assert run_hamilton([reexports], ["total"], {"a": 1}) == Outcome(None, "ValueError")
+    assert nodes_fnloom([reexports]) == Nodes(None, "ValueError")
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^module 'q53_reexports' has no nodes: "
+            r"'total' is defined in 'q53_impl'$"
+        ),
+    ):
+        fnloom.build(reexports)
+
+
+@pytest.mark.deliberate("Q53")
+def test_q53_a_hand_built_module() -> None:
+    """A `ModuleType` holding another module's function is empty in Hamilton too."""
+    handmade = types.ModuleType("q53_handmade")
+    handmade.f = _plain_function  # ty: ignore[unresolved-attribute]  # a hand-built module
+    assert nodes_hamilton([handmade]) == Nodes([], None)
+    with pytest.raises(
+        ValueError, match=r"^module 'q53_handmade' has no nodes: 'f' is defined in "
+    ):
+        fnloom.build(handmade)

@@ -3,7 +3,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap};
 
-use crate::error::PlanError;
+use crate::error::{MissingInput, PlanError};
 use crate::graph::Graph;
 use crate::node::{Dependency, Node, NodeId, NodeKind};
 
@@ -134,7 +134,8 @@ impl<P> Graph<P> {
     /// # Errors
     ///
     /// `PlanError::MissingInputs` naming each input that is neither supplied nor overridden yet
-    /// is requested or read by a required edge of a computed node.
+    /// is requested or read by a required edge of a computed node, with whether it was
+    /// requested and the computed nodes that read it so.
     fn plan_actions(&self, resolved: &Resolved) -> Result<Vec<Option<Action>>, PlanError> {
         let mut actions = vec![None; self.nodes().len()];
         let mut missing = BTreeSet::new();
@@ -166,13 +167,46 @@ impl<P> Graph<P> {
         if missing.is_empty() {
             Ok(actions)
         } else {
-            Err(PlanError::MissingInputs(
-                missing
-                    .into_iter()
-                    .map(|id| self.node(id).name.clone())
-                    .collect(),
-            ))
+            Err(self.missing_inputs(&missing, &actions, resolved))
         }
+    }
+
+    /// The `MissingInputs` error for `missing`: each input with whether it was requested, and
+    /// the computed nodes of `actions` reading it by a required edge.
+    ///
+    /// Kept out of `plan_actions`, so the walk a successful plan takes stays as small as it
+    /// was. Ids follow name order, so the inputs and their consumers come out sorted by name.
+    #[cold]
+    #[inline(never)]
+    fn missing_inputs(
+        &self,
+        missing: &BTreeSet<NodeId>,
+        actions: &[Option<Action>],
+        resolved: &Resolved,
+    ) -> PlanError {
+        let consumers_of = |input: NodeId| {
+            self.nodes()
+                .iter()
+                .enumerate()
+                .filter(|&(index, node)| {
+                    actions[index] == Some(Action::Compute)
+                        && node.inputs.iter().any(|edge| {
+                            edge.node == input && edge.dependency == Dependency::Required
+                        })
+                })
+                .map(|(_, node)| node.name.clone())
+                .collect()
+        };
+        PlanError::MissingInputs(
+            missing
+                .iter()
+                .map(|&id| MissingInput {
+                    name: self.node(id).name.clone(),
+                    requested: resolved.outputs.contains(&id),
+                    consumers: consumers_of(id),
+                })
+                .collect(),
+        )
     }
 
     /// The action for a needed node; an input that is not supplied is taken to be optional.
@@ -293,6 +327,14 @@ mod tests {
         .unwrap()
     }
 
+    fn missing(name: &str, requested: bool, consumers: &[&str]) -> MissingInput {
+        MissingInput {
+            name: name.to_owned(),
+            requested,
+            consumers: strings(consumers),
+        }
+    }
+
     fn step_summary(graph: &Graph<()>, plan: &Plan) -> Vec<(String, Action)> {
         plan.steps()
             .iter()
@@ -349,7 +391,44 @@ mod tests {
     fn missing_required_input_lists_all_missing_sorted() {
         let g = Graph::build(vec![node("out", &["z", "m", "a"]), node("a", &["q"])]).unwrap();
         let err = g.prepare(&request(&["out"], &["m"], &[])).unwrap_err();
-        assert_eq!(err, PlanError::MissingInputs(strings(&["q", "z"])));
+        assert_eq!(
+            err,
+            PlanError::MissingInputs(vec![
+                missing("q", false, &["a"]),
+                missing("z", false, &["out"]),
+            ])
+        );
+    }
+
+    #[test]
+    fn a_missing_input_names_every_planned_consumer_sorted() {
+        let g = Graph::build(vec![
+            node("c", &["x"]),
+            node("a", &["x"]),
+            node("b", &["x"]),
+            node("unplanned", &["x"]),
+        ])
+        .unwrap();
+        let err = g.prepare(&request(&["c", "a", "x"], &[], &[])).unwrap_err();
+        assert_eq!(
+            err,
+            PlanError::MissingInputs(vec![missing("x", true, &["a", "c"])])
+        );
+        assert_eq!(
+            err.to_string(),
+            "missing inputs: 'x' (requested as an output, needed by 'a', 'c')"
+        );
+    }
+
+    #[test]
+    fn missing_inputs_are_listed_with_their_reasons() {
+        let g = Graph::build(vec![node("out", &["z", "q"])]).unwrap();
+        let err = g.prepare(&request(&["out", "q"], &[], &[])).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "missing inputs: 'q' (requested as an output, needed by 'out'); \
+             'z' (needed by 'out')"
+        );
     }
 
     #[test]
@@ -421,14 +500,21 @@ mod tests {
         .unwrap();
         assert!(g.prepare(&request(&["p"], &[], &[])).is_ok());
         let err = g.prepare(&request(&["p", "q"], &[], &[])).unwrap_err();
-        assert_eq!(err, PlanError::MissingInputs(strings(&["i"])));
+        assert_eq!(
+            err,
+            PlanError::MissingInputs(vec![missing("i", false, &["q"])])
+        );
     }
 
     #[test]
     fn requested_unsupplied_input_is_missing() {
         let g = diamond();
         let err = g.prepare(&request(&["x"], &[], &[])).unwrap_err();
-        assert_eq!(err, PlanError::MissingInputs(strings(&["x"])));
+        assert_eq!(err, PlanError::MissingInputs(vec![missing("x", true, &[])]));
+        assert_eq!(
+            err.to_string(),
+            "missing inputs: 'x' (requested as an output)"
+        );
         let plan = g.prepare(&request(&["x"], &["x"], &[])).unwrap();
         assert_eq!(
             step_summary(&g, &plan),

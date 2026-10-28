@@ -7,6 +7,34 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-10-28
+
+### Added
+
+- A `Driver` pickles, and copies with `copy.deepcopy`, so it can go to a process pool. It is pickled as the
+  `Builder` that built it: its modules by importable name, whether it checks input types, and its store. Loading it
+  builds it again. A `PreparedPlan` pickles as its driver and its request, and loading it prepares the request again.
+  A `Builder` pickles too. A `DiskCache` reopens its directory when loaded, and a `MemoryCache` arrives empty with the
+  same bounds. Pickling raises `TypeError` for a module that isn't importable by its name, and for a driver made from
+  a native graph. See [Pickling and process pools](https://kelsayed17.github.io/fnloom/running/#pickling-and-process-pools).
+
+### Changed
+
+- `build`, `Builder.with_modules` and `Builder` raise `TypeError: expected a module, got function 'f'` for anything
+  that isn't a module, instead of building nothing from it (Q52).
+- A module that contributes no node fails the build with a `ValueError`. It names the module and says why each of its
+  functions was skipped: defined in another module (a re-export) or private. Before, such a module was silently empty
+  and its nodes showed up as unknown outputs at `execute` (Q53).
+- The missing-input error names, for each input, the nodes that need it, and says when you asked for it as an output:
+  `missing inputs: 'quantity' (needed by 'total')`. In the Rust core, `PlanError::MissingInputs` holds a
+  `MissingInput` per input, with its consumers.
+
+### Fixed
+
+- `inspect.signature` works on every public callable. Before, 12 of them (`build`, `Builder`, `Driver`, `PreparedPlan`,
+  `NodeView`, `DiskCache` and methods such as `Driver.execute`) raised `NameError`, because their annotations named
+  types imported only for type checkers.
+
 ## [0.1.0] - 2026-10-27
 
 ### Added
@@ -95,5 +123,6 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - The type stub `fnloom/_core.pyi` matches the extension: `Graph`, `KeyPlan` and `ObserverBase` construct through `__new__`,
   and `Plan.run`'s `observers` defaults to `()` in its runtime signature too.
 
-[Unreleased]: https://github.com/kelsayed17/fnloom/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/kelsayed17/fnloom/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/kelsayed17/fnloom/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kelsayed17/fnloom/releases/tag/v0.1.0

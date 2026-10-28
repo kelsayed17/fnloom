@@ -6,7 +6,7 @@ members = ["crates/fnloom-core", "crates/fnloom-py"]
 edition = "2024"
 # The first release with edition 2024; CI's `msrv` job verifies it.
 rust-version = "1.85"
-version = "0.1.0"
+version = "0.1.1"
 license = "Apache-2.0"
 publish = false
 

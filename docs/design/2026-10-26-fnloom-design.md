@@ -208,6 +208,10 @@ are open.
 - **Hamilton baseline:** pinned at 1.90.0; newer releases are followed only by an explicit decision, with a
   report-only canary against the newest one.
 - **No go/no-go gate** (maintainer); instruction-count regression gate in CI (§3).
+- **Pickling (0.1.1):** a `Driver` pickles as the `Builder` that built it (module names, the type-check setting, the
+  store) and rebuilds on load; a `PreparedPlan` pickles as its driver and its request, and is prepared again on load,
+  rather than being refused, so a prepared request can go to a process pool. A `DiskCache` reopens its directory; a
+  `MemoryCache` arrives empty, its entries belonging to their process.
 
 ## 11. Downstream: the indicator library (not part of fnloom)
 

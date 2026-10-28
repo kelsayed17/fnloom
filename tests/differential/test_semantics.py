@@ -1,5 +1,10 @@
 """Behaviour fnloom keeps from Hamilton: same values or same exception class."""
 
+import copy
+import inspect
+import pickle
+from typing import TYPE_CHECKING
+
 import pytest
 from hamilton import driver as hamilton_driver
 from harness import (
@@ -26,6 +31,14 @@ from type_matrix import (
 import fnloom
 from fnloom import _types
 from helpers import make_module
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+
+def pickle_round_trip(value: object) -> object:
+    """`value` pickled and loaded again."""
+    return pickle.loads(pickle.dumps(value))  # noqa: S301  # our own pickle
 
 
 def test_chain() -> None:
@@ -388,3 +401,39 @@ def test_a_compiled_plain_class_check_agrees_with_value_matches() -> None:
                 declared,
                 value_id,
             )
+
+
+def test_public_signatures_resolve() -> None:
+    """`inspect.signature` resolves the driver API's annotations in both runtimes."""
+    for hamilton_callable, fnloom_callable in (
+        (hamilton_driver.Builder.with_modules, fnloom.Builder.with_modules),
+        (hamilton_driver.Builder.build, fnloom.Builder.build),
+        (hamilton_driver.Driver.execute, fnloom.Driver.execute),
+    ):
+        inspect.signature(hamilton_callable, eval_str=True)
+        inspect.signature(fnloom_callable, eval_str=True)
+
+
+@pytest.mark.parametrize("copier", [pickle_round_trip, copy.deepcopy])
+def test_a_driver_pickles_and_copies(copier: Callable[[object], object]) -> None:
+    """A pickled or deep-copied driver runs the same in both runtimes."""
+    module = load_fixture("chain")
+    hamilton = copier(hamilton_driver.Builder().with_modules(module).build())
+    again = copier(fnloom.build(module))
+    assert isinstance(hamilton, hamilton_driver.Driver)
+    assert isinstance(again, fnloom.Driver)
+    expected = {"c": 4}
+    assert hamilton.execute(["c"], inputs={"a": 1}) == expected
+    assert again.execute(["c"], inputs={"a": 1}) == expected
+
+
+def test_a_missing_input_names_the_nodes_needing_it() -> None:
+    """Both raise `ValueError` for a missing input, naming the node that reads it."""
+    module = load_fixture("chain")
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    with pytest.raises(
+        ValueError, match=r"Required input a not provided for nodes: \['b'\]"
+    ):
+        hamilton.execute(["c"])
+    with pytest.raises(ValueError, match=r"^missing inputs: 'a' \(needed by 'b'\)$"):
+        fnloom.build(module).execute(["c"])

@@ -29,13 +29,14 @@ import time
 import warnings
 import zlib
 from collections import OrderedDict
+
+# Imported for real: `DiskCache`'s signature annotates with it, and
+# `inspect.signature` resolves that at run time.
+from collections.abc import Callable
 from pathlib import Path
-from typing import TYPE_CHECKING, Final, Protocol, override
+from typing import Final, Protocol, override
 
 from fnloom._codeversion import distribution_version
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
 
 __all__ = [
     "MISSING",
@@ -104,6 +105,10 @@ class MemoryCache:
     A hit returns the stored object itself, not a copy, so a cached node must not
     mutate its arguments: a change would reach every later run that hits.
 
+    Pickled or copied, the store comes back empty, with the same bounds: its entries
+    belong to its process, so a driver sent to a worker process starts a cache of
+    its own there.
+
     Args:
         max_entries: The most entries held at once.
         max_bytes: The most bytes held at once, or None for no bound. Each value is
@@ -127,6 +132,11 @@ class MemoryCache:
         self._entries: OrderedDict[bytes, tuple[object, int]] = OrderedDict()
         self._bytes = 0
         self._lock = threading.Lock()
+
+    @override
+    def __reduce__(self) -> tuple[type[MemoryCache], tuple[int, int | None]]:
+        """An empty store with the same bounds; see the class."""
+        return MemoryCache, (self._max_entries, self._max_bytes)
 
     def get(self, key: bytes) -> object:
         """The value stored under `key`, the same object `put` stored, or `MISSING`."""
@@ -250,6 +260,10 @@ class DiskCache:
     The default serializer is pickle, and loading a pickle can run code: keep the
     directory as private as the code that uses it.
 
+    Pickled or copied, the store reopens the same directory with the same
+    arguments, so worker processes share its entries; `dumps` and `loads` must
+    pickle too, as the default pair does.
+
     Args:
         path: The directory, created on the first write.
         max_bytes: The most bytes of entries kept, or None for no bound. When the
@@ -304,6 +318,17 @@ class DiskCache:
         self._lock = threading.Lock()
         if max_bytes is not None:
             self._prune_quietly(max_bytes)
+
+    @override
+    def __reduce__(self) -> tuple[Callable[..., DiskCache], tuple[object, ...]]:
+        """The store reopened at its directory with its arguments; see the class."""
+        return _reopen, (
+            self._path,
+            self._max_bytes,
+            self._dumps,
+            self._loads,
+            self._serializer,
+        )
 
     @property
     def path(self) -> Path:
@@ -536,3 +561,16 @@ def _scan(directory: Path) -> list[os.DirEntry[str]]:
             return list(entries)
     except FileNotFoundError:
         return []
+
+
+def _reopen(
+    path: Path,
+    max_bytes: int | None,
+    dumps: Callable[[object], bytes],
+    loads: Callable[[bytes], object],
+    serializer: str,
+) -> DiskCache:
+    """Opens a `DiskCache` from the arguments a pickled one was made with."""
+    return DiskCache(
+        path, max_bytes=max_bytes, dumps=dumps, loads=loads, serializer=serializer
+    )

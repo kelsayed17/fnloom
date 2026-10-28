@@ -83,18 +83,18 @@ ledger collects Hamilton 1.90.0's bugs, quirks and design warts from four source
 research; and a probe of each item against both libraries on Python 3.14. Rows already in the register give their
 Q-number, and rows that need one get it when their plan starts.
 
-Status: **fixed** (in 0.1.0); **same** (fnloom behaves as Hamilton does, and should not); **worse** (fnloom is
+Status: **fixed** (in 0.1.0, or in the release named); **same** (fnloom behaves as Hamilton does, and should not); **worse** (fnloom is
 behind); **n/a** (fnloom has no such feature yet; the plan builds it without the problem).
 
 ### fnloom's own regressions, found while probing (fix first, in 0.1.x)
 
 | Problem | Status | Fix |
 |---|---|---|
-| `inspect.signature` raises `NameError` on 12 public callables (`build`, `Builder.with_modules`, `Driver.execute`, `PreparedPlan.run`, ...): their annotation names are imported only under `TYPE_CHECKING`. Hamilton's resolve | worse | Import annotation names at runtime; a test calls `inspect.signature` on every name in `__all__` and its public methods |
-| A `Driver` or `PreparedPlan` cannot be pickled or deep-copied (`cannot pickle 'fnloom._core.Graph'`). Hamilton's Driver pickles, which process pools, Ray and Dask rely on | worse | `__reduce__` that rebuilds from the modules' names and the builder's settings |
-| `build(fn)` given a function instead of a module returns an empty graph (Hamilton does the same) | same | `TypeError: expected a module` |
-| A module that contributes no node (a package that only re-exports, a hand-made `ModuleType`) is silently empty, found only at `execute` as "unknown outputs" (Hamilton #1281) | same | Refuse a module with no node at build, naming it, and say why its functions were skipped |
-| The missing-input error lists the names only; Hamilton also names the nodes that need each one | worse | Name each missing input's consumers |
+| `inspect.signature` raises `NameError` on 12 public callables (`build`, `Builder.with_modules`, `Driver.execute`, `PreparedPlan.run`, ...): their annotation names are imported only under `TYPE_CHECKING`. Hamilton's resolve | fixed (0.1.1) | Import annotation names at runtime; a test calls `inspect.signature` on every name in `__all__` and its public methods |
+| A `Driver` or `PreparedPlan` cannot be pickled or deep-copied (`cannot pickle 'fnloom._core.Graph'`). Hamilton's Driver pickles, which process pools, Ray and Dask rely on | fixed (0.1.1) | `__reduce__` that rebuilds from the modules' names and the builder's settings |
+| `build(fn)` given a function instead of a module returns an empty graph (Hamilton does the same) | fixed (0.1.1) | `TypeError: expected a module` (Q52) |
+| A module that contributes no node (a package that only re-exports, a hand-made `ModuleType`) is silently empty, found only at `execute` as "unknown outputs" (Hamilton #1281) | fixed (0.1.1) | Refuse a module with no node at build, naming it, and say why its functions were skipped (Q53) |
+| The missing-input error lists the names only; Hamilton also names the nodes that need each one | fixed (0.1.1) | Name each missing input's consumers |
 
 ### Wiring and inspection
 

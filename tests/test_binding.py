@@ -175,8 +175,8 @@ def test_unknown_output_raises_value_error_naming_it() -> None:
 
 
 def test_missing_input_raises_value_error_naming_it() -> None:
-    """Preparing without a required input raises `ValueError` naming it."""
-    with pytest.raises(ValueError, match="missing inputs: 'a'"):
+    """Preparing without a required input is a `ValueError` naming it and its reader."""
+    with pytest.raises(ValueError, match=r"^missing inputs: 'a' \(needed by 'b'\)$"):
         _chain().prepare(["c"], [], [])
 
 
