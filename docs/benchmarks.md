@@ -94,7 +94,18 @@ of three runs, ms, on 2026-10-28; default / deep / widening):
 The default stays within noise of the table above. Deep checks cost about 0.05 ms per 1,000 inputs here, each list
 holding one item: a `list[int]` of exactly the class checks its items in a loop of `isinstance` calls, made when the
 plan is prepared. The cost grows with the items read: a `list[float]` of 100,000 items takes about 2.6 ms, and a
-`list[tuple[int, str]]` of 100,000 about 31 ms. Widening costs nothing on a value that fits without it.
+`list[tuple[int, str]]` of 100,000 about 31 ms. An item that is itself a collection of collections, or meets a union or
+an alias, is walked question by question and costs more per item (over 200,000 items each):
+
+| deep check of | per item |
+| --- | ---: |
+| `list[list[int]]` | 2.3 µs |
+| `list[list[list[int]]]` | 5.3 µs |
+| `list[list[list[int]] \| None]` | 8.3 µs |
+| `type Tree = list[Tree] \| int` | 13.7 µs |
+
+A part the value shares, even on a cycle, is read once per check. Widening costs nothing on a value that fits without
+it.
 
 **Steady execution**, the cost of running a prepared plan again, is where fnloom differs most. With checks on, it's
 2.5 to 24 times faster than Hamilton's `execute` on the first four shapes wherever both finish, and 8.6 to 998 times

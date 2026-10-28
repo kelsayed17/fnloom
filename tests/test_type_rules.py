@@ -5,6 +5,7 @@ import collections.abc
 import copy
 import dataclasses
 import pickle
+import random
 import re
 import time
 import types
@@ -901,6 +902,108 @@ def test_an_error_shows_a_long_type_cut_short() -> None:
     shown = str(raised.value).split(": more than", 1)[0]
     assert shown.endswith("...")
     assert len(shown) == len("value too cyclic to check against ") + 200
+
+
+def test_cut_type_text_names_classes_and_writes_lists_piece_by_piece() -> None:
+    """Classes show as `int`, and a parameter list of a shared type ends quickly."""
+    shared: object = int
+    for _ in range(40):
+        shared = _subscripted(tuple, int, _subscripted(tuple, shared, shared))
+    shown = _types._shown(shared)  # noqa: SLF001  # the error's text
+    assert shown.startswith("tuple[int, tuple[tuple[int, ")
+    assert "<class" not in shown
+    assert shown.endswith("...")
+    assert len(shown) == 200  # noqa: PLR2004  # the cap
+    start = time.perf_counter()
+    called = _types._shown(_subscripted(collections.abc.Callable, [shared], int))  # noqa: SLF001  # the error's text
+    assert called.startswith("collections.abc.Callable[[tuple[int, ")
+    assert time.perf_counter() - start < 1
+    # A short type is its own `repr`.
+    short = collections.abc.Callable[[int, str], int]
+    assert _types._shown(short) == repr(short)  # noqa: SLF001  # the error's text
+
+
+def _back_linked(depth: int) -> list[object]:
+    """A root list holding a 2-way DAG whose leaves point back to the root."""
+    root: list[object] = []
+    part: object = root
+    for _ in range(depth):
+        part = [part, part]
+    root.append(part)
+    return root
+
+
+type _Graph = dict[str, list[_Graph]]
+
+
+def _graph(size: int, *, bad: bool = False) -> dict[str, object]:
+    """`size` nodes, each linking to node 0 and two others, by a fixed seed."""
+    rng = random.Random(size)  # noqa: S311  # a seeded shape, not cryptography
+    nodes: list[dict[str, object]] = [{"next": []} for _ in range(size)]
+    for node in nodes:
+        links = typing.cast("list[object]", node["next"])
+        links.extend([nodes[rng.randrange(size)], nodes[rng.randrange(size)], nodes[0]])
+    if bad:
+        typing.cast("list[object]", nodes[size // 2]["next"]).append("leaf")
+    return nodes[0]
+
+
+def test_shared_parts_on_a_cycle_are_read_once_per_part() -> None:
+    """Inside a cycle, a fitting answer is reused provisionally, so no path repeats."""
+    start = time.perf_counter()
+    assert fnloom.value_matches(_L, _back_linked(20), deep=True) is True
+    assert fnloom.value_matches(_Graph, _graph(80), deep=True) is True
+    assert time.perf_counter() - start < 1
+    assert fnloom.value_matches(_Graph, _graph(80, bad=True), deep=True) is False
+    bad_root = _back_linked(20)
+    bad_root.append("leaf")
+    assert fnloom.value_matches(_L, bad_root, deep=True) is False
+
+
+_FUZZ_TYPES: list[object] = [
+    _L,
+    _Pairs,
+    _Tree,
+    _Graph,
+    _Y,
+    _T,
+    tuple[_Y, object] | tuple[object, _T],
+    list[_L | int],
+    list[_Tree] | str,
+]
+
+
+def _fuzz_value(rng: random.Random) -> object:
+    """A small value of lists, dicts and tuples that may share parts and cycle."""
+    leaves: list[object] = [1, "s", None, 1.5]
+    built: list[object] = []
+    for _ in range(rng.randint(1, 10)):
+        kind = rng.random()
+        if kind < 0.5:  # noqa: PLR2004  # half lists
+            built.append([])
+        elif kind < 0.75:  # noqa: PLR2004  # a quarter dicts
+            built.append({})
+        else:
+            parts = [rng.choice([*leaves, *built]) for _ in range(rng.randint(1, 2))]
+            built.append(tuple(parts))
+    for node in built:
+        if isinstance(node, list):
+            node.extend(rng.choice([*leaves, *built]) for _ in range(rng.randint(0, 3)))
+        elif isinstance(node, dict):
+            node.update({f"k{k}": rng.choice([*leaves, *built]) for k in range(2)})
+    return rng.choice(built)
+
+
+def test_reused_answers_agree_with_a_walk_that_reuses_none() -> None:
+    """On random cyclic and shared values, reuse never changes an answer."""
+    rng = random.Random(10)  # noqa: S311  # a seeded fuzz, not cryptography
+    walk = _types._walk  # noqa: SLF001  # with and without reused answers
+    for _ in range(2_000):
+        value, declared = _fuzz_value(rng), rng.choice(_FUZZ_TYPES)
+        for rules in (_types.Rules(), _types.Rules(deep=True)):
+            expand = _types._expander(rules)  # noqa: SLF001  # the walk's own expansion
+            reused = walk(declared, value, expand)
+            assert reused is walk(declared, value, expand, reuse=False), declared
 
 
 type _FreshUnion[T] = _FreshUnion[Annotated[T, _Meta(1)]] | str  # ty: ignore[cyclic-type-alias-definition]  # the cycle is the point

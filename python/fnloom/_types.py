@@ -325,15 +325,19 @@ class _Frame:
 
     `descents` counts the steps into an item between the first question and this
     one, so a repeated question tells whether the value changed on the way.
-    `low` is the lowest stack index of an open question its answer has consulted
-    so far: its own index while it consulted none. `asked` is the question's type
-    and value, kept alive while their ids key the walk's answers.
+    `serial` numbers the frame in the order frames open, so open frames' serials
+    rise up the stack. `low` is the lowest serial of an open question its answer
+    has consulted so far: its own serial while it consulted none. `mark` is how
+    many provisional answers there were when it opened (see `_Answers`). `asked`
+    is the question's type and value, kept alive while their ids key answers.
     """
 
     group: _Group
     pair: _Pair
     descents: int
+    serial: int
     low: int
+    mark: int
     asked: tuple[object, object]
     next: int = 0
 
@@ -389,8 +393,16 @@ def _shown(declared: object) -> str:
         current = pending.pop()
         if isinstance(current, str):
             text = current
+        elif isinstance(current, list):
+            # A parameter list, as `Callable[[X], int]` has: written item by item.
+            items = typing.cast("list[object]", current)
+            text = "["
+            joined = [part for item in items for part in (", ", item)][1:]
+            pending.extend(reversed([*joined, "]"]))
         elif not (args := typing.get_args(current)) or isinstance(current, type):
-            text = repr(current)
+            # A class by its name, `int` or `collections.abc.Sized`, as `repr` of
+            # a generic writes it.
+            text = annotationlib.type_repr(current)
         else:
             joined: list[object] = []
             for arg in args:
@@ -539,30 +551,116 @@ class _Open:
             self._held[key] = held
 
 
-def _keep(
-    frame: _Frame,
-    answer: bool,  # noqa: FBT001  # the closed frame's answer
-    stack: list[_Frame],
-    answered: dict[_Pair, tuple[bool, object, object]],
-) -> None:
-    """Keeps a closed frame's answer, or hands its lowlink to the frame below.
+class _Answers:
+    """The answers one walk keeps, so a part a value shares is read once per check.
 
-    It is kept when it consulted nothing still open (its lowlink is not below
-    its own index, now `len(stack)`): it then holds whenever asked again. Only a
-    group that read items is kept: a union about the same value is cheap to ask
-    again, and keeping it too would double the memory.
+    An answer that consulted no question still open below its own (its lowlink,
+    `low`, is not below its own serial) is final: kept for the rest of the walk.
+
+    Inside a cycle, a `True` that rests on open questions fitting is provisional
+    (a greatest-fixpoint memo): reused while those questions stay open, and
+    `False` never is. When a question closes `False`, every provisional answer
+    made since it opened is dropped, as it may have assumed that question fits.
+    When the cycle's first question, whose lowlink is its own, closes `True`,
+    the provisional answers made since it opened become final. A provisional
+    answer's lowlink names a question that may since have closed; `_redirect`
+    maps a closed question's serial to its own lowlink, toward one still open.
+
+    Only a question that read items is kept: a union about the same value is
+    cheap to ask again, and keeping it too would double the memory. With
+    `enabled` false nothing is kept, the walk as it is with no answers reused.
     """
-    if frame.low < len(stack):
-        stack[-1].low = min(stack[-1].low, frame.low)
-    elif frame.group.descends:
-        answered[frame.pair] = (answer, *frame.asked)
+
+    __slots__ = (
+        "_enabled",
+        "_final",
+        "_held",
+        "_order",
+        "_provisional",
+        "_redirect",
+        "_serial",
+    )
+
+    def __init__(self, held: _Open, *, enabled: bool = True) -> None:
+        """Starts with no answers; keeps none unless `enabled`.
+
+        `held` counts the groups open about each value, as frames open and close.
+        """
+        self._held = held
+        self._enabled = enabled
+        self._final: dict[_Pair, tuple[bool, object, object]] = {}
+        self._provisional: dict[_Pair, tuple[int, object, object]] = {}
+        self._order: list[_Pair] = []
+        self._redirect: dict[int, int] = {}
+        self._serial = 0
+
+    def frame(
+        self, group: _Group, pair: _Pair, descents: int, asked: tuple[object, object]
+    ) -> _Frame:
+        """A frame opening for `pair`, numbered after every frame opened before it.
+
+        `TypeError` past the budget of groups open about one value (see `_Open`).
+        """
+        self._held.open(pair[1])
+        self._serial += 1
+        serial = self._serial
+        return _Frame(group, pair, descents, serial, serial, len(self._order), asked)
+
+    def get(self, pair: _Pair, asking: _Frame) -> bool | None:
+        """`pair`'s answer or `None`; `asking` takes what a provisional one rests on."""
+        if (final := self._final.get(pair)) is not None:
+            return final[0]
+        if (provisional := self._provisional.get(pair)) is not None:
+            asking.low = min(asking.low, self._open(provisional[0]))
+            return True
+        return None
+
+    def _open(self, serial: int) -> int:
+        """The open question `serial` rests on, following closed ones' lowlinks."""
+        chain: list[int] = []
+        while (lower := self._redirect.get(serial)) is not None:
+            chain.append(serial)
+            serial = lower
+        for passed in chain:
+            self._redirect[passed] = serial
+        return serial
+
+    def close(self, frame: _Frame, answer: bool, parent: _Frame) -> None:  # noqa: FBT001  # the frame's answer
+        """Keeps or drops answers as `frame` closes; `parent` takes its lowlink."""
+        self._held.close(frame.pair[1])
+        root = frame.low >= frame.serial
+        if not root:
+            parent.low = min(parent.low, frame.low)
+        if not self._enabled:
+            return
+        kept = frame.group.descends
+        if not answer:
+            for pair in self._order[frame.mark :]:
+                del self._provisional[pair]
+            del self._order[frame.mark :]
+            if root and kept:
+                self._final[frame.pair] = (False, *frame.asked)
+        elif root:
+            for pair in self._order[frame.mark :]:
+                _, *asked = self._provisional.pop(pair)
+                self._final[pair] = (True, asked[0], asked[1])
+            del self._order[frame.mark :]
+            if kept:
+                self._final[frame.pair] = (True, *frame.asked)
+        else:
+            self._redirect[frame.serial] = frame.low
+            if kept:
+                self._provisional[frame.pair] = (frame.low, *frame.asked)
+                self._order.append(frame.pair)
 
 
-def _walk(  # noqa: C901  # one loop, its branches the walk's states
+def _walk(  # noqa: C901, PLR0912  # one loop, its branches the walk's states
     declared: object,
     value: object,
     expand: _Expand = _expand,
     budget: int = WALK_BUDGET,
+    *,
+    reuse: bool = True,
 ) -> bool:
     """Whether `value` fits `declared`, by the rules of `expand`, with no recursion.
 
@@ -581,11 +679,9 @@ def _walk(  # noqa: C901  # one loop, its branches the walk's states
       recursive alias never ends in one.
 
     A question that read items, answered once, is not asked again in the same
-    walk, so a value that shares its parts (`l = [l2, l2]`, nested) is read once
-    per part, not once per path. An answer is kept only when it consulted no
-    question still open below its own (the lowest such index, its "lowlink", is
-    not below it): one that assumed an open question fits is never reused once
-    that question is closed.
+    walk, so a value that shares its parts (`l = [l2, l2]`, nested), on a cycle
+    or not, is read once per part, not once per path: see `_Answers`, which
+    `reuse` false turns off, to compare against.
 
     Past `budget` groups open about one value (see `WALK_BUDGET`), a cycle no key
     can see, it raises `TypeError` naming the type. A value that does not fit
@@ -596,11 +692,11 @@ def _walk(  # noqa: C901  # one loop, its branches the walk's states
         if not answer and type(declared) is Unresolved:
             raise UnresolvedError(declared)
         return answer
-    stack = [_Frame(answer, _pair(declared, value), 0, 0, (declared, value))]
-    # Each open question's descents and stack index.
+    stack = [_Frame(answer, _pair(declared, value), 0, 0, 0, 0, (declared, value))]
+    # Each open question's descents and serial.
     open_pairs = {stack[0].pair: (0, 0)}
-    # Each closed question's answer, with its type and value kept alive.
-    answered: dict[_Pair, tuple[bool, object, object]] = {}
+    # Made when a second group opens: a walk of one group reuses nothing.
+    answers: _Answers | None = None
     held = _Open(declared, budget)
     held.open(stack[0].pair[1])
     finished: bool | None = None
@@ -623,8 +719,8 @@ def _walk(  # noqa: C901  # one loop, its branches the walk's states
                 frame.low = min(frame.low, before[1])
                 finished = descents > before[0] and type(item) is not str
                 continue
-            if (known := answered.get(pair)) is not None:
-                finished = known[0]
+            if answers is not None and (known := answers.get(pair, frame)) is not None:
+                finished = known
                 continue
             expanded = expand(question, item)
             if isinstance(expanded, bool):
@@ -632,19 +728,19 @@ def _walk(  # noqa: C901  # one loop, its branches the walk's states
                     unresolved = question
                 finished = expanded
                 continue
-            held.open(pair[1])
-            open_pairs[pair] = (descents, len(stack))
-            stack.append(_Frame(expanded, pair, descents, len(stack), (question, item)))
+            if answers is None:
+                answers = _Answers(held, enabled=reuse)
+            stack.append(answers.frame(expanded, pair, descents, (question, item)))
+            open_pairs[pair] = (descents, stack[-1].serial)
             finished = None
             continue
         stack.pop()
         del open_pairs[frame.pair]
-        held.close(frame.pair[1])
         if not stack:
             if not answer and unresolved is not None:
                 raise UnresolvedError(unresolved)
             return answer
-        _keep(frame, answer, stack, answered)
+        typing.cast("_Answers", answers).close(frame, answer, stack[-1])
         finished = answer
 
 
