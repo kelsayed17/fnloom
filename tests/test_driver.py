@@ -359,6 +359,7 @@ def test_public_api_is_exported() -> None:
         "Value",
         "build",
         "cache",
+        "config",
         "fingerprint",
         "parameterize",
         "register_fingerprint",
