@@ -1,11 +1,15 @@
 """Times cached runs of fnloom and Hamilton; prints one JSON object per row.
 
+`fnloom-async` is fnloom's `AsyncDriver` with `sync_nodes="inline"`, timed on the
+loop. Hamilton's async driver has no row: with a cache, it fails to build (Q68).
+
 Run it as `uv run python -m benches.cache`. Every sample is a fresh process, so no
 run inherits another's warm caches, interned strings or imported modules; a row is
 the median over its processes. It prints to stdout on purpose: the rows are the
 output, so redirect them to a file.
 """
 
+import asyncio
 import importlib.util
 import json
 import os
@@ -32,7 +36,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Mapping, Sequence
     from types import ModuleType
 
-type Runtime = Literal["fnloom", "hamilton"]
+type Runtime = Literal["fnloom", "fnloom-async", "hamilton"]
 type Store = Literal["none", "memory", "disk"]
 
 CASES: tuple[tuple[Shape, int], ...] = (("chain", 200), ("layered", 1000))
@@ -97,7 +101,8 @@ def _file_module(shape: Shape, n: int, runtime: Runtime) -> Generator[ModuleType
     name = f"bench_cache_{shape}_{n}"
     with tempfile.TemporaryDirectory() as directory:
         path = Path(directory) / f"{name}.py"
-        path.write_text(module_source(shape, n, runtime), encoding="utf-8")
+        spelling = "hamilton" if runtime == "hamilton" else "fnloom"
+        path.write_text(module_source(shape, n, spelling), encoding="utf-8")
         spec = importlib.util.spec_from_file_location(name, path)
         if spec is None or spec.loader is None:
             msg = f"cannot import {path}"
@@ -154,6 +159,31 @@ def _fnloom_runs(
         builder = builder.with_cache(cache)
     prepared = builder.build().prepare(outputs, inputs=inputs)
     return lambda: prepared.run(inputs=inputs)
+
+
+async def _fnloom_async_times(
+    module: ModuleType,
+    outputs: Sequence[str],
+    inputs: Mapping[str, object],
+    store: Store,
+    directory: Path,
+) -> tuple[Mapping[str, object], float, list[float]]:
+    """A prepared async plan's cold run and warm runs, in ms, timed on the loop.
+
+    A new driver with an empty store, its sync nodes run inline; the last result.
+    """
+    builder = fnloom.Builder().with_modules(module)
+    cache = _fnloom_store(store, directory)
+    if cache is not None:
+        builder = builder.with_cache(cache)
+    plan = builder.build_async(sync_nodes="inline").prepare(outputs, inputs=inputs)
+    times: list[float] = []
+    result: Mapping[str, object] = {}
+    for _ in range(1 + WARM_RUNS):
+        start = time.perf_counter_ns()
+        result = await plan.run(inputs=inputs)
+        times.append((time.perf_counter_ns() - start) / NS_PER_MS)
+    return result, times[0], times[1:]
 
 
 def _hamilton_runs(
@@ -221,12 +251,21 @@ def sample(shape: Shape, n: int, runtime: Runtime, store: Store) -> Sample:
         try:
             for _ in range(REPEATS):
                 with tempfile.TemporaryDirectory() as directory:
-                    run = make_runs(module, outputs, inputs, store, Path(directory))
-                    result, elapsed = _timed(run)
-                    cold.append(elapsed)
-                    for _ in range(WARM_RUNS):
+                    if runtime == "fnloom-async":
+                        result, elapsed, warm_times = asyncio.run(
+                            _fnloom_async_times(
+                                module, outputs, inputs, store, Path(directory)
+                            )
+                        )
+                        cold.append(elapsed)
+                        warm.extend(warm_times)
+                    else:
+                        run = make_runs(module, outputs, inputs, store, Path(directory))
                         result, elapsed = _timed(run)
-                        warm.append(elapsed)
+                        cold.append(elapsed)
+                        for _ in range(WARM_RUNS):
+                            result, elapsed = _timed(run)
+                            warm.append(elapsed)
                     _check_answer(
                         result, expected, f"{shape} n={n}: {runtime} ({store})"
                     )

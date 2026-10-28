@@ -64,6 +64,31 @@ A key covers a node's code as well as its inputs, so an edit to the function, to
 it reads misses too. The code is read when the driver is built, never per run: **rebuild the driver after editing
 code** ([Code versions](#code-versions)).
 
+### On the async driver
+
+`with_cache` works the same way with `build_async()` (Q68). The keys, stores, [policies](#policies) and
+`explain_cache` are the sync driver's, so the two drivers share what a store holds:
+
+```python
+import asyncio
+
+store = fnloom.MemoryCache()
+builder = fnloom.Builder().with_modules(quotes).with_cache(store)
+quote = {"bid": 98.0, "ask": 102.0}
+asyncio.run(builder.build_async().execute(["relative_spread"], inputs=quote))
+# -> {'relative_spread': 0.04}
+outcomes = builder.build().explain_cache(["relative_spread"], inputs=quote)
+{name: outcome.status for name, outcome in outcomes.items()}
+# -> {"mid": "hit", "relative_spread": "hit", "spread": "hit"}
+```
+
+Each node is stored as it succeeds. A node that fails, or that a failing node cancels, stores nothing, so the next run
+loads what succeeded and runs the rest. A `recompute` node that something reads runs first in every run, and an
+`async def` one is awaited. `explain_cache` is synchronous on `AsyncDriver` too, since it runs nothing.
+
+Store calls run on the event loop's thread. A `MemoryCache` costs next to nothing there. A `DiskCache` reads and
+writes files, which stops the loop while it does, as an inline sync node would.
+
 ## The purity contract
 
 A hit returns a stored value in place of running the node, so the cache is only right for a node whose result depends
@@ -136,6 +161,7 @@ A node changes how it is cached with `@cache`, which records the policy and read
 | `@cache()`, or no decorator | on a miss | yes | its key |
 | `@cache(behavior="recompute")` | always | no | the fingerprint of its result |
 | `@cache(behavior="disable")` | always | never | nothing: they cannot be cached either, unless they `ignore` it |
+| A field or column node of `@extract_fields` or `@extract_columns` | whenever it's needed, and its type check with it | never | its key: the producer's, with the field or column, its declared type and its fill |
 
 **`recompute`** is for a node that reads the outside world, as above. Its result is never stored, since the node
 always runs and nothing would read it back. Its result must be fingerprintable ([Fingerprints](#fingerprints)), or
@@ -383,7 +409,7 @@ same way, runs nothing, and returns every computed node of the plan, by name, wi
 | `status` | Means | `reason` |
 | --- | --- | --- |
 | `hit` | the store holds the node's key | `None` |
-| `miss` | it does not, so a run runs and stores the node | `None`, or `"policy recompute"` for a `recompute` node, which always runs and is never stored |
+| `miss` | it does not, so a run runs and stores the node | `None`, or `"policy recompute"` for a `recompute` node, which always runs and is never stored, or `"extracted field: runs whenever needed; never served from the store"` for a field or column node of `@extract_fields` or `@extract_columns` |
 | `uncacheable` | the node has no key: it always runs and is never stored | why, for example the global (`"global 'WEIGHTS' of 'f' is a dict, ..."`), the value path (`"levels[0]: Level"`), the policy (`"policy disable"`), a source (`"reads uncacheable 'x'"`) or a failing fingerprint function (`"cannot fingerprint 'x' for the cache: ..."`) |
 | `unknown` | the key depends on a `recompute` node's result, which only a run knows | for example `"downstream of recompute node 'x'"`, or `"no key"` |
 

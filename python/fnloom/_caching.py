@@ -7,7 +7,10 @@ plan's `recompute` nodes, in a nested run, then computes every key, walks back f
 the outputs to the first nodes
 the store holds, and runs the plan with those as overrides, so the core prunes their
 upstream. Each `default` node that runs is stored under its key as it succeeds;
-nothing else is ever looked up, so nothing else is stored. `explain`
+nothing else is ever looked up, so nothing else is stored. A field or column
+node of `@extract_fields` or `@extract_columns` is keyed, so what reads it chains
+from its key, but is never looked up or stored: it runs whenever it is needed,
+and its check with it, and is never served from the store. `explain`
 reports what a run would do with each computed node, running nothing.
 
 The cache never fails a run: a store that raises is a miss or a skipped write,
@@ -15,13 +18,15 @@ reported with one `CacheWarning` per node per run. A node's own exception fails 
 run as without the cache, and nothing is stored for that node.
 """
 
+import functools
 import threading
 import warnings
 from collections import abc
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
 
-from fnloom import _core
+from fnloom import _core, _extract
 from fnloom._codeversion import UncacheableError, code_version
 from fnloom._decorators import CacheBehavior, CachePolicy, Source, decorations
 from fnloom._fingerprint import fingerprint, forget_class_versions
@@ -29,7 +34,7 @@ from fnloom._scan import core_inputs
 from fnloom._stores import MISSING, CacheStore, CacheWarning, Format, MemoryCache
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
 
     from fnloom._scan import NodeDef
 
@@ -55,9 +60,12 @@ class CacheOutcome(NamedTuple):
         status: `"hit"`: the store holds the node's key. `"miss"`: it does not, so
             the node runs and is stored; a `recompute` node is always one, with the
             reason `"policy recompute"`, and is never stored. `"uncacheable"`: the
-            node has no key, so it always runs and is never stored. `"unknown"`:
-            the key depends on the result of a `recompute` node, which only a run
-            knows.
+            node has no key, so it always runs and is never stored. An
+            `@extract_*` field or column node is always a miss, with the reason
+            `"extracted field: runs whenever needed; never served from the store"`:
+            it is keyed but never stored, so its check runs whenever it runs.
+            `"unknown"`: the key depends on the result of a `recompute` node,
+            which only a run knows.
         reason: Why a node is uncacheable or unknown, or is a `recompute` miss;
             `None` for a plain hit or miss.
     """
@@ -66,8 +74,17 @@ class CacheOutcome(NamedTuple):
     reason: str | None
 
 
+# A run's keys on the binding's walk, which keeps them itself.
+_EMPTY_KEYS: dict[str, bytes | None] = {}
+_NO_KEYS: Mapping[str, bytes | None] = MappingProxyType(_EMPTY_KEYS)
+
 # The outcome of a `recompute` node with a key, or one that only a run would know.
 _RECOMPUTE = CacheOutcome("miss", "policy recompute")
+
+# The outcome of an extracted field with a key: run when needed, never stored.
+_EXTRACTED = CacheOutcome(
+    "miss", "extracted field: runs whenever needed; never served from the store"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,12 +98,15 @@ class NodeKey:
         reason: Why `static` is `None`, else `None`.
         behavior: The node's cache behavior.
         params: The key parameters, in declaration order, the ignored ones left out.
+        stored: Whether a `default` node is looked up and stored; False for an
+            extracted field, which is keyed but never served from the store.
     """
 
     static: bytes | None
     reason: str | None
     behavior: CacheBehavior
     params: tuple[KeyParam, ...]
+    stored: bool = True
 
 
 def node_keys(nodes: Sequence[NodeDef]) -> dict[str, NodeKey]:
@@ -99,6 +119,8 @@ def node_keys(nodes: Sequence[NodeDef]) -> dict[str, NodeKey]:
     keys: dict[str, NodeKey] = {}
     for node in nodes:
         policy = decorations(node.origin).cache or _DEFAULT_POLICY
+        if _extract.is_generated(node):
+            policy = _field_policy(policy)
         code: bytes | UncacheableError
         if policy.behavior == "disable":
             # Never keyed, so its code is never read.
@@ -125,6 +147,51 @@ def node_keys(nodes: Sequence[NodeDef]) -> dict[str, NodeKey]:
     return keys
 
 
+def _field_policy(producer: CachePolicy) -> CachePolicy:
+    """An extracted field's policy: keyed like its producer, never stored.
+
+    `disable` carries over; `recompute`, `ignore` and the format do not, since a
+    field runs whenever it is needed and is never stored. A pinned `version`
+    carries over.
+    """
+    behavior: CacheBehavior = "disable" if producer.behavior == "disable" else "default"
+    return CachePolicy(behavior, frozenset(), producer.version)
+
+
+def _extraction_parts(node: NodeDef) -> tuple[list[bytes], str | None]:
+    """An extracted field's or column's own key parts, or why it has no key.
+
+    Which decorator made it, its field or column, its declared type's `repr` and
+    its fill's fingerprint, or a marker for no fill: a rebuild changing any of
+    them changes the key of what reads it.
+    """
+    payload = _extract.extractor(node)
+    if payload is None:
+        return [], None
+    noun = payload.noun
+    parts = [
+        b"extract",
+        f"{noun}s".encode(),
+        payload.field.encode(),
+        repr(payload.declared).encode(),
+    ]
+    if payload.fill is _extract.MISSING_FILL:
+        return [*parts, b"no fill", b""], None
+    try:
+        return [*parts, b"fill", fingerprint(payload.fill)], None
+    except _core.UnfingerprintableError as error:
+        return parts, f"fill_with of {noun} {payload.field!r}: {error}"
+    except Exception as error:  # noqa: BLE001  # a failing fingerprint: uncacheable
+        reason = (
+            f"cannot fingerprint fill_with of {noun} {payload.field!r} of node "
+            f"{node.name!r}: {error!r}"
+        )
+        # Up: `_extraction_parts`, `_node_key`, `node_keys`, `Cache.of`,
+        # `Builder.build`, its caller.
+        _warn_build(reason, stacklevel=7)
+        return parts, reason
+
+
 def _node_key(
     node: NodeDef, policy: CachePolicy, code: bytes | UncacheableError
 ) -> NodeKey:
@@ -149,6 +216,8 @@ def _node_key(
             # Up: `_node_key`, `node_keys`, `Cache.of`, `Builder.build`, its caller.
             _warn_build(reason, stacklevel=6)
         params.append((param.name, None, version))
+    extraction, unkeyed = _extraction_parts(node)
+    reason = reason or unkeyed
     static = None
     if policy.behavior == "disable":
         reason = "policy disable"
@@ -171,9 +240,11 @@ def _node_key(
                 code,
                 policy.behavior.encode(),
                 *framed,
+                *extraction,
             ]
         )
-    return NodeKey(static, reason, policy.behavior, tuple(params))
+    stored = not extraction
+    return NodeKey(static, reason, policy.behavior, tuple(params), stored)
 
 
 def _formats(store: CacheStore, nodes: Sequence[NodeDef]) -> dict[str, Format]:
@@ -187,7 +258,8 @@ def _formats(store: CacheStore, nodes: Sequence[NodeDef]) -> dict[str, Format]:
     formats: dict[str, Format] = {}
     problems: list[str] = []
     for node in nodes:
-        policy = decorations(node.origin).cache
+        # A field is never stored, so its producer's format does not apply.
+        policy = None if _extract.is_generated(node) else decorations(node.origin).cache
         wanted = None if policy is None else policy.format
         if wanted is None or isinstance(store, MemoryCache):
             continue
@@ -258,6 +330,32 @@ class Cache:
         return cls(store, node_keys(nodes), sources, _formats(store, nodes))
 
 
+@dataclass(frozen=True, slots=True)
+class Begun:
+    """A cached run, begun: what `CacheRun.begin` found, for the run and `finish`.
+
+    Attributes:
+        plan: The core plan to run: the request's, with the hits as overrides.
+        overrides: The run's overrides and the hits, by name.
+        hits: The values loaded from the store or computed by the pre-run, by name.
+        keys: Each computed node's key, by name; empty on the binding's walk,
+            which keeps them in `pending`.
+        pending: On the binding's walk, the keys it stores as the core run calls
+            it; `None` when `finish` stores each value instead.
+        warned: The nodes this run has already warned about.
+        values: Receives every value the run computes, for an enclosing run;
+            `None` for none.
+    """
+
+    plan: _core.Plan
+    overrides: dict[str, object]
+    hits: dict[str, object]
+    keys: Mapping[str, bytes | None]
+    pending: _core.Keys | None
+    warned: set[str]
+    values: dict[str, object] | None
+
+
 class _Preparer(Protocol):
     """The part of `_core.Graph` a cached run uses."""
 
@@ -317,7 +415,7 @@ class CacheRun:
                     name,
                     k.static,
                     [source for _, source, _ in k.params if source is not None],
-                    k.behavior == "default",
+                    k.behavior == "default" and k.stored,
                     list(cache.sources[name]),
                 )
                 for name, k in zip(computed, keys, strict=True)
@@ -331,6 +429,11 @@ class CacheRun:
         # In plan order.
         self._node_keys = dict(zip(computed, keys, strict=True))
         self._behaviors = {name: k.behavior for name, k in self._node_keys.items()}
+        # Looked up and stored: a `default` node that is no extracted field.
+        self._stored = {
+            name: k.behavior == "default" and k.stored
+            for name, k in self._node_keys.items()
+        }
         self._sources = {name: cache.sources[name] for name in computed}
         # Every input and override a key reads gets a version, so a version that
         # is missing only ever means an optional input not supplied.
@@ -361,48 +464,122 @@ class CacheRun:
         self._plans: dict[frozenset[str], _core.Plan] = {}
         self._plans_lock = threading.Lock()
 
+    @property
+    def nested(self) -> CacheRun | None:
+        """The run of the `recompute` nodes something reads, which goes first."""
+        return self._nested
+
     def run(
         self, inputs: dict[str, object], overrides: dict[str, object]
     ) -> dict[str, object]:
         """Runs the plan, already checked, through the store; the outputs, sorted."""
-        return self._execute(inputs, overrides, None, set(), None)
+        return self._finished(self.begin(inputs, overrides), inputs)
 
     def _execute(
         self,
         inputs: dict[str, object],
         overrides: dict[str, object],
-        versions: dict[str, bytes | None] | None,
+        versions: dict[str, bytes | None],
         warned: set[str],
-        values: dict[str, object] | None,
+        values: dict[str, object],
     ) -> dict[str, object]:
-        """One cached run: versions, keys, the hit frontier, then the pruned plan.
+        """A nested run; `values` receives every value it computed or loaded."""
+        begun = self.begin(
+            inputs, overrides, versions=versions, warned=warned, values=values
+        )
+        return self._finished(begun, inputs)
 
-        `versions` are the inputs' and overrides' when an enclosing run already
-        has them. `values`, when given, receives every value this run computed or
-        loaded, for the enclosing run to use as it is.
+    def _finished(self, begun: Begun, inputs: dict[str, object]) -> dict[str, object]:
+        """Runs a begun run's plan, storing each value as its node succeeds."""
+        on_value = begun.pending
+        result = begun.plan.run(
+            inputs,
+            begun.overrides,
+            on_value=functools.partial(self.finish, begun)
+            if on_value is None
+            else on_value,
+        )
+        if begun.values is not None:
+            begun.values.update(begun.hits)
+            begun.values.update(result)
+        return result
+
+    def begin(  # noqa: PLR0913  # the request, and what an enclosing run already has
+        self,
+        inputs: dict[str, object],
+        overrides: dict[str, object],
+        *,
+        known: dict[str, object] | None = None,
+        versions: dict[str, bytes | None] | None = None,
+        warned: set[str] | None = None,
+        values: dict[str, object] | None = None,
+        native: bool = True,
+    ) -> Begun:
+        """Everything a cached run does before its core run: versions, keys, hits.
+
+        `known` holds the values of the nested run, when the caller ran it; when
+        it is `None`, the nested run, if any, runs here, synchronously. `versions`
+        are the inputs' and overrides' when the caller already has them, and
+        `warned` the nodes it already warned about. `values`, when given, receives
+        every value the run computes or loads. With `native`, a plain
+        `MemoryCache` is walked and written in the binding; without, every store
+        call goes through `finish`.
         """
+        warned = set() if warned is None else warned
         if versions is None:
             versions = self._versions(inputs, overrides, warned)
-        known: dict[str, object] = {}
-        if self._nested is not None:
-            self._nested._execute(inputs, overrides, dict(versions), warned, known)  # noqa: SLF001  # the same class
-            for name in self._first:
-                versions[name] = _version(known[name], name, warned)
-        if self._native is not None and self._nested is None and values is None:
+        if known is None:
+            known = {}
+            if self._nested is not None:
+                self._nested._execute(inputs, overrides, dict(versions), warned, known)  # noqa: SLF001  # the same class
+        for name in self._first:
+            versions[name] = _version(known[name], name, warned)
+        keys: Mapping[str, bytes | None]
+        pending: _core.Keys | None = None
+        if native and self._native is not None and not known and values is None:
             pending, hits = self._key_plan.walk(versions, self._native)
-            on_value: _core.Keys | Callable[[str, object], None] = pending
+            keys = _NO_KEYS
         else:
             keys = self._key_plan.keys(versions)
             hits = self._frontier(keys, known, warned)
-            on_value = self._on_value(keys, warned, values)
-        plan = self._plan_for(frozenset(hits)) if hits else self._plan
-        result = plan.run(
-            inputs, {**overrides, **hits} if hits else overrides, on_value=on_value
-        )
-        if values is not None:
-            values.update(hits)
-            values.update(result)
-        return result
+        if not hits:
+            return Begun(self._plan, overrides, hits, keys, pending, warned, values)
+        plan = self._plan_for(frozenset(hits))
+        return Begun(plan, {**overrides, **hits}, hits, keys, pending, warned, values)
+
+    def versions(
+        self, inputs: dict[str, object], overrides: dict[str, object], warned: set[str]
+    ) -> dict[str, bytes | None]:
+        """The fingerprint of every input and override a key reads; see `begin`."""
+        return self._versions(inputs, overrides, warned)
+
+    def finish(self, begun: Begun, name: str, value: object) -> None:
+        """Stores node `name`'s `value`, which it just computed, under its key.
+
+        Only a `default` node is ever looked up, so only one is stored: a
+        `disable` node has no key, and a `recompute` node or an extracted field
+        always runs. A store that raises skips the write, and warns.
+
+        For a run begun without `pending` only: the binding's walk stores
+        through its own keys. A name the run has no key for is a `KeyError`, so
+        a run and a plan that disagree never skip a store silently.
+        """
+        if begun.values is not None:
+            begun.values[name] = value
+        key = begun.keys[name]
+        if key is None or not self._stored[name]:
+            return
+        try:
+            if (format_ := self._formats.get(name)) is not None:
+                self._store.put(key, value, format=format_)  # ty: ignore[unknown-argument]  # as in `_get`
+            else:
+                self._store.put(key, value)
+        except Exception as error:  # noqa: BLE001  # a store error skips the write
+            _warn_once(
+                begun.warned,
+                name,
+                f"cannot store node {name!r} in the cache: {error!r}",
+            )
 
     def explain(
         self, inputs: dict[str, object], overrides: dict[str, object]
@@ -427,6 +604,8 @@ class CacheRun:
             key = keys[name]
             if key is None:
                 outcome = self._keyless(k, reasons, outcomes)
+            elif not k.stored:
+                outcome = _EXTRACTED
             elif k.behavior == "default":
                 found = self._get(key, name, warned) is not MISSING
                 outcome = CacheOutcome("hit" if found else "miss", None)
@@ -528,7 +707,7 @@ class CacheRun:
                 hits[name] = known[name]
                 continue
             key = keys[name]
-            if key is not None and self._behaviors[name] == "default":
+            if key is not None and self._stored[name]:
                 value = self._get(key, name, warned)
                 if value is not MISSING:
                     hits[name] = value
@@ -559,37 +738,6 @@ class CacheRun:
                 warned, name, f"cannot load node {name!r} from the cache: {error!r}"
             )
             return MISSING
-
-    def _on_value(
-        self,
-        keys: Mapping[str, bytes | None],
-        warned: set[str],
-        values: dict[str, object] | None,
-    ) -> Callable[[str, object], None]:
-        """What stores each computed value as its node succeeds, and records it."""
-        store = self._store
-        behaviors = self._behaviors
-        formats = self._formats
-
-        def on_value(name: str, value: object) -> None:
-            if values is not None:
-                values[name] = value
-            # Only a `default` node is ever looked up, so only one is stored: a
-            # `disable` node has no key, and a `recompute` node always runs.
-            key = keys[name]
-            if key is None or behaviors[name] != "default":
-                return
-            try:
-                if (format_ := formats.get(name)) is not None:
-                    store.put(key, value, format=format_)  # ty: ignore[unknown-argument]  # as in `_get`
-                else:
-                    store.put(key, value)
-            except Exception as error:  # noqa: BLE001  # a store error skips the write
-                _warn_once(
-                    warned, name, f"cannot store node {name!r} in the cache: {error!r}"
-                )
-
-        return on_value
 
 
 def _version(value: object, name: str, warned: set[str]) -> bytes | None:

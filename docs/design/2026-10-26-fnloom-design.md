@@ -237,3 +237,7 @@ language: an earlier Rust port of numba kernels showed no compute speedup betwee
   requirements recorded; authoring API decided: name-wiring.
 - **2026-10-27:** caching leaves the non-goals (§2) and Q16 becomes a FIX: result caching is designed in
   `2026-10-27-caching-design.md` and built in Plan 4.
+- **2026-10-28:** Plan 3 adds what §5 did not name: `@config.default`, `name=` on all four `@config.when*` forms,
+  and `build_async(sync_nodes=...)`; and it fixes Hamilton's config, extract and async problems as register rows
+  Q56–Q69 (config never a node, refused misuse and ambiguity, checked and non-mutating extraction, sync nodes off the
+  loop, cancellation on failure, checked async requests, async caching and awaited async rows).

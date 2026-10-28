@@ -3,6 +3,7 @@
 from importlib.metadata import version as _version
 
 from fnloom._caching import CacheOutcome
+from fnloom._config import Condition, config
 from fnloom._core import UnfingerprintableError
 from fnloom._decorators import (
     CachePolicy,
@@ -14,6 +15,7 @@ from fnloom._decorators import (
     tag,
     value,
 )
+from fnloom._extract import extract_columns, extract_fields
 from fnloom._fingerprint import fingerprint, register_fingerprint
 from fnloom._stores import (
     MISSING,
@@ -24,17 +26,27 @@ from fnloom._stores import (
     MemoryCache,
 )
 from fnloom._view import NodeView, Param
-from fnloom.driver import Builder, Driver, PreparedPlan, build
+from fnloom.driver import (
+    AsyncDriver,
+    AsyncPreparedPlan,
+    Builder,
+    Driver,
+    PreparedPlan,
+    build,
+)
 
 __version__ = _version("fnloom")
 
 __all__ = [
     "MISSING",
+    "AsyncDriver",
+    "AsyncPreparedPlan",
     "Builder",
     "CacheOutcome",
     "CachePolicy",
     "CacheStore",
     "CacheWarning",
+    "Condition",
     "DiskCache",
     "Driver",
     "Format",
@@ -47,6 +59,9 @@ __all__ = [
     "Value",
     "build",
     "cache",
+    "config",
+    "extract_columns",
+    "extract_fields",
     "fingerprint",
     "parameterize",
     "register_fingerprint",

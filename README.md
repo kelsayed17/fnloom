@@ -31,10 +31,11 @@ needed to produce them, in a fixed order, with your mistakes caught before anyth
 
 - 🧵 **Your functions are the graph.** No decorators, no registration, no config objects. Delete fnloom tomorrow and
   your code is still plain Python you can call and test directly.
-- ⚡ **Up to 24× faster repeat runs than Hamilton.** Compile a request once with `prepare`, then run it as often as you
-  like. A 1,000-node graph runs in about 0.2 ms.
+- ⚡ **Up to 24× faster repeat runs than Hamilton on plain graphs.** Compile a request once with `prepare`, then run
+  it as often as you like. A 1,000-node graph runs in about 0.2 ms.
 - 🛡️ **Mistakes fail loudly, and early.** A misspelled input, a dependency cycle, a type mismatch between two functions
-  or an `async def` node raises a clear error naming the culprit. Hamilton accepts several of these silently.
+  or an `async def` node in a sync build raises a clear error naming the culprit. Hamilton accepts several of these
+  silently.
 - 🎯 **The same order, every run.** Nodes run in topological order with ties broken by name, so logs and side effects
   never shuffle between runs.
 - 🏔️ **No depth limit.** Nothing recurses over the graph, so a 50,000-node chain builds and runs. Hamilton
@@ -103,7 +104,7 @@ in what happens when you run it.
 | A chain of 1,000+ nodes | `RecursionError` | ✅ Runs at any depth |
 | A dependency cycle | `RecursionError` when executed | ✅ `ValueError` naming the cycle, at build |
 | A misspelled input or override | Silently ignored | ✅ `ValueError` naming it |
-| An `async def` node | The un-awaited coroutine is the value | ✅ `ValueError` at build |
+| An `async def` node | The un-awaited coroutine is the value | ✅ `ValueError` at `build()`; `build_async()` awaits it |
 | Execution order | Depends on how you list outputs | ✅ Always the same |
 | Running a request again | Re-planned on every call | ✅ `prepare` once, `run` many times |
 | Runtime dependencies | numpy, pandas and more | ✅ None |
@@ -133,8 +134,8 @@ dispatch.
 **Yes, if** you compute many derived values from a few inputs (features, metrics, pricing, signals), want each step
 to be a small function you can test on its own, and run the same graph many times in one process.
 
-**Not yet, if** you need Hamilton's adapters, result builders, async execution, `@config.when` or `@extract_columns`.
-They're on the [roadmap](#status). fnloom is also not a scheduler. It doesn't retry, distribute or schedule
+**Not yet, if** you need Hamilton's adapters, result builders or graph visualisation. They're on the
+[roadmap](#status). fnloom is also not a scheduler. It doesn't retry, distribute or schedule
 work, so pair it with an orchestrator if you need that.
 
 ## Install
@@ -156,7 +157,8 @@ uv run maturin develop --release
 - ✅ The Rust core and the native Python path
 - ✅ `@parameterize`, `@tag`, graph inspection and type checks
 - ✅ [Result caching](https://kelsayed17.github.io/fnloom/caching/), in memory or on disk
-- 🔜 Configuration and `@extract_*`, then adapters and async execution, then visualisation
+- ✅ `@config.when*`, `@extract_fields`, `@extract_columns`, and an async driver that caches too
+- 🔜 Adapters and result builders, then visualisation
 
 The [design](https://kelsayed17.github.io/fnloom/design/2026-10-26-fnloom-design/) has the full plan. The name is
 provisional, pending a trademark check before the first release.

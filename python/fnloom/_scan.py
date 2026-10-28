@@ -6,9 +6,12 @@ import inspect
 import operator
 import typing
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from types import MappingProxyType
+from typing import TYPE_CHECKING, NamedTuple
 
-from fnloom._decorators import Source, Value, decorations
+from fnloom import _config, _extract
+from fnloom._config import Condition, Found, redefinitions, resolve_variants
+from fnloom._decorators import _ATTRIBUTE, Source, Value, decorations
 from fnloom._types import read_aliases
 from fnloom._view import Param
 
@@ -35,7 +38,10 @@ class NodeDef:
     call that maps those keywords onto `origin`'s parameters. `renames` maps a core
     input to the parameter keyword the core passes it under, when the two differ.
     `returns` is the return annotation: as written after `collect`, its value after
-    `resolve`, as are the params' annotations.
+    `resolve`, as are the params' annotations. `config` holds the conditions that
+    selected the function, empty for a plain one or a `@config.default`. `doc` is
+    the node's own docstring, as an `extract_columns` `(name, doc)` sets it, or
+    `None` for `origin`'s.
     """
 
     name: str
@@ -46,6 +52,8 @@ class NodeDef:
     module: str
     returns: object
     renames: Mapping[str, str] = field(default_factory=dict)
+    config: tuple[Condition, ...] = ()
+    doc: str | None = None
 
 
 def core_inputs(params: tuple[Param, ...]) -> list[tuple[str, bool]]:
@@ -205,13 +213,37 @@ def _payload(
     return call, {}
 
 
-def _node_defs(
-    module: ModuleType, name: str, fn: Callable[..., object]
-) -> list[NodeDef]:
-    """One node for a plain function; one per row for a parameterized one."""
-    if (kind := _unsupported_function_kind(fn)) is not None:
+def _check_kind(name: str, fn: Callable[..., object], *, awaits: bool) -> None:
+    """`ValueError` when calling `fn` would not run its body to a value (Q32).
+
+    With `awaits`, an `async def` is accepted: the async driver awaits it.
+    """
+    kind = _unsupported_function_kind(fn)
+    if kind is None or (awaits and kind == "async function"):
+        return
+    if kind == "async function":
+        msg = (
+            f"{name!r}: async function is not supported by build(), which calls "
+            "nodes synchronously; build it with build_async()"
+        )
+    elif awaits:
+        msg = (
+            f"{name!r}: {kind} is not supported; calling it returns a generator, "
+            "not the node's value"
+        )
+    else:
         msg = f"{name!r}: {kind} is not supported; nodes are called synchronously"
-        raise ValueError(msg)
+    raise ValueError(msg)
+
+
+def _node_defs(
+    module: ModuleType, name: str, fn: Callable[..., object], *, awaits: bool
+) -> list[NodeDef]:
+    """One node for a plain function; one per row for a parameterized one.
+
+    With `awaits`, as `build_async` scans, an `async def` is a node too (Q32).
+    """
+    _check_kind(name, fn, awaits=awaits)
     annotations = annotationlib.get_annotations(
         fn, format=annotationlib.Format.FORWARDREF
     )
@@ -222,12 +254,30 @@ def _node_defs(
     if parameters is None:
         parameters = _signature_parameters(name, fn, annotations)
     recorded = decorations(fn)
+    conditions: tuple[Condition, ...] = ()
+    if recorded.config is not None:
+        # A variant is named by `name=`, or by its function's name cut at `__`.
+        name = _config.node_name(fn, recorded.config.name)
+        conditions = recorded.config.conditions
     if recorded.rows is None:
         # A plain function is one node, of its own name, binding nothing, so each
         # parameter reads its own name and the payload is the function itself.
         params = _bind(parameters, {})
         returns = annotations["return"]
-        return [NodeDef(name, params, recorded.tags, fn, fn, module.__name__, returns)]
+        tags, module_name = recorded.tags, module.__name__
+        if not conditions:
+            # Positional and without `config`: the common case, kept cheapest.
+            node = NodeDef(name, params, tags, fn, fn, module_name, returns)
+        else:
+            node = NodeDef(
+                name, params, tags, fn, fn, module_name, returns, {}, conditions
+            )
+        if recorded.extract is None:
+            return [node]
+        # Lowered after the variant is selected. These field nodes are placeholders,
+        # used only to find duplicate names; `resolve` lowers them again, typed
+        # from the resolved return, with their checks.
+        return _extract.lower(node, recorded.extract, resolved=False)
     nodes: list[NodeDef] = []
     for node_name, row in recorded.rows.items():
         params = _bind(parameters, row)
@@ -242,18 +292,34 @@ def _node_defs(
                 module.__name__,
                 annotations["return"],
                 renames,
+                conditions,
             )
         )
+    if recorded.extract is not None:
+        # At most one row: `@parameterize` and `@extract_fields` refuse more. The
+        # field nodes are placeholders for duplicate detection, as above.
+        return [
+            lowered
+            for node in nodes
+            for lowered in _extract.lower(node, recorded.extract, resolved=False)
+        ]
     return nodes
 
 
-def _scan_module(module: ModuleType) -> list[NodeDef]:
-    return [
-        node
-        for name, value in vars(module).items()
-        if _is_node(module, name, value)
-        for node in _node_defs(module, name, value)
-    ]
+def _found(module: ModuleType) -> tuple[list[Found], bool]:
+    """The module's node functions, in definition order, with their attribute names.
+
+    And whether any is config-decorated: a function no decorator touched has no
+    record in its `__dict__`, so it costs a dict lookup, the common case.
+    """
+    functions: list[Found] = []
+    configured = False
+    for name, value in vars(module).items():
+        if _is_node(module, name, value):
+            functions.append((module, name, value))
+            if not configured and _ATTRIBUTE in value.__dict__:
+                configured = decorations(value).config is not None
+    return functions, configured
 
 
 def _skipped(module: ModuleType) -> str:
@@ -273,6 +339,8 @@ def _skipped(module: ModuleType) -> str:
 def _definition(node: NodeDef) -> str:
     """How `node` was written: as a function, or as a row of a parameterized one."""
     function = getattr(node.origin, "__name__", node.name)
+    if (payload := _extract.extractor(node)) is not None:
+        return f"a {payload.noun} of function {function!r}"
     if decorations(node.origin).rows is None:
         return f"function {function!r}"
     return f"a row of function {function!r}"
@@ -290,35 +358,95 @@ def _duplicate(first: NodeDef, second: NodeDef) -> str:
     )
 
 
-def collect(modules: Sequence[ModuleType]) -> list[NodeDef]:
+def _functions(
+    modules: Sequence[ModuleType],
+) -> tuple[list[Found], list[ModuleType]]:
+    """Every module's node functions, and the modules holding a config-decorated one.
+
+    `ValueError` naming every module with no node function (Q53).
+    """
+    found: list[Found] = []
+    configured: list[ModuleType] = []
+    empty: list[str] = []
+    # Modules hash by identity, so this drops repeats of one module, keeping the first.
+    for module in dict.fromkeys(modules):
+        functions, has_config = _found(module)
+        if not functions:
+            empty.append(_skipped(module))
+        elif has_config:
+            configured.append(module)
+        found.extend(functions)
+    if empty:
+        raise ValueError("; ".join(empty))
+    return found, configured
+
+
+# No config: what a build without `with_config` selects with. Read, never written.
+_NO_CONFIG: Mapping[str, object] = MappingProxyType({})
+
+
+class Scanned(NamedTuple):
+    """What a scan found: the nodes, and why each node no variant gave is absent."""
+
+    nodes: list[NodeDef]
+    unmatched: dict[str, str]
+
+
+def collect(
+    modules: Sequence[ModuleType],
+    config: Mapping[str, object] = _NO_CONFIG,
+    *,
+    awaits: bool = False,
+) -> list[NodeDef]:
     """Returns the nodes of `modules`; `ValueError` on a malformed or duplicate one.
 
     Every duplicate name is listed, sorted by name, in one `ValueError`. A module
     with no node is refused too, before duplicates, every such module in one
     `ValueError` naming each function it holds and why that is not a node (Q53).
 
+    `config` selects among `@config.when*` variants (see `scan`), and `awaits`
+    accepts `async def` nodes, as `build_async` does.
+
     Annotations are read without being evaluated; `resolve` evaluates them.
     """
+    return scan(modules, config, awaits=awaits).nodes
+
+
+def scan(
+    modules: Sequence[ModuleType],
+    config: Mapping[str, object] = _NO_CONFIG,
+    *,
+    awaits: bool = False,
+) -> Scanned:
+    """`collect`, with the reason each node that no variant gave is absent.
+
+    Variants are selected first, one per node (`_config.select`), so a variant
+    the config does not select is never lowered. A module none of whose
+    variants is selected is not empty. Without a config-decorated function
+    there is nothing to select, and selection is skipped entirely.
+    """
+    found, configured = _functions(modules)
+    unmatched: dict[str, str] = {}
+    if configured:
+        if redefined := sorted(line for m in configured for line in redefinitions(m)):
+            raise ValueError("; ".join(redefined))
+        selection = resolve_variants(found, config)
+        found, unmatched = selection.functions, selection.unmatched
     seen: dict[str, NodeDef] = {}
     clashes: list[tuple[str, str]] = []
-    empty: list[str] = []
-    # Modules hash by identity, so this drops repeats of one module, keeping the first.
-    for module in dict.fromkeys(modules):
-        nodes = _scan_module(module)
-        if not nodes:
-            empty.append(_skipped(module))
-        for node in nodes:
+    for module, name, fn in found:
+        for node in _node_defs(module, name, fn, awaits=awaits):
             if node.name in seen:
                 clashes.append((node.name, _duplicate(seen[node.name], node)))
             else:
                 seen[node.name] = node
-    if empty:
-        raise ValueError("; ".join(empty))
     if clashes:
         # Sorted by node name; a name clashing more than once keeps scan order.
         clashes.sort(key=lambda clash: clash[0])
         raise ValueError("; ".join(message for _, message in clashes))
-    return list(seen.values())
+    # A node a plain function or another variant defines is not missing.
+    missing = {n: why for n, why in unmatched.items() if n not in seen}
+    return Scanned(list(seen.values()), missing)
 
 
 def _owner(origin: Callable[..., object], names: list[str]) -> str:
@@ -408,7 +536,9 @@ def resolve(nodes: Sequence[NodeDef]) -> list[NodeDef]:
     """
     origins: dict[int, tuple[Callable[..., object], list[str]]] = {}
     nodes_of: dict[int, NodeDef] = {}
-    for node in nodes:
+    # A field node is lowered again from its resolved producer, by `_lowered`.
+    own = [node for node in nodes if not _extract.is_generated(node)]
+    for node in own:
         origins.setdefault(id(node.origin), (node.origin, []))[1].append(node.name)
         nodes_of.setdefault(id(node.origin), node)
     values: dict[int, dict[str, typing.Any]] = {}
@@ -436,7 +566,7 @@ def resolve(nodes: Sequence[NodeDef]) -> list[NodeDef]:
         error.add_note(_unresolved_note(failures))
         raise error
     resolved: list[NodeDef] = []
-    for node in nodes:
+    for node in own:
         if (hints := values.get(id(node.origin))) is None:
             # Every annotation was already a class, which evaluates to itself.
             resolved.append(node)
@@ -455,4 +585,64 @@ def resolve(nodes: Sequence[NodeDef]) -> list[NodeDef]:
             resolved.append(node)
         else:
             resolved.append(replace(node, params=params, returns=returns))
-    return resolved
+    return _lowered(resolved)
+
+
+def _lowered(nodes: list[NodeDef]) -> list[NodeDef]:
+    """`nodes`, resolved, with each producer's field nodes lowered from its return.
+
+    `ValueError` listing, sorted, every declared field type a return cannot feed,
+    and then every field name that another node already has.
+    """
+    if all(decorations(node.origin).extract is None for node in nodes):
+        return nodes
+    lowered: list[NodeDef] = []
+    problems: list[str] = []
+    # Each producer whose `TypedDict` field types do not resolve, with the error.
+    unresolved: list[tuple[str, _Unresolved, str]] = []
+    for node in nodes:
+        extraction = decorations(node.origin).extract
+        if extraction is None:
+            lowered.append(node)
+            continue
+        try:
+            lowered.extend(_extract.lower(node, extraction, resolved=True))
+        except ValueError as error:
+            problems.append(str(error))
+        except (NameError, AttributeError) as error:
+            unresolved.append((node.name, error, _extract.returned_type(node)))
+    if unresolved:
+        _raise_unresolved(unresolved)
+    if problems:
+        raise ValueError("; ".join(sorted(problems)))
+    # A field a forward-referenced `TypedDict` gives is first known here.
+    _refuse_duplicates(lowered)
+    return lowered
+
+
+def _refuse_duplicates(nodes: list[NodeDef]) -> None:
+    """`ValueError` naming every node name defined twice in `nodes`, sorted."""
+    seen: dict[str, NodeDef] = {}
+    clashes: list[str] = []
+    for node in nodes:
+        if node.name in seen:
+            clashes.append(_duplicate(seen[node.name], node))
+        else:
+            seen[node.name] = node
+    if clashes:
+        raise ValueError("; ".join(sorted(clashes)))
+
+
+def _raise_unresolved(unresolved: list[tuple[str, _Unresolved, str]]) -> None:
+    """Raises the first failing producer's error, by name, as `resolve` does.
+
+    With one note naming every producer whose `TypedDict` fields do not resolve;
+    each failure is (producer name, its error, its return type as shown).
+    """
+    unresolved.sort(key=lambda failure: failure[0])
+    listed = "; ".join(
+        f"{shown}, returned by {name!r}" for name, _, shown in unresolved
+    )
+    error = unresolved[0][1]
+    error.add_note(f"resolving the fields of {listed}")
+    raise error

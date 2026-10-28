@@ -7,12 +7,16 @@ the constant, the helper and the `value()` constants in turn, rebuilding the mod
 under the same name whenever its code changes, so a key that missed an edit would
 hit a stale entry. After every edit the requested outputs from a `MemoryCache` and a
 `DiskCache` driver, cold and then warm, must equal an uncached driver's, compared by
-`repr` so that `1`, `1.0` and `True`, or `0.0` and `-0.0`, do not pass as equal.
+`repr` so that `1`, `1.0` and `True`, or `0.0` and `-0.0`, do not pass as equal. Each
+store is driven twice over, by a `Driver` and, with a store of its own, by an
+`AsyncDriver`.
 """
 
+import asyncio
 import os
 import tempfile
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Literal
 
 from hypothesis import given, settings
@@ -25,7 +29,7 @@ from helpers import make_module
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from fnloom import CacheStore, Driver
+    from fnloom import AsyncDriver, CacheStore, Driver
 
 # On CI, the same examples every run, and no example database to carry between runs.
 settings.register_profile("ci", derandomize=True, database=None)
@@ -226,14 +230,32 @@ def _same(got: dict[str, object], expected: dict[str, object]) -> bool:
     return repr(got) == repr(expected)
 
 
-def check(scenario: Scenario, stores: list[Callable[[], CacheStore]]) -> None:
+# Which driver a store is made for: each gets its own, so the async one's warm runs
+# hit what it stored itself.
+type Role = Literal["sync", "async"]
+
+
+async def _async_runs(
+    drivers: list[AsyncDriver], outputs: list[str], given: dict[str, object]
+) -> list[dict[str, object]]:
+    """Each async driver's result, cold and then warm, on one loop."""
+    return [
+        await driver.execute(outputs, inputs=given)
+        for driver in drivers
+        for _ in range(2)
+    ]
+
+
+def check(scenario: Scenario, stores: list[Callable[[Role], CacheStore]]) -> None:
     """Runs `scenario` uncached and through each store; every result must match."""
     nodes = scenario.nodes
     inputs = _used_inputs(nodes)
-    made = [factory() for factory in stores]
+    made = [factory("sync") for factory in stores]
+    made_async = [factory("async") for factory in stores]
     state = scenario.start
     code: str | None = None
     drivers: list[Driver] = []
+    async_drivers: list[AsyncDriver] = []
     uncached: Driver | None = None
     for edit, wanted in scenario.steps:
         state = _apply(state, edit)
@@ -246,6 +268,13 @@ def check(scenario: Scenario, stores: list[Callable[[], CacheStore]]) -> None:
                 Builder().with_modules(module).with_cache(store).build()
                 for store in made
             ]
+            async_drivers = [
+                Builder()
+                .with_modules(module)
+                .with_cache(store)
+                .build_async(sync_nodes="inline")
+                for store in made_async
+            ]
         assert uncached is not None
         given = {name: state.inputs[INPUTS.index(name)] for name in inputs}
         outputs = [f"n{i}" for i in sorted(wanted)]
@@ -254,6 +283,8 @@ def check(scenario: Scenario, stores: list[Callable[[], CacheStore]]) -> None:
             for _ in range(2):
                 got = driver.execute(outputs, inputs=given)
                 assert _same(got, expected), (code, given, got, expected)
+        for got in asyncio.run(_async_runs(async_drivers, outputs, given)):
+            assert _same(got, expected), ("async", code, given, got, expected)
 
 
 class PythonWalkedCache(MemoryCache):
@@ -271,5 +302,9 @@ def test_a_cached_run_equals_an_uncached_run(scenario: Scenario) -> None:
     with tempfile.TemporaryDirectory() as directory:
         check(
             scenario,
-            [MemoryCache, PythonWalkedCache, lambda: DiskCache(directory)],
+            [
+                lambda _: MemoryCache(),
+                lambda _: PythonWalkedCache(),
+                lambda role: DiskCache(Path(directory) / role),
+            ],
         )

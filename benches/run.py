@@ -1,7 +1,8 @@
 """Times fnloom against Hamilton on generated graphs; prints one JSON object per row.
 
-Run it as `uv run python -m benches.run`. It prints to stdout on purpose: the rows
-are the output, so redirect them to a file.
+Run it as `uv run python -m benches.run`, or `uv run python -m benches.run extract`
+to time only the shapes named. It prints to stdout on purpose: the rows are the
+output, so redirect them to a file.
 """
 
 import json
@@ -196,8 +197,14 @@ def measure_case(shape: Shape, n: int) -> list[Row]:
 
 
 def main() -> None:
-    """Prints the 48 rows as JSON lines."""
-    for shape in get_args(Shape.__value__):
+    """Prints the 60 rows as JSON lines, or those of the shapes named as arguments."""
+    every = get_args(Shape.__value__)
+    named = sys.argv[1:]
+    if unknown := sorted(set(named) - set(every)):
+        msg = f"unknown shapes: {', '.join(unknown)}; the shapes: {', '.join(every)}"
+        raise SystemExit(msg)
+    shapes = [shape for shape in every if not named or shape in named]
+    for shape in shapes:
         for n in SIZES:
             for row in measure_case(shape, n):
                 sys.stdout.write(json.dumps(asdict(row)) + "\n")

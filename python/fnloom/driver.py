@@ -1,5 +1,6 @@
-"""The user-facing `Builder`, `Driver` and `PreparedPlan`."""
+"""The user-facing `Builder`, `Driver`, `PreparedPlan`, and their async forms."""
 
+import copy
 import importlib
 import inspect
 import sys
@@ -9,13 +10,13 @@ import threading
 # them, and `inspect.signature` resolves those annotations at run time.
 from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
-from types import ModuleType
-from typing import Any, Protocol, override
+from types import MappingProxyType, ModuleType
+from typing import Any, Literal, Protocol, override
 
-from fnloom import _core, _types
+from fnloom import _async, _core, _types
 from fnloom._caching import Cache, CacheOutcome, CacheRun
 from fnloom._decorators import Source
-from fnloom._scan import NodeDef, collect, core_inputs, resolve
+from fnloom._scan import NodeDef, core_inputs, resolve, scan
 from fnloom._stores import CacheStore
 from fnloom._view import NodeView, NodeViews, node_views
 
@@ -61,6 +62,23 @@ class _GraphLike(Protocol):
     ) -> _core.Plan:
         """Compiles a plan for the outputs, given the input and override names."""
         ...
+
+
+class _Request:
+    """The checks of a request that come before its plan, shared by both drivers."""
+
+    @staticmethod
+    def check(
+        final_vars: Sequence[str],
+        inputs: Mapping[str, object] | None,
+        overrides: Mapping[str, object] | None,
+    ) -> _PlanKey:
+        """The outputs, copied, and the input and override names of a request.
+
+        `TypeError` for a bare `str`, or an output that is not a `str` (Q6). The
+        names are checked against the graph when the plan is compiled.
+        """
+        return (_check_final_vars(final_vars), _names(inputs), _names(overrides))
 
 
 def _check_final_vars(final_vars: Sequence[str]) -> tuple[str, ...]:
@@ -189,6 +207,8 @@ class PreparedPlan:
         self._input_checks, self._override_checks = checks
         # The driver that prepared this plan, which pickling rebuilds it through.
         self._driver: Driver | None = None
+        # This plan as an `AsyncDriver` runs it, made on its first async use.
+        self._async: AsyncPreparedPlan | None = None
 
     @override
     def __reduce__(
@@ -291,11 +311,22 @@ class Driver:
         *,
         check_inputs: bool = True,
         cache: Cache | None = None,
+        config: Mapping[str, object] | None = None,
     ) -> None:
-        """Wraps a native graph; `Builder` is the way to make one from modules."""
+        """Wraps a native graph; `Builder` is the way to make one from modules.
+
+        `config` is the config the graph was built with, kept read-only.
+        """
         self._graph = graph
         self._check_inputs = check_inputs
         self._cache = cache
+        self._config = (
+            config
+            if isinstance(config, MappingProxyType)
+            else MappingProxyType(dict(config or {}))
+        )
+        # Each node no `@config.when*` variant gave, with why: see `prepare`.
+        self._unmatched: Mapping[str, str] = {}
         self._nodes = (
             nodes if isinstance(nodes, NodeViews) else NodeViews(nodes or {}, {})
         )
@@ -330,9 +361,23 @@ class Driver:
             self._nodes,
             check_inputs=self._check_inputs,
             cache=self._cache,
+            config=self._config,
         )
         copied._builder = self._builder
+        copied._unmatched = self._unmatched
         return copied
+
+    @property
+    def config(self) -> Mapping[str, object]:
+        """The config the graph was built with: a read-only, shallow copy.
+
+        Empty by default. Shallow: a value the caller changes in place after
+        `with_config`, such as a list, shows the change here too.
+
+        Config only selects `@config.when*` variants: it is never passed to a node
+        (Q56).
+        """
+        return self._config
 
     def prepare(
         self,
@@ -353,11 +398,7 @@ class Driver:
             and _keys(overrides) == last[2]
         ):
             return last[3]
-        key: _PlanKey = (
-            _check_final_vars(final_vars),
-            _names(inputs),
-            _names(overrides),
-        )
+        key = _Request.check(final_vars, inputs, overrides)
         with self._plans_lock:
             prepared = self._plans.pop(key, None)
             if prepared is None:
@@ -374,9 +415,27 @@ class Driver:
 
     def _compile(self, key: _PlanKey) -> PreparedPlan:
         outputs, input_names, override_names = key
-        plan = self._graph.prepare(
-            list(outputs), sorted(input_names), sorted(override_names)
-        )
+        if self._unmatched and (
+            absent := sorted({name for name in outputs if name in self._unmatched})
+        ):
+            lines = [self._unmatched[name] for name in absent]
+            # A misspelled output in the same request is named too, not hidden.
+            known = self._nodes
+            if unknown := sorted(
+                {n for n in outputs if n not in self._unmatched and n not in known}
+            ):
+                lines.append(f"unknown outputs: {', '.join(map(repr, unknown))}")
+            raise ValueError("\n".join(lines))
+        try:
+            plan = self._graph.prepare(
+                list(outputs), sorted(input_names), sorted(override_names)
+            )
+        except ValueError as error:
+            hint = _config_hint(str(error), self._config)
+            if hint is None:
+                raise
+            msg = f"{error}\n{hint}"
+            raise ValueError(msg) from None
         checks = self._checks(plan, override_names) if self._check_inputs else ((), ())
         runnable: _Runnable = plan
         if self._cache is not None:
@@ -463,6 +522,249 @@ class Driver:
         return sorted({*names, *self._graph.downstream_of(list(names))})
 
 
+class AsyncPreparedPlan:
+    """A plan an `AsyncDriver` compiled: `PreparedPlan`, with `run` a coroutine.
+
+    Compiled for the same outputs and names, and checked the same way, as a
+    `PreparedPlan`; pickled as its driver and its request, as one is.
+    """
+
+    def __init__(
+        self,
+        prepared: PreparedPlan,
+        driver: AsyncDriver,
+        schedule: _async.Schedule | _async.CachedSchedule,
+    ) -> None:
+        """The async form of `prepared`, run by `schedule`, for `driver`."""
+        self._prepared = prepared
+        self._driver = driver
+        self._schedule = schedule
+        self._outputs = prepared._outputs  # noqa: SLF001  # the plan this wraps
+
+    @override
+    def __reduce__(
+        self,
+    ) -> tuple[Callable[..., AsyncPreparedPlan], tuple[AsyncDriver, _PlanKey]]:
+        """The driver and the request, prepared again on load; see the class."""
+        prepared = self._prepared
+        key: _PlanKey = (
+            self._outputs,
+            prepared._input_names,  # noqa: SLF001  # the plan this wraps
+            prepared._override_names,  # noqa: SLF001  # the plan this wraps
+        )
+        return _prepare_async_again, (self._driver, key)
+
+    def __copy__(self) -> AsyncPreparedPlan:
+        """The plan itself: nothing about a plan changes once it is compiled."""
+        return self
+
+    async def run(
+        self,
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Runs on the running loop; checked and returned as `PreparedPlan.run` is.
+
+        The first node to fail cancels every node still running and raises its own
+        exception, with a note naming it (Q66).
+        """
+        given_inputs, given_overrides = self._prepared._checked(inputs, overrides)  # noqa: SLF001  # the plan this wraps
+        values = await self._schedule.run(given_inputs, given_overrides)
+        return {name: values[name] for name in self._outputs}
+
+
+class AsyncDriver:
+    """Executes a graph whose nodes may be `async def`: `execute` is a coroutine.
+
+    Made by `Builder.build_async`, which is synchronous. It plans, checks requests
+    and keeps plans as `Driver` does, with the same errors (Q67). A coroutine
+    function is awaited; a sync function runs in the loop's default executor, in
+    the caller's context, so the loop keeps running (Q65), or on the loop with
+    `sync_nodes="inline"`. A generated `extract_*` node always runs on the loop.
+
+    A driver made by a `Builder` pickles as that builder and its `sync_nodes`, as
+    `Driver` does.
+    """
+
+    def __init__(
+        self,
+        driver: Driver,
+        nodes: Mapping[str, NodeDef],
+        *,
+        sync_nodes: Literal["thread", "inline"] = "thread",
+    ) -> None:
+        """Runs `driver`'s plans; `nodes` are its graph's nodes, by name."""
+        self._driver = driver
+        self._nodes = nodes
+        self._sync_nodes: Literal["thread", "inline"] = sync_nodes
+        self._calls = _async.calls(nodes, sync_nodes)
+        # The builder that built this driver, which pickling rebuilds it from.
+        self._builder: Builder | None = None
+
+    @override
+    def __reduce__(
+        self,
+    ) -> tuple[Callable[..., AsyncDriver], tuple[Builder, str]]:
+        """The builder and `sync_nodes`, built again on load; see the class."""
+        if self._builder is None:
+            msg = (
+                "cannot pickle an AsyncDriver made from a Driver; "
+                "make it with Builder.build_async to pickle it"
+            )
+            raise TypeError(msg)
+        return _build_async_again, (self._builder, self._sync_nodes)
+
+    def __copy__(self) -> AsyncDriver:
+        """A driver over the same graph and settings, with no compiled plans."""
+        copied = AsyncDriver(
+            copy.copy(self._driver), self._nodes, sync_nodes=self._sync_nodes
+        )
+        copied._builder = self._builder
+        return copied
+
+    @property
+    def config(self) -> Mapping[str, object]:
+        """The config the graph was built with; see `Driver.config`."""
+        return self._driver.config
+
+    @property
+    def nodes(self) -> Mapping[str, NodeView]:
+        """Every node, inputs included, by name; see `Driver.nodes`."""
+        return self._driver.nodes
+
+    def node_names(self) -> list[str]:
+        """Returns every node name, sorted."""
+        return self._driver.node_names()
+
+    def what_is_upstream_of(self, *names: str) -> list[str]:
+        """Returns the named nodes and every node they depend on, sorted."""
+        return self._driver.what_is_upstream_of(*names)
+
+    def what_is_downstream_of(self, *names: str) -> list[str]:
+        """Returns the named nodes and every node depending on them, sorted."""
+        return self._driver.what_is_downstream_of(*names)
+
+    def prepare(
+        self,
+        final_vars: Sequence[str],
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+    ) -> AsyncPreparedPlan:
+        """Returns the plan for this request shape, compiling it on first use.
+
+        Synchronous: compiling awaits nothing. The plans are kept as `Driver`
+        keeps them.
+        """
+        prepared = self._driver.prepare(final_vars, inputs=inputs, overrides=overrides)
+        plan = prepared._async  # noqa: SLF001  # this driver's own plan
+        if plan is None:
+            runnable = prepared._plan  # noqa: SLF001  # this driver's own plan
+            schedule: _async.Schedule | _async.CachedSchedule
+            if isinstance(runnable, CacheRun):
+                schedule = _async.CachedSchedule(runnable, self._calls)
+            elif isinstance(runnable, _core.Plan):
+                schedule = _async.Schedule(runnable, self._calls)
+            else:
+                msg = f"an AsyncDriver cannot run {type(runnable).__name__}"
+                raise TypeError(msg)
+            plan = AsyncPreparedPlan(prepared, self, schedule)
+            # Two threads may both get here: either plan will do, and one is kept.
+            prepared._async = plan  # noqa: SLF001  # this driver's own plan
+        return plan
+
+    async def execute(
+        self,
+        final_vars: Sequence[str],
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Computes `final_vars`; checked and returned as `Driver.execute`.
+
+        The result holds each requested output once, in the order first requested
+        (Q11). The first node to fail cancels every node still running and raises
+        its own exception, with a note naming it (Q66).
+        """
+        plan = self.prepare(final_vars, inputs=inputs, overrides=overrides)
+        return await plan.run(inputs=inputs, overrides=overrides)
+
+    def explain_cache(
+        self,
+        final_vars: Sequence[str],
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+    ) -> dict[str, CacheOutcome]:
+        """See `Driver.explain_cache`; synchronous, since it runs nothing."""
+        return self._driver.explain_cache(
+            final_vars, inputs=inputs, overrides=overrides
+        )
+
+
+def _build_async_again(builder: Builder, sync_nodes: str) -> AsyncDriver:
+    """A pickled `AsyncDriver`, built again by its builder."""
+    return builder.build_async(sync_nodes=_async.checked_sync_nodes(sync_nodes))
+
+
+def _prepare_async_again(driver: AsyncDriver, key: _PlanKey) -> AsyncPreparedPlan:
+    """Prepares a pickled async plan's request on its rebuilt driver."""
+    outputs, input_names, override_names = key
+    return driver.prepare(
+        outputs,
+        inputs=dict.fromkeys(input_names),
+        overrides=dict.fromkeys(override_names),
+    )
+
+
+def _config_hint(message: str, config: Mapping[str, object]) -> str | None:
+    """A line for a missing-input error naming config keys, or `None` (Q56).
+
+    A missing input is listed as `'name' (`, which no other part of the message
+    is: a consumer is followed by `,` or `)`.
+    """
+    if not config or not message.startswith("missing inputs: "):
+        return None
+    keys = [key for key in sorted(config) if f"'{key}' (" in message]
+    if not keys:
+        return None
+    listed = ", ".join(repr(key) for key in keys)
+    if len(keys) == 1:
+        return (
+            f"{listed} is a config key; config is not passed to nodes: "
+            "supply it in inputs="
+        )
+    return (
+        f"{listed} are config keys; config is not passed to nodes: "
+        "supply them in inputs="
+    )
+
+
+def _checked_config(config: object) -> dict[str, object]:
+    """A copy of `config`; `TypeError` for a non-mapping or a key that is no `str`."""
+    if not isinstance(config, Mapping):
+        msg = f"with_config takes a mapping, got {type(config).__name__}"
+        raise TypeError(msg)
+    given: dict[object, object] = dict(config)
+    not_str = sorted(type(k).__name__ for k in given if not isinstance(k, str))
+    if not_str:
+        msg = f"config keys must be str, got: {', '.join(not_str)}"
+        raise TypeError(msg)
+    return {str(k): v for k, v in given.items()}
+
+
+def _unmatched_edges(nodes: Sequence[NodeDef], unmatched: Mapping[str, str]) -> str:
+    """Why each node no variant gave that a node reads is absent, sorted; or ``""``."""
+    read = {
+        p.binding.name
+        for node in nodes
+        for p in node.params
+        if isinstance(p.binding, Source) and p.binding.name in unmatched
+    }
+    return "\n".join(unmatched[name] for name in sorted(read))
+
+
 def _prepare_again(driver: Driver, key: _PlanKey) -> PreparedPlan:
     """Prepares a pickled plan's request on its rebuilt driver."""
     outputs, input_names, override_names = key
@@ -514,17 +816,18 @@ def _builder_of(
     names: tuple[str, ...],
     check_inputs: bool,  # noqa: FBT001  # pickle passes arguments positionally
     store: CacheStore | None,
+    config: Mapping[str, object] | None = None,
 ) -> Builder:
     """A pickled builder, its modules imported again by name."""
     modules = tuple(importlib.import_module(name) for name in names)
-    return Builder(modules, check_inputs=check_inputs, store=store)
+    return Builder(modules, check_inputs=check_inputs, store=store, config=config)
 
 
 class Builder:
     """Accumulates modules, then builds a `Driver`; methods return new builders.
 
     A builder pickles as the names of its modules, which must import them, its
-    type-check setting and its store, which must pickle too.
+    type-check setting, its config and its store, which must pickle too.
     """
 
     def __init__(
@@ -533,41 +836,72 @@ class Builder:
         *,
         check_inputs: bool = True,
         store: CacheStore | None = None,
+        config: Mapping[str, object] | None = None,
     ) -> None:
         """Starts with the given modules (none by default), checking input types.
 
         `store`, when given, caches the results of the driver's runs in it.
+        `config`, copied, selects `@config.when*` variants (see `with_config`).
         `TypeError` when an item of `modules` is not a module.
         """
         self._modules = _checked_modules(modules)
         self._check_inputs = check_inputs
         self._store = store
+        # Never changed once made: `with_config` makes a new dict.
+        self._config: dict[str, object] = (
+            {} if config is None else _checked_config(config)
+        )
 
     @override
     def __reduce__(
         self,
-    ) -> tuple[Callable[..., Builder], tuple[tuple[str, ...], bool, CacheStore | None]]:
+    ) -> tuple[
+        Callable[..., Builder],
+        tuple[tuple[str, ...], bool, CacheStore | None, dict[str, object]],
+    ]:
         """The modules' names and the settings, imported again on load."""
         names = tuple(_importable_name(module) for module in self._modules)
-        return _builder_of, (names, self._check_inputs, self._store)
+        return _builder_of, (names, self._check_inputs, self._store, self._config)
+
+    def _with(
+        self,
+        modules: tuple[ModuleType, ...] | None = None,
+        *,
+        check_inputs: bool | None = None,
+        store: CacheStore | None = None,
+        config: Mapping[str, object] | None = None,
+    ) -> Builder:
+        """A new builder: this one's settings, each given one replaced."""
+        return Builder(
+            self._modules if modules is None else modules,
+            check_inputs=self._check_inputs if check_inputs is None else check_inputs,
+            store=self._store if store is None else store,
+            config=self._config if config is None else config,
+        )
 
     def with_modules(self, *modules: ModuleType) -> Builder:
         """Returns a new builder with `modules` appended to this one's.
 
         `TypeError` when an item is not a module, such as a function.
         """
-        return Builder(
-            (*self._modules, *modules),
-            check_inputs=self._check_inputs,
-            store=self._store,
-        )
+        return self._with((*self._modules, *modules))
+
+    def with_config(self, config: Mapping[str, object]) -> Builder:
+        """Returns a new builder with `config` merged into a copy of this one's.
+
+        A key given again takes its later value. The config selects among
+        `@config.when*` variants when building, and is never passed to a node
+        (Q56); the driver's `config` is a read-only, shallow copy of it.
+        `TypeError` for a non-mapping or a key that is not a `str`.
+        """
+        return self._with(config={**self._config, **_checked_config(config)})
 
     def without_input_type_checks(self) -> Builder:
         """Returns a new builder whose driver skips input and override type checks.
 
         Edge checks, between a node and the parameters it feeds, stay on (Q10).
         """
-        return Builder(self._modules, check_inputs=False, store=self._store)
+        return self._with(check_inputs=False)
 
     def with_cache(self, store: CacheStore) -> Builder:
         """Returns a new builder whose driver caches every node's result in `store`.
@@ -583,7 +917,7 @@ class Builder:
         ):
             msg = f"a cache store needs get, put and discard methods, not {store!r}"
             raise TypeError(msg)
-        return Builder(self._modules, check_inputs=self._check_inputs, store=store)
+        return self._with(store=store)
 
     def build(self) -> Driver:
         """Scans the modules and returns a `Driver`; `ValueError` on a bad node.
@@ -597,14 +931,83 @@ class Builder:
         the node. Every edge is type checked: a node whose return type a parameter
         it feeds does not accept fails the build, with one `ValueError` listing
         every such parameter.
+
+        The config selects one `@config.when*` variant per node. Two matching
+        variants, or a node that a node reads and that no variant or
+        `@config.default` gives, are a `ValueError` naming each (Q57, Q58).
         """
-        nodes = resolve(collect(self._modules))
+        nodes, views, graph, unmatched = self._scanned(awaits=False)
+        # Called here, so a `CacheWarning` points at the caller's `build`.
+        cache = None if self._store is None else Cache.of(self._store, nodes)
+        return self._driver(graph, views, unmatched, cache)
+
+    def build_async(
+        self, *, sync_nodes: Literal["thread", "inline"] = "thread"
+    ) -> AsyncDriver:
+        """Scans the modules and returns an `AsyncDriver`; synchronous (Q12).
+
+        As `build`, but an `async def` node is accepted, and awaited when run.
+        `sync_nodes` says where a sync node runs: `"thread"` in the loop's
+        default executor, so the loop keeps running while it does (Q65), or
+        `"inline"` on the loop, which suits a graph of cheap nodes. A generated
+        `extract_*` node always runs on the loop. `ValueError` for any other
+        `sync_nodes`.
+
+        With `with_cache`, runs cache as `build`'s do, with the same keys and
+        store (Q68): each node is stored as it succeeds, and a node that fails,
+        or that a failure cancels, stores nothing. Store calls run on the loop.
+        """
+        checked = _async.checked_sync_nodes(sync_nodes)
+        nodes, views, graph, unmatched = self._scanned(awaits=True)
+        # Called here, so a `CacheWarning` points at the caller's `build_async`.
+        cache = None if self._store is None else Cache.of(self._store, nodes)
+        built = AsyncDriver(
+            self._driver(graph, views, unmatched, cache),
+            {node.name: node for node in nodes},
+            sync_nodes=checked,
+        )
+        built._builder = self  # noqa: SLF001  # the builder's own driver
+        return built
+
+    def _scanned(
+        self, *, awaits: bool
+    ) -> tuple[list[NodeDef], NodeViews, _core.Graph, dict[str, str]]:
+        """The checked nodes, their views and graph; see `build`.
+
+        Also why each node no variant gave is absent. With `awaits`, an
+        `async def` is a node too.
+        """
+        scanned = scan(self._modules, self._config, awaits=awaits)
+        nodes = resolve(scanned.nodes)
+        unmatched = scanned.unmatched
+        if unmatched:
+            # A field of a forward-referenced `TypedDict` is first known resolved.
+            names = {node.name for node in nodes}
+            unmatched = {n: why for n, why in unmatched.items() if n not in names}
+            if absent := _unmatched_edges(nodes, unmatched):
+                raise ValueError(absent)
         views = node_views(nodes)
         graph = _graph_of(nodes)
         if mismatches := _edge_mismatches(views.functions):
             raise ValueError("\n".join(mismatches))
-        cache = None if self._store is None else Cache.of(self._store, nodes)
-        driver = Driver(graph, views, check_inputs=self._check_inputs, cache=cache)
+        return nodes, views, graph, unmatched
+
+    def _driver(
+        self,
+        graph: _core.Graph,
+        views: NodeViews,
+        unmatched: dict[str, str],
+        cache: Cache | None,
+    ) -> Driver:
+        """This builder's driver over a scanned graph."""
+        driver = Driver(
+            graph,
+            views,
+            check_inputs=self._check_inputs,
+            cache=cache,
+            config=MappingProxyType(self._config),
+        )
+        driver._unmatched = unmatched  # noqa: SLF001  # the builder's own driver
         driver._builder = self  # noqa: SLF001  # the builder's own driver
         return driver
 

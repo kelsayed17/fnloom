@@ -8,4 +8,5 @@ column means are on the [benchmarks page](../docs/benchmarks.md)
 uv run maturin develop --release
 uv run python -m benches.run > bench.jsonl 2> bench.stderr
 uv run python -m benches.cache > cache.jsonl   # cached runs, one fresh process per sample
+uv run python -m benches.async_ > async.jsonl  # async runs, one fresh process per sample
 ```

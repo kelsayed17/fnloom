@@ -1,5 +1,6 @@
 """Each deliberate difference from Hamilton, asserted on both sides."""
 
+import asyncio
 import collections.abc
 import importlib.util
 import inspect
@@ -7,9 +8,12 @@ import pickle
 import sys
 import textwrap
 import types
-from typing import TYPE_CHECKING, Annotated, Any
+import warnings
+from pathlib import Path
+from typing import TYPE_CHECKING, Annotated, Any, TypedDict, cast
 
 import pytest
+from hamilton import async_driver as hamilton_async
 from hamilton import driver as hamilton_driver
 from hamilton import htypes
 from hamilton.function_modifiers.base import InvalidDecoratorException
@@ -42,8 +46,7 @@ from fnloom._types import type_matches, value_matches
 from helpers import make_module
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
-    from pathlib import Path
+    from collections.abc import Callable, Coroutine
     from types import ModuleType
 
 
@@ -946,3 +949,1292 @@ def test_q55_an_unknown_format_is_refused_at_build(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="'nosuch', which the store does not know"):
         _fnloom_cached(fnloom_module, tmp_path / "fnloom")
+
+
+# Each library's config decorator, put in a fixture module's source as `{decorator}`.
+_HAMILTON_CONFIG = "from hamilton.function_modifiers import config"
+_FNLOOM_CONFIG = "from fnloom import config"
+
+
+def _hamilton_configured(
+    settings: dict[str, object], *modules: ModuleType
+) -> hamilton_driver.Driver:
+    return (
+        hamilton_driver.Builder().with_config(settings).with_modules(*modules).build()
+    )
+
+
+def _fnloom_configured(
+    settings: dict[str, object], *modules: ModuleType
+) -> fnloom.Driver:
+    return fnloom.Builder().with_config(settings).with_modules(*modules).build()
+
+
+def _hamilton_names(built: hamilton_driver.Driver) -> list[str]:
+    return sorted(v.name for v in built.list_available_variables())
+
+
+@pytest.mark.deliberate("Q56")
+def test_q56_config_is_never_a_node_or_an_input() -> None:
+    """Hamilton passes config to parameters and drops a function a key names."""
+    source = """
+def usecfg(mode: str) -> str:
+    return "mode=" + mode
+
+def a() -> int:
+    return 1
+
+def b(a: int) -> int:
+    return a * 2
+"""
+    module = make_module("differential_q56", source)
+    settings: dict[str, object] = {"mode": "fast", "a": 50}
+    hamilton = _hamilton_configured(settings, module)
+    assert _hamilton_names(hamilton) == ["a", "b", "mode", "usecfg"]
+    assert hamilton.execute(["usecfg", "b", "mode"]) == {
+        "usecfg": "mode=fast",
+        "b": 100,
+        "mode": "fast",
+    }
+    with pytest.raises(ValueError, match="present in both config and inputs"):
+        hamilton.execute(["usecfg"], inputs={"mode": "slow"})
+    driver = _fnloom_configured(settings, module)
+    assert driver.node_names() == ["a", "b", "mode", "usecfg"]
+    assert driver.nodes["mode"].is_input
+    assert not driver.nodes["a"].is_input
+    assert driver.execute(["usecfg", "b"], inputs={"mode": "slow"}) == {
+        "usecfg": "mode=slow",
+        "b": 2,
+    }
+    with pytest.raises(ValueError, match=r"'mode' is a config key; config is not"):
+        driver.execute(["usecfg"])
+
+
+_VARIANTS = """
+{decorator}
+
+@config.when(mode="a")
+def foo__a(x: int) -> int:
+    return x + 1
+
+@config.when(mode="b")
+def foo__b(x: int) -> int:
+    return x + 100
+
+@config.when_not(mode="a")
+def other__not_a(x: int) -> int:
+    return x
+
+def bar(foo: int) -> int:
+    return foo + 1
+"""
+
+
+@pytest.mark.deliberate("Q57")
+def test_q57_a_missing_key_and_a_missing_variant() -> None:
+    """Hamilton matches `when_not` on a missing key and fails late without a variant."""
+    hamilton_module = make_module(
+        "differential_q57_h", _VARIANTS.format(decorator=_HAMILTON_CONFIG)
+    )
+    fnloom_module = make_module(
+        "differential_q57_f", _VARIANTS.format(decorator=_FNLOOM_CONFIG)
+    )
+    hamilton_empty = _hamilton_configured({}, hamilton_module)
+    assert "other" in _hamilton_names(hamilton_empty)
+    unmatched = _hamilton_configured({"mode": "c"}, hamilton_module)
+    assert "foo" in _hamilton_names(unmatched)
+    with pytest.raises(ValueError, match=r"Required input foo not provided"):
+        unmatched.execute(["bar"], inputs={"x": 1})
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^no variant of 'foo' matches the config \{\}; its variants need "
+            r"mode == 'a' \(foo__a\), mode == 'b' \(foo__b\); "
+            r"add @config\.default or a variant for it$"
+        ),
+    ):
+        _fnloom_configured({}, fnloom_module)
+    with pytest.raises(ValueError, match=r"^no variant of 'foo' matches the config"):
+        _fnloom_configured({"mode": "c"}, fnloom_module)
+    without_bar = make_module(
+        "differential_q57_f_alone",
+        _VARIANTS.format(decorator=_FNLOOM_CONFIG).replace(
+            "def bar(foo: int)", "def bar(x: int)"
+        ),
+    )
+    assert _fnloom_configured({}, without_bar).node_names() == ["bar", "x"]
+
+
+_ROWS = """
+{decorator}
+{rows}
+
+@parameterize(r1={{"k": value(1)}}, r2={{"k": value(2)}})
+@config.when(mode="a")
+def rows__a(k: int) -> int:
+    return k
+
+@parameterize(r1={{"k": value(10)}})
+@config.when_not(mode="a")
+def rows__other(k: int) -> int:
+    return k
+
+def total(r1: int, r2: int) -> int:
+    return r1 + r2
+"""
+
+
+@pytest.mark.deliberate("Q57")
+def test_q57_a_name_only_an_unselected_variant_gives() -> None:
+    """Hamilton makes a row only the unselected variant has an input; fnloom refuses."""
+    hamilton_module = make_module(
+        "differential_q57_rows_h",
+        _ROWS.format(
+            decorator=_HAMILTON_CONFIG,
+            rows="from hamilton.function_modifiers import parameterize, value",
+        ),
+    )
+    hamilton = _hamilton_configured({"mode": "z"}, hamilton_module)
+    assert _hamilton_names(hamilton) == ["mode", "r1", "r2", "total"]
+    with pytest.raises(ValueError, match=r"Required input r2 not provided"):
+        hamilton.execute(["total"])
+    assert hamilton.execute(["total"], inputs={"r2": 5}) == {"total": 15}
+    fnloom_module = make_module(
+        "differential_q57_rows_f",
+        _ROWS.format(
+            decorator=_FNLOOM_CONFIG, rows="from fnloom import parameterize, value"
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^no selected variant gives 'r2': the config \{'mode': 'z'\} selects "
+            r"rows__other for 'rows', and only rows__a gives 'r2'$"
+        ),
+    ):
+        _fnloom_configured({"mode": "z"}, fnloom_module)
+    assert _fnloom_configured({"mode": "a"}, fnloom_module).execute(["total"]) == {
+        "total": 3
+    }
+
+
+_MISSING_KEY = """
+{decorator}
+
+@config.when(mode=None)
+def a__none() -> int:
+    return 1
+
+@config.when_not(mode="a")
+def b__not_a() -> int:
+    return 2
+
+@config.when_in(mode=["a", None])
+def c__in() -> int:
+    return 3
+
+@config.when_not_in(mode=["a"])
+def d__not_in() -> int:
+    return 4
+"""
+
+
+@pytest.mark.deliberate("Q57")
+def test_q57_a_missing_key_matches_no_form() -> None:
+    """Hamilton reads a missing key as `None` in all four forms; fnloom matches none."""
+    hamilton_module = make_module(
+        "differential_q57_forms_h", _MISSING_KEY.format(decorator=_HAMILTON_CONFIG)
+    )
+    hamilton = _hamilton_configured({}, hamilton_module)
+    assert _hamilton_names(hamilton) == ["a", "b", "c", "d"]
+    assert hamilton.execute(["a", "b", "c", "d"]) == {"a": 1, "b": 2, "c": 3, "d": 4}
+    fnloom_module = make_module(
+        "differential_q57_forms_f", _MISSING_KEY.format(decorator=_FNLOOM_CONFIG)
+    )
+    assert _fnloom_configured({}, fnloom_module).node_names() == []
+    # With the key present, fnloom's forms read it as Hamilton's do.
+    both: dict[str, object] = {"mode": "b"}
+    assert _fnloom_configured(both, fnloom_module).node_names() == ["b", "d"]
+    assert _hamilton_names(_hamilton_configured(both, hamilton_module)) == [
+        "b",
+        "d",
+        "mode",
+    ]
+
+
+_TWO_MATCHES = """
+{decorator}
+
+@config.when_not(mode="b")
+def foo__nb() -> int:
+    return 1
+
+@config.when(mode="a")
+def foo__a() -> int:
+    return 2
+"""
+
+_REDEFINED = """
+{decorator}
+
+@config.when(mode="a")
+def foo__a() -> int:
+    return 1
+
+@config.when(mode="a")
+def foo__a() -> int:
+    return 2
+"""
+
+
+@pytest.mark.deliberate("Q58")
+def test_q58_two_variants_and_a_redefinition(tmp_path: Path) -> None:
+    """Hamilton names a wrong culprit and keeps a redefinition; fnloom refuses both."""
+    hamilton_two = make_module(
+        "differential_q58_two_h", _TWO_MATCHES.format(decorator=_HAMILTON_CONFIG)
+    )
+    with pytest.raises(ValueError, match="more than once") as raised:
+        _hamilton_configured({"mode": "a"}, hamilton_two)
+    assert "foo__nb" in str(raised.value)
+    assert "foo__a " not in str(raised.value)
+    fnloom_two = make_module(
+        "differential_q58_two_f", _TWO_MATCHES.format(decorator=_FNLOOM_CONFIG)
+    )
+    with pytest.raises(ValueError, match=r": 'foo__a', 'foo__nb'$"):
+        _fnloom_configured({"mode": "a"}, fnloom_two)
+    hamilton_redefined = _file_module(
+        tmp_path,
+        "differential_q58_redef_h",
+        _REDEFINED.format(decorator=_HAMILTON_CONFIG),
+    )
+    assert _hamilton_configured({"mode": "a"}, hamilton_redefined).execute(["foo"]) == {
+        "foo": 2
+    }
+    fnloom_redefined = _file_module(
+        tmp_path,
+        "differential_q58_redef_f",
+        _REDEFINED.format(decorator=_FNLOOM_CONFIG),
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"^function 'foo__a' is defined more than once .* \(lines 5, 9\)",
+    ):
+        _fnloom_configured({"mode": "a"}, fnloom_redefined)
+
+
+_BARE_WHEN = """
+{decorator}
+
+@config.when
+def foo__a() -> int:
+    return 1
+
+def keep() -> int:
+    return 1
+"""
+
+_SUBSTRING = """
+{decorator}
+
+@config.when_in(mode="ab")
+def foo__a() -> int:
+    return 1
+"""
+
+
+@pytest.mark.deliberate("Q59")
+def test_q59_misuse_is_refused_when_decorating() -> None:
+    """Hamilton drops a bare `@config.when` and reads a `str` as substrings."""
+    bare = make_module(
+        "differential_q59_bare_h", _BARE_WHEN.format(decorator=_HAMILTON_CONFIG)
+    )
+    assert _hamilton_names(_hamilton_configured({"mode": "a"}, bare)) == [
+        "keep",
+        "mode",
+    ]
+    substring = make_module(
+        "differential_q59_sub_h", _SUBSTRING.format(decorator=_HAMILTON_CONFIG)
+    )
+    for mode in ("a", "b", "ab"):
+        assert "foo" in _hamilton_names(_hamilton_configured({"mode": mode}, substring))
+    with pytest.raises(InvalidDecoratorException, match=r"whereas$"):
+        make_module(
+            "differential_q59_trail_h",
+            f"{_HAMILTON_CONFIG}\n\n@config.when(mode='a')\n"
+            "def foo__() -> int:\n    return 1\n",
+        )
+    with pytest.raises(TypeError, match=r"with parentheses"):
+        make_module(
+            "differential_q59_bare_f", _BARE_WHEN.format(decorator=_FNLOOM_CONFIG)
+        )
+    with pytest.raises(TypeError, match=r"need a collection of values: 'mode' \(str\)"):
+        make_module(
+            "differential_q59_sub_f", _SUBSTRING.format(decorator=_FNLOOM_CONFIG)
+        )
+    with pytest.raises(ValueError, match=r"'foo__' ends in '__'"):
+        make_module(
+            "differential_q59_trail_f",
+            f"{_FNLOOM_CONFIG}\n\n@config.when(mode='a')\n"
+            "def foo__() -> int:\n    return 1\n",
+        )
+
+
+_POSITIONAL_NAME = """
+{decorator}
+
+@config.when("alpha", mode="a")
+def thing() -> int:
+    return 1
+"""
+
+_NOT_ITERABLE = """
+{decorator}
+
+@config.when_in(mode=5)
+def foo__a() -> int:
+    return 1
+"""
+
+_NOT_IN_NAME = """
+{decorator}
+
+@config.when_not_in(name=["a"])
+def foo__x() -> int:
+    return 1
+"""
+
+
+@pytest.mark.deliberate("Q59")
+def test_q59_a_name_and_a_non_iterable() -> None:
+    """Hamilton reads a name or a non-iterable loosely; fnloom refuses when decorating.
+
+    Hamilton takes a positional string as the node name, reads `name` on
+    `when_not_in` as a config key, and fails a non-iterable only at build.
+    """
+    positional = make_module(
+        "differential_q59_pos_h", _POSITIONAL_NAME.format(decorator=_HAMILTON_CONFIG)
+    )
+    assert _hamilton_names(_hamilton_configured({"mode": "a"}, positional)) == [
+        "alpha",
+        "mode",
+    ]
+    not_iterable = make_module(
+        "differential_q59_nonit_h", _NOT_ITERABLE.format(decorator=_HAMILTON_CONFIG)
+    )
+    with pytest.raises(TypeError, match="is not a container or iterable"):
+        _hamilton_configured({"mode": 5}, not_iterable)
+    not_in = make_module(
+        "differential_q59_nin_h", _NOT_IN_NAME.format(decorator=_HAMILTON_CONFIG)
+    )
+    assert "foo" in _hamilton_names(_hamilton_configured({"name": "b"}, not_in))
+    assert "foo" not in _hamilton_names(_hamilton_configured({"name": "a"}, not_in))
+    with pytest.raises(TypeError, match=r"as a mapping or keywords, got str"):
+        make_module(
+            "differential_q59_pos_f", _POSITIONAL_NAME.format(decorator=_FNLOOM_CONFIG)
+        )
+    with pytest.raises(TypeError, match=r"need a collection of values: 'mode' \(int\)"):
+        make_module(
+            "differential_q59_nonit_f", _NOT_ITERABLE.format(decorator=_FNLOOM_CONFIG)
+        )
+    # `name=` is the node name on `when_not_in` too, never a key: no condition is left.
+    with pytest.raises(ValueError, match=r"when_not_in needs at least one condition"):
+        make_module(
+            "differential_q59_nin_f", _NOT_IN_NAME.format(decorator=_FNLOOM_CONFIG)
+        )
+    keyed = make_module(
+        "differential_q59_nin_keyed_f",
+        _NOT_IN_NAME.format(decorator=_FNLOOM_CONFIG).replace(
+            '(name=["a"])', '({"name": ["a"]})'
+        ),
+    )
+    assert _fnloom_configured({"name": "b"}, keyed).node_names() == ["foo"]
+    assert _fnloom_configured({"name": "a"}, keyed).node_names() == []
+
+
+_ONE_VARIANT = """
+{decorator}
+
+@config.when(mode="a")
+def foo__a() -> int:
+    return 1
+"""
+
+
+@pytest.mark.deliberate("Q60")
+def test_q60_no_mutation_and_no_tag() -> None:
+    """Hamilton renames the function and tags the node; fnloom does neither."""
+    hamilton_module = make_module(
+        "differential_q60_h", _ONE_VARIANT.format(decorator=_HAMILTON_CONFIG)
+    )
+    hamilton = _hamilton_configured({"mode": "a"}, hamilton_module)
+    assert hamilton_module.foo__a.__name__ == "foo"
+    (foo,) = (v for v in hamilton.list_available_variables() if v.name == "foo")
+    assert foo.tags["hamilton.config"] == "mode"
+    fnloom_module = make_module(
+        "differential_q60_f", _ONE_VARIANT.format(decorator=_FNLOOM_CONFIG)
+    )
+    driver = _fnloom_configured({"mode": "a"}, fnloom_module)
+    assert fnloom_module.foo__a.__name__ == "foo__a"
+    assert not hasattr(fnloom_module.foo__a, "__original_name__")
+    assert driver.nodes["foo"].tags == {}
+    assert [c.key for c in driver.nodes["foo"].config] == ["mode"]
+
+
+_HAMILTON_EXTRACT = (
+    "from hamilton.function_modifiers import extract_fields, parameterize, tag, value"
+)
+_FNLOOM_EXTRACT = "from fnloom import extract_fields, parameterize, tag, value"
+
+_UNCHECKED = """
+{decorator}
+
+@extract_fields({{"a": int, "b": int}})
+def p() -> dict:
+    return {{"a": "not-int"}}
+
+@extract_fields({{"c": str}})
+def q() -> dict[str, int]:
+    return {{"c": 1}}
+
+def uses_a(a: int) -> str:
+    return a
+"""
+
+
+@pytest.mark.deliberate("Q61")
+def test_q61_fields_are_checked_at_build_and_run() -> None:
+    """Hamilton checks no field's type and fails a missing one with its own class.
+
+    fnloom refuses a declared type the return cannot feed at build, and checks
+    each field's value and presence on every run, also with input checks off.
+    """
+    hamilton_module = make_module(
+        "differential_q61_h", _UNCHECKED.format(decorator=_HAMILTON_EXTRACT)
+    )
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    assert hamilton.execute(["a", "uses_a", "c"]) == {
+        "a": "not-int",
+        "uses_a": "not-int",
+        "c": 1,
+    }
+    with pytest.raises(InvalidDecoratorException, match="No such field: b"):
+        hamilton.execute(["b"])
+    fnloom_module = make_module(
+        "differential_q61_f", _UNCHECKED.format(decorator=_FNLOOM_EXTRACT)
+    )
+    with pytest.raises(ValueError, match=r"field 'c' is declared str"):
+        fnloom.build(fnloom_module)
+    del fnloom_module.q
+    for builder in (fnloom.Builder(), fnloom.Builder().without_input_type_checks()):
+        driver = builder.with_modules(fnloom_module).build()
+        with pytest.raises(ValueError, match=r"returned field 'a' as str"):
+            driver.execute(["a"])
+        with pytest.raises(ValueError, match=r"no field 'b'; it returned 'a'"):
+            driver.execute(["b"])
+
+
+_MIXED = """
+from collections.abc import Mapping
+from typing import TypedDict
+{decorator}
+
+class Point(TypedDict):
+    x: int
+
+@extract_fields({{"a": int}}, "b")
+def mixed() -> dict:
+    return {{"a": 1, "b": 2}}
+"""
+
+_TYPED_DICT_MISSING = """
+from typing import TypedDict
+{decorator}
+
+class Point(TypedDict):
+    x: int
+
+@extract_fields(["zz"])
+def p() -> Point:
+    return {{"x": 1}}
+"""
+
+_MAPPING = """
+from collections.abc import Mapping
+{decorator}
+
+@extract_fields("a")
+def p() -> Mapping[str, int]:
+    return {{"a": 1}}
+"""
+
+_TWO_ROWS = """
+{decorator}
+
+@extract_fields({{"a": int}})
+@parameterize(r1={{"n": value(1)}}, r2={{"n": value(2)}})
+def p(n: int) -> dict:
+    return {{"a": n}}
+"""
+
+
+@pytest.mark.deliberate("Q61")
+def test_q61_misuse_is_refused_when_decorating() -> None:
+    """Hamilton drops extra names, raises `KeyError` and refuses `Mapping`.
+
+    It refuses two rows only at build. fnloom refuses the first, second and
+    fourth with a `ValueError` when decorating, and accepts a `Mapping` return.
+    """
+    mixed = make_module(
+        "differential_q61_mixed_h", _MIXED.format(decorator=_HAMILTON_EXTRACT)
+    )
+    assert _hamilton_names(hamilton_driver.Builder().with_modules(mixed).build()) == [
+        "a",
+        "mixed",
+    ]
+    with pytest.raises(KeyError, match="zz"):
+        make_module(
+            "differential_q61_td_h",
+            _TYPED_DICT_MISSING.format(decorator=_HAMILTON_EXTRACT),
+        )
+    with pytest.raises(InvalidDecoratorException, match="must be a `dict`"):
+        make_module(
+            "differential_q61_mapping_h", _MAPPING.format(decorator=_HAMILTON_EXTRACT)
+        )
+    two_rows = make_module(
+        "differential_q61_rows_h", _TWO_ROWS.format(decorator=_HAMILTON_EXTRACT)
+    )
+    with pytest.raises(InvalidDecoratorException, match="single node"):
+        hamilton_driver.Builder().with_modules(two_rows).build()
+    with pytest.raises(ValueError, match=r"not both; the extra names: 'b'"):
+        make_module(
+            "differential_q61_mixed_f", _MIXED.format(decorator=_FNLOOM_EXTRACT)
+        )
+    with pytest.raises(ValueError, match=r"which has no field 'zz'"):
+        make_module(
+            "differential_q61_td_f",
+            _TYPED_DICT_MISSING.format(decorator=_FNLOOM_EXTRACT),
+        )
+    mapping = make_module(
+        "differential_q61_mapping_f", _MAPPING.format(decorator=_FNLOOM_EXTRACT)
+    )
+    assert fnloom.build(mapping).execute(["a"]) == {"a": 1}
+    with pytest.raises(ValueError, match=r"parameterize makes 2: 'r1', 'r2'"):
+        make_module(
+            "differential_q61_rows_f", _TWO_ROWS.format(decorator=_FNLOOM_EXTRACT)
+        )
+
+
+class _Coordinates(TypedDict):
+    x: int
+
+
+@pytest.mark.deliberate("Q61")
+def test_q61_a_typed_dict_takes_any_dict() -> None:
+    """Hamilton's input check raises on a `TypedDict`; fnloom takes any dict."""
+    with pytest.raises(TypeError, match="TypedDict does not support instance"):
+        htypes.check_input_type(_Coordinates, {"x": 1})
+    assert value_matches(_Coordinates, {"x": 1})
+    assert not value_matches(_Coordinates, [("x", 1)])
+    # And through a driver's real input check.
+    module = make_module(
+        "differential_q61_td_input",
+        """
+        def count(point: Coordinates) -> int:
+            return len(point)
+        """,
+    )
+    setattr(module, "Coordinates", _Coordinates)  # noqa: B010  # a module attribute ty cannot see
+    driver = fnloom.build(module)
+    assert driver.execute(["count"], inputs={"point": {"x": 1}}) == {"count": 1}
+    with pytest.raises(ValueError, match=r"point: expected .*_Coordinates, got list"):
+        driver.execute(["count"], inputs={"point": [("x", 1)]})
+
+
+_FILLED = """
+{decorator}
+
+SHARED: dict[str, int] = {{"a": 1}}
+
+@extract_fields({{"a": int, "b": int}}, fill_with=-1)
+def p() -> dict:
+    return SHARED
+
+@extract_fields({{"c": int}}, fill_with=None)
+def q() -> dict:
+    return {{}}
+"""
+
+
+@pytest.mark.deliberate("Q62")
+def test_q62_fill_never_mutates_and_none_fills() -> None:
+    """Hamilton writes the fill into the returned dict and reads `None` as no fill."""
+    hamilton_module = make_module(
+        "differential_q62_h", _FILLED.format(decorator=_HAMILTON_EXTRACT)
+    )
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    assert hamilton.execute(["b", "p"]) == {"b": -1, "p": {"a": 1, "b": -1}}
+    assert hamilton_module.SHARED == {"a": 1, "b": -1}
+    with pytest.raises(InvalidDecoratorException, match="No such field: c"):
+        hamilton.execute(["c"])
+    fnloom_module = make_module(
+        "differential_q62_f", _FILLED.format(decorator=_FNLOOM_EXTRACT)
+    )
+    driver = fnloom.build(fnloom_module)
+    assert driver.execute(["b", "p", "c"]) == {"b": -1, "p": {"a": 1}, "c": None}
+    assert fnloom_module.SHARED == {"a": 1}
+
+
+_TAGGED = """
+{decorator}
+
+{first}
+{second}
+def p() -> dict:
+    return {{"a": 1}}
+"""
+_TAG_ORDERS = [
+    ('@tag(owner="z")', '@extract_fields({"a": int})'),
+    ('@extract_fields({"a": int})', '@tag(owner="z")'),
+]
+
+
+@pytest.mark.deliberate("Q63")
+def test_q63_tags_land_on_the_producer_too() -> None:
+    """Hamilton tags only the field nodes, in either order; fnloom the producer too."""
+    for index, (first, second) in enumerate(_TAG_ORDERS):
+        hamilton_module = make_module(
+            f"differential_q63_h{index}",
+            _TAGGED.format(decorator=_HAMILTON_EXTRACT, first=first, second=second),
+        )
+        hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+        hamilton_tags = {
+            v.name: {k: t for k, t in v.tags.items() if not k.startswith("module")}
+            for v in hamilton.list_available_variables()
+        }
+        assert hamilton_tags == {"a": {"owner": "z"}, "p": {}}, (first, second)
+        fnloom_module = make_module(
+            f"differential_q63_f{index}",
+            _TAGGED.format(decorator=_FNLOOM_EXTRACT, first=first, second=second),
+        )
+        driver = fnloom.build(fnloom_module)
+        assert driver.nodes["a"].tags == {"owner": "z"}
+        assert driver.nodes["p"].tags == {"owner": "z"}
+
+
+_TAGGED_COLUMNS = """
+import pandas as pd
+{decorator}
+
+{first}
+{second}
+def p() -> pd.DataFrame:
+    return pd.DataFrame({{"a": [1]}})
+"""
+_COLUMN_TAG_ORDERS = [
+    ('@tag(owner="z")', '@extract_columns("a")'),
+    ('@extract_columns("a")', '@tag(owner="z")'),
+]
+
+
+@pytest.mark.deliberate("Q63")
+def test_q63_column_tags_land_on_the_producer_too() -> None:
+    """Hamilton tags only the column nodes, in either order; fnloom the producer too."""
+    pytest.importorskip("pandas")
+    _hamilton_pandas()
+    for index, (first, second) in enumerate(_COLUMN_TAG_ORDERS):
+        hamilton_module = make_module(
+            f"differential_q63_columns_h{index}",
+            _TAGGED_COLUMNS.format(
+                decorator=_HAMILTON_COLUMNS_TAG, first=first, second=second
+            ),
+        )
+        hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+        hamilton_tags = {
+            v.name: {k: t for k, t in v.tags.items() if not k.startswith("module")}
+            for v in hamilton.list_available_variables()
+        }
+        assert hamilton_tags == {"a": {"owner": "z"}, "p": {}}, (first, second)
+        fnloom_module = make_module(
+            f"differential_q63_columns_f{index}",
+            _TAGGED_COLUMNS.format(
+                decorator=_FNLOOM_COLUMNS_TAG, first=first, second=second
+            ),
+        )
+        driver = fnloom.build(fnloom_module)
+        assert driver.nodes["a"].tags == {"owner": "z"}, (first, second)
+        assert driver.nodes["p"].tags == {"owner": "z"}, (first, second)
+
+
+_HAMILTON_COLUMNS_TAG = "from hamilton.function_modifiers import extract_columns, tag"
+_FNLOOM_COLUMNS_TAG = "from fnloom import extract_columns, tag"
+
+
+_HAMILTON_COLUMNS = "from hamilton.function_modifiers import extract_columns"
+_FNLOOM_COLUMNS = "from fnloom import extract_columns"
+
+_FRAME = """
+import pandas as pd
+{decorator}
+
+@extract_columns("a")
+def frame() -> pd.DataFrame:
+    return pd.DataFrame({{"a": [1, 2]}})
+"""
+
+_DICT = """
+{decorator}
+
+@extract_columns("b")
+def mapping() -> dict:
+    return {{"b": 3}}
+"""
+
+
+@pytest.mark.deliberate("Q64")
+def test_q64_extract_columns_needs_no_extension(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hamilton without its pandas extension refuses a frame at decoration.
+
+    fnloom splits it into `pandas.Series` columns, read by name.
+    """
+    pd = pytest.importorskip("pandas")
+    from hamilton import registry  # noqa: PLC0415  # only the Q64 tests need it
+
+    # As with autoload off and nothing loaded yet, whatever ran before.
+    monkeypatch.setattr(registry, "DF_TYPE_AND_COLUMN_TYPES", {})
+    with pytest.raises(InvalidDecoratorException, match="type we know about"):
+        make_module("differential_q64_h", _FRAME.format(decorator=_HAMILTON_COLUMNS))
+    fnloom_module = make_module(
+        "differential_q64_f", _FRAME.format(decorator=_FNLOOM_COLUMNS)
+    )
+    driver = fnloom.build(fnloom_module)
+    assert driver.nodes["a"].type is pd.Series
+    result: dict[str, Any] = dict(driver.execute(["a"]))
+    assert result["a"].tolist() == [1, 2]
+
+
+@pytest.mark.deliberate("Q64")
+def test_q64_a_dict_return_is_split() -> None:
+    """Hamilton refuses a `dict` return even with its pandas extension loaded.
+
+    fnloom splits it into columns typed `Any`.
+    """
+    pytest.importorskip("pandas")
+    _hamilton_pandas()
+    with pytest.raises(InvalidDecoratorException, match="type we know about"):
+        make_module(
+            "differential_q64_dict_h", _DICT.format(decorator=_HAMILTON_COLUMNS)
+        )
+    fnloom_module = make_module(
+        "differential_q64_dict_f", _DICT.format(decorator=_FNLOOM_COLUMNS)
+    )
+    driver = fnloom.build(fnloom_module)
+    assert driver.nodes["b"].type is Any
+    assert driver.execute(["b", "mapping"]) == {"b": 3, "mapping": {"b": 3}}
+
+
+_REPEATED = """
+import pandas as pd
+{decorator}
+
+@extract_columns({columns})
+def frame() -> pd.DataFrame:
+    return pd.DataFrame({{"a": [1]}})
+"""
+
+
+@pytest.mark.deliberate("Q64")
+def test_q64_a_repeated_column_is_refused_when_decorating() -> None:
+    """Hamilton fails the build on a column named twice, in either form.
+
+    fnloom refuses it when decorating, listing every repeat, sorted.
+    """
+    pytest.importorskip("pandas")
+    _hamilton_pandas()
+    for index, columns in enumerate(['"a", "a"', '"a", ("a", "doc")']):
+        hamilton_module = make_module(
+            f"differential_q64_repeat_h{index}",
+            _REPEATED.format(decorator=_HAMILTON_COLUMNS, columns=columns),
+        )
+        with pytest.raises(ValueError, match="Cannot define function a more than"):
+            hamilton_driver.Builder().with_modules(hamilton_module).build()
+        with pytest.raises(ValueError, match=r"names a column more than once: 'a'$"):
+            make_module(
+                f"differential_q64_repeat_f{index}",
+                _REPEATED.format(decorator=_FNLOOM_COLUMNS, columns=columns),
+            )
+    with pytest.raises(ValueError, match=r"more than once: 'a', 'b'$"):
+        fnloom.extract_columns("b", "a", ("b", "doc"), "a")
+
+
+_COLUMNS_FILLED = """
+import pandas as pd
+{decorator}
+
+@extract_columns("a", ("b", "The b column."), fill_with=0)
+def frame() -> pd.DataFrame:
+    return pd.DataFrame({{"a": [1, 2]}})
+"""
+
+
+def _hamilton_pandas() -> None:
+    """Registers Hamilton's pandas extension, which its autoload would load."""
+    from hamilton import registry  # noqa: PLC0415  # only the Q64 tests need it
+
+    registry.load_extension("pandas")
+
+
+@pytest.mark.deliberate("Q64")
+def test_q64_fill_never_mutates_and_fills_by_name() -> None:
+    """Hamilton fills a column named by the `(name, doc)` tuple into the frame.
+
+    It then fails to find the column by its name. fnloom fills by the name,
+    leaving the producer's frame as it was.
+    """
+    pytest.importorskip("pandas")
+    _hamilton_pandas()
+    hamilton_module = make_module(
+        "differential_q64_fill_h", _COLUMNS_FILLED.format(decorator=_HAMILTON_COLUMNS)
+    )
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    with pytest.raises(InvalidDecoratorException, match="No such column: b"):
+        hamilton.execute(["b"])
+    mutated = hamilton.execute(["a", "frame"])["frame"]
+    assert list(mutated.columns) == ["a", ("b", "The b column.")]
+    fnloom_module = make_module(
+        "differential_q64_fill_f", _COLUMNS_FILLED.format(decorator=_FNLOOM_COLUMNS)
+    )
+    result: dict[str, Any] = dict(fnloom.build(fnloom_module).execute(["b", "frame"]))
+    assert result["b"].tolist() == [0, 0]
+    assert result["b"].name == "b"
+    assert list(result["frame"].columns) == ["a"]
+
+
+_COLUMNS_CHECKED = """
+import pandas as pd
+{decorator}
+
+@extract_columns("a")
+def twice() -> pd.DataFrame:
+    return pd.DataFrame([[1, 2]], columns=["a", "a"])
+
+@extract_columns("zz")
+def lacking() -> pd.DataFrame:
+    return pd.DataFrame({{"b": [1], "c": [2]}})
+"""
+
+
+@pytest.mark.deliberate("Q64")
+def test_q64_columns_are_checked_at_run() -> None:
+    """Hamilton passes a duplicated column on as a DataFrame, unchecked.
+
+    It fails a missing column with its own exception class. fnloom checks the
+    column is a Series, and names the columns the producer returned.
+    """
+    pd = pytest.importorskip("pandas")
+    _hamilton_pandas()
+    hamilton_module = make_module(
+        "differential_q64_checked_h",
+        _COLUMNS_CHECKED.format(decorator=_HAMILTON_COLUMNS),
+    )
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    assert isinstance(hamilton.execute(["a"])["a"], pd.DataFrame)
+    with pytest.raises(InvalidDecoratorException, match="No such column: zz"):
+        hamilton.execute(["zz"])
+    fnloom_module = make_module(
+        "differential_q64_checked_f",
+        _COLUMNS_CHECKED.format(decorator=_FNLOOM_COLUMNS),
+    )
+    driver = fnloom.build(fnloom_module)
+    with pytest.raises(ValueError, match=r"'a' as pandas\.DataFrame, but it is"):
+        driver.execute(["a"])
+    with pytest.raises(ValueError, match=r"no column 'zz'; it returned 'b', 'c'"):
+        driver.execute(["zz"])
+
+
+_ASYNC = """
+import asyncio
+
+
+async def doubled(x: int) -> int:
+    await asyncio.sleep(0)
+    return x * 2
+
+
+def plus_one(doubled: int) -> int:
+    return doubled + 1
+
+
+async def total(plus_one: int, doubled: int) -> int:
+    return plus_one + doubled
+"""
+# Hamilton's AsyncDriver warns on 3.14 from its own code; Q13 asserts it.
+_HAMILTON_ASYNC_WARNING = (
+    "ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning"
+)
+
+
+async def _hamilton_async(module: ModuleType) -> hamilton_async.AsyncDriver:
+    """Hamilton's async driver through its builder, which gives a dict result."""
+    # Typed as the sync builder's `build`, which this one overrides with a coroutine.
+    pending: object = hamilton_async.Builder().with_modules(module).build()
+    return await cast("Coroutine[Any, Any, hamilton_async.AsyncDriver]", pending)
+
+
+@pytest.mark.deliberate("Q11")
+@pytest.mark.filterwarnings(_HAMILTON_ASYNC_WARNING)
+def test_q11_async_results_are_dicts_in_request_order() -> None:
+    """Hamilton gives a DataFrame, or a dict sorted by key; fnloom the sync dict."""
+    pd = pytest.importorskip("pandas")
+    module = make_module("differential_q11", _ASYNC)
+    request = ["total", "doubled"]
+
+    async def hamilton() -> tuple[object, object]:
+        built = await _hamilton_async(module)
+        direct = hamilton_async.AsyncDriver({}, module)
+        return (
+            await built.execute(request, inputs={"x": 3}),
+            await direct.execute(request, inputs={"x": 3}),
+        )
+
+    by_builder, by_constructor = asyncio.run(hamilton())
+    assert isinstance(by_builder, dict)
+    assert list(by_builder.items()) == [("doubled", 6), ("total", 13)]
+    assert isinstance(by_constructor, pd.DataFrame)
+    driver = fnloom.Builder().with_modules(module).build_async()
+    result = asyncio.run(driver.execute(request, inputs={"x": 3}))
+    assert type(result) is dict
+    assert list(result.items()) == [("total", 13), ("doubled", 6)]
+
+
+@pytest.mark.deliberate("Q12")
+def test_q12_building_is_synchronous() -> None:
+    """Hamilton's async `build` is a coroutine; fnloom's `build_async` the driver."""
+    module = make_module("differential_q12", _ASYNC)
+    pending = hamilton_async.Builder().with_modules(module).build()
+    assert inspect.iscoroutine(pending)
+    pending.close()
+    driver = fnloom.Builder().with_modules(module).build_async()
+    assert isinstance(driver, fnloom.AsyncDriver)
+    plan = driver.prepare(["total"], inputs={"x": 0})
+    assert isinstance(plan, fnloom.AsyncPreparedPlan)
+    assert asyncio.run(plan.run(inputs={"x": 1})) == {"total": 5}
+
+
+@pytest.mark.deliberate("Q13")
+def test_q13_the_deprecation_warning_is_hamiltons() -> None:
+    """On 3.14, Hamilton's AsyncDriver warns `DeprecationWarning`; fnloom's doesn't."""
+    module = make_module("differential_q13", _ASYNC)
+
+    async def hamilton() -> object:
+        return await (await _hamilton_async(module)).execute(["total"], inputs={"x": 1})
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert asyncio.run(hamilton()) == {"total": 5}
+    hamilton_warnings = {
+        (Path(w.filename).parent.name, Path(w.filename).name, str(w.message))
+        for w in caught
+        if issubclass(w.category, DeprecationWarning)
+    }
+    assert hamilton_warnings == {
+        (
+            "hamilton",
+            "async_driver.py",
+            (
+                "'asyncio.iscoroutinefunction' is deprecated and slated for removal "
+                "in Python 3.16; use inspect.iscoroutinefunction() instead"
+            ),
+        )
+    }
+    driver = fnloom.Builder().with_modules(module).build_async()
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        assert asyncio.run(driver.execute(["total"], inputs={"x": 1})) == {"total": 5}
+    assert [w for w in caught if issubclass(w.category, DeprecationWarning)] == []
+
+
+# A sync node that waits for an async sibling to tick, and says whether it did.
+# The ticker ticks only after the sync node has started, so a tick can reach it
+# only while it runs, and only if the loop runs the ticker meanwhile.
+_TICKING = """
+import asyncio
+import threading
+
+STARTED = threading.Event()
+TICKED = threading.Event()
+
+
+def waits_for_tick(x: int) -> bool:
+    STARTED.set()
+    return TICKED.wait({patience})
+
+
+async def ticker(x: int) -> int:
+    await asyncio.to_thread(STARTED.wait, 10.0)
+    TICKED.set()
+    return x
+"""
+# How long a sync node blocking the loop waits for a tick that can't come.
+_BLOCKED_PATIENCE = 0.1
+
+
+@pytest.mark.deliberate("Q65")
+@pytest.mark.filterwarnings(_HAMILTON_ASYNC_WARNING)
+def test_q65_sync_nodes_run_off_the_loop() -> None:
+    """Hamilton's sync node stops the loop, so no tick reaches it; fnloom's doesn't.
+
+    By order of events: the node sees the tick only if the loop ran the ticker
+    while the node waited, however long it waits.
+    """
+    request = ["waits_for_tick", "ticker"]
+    hamilton_module = make_module(
+        "differential_q65_h", _TICKING.format(patience=_BLOCKED_PATIENCE)
+    )
+
+    async def hamilton() -> object:
+        built = await _hamilton_async(hamilton_module)
+        return await built.execute(request, inputs={"x": 1})
+
+    assert asyncio.run(hamilton()) == {"waits_for_tick": False, "ticker": 1}
+    for sync_nodes, patience, ticked in (
+        ("thread", 10.0, True),
+        ("inline", _BLOCKED_PATIENCE, False),
+    ):
+        module = make_module(
+            f"differential_q65_{sync_nodes}", _TICKING.format(patience=patience)
+        )
+        driver = (
+            fnloom.Builder().with_modules(module).build_async(sync_nodes=sync_nodes)
+        )
+        assert asyncio.run(driver.execute(request, inputs={"x": 1})) == {
+            "waits_for_tick": ticked,
+            "ticker": 1,
+        }, sync_nodes
+
+
+_FAILING = """
+import asyncio
+
+LOG: list[str] = []
+SIBLING_STARTED = asyncio.Event()
+RELEASE = asyncio.Event()
+FINISHED = asyncio.Event()
+
+
+async def boom(x: int) -> int:
+    await SIBLING_STARTED.wait()
+    raise KeyError("boom")
+
+
+async def sibling(x: int) -> int:
+    SIBLING_STARTED.set()
+    try:
+        await RELEASE.wait()
+    except asyncio.CancelledError:
+        LOG.append("cancelled")
+        raise
+    LOG.append("finished")
+    FINISHED.set()
+    return x
+"""
+
+
+@pytest.mark.deliberate("Q66")
+@pytest.mark.filterwarnings(_HAMILTON_ASYNC_WARNING)
+def test_q66_a_failure_cancels_its_siblings() -> None:
+    """Hamilton leaves the sibling running after it raises; fnloom cancels it.
+
+    By order of events: the node fails only once the sibling waits, and the
+    sibling finishes only when released, after the run has raised.
+    """
+    request = ["sibling", "boom"]
+    hamilton_module = make_module("differential_q66_h", _FAILING)
+
+    async def hamilton() -> BaseException:
+        built = await _hamilton_async(hamilton_module)
+        with pytest.raises(KeyError) as info:
+            await built.execute(request, inputs={"x": 1})
+        assert hamilton_module.LOG == []
+        hamilton_module.RELEASE.set()
+        await asyncio.wait_for(hamilton_module.FINISHED.wait(), 10.0)
+        return info.value
+
+    hamilton_error = asyncio.run(hamilton())
+    assert getattr(hamilton_error, "__notes__", None) is None
+    assert hamilton_module.LOG == ["finished"]
+    module = make_module("differential_q66_f", _FAILING)
+    driver = fnloom.Builder().with_modules(module).build_async()
+
+    async def fnloom_run() -> BaseException:
+        with pytest.raises(KeyError) as info:
+            await driver.execute(request, inputs={"x": 1})
+        # Cancelled, and done being cancelled, by the time the run raised.
+        assert module.LOG == ["cancelled"]
+        return info.value
+
+    error = asyncio.run(fnloom_run())
+    assert type(error) is type(hamilton_error)
+    assert error.args == hamilton_error.args == ("boom",)
+    assert error.__notes__ == ["in node 'boom'"]
+    assert module.LOG == ["cancelled"]
+
+
+_TYPED = """
+def typed(x: int) -> int:
+    return x
+"""
+
+
+@pytest.mark.deliberate("Q67")
+@pytest.mark.filterwarnings(_HAMILTON_ASYNC_WARNING)
+def test_q67_requests_are_checked_as_the_sync_driver_checks_them() -> None:
+    """Hamilton checks no type and raises other errors; fnloom raises the sync ones."""
+    module = make_module("differential_q67", _TYPED)
+    requests: list[tuple[list[str], dict[str, object]]] = [
+        (["typed"], {"x": "str"}),
+        (["typed"], {}),
+        (["x"], {}),
+    ]
+
+    async def hamilton() -> list[object]:
+        built = await _hamilton_async(module)
+        outcomes: list[object] = []
+        for request, inputs in requests:
+            try:
+                outcomes.append(await built.execute(request, inputs=inputs))
+            except (NotImplementedError, KeyError) as error:
+                outcomes.append((type(error).__name__, str(error)))
+        return outcomes
+
+    assert asyncio.run(hamilton()) == [
+        {"typed": "str"},
+        ("NotImplementedError", "x was expected to be passed in but was not."),
+        ("KeyError", "'x'"),
+    ]
+    sync = fnloom.build(module)
+    driver = fnloom.Builder().with_modules(module).build_async()
+    messages: list[str] = []
+    for request, inputs in requests:
+        with pytest.raises(ValueError) as sync_info:  # noqa: PT011  # compared below
+            sync.execute(request, inputs=inputs)
+        with pytest.raises(ValueError) as async_info:  # noqa: PT011  # compared below
+            asyncio.run(driver.execute(request, inputs=inputs))
+        assert str(async_info.value) == str(sync_info.value), request
+        messages.append(str(async_info.value))
+    assert messages == [
+        "x: expected int, got str",
+        "missing inputs: 'x' (needed by 'typed')",
+        "missing inputs: 'x' (requested as an output)",
+    ]
+
+
+_CACHED_ASYNC = """
+import asyncio
+
+
+async def doubled(x: int) -> int:
+    print("doubled")
+    await asyncio.sleep(0)
+    return x * 2
+
+
+def plus_one(doubled: int) -> int:
+    print("plus_one")
+    return doubled + 1
+"""
+
+
+@pytest.mark.deliberate("Q68")
+@pytest.mark.filterwarnings(_HAMILTON_ASYNC_WARNING)
+def test_q68_the_async_driver_caches(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Hamilton fails to build an async driver with a cache; fnloom's caches."""
+    module = make_module("differential_q68", _CACHED_ASYNC)
+
+    async def hamilton() -> None:
+        pending: object = (
+            hamilton_async.Builder()
+            .with_modules(module)
+            .with_cache(path=str(tmp_path / "hamilton"))
+            .build()
+        )
+        await cast("Coroutine[Any, Any, hamilton_async.AsyncDriver]", pending)
+
+    with pytest.raises(ValueError, match="Multiple adapters cannot"):
+        asyncio.run(hamilton())
+    store = DiskCache(tmp_path / "fnloom")
+    driver = fnloom.Builder().with_modules(module).with_cache(store).build_async()
+    request = ["plus_one"]
+    miss = CacheOutcome("miss", None)
+    hit = CacheOutcome("hit", None)
+    assert driver.explain_cache(request, inputs={"x": 2}) == {
+        "doubled": miss,
+        "plus_one": miss,
+    }
+    assert asyncio.run(driver.execute(request, inputs={"x": 2})) == {"plus_one": 5}
+    assert driver.explain_cache(request, inputs={"x": 2}) == {
+        "doubled": hit,
+        "plus_one": hit,
+    }
+    assert sorted(capsys.readouterr().out.split()) == ["doubled", "plus_one"]
+    assert asyncio.run(driver.execute(request, inputs={"x": 2})) == {"plus_one": 5}
+    assert capsys.readouterr().out == "", "the warm run runs nothing"
+
+
+# The row decorators in each library's spelling.
+_HAMILTON_ROWS = "from hamilton.function_modifiers import parameterize, source, value"
+_FNLOOM_ROWS = "from fnloom import parameterize, source, value"
+_ASYNC_ROWS = """
+import asyncio
+{decorator}
+
+
+@parameterize(scaled={{"factor": value(3)}}, shifted={{"factor": source("x")}})
+async def times(x: int, factor: int) -> int:
+    await asyncio.sleep(0)
+    return x * factor
+
+
+async def plain(x: int) -> int:
+    return x
+"""
+
+
+@pytest.mark.deliberate("Q69")
+@pytest.mark.filterwarnings(_HAMILTON_ASYNC_WARNING)
+def test_q69_an_async_row_is_awaited() -> None:
+    """Hamilton returns an async row's coroutine as its value; fnloom awaits it."""
+    request = ["scaled", "shifted", "plain"]
+    hamilton_module = make_module(
+        "differential_q69_h", _ASYNC_ROWS.format(decorator=_HAMILTON_ROWS)
+    )
+
+    async def hamilton() -> dict[str, object]:
+        built = await _hamilton_async(hamilton_module)
+        values = await built.execute(request, inputs={"x": 2})
+        found: dict[str, object] = {}
+        for name, value in values.items():
+            if inspect.iscoroutine(value):
+                value.close()
+                found[name] = "coroutine"
+            else:
+                found[name] = value
+        return found
+
+    assert asyncio.run(hamilton()) == {
+        "plain": 2,
+        "scaled": "coroutine",
+        "shifted": "coroutine",
+    }
+    module = make_module(
+        "differential_q69_f", _ASYNC_ROWS.format(decorator=_FNLOOM_ROWS)
+    )
+    driver = fnloom.Builder().with_modules(module).build_async()
+    assert asyncio.run(driver.execute(request, inputs={"x": 2})) == {
+        "scaled": 6,
+        "shifted": 4,
+        "plain": 2,
+    }

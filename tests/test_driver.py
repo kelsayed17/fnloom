@@ -341,11 +341,14 @@ def test_ten_thousand_node_chain_executes() -> None:
 def test_public_api_is_exported() -> None:
     """The package exports exactly its public names."""
     assert sorted(fnloom.__all__) == [
+        "AsyncDriver",
+        "AsyncPreparedPlan",
         "Builder",
         "CacheOutcome",
         "CachePolicy",
         "CacheStore",
         "CacheWarning",
+        "Condition",
         "DiskCache",
         "Driver",
         "Format",
@@ -359,6 +362,9 @@ def test_public_api_is_exported() -> None:
         "Value",
         "build",
         "cache",
+        "config",
+        "extract_columns",
+        "extract_fields",
         "fingerprint",
         "parameterize",
         "register_fingerprint",

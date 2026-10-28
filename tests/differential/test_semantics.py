@@ -1,12 +1,14 @@
 """Behaviour fnloom keeps from Hamilton: same values or same exception class."""
 
+import asyncio
 import copy
 import inspect
 import pickle
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 from hamilton import driver as hamilton_driver
+from hamilton.function_modifiers.base import InvalidDecoratorException
 from harness import (
     Direction,
     Nodes,
@@ -33,7 +35,7 @@ from fnloom import _types
 from helpers import make_module
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Coroutine
 
 
 def pickle_round_trip(value: object) -> object:
@@ -437,3 +439,416 @@ def test_a_missing_input_names_the_nodes_needing_it() -> None:
         hamilton.execute(["c"])
     with pytest.raises(ValueError, match=r"^missing inputs: 'a' \(needed by 'b'\)$"):
         fnloom.build(module).execute(["c"])
+
+
+# Variants for the config tests; `{decorator}` imports each library's `config`.
+_CONFIG_VARIANTS = """
+{decorator}
+
+@config.when(mode="a")
+def foo__a__b(x: int) -> int:
+    return x + 1
+
+def plain__x(x: int) -> int:
+    return x
+
+@config.when(a=1, b=2)
+def both__eq(x: int) -> int:
+    return x
+
+@config.when_not(a=1, b=2)
+def neither__ne(x: int) -> int:
+    return x
+
+@config.when(flag=1)
+def truthy__one(x: int) -> int:
+    return x
+
+@config.when(flag="1")
+def text__one(x: int) -> int:
+    return x
+
+@config.when(a=1)
+@config.when(b=2)
+def stacked__ab(x: int) -> int:
+    return x
+"""
+
+_CONFIGS: list[dict[str, object]] = [
+    {"mode": "a", "a": 1, "b": 2, "flag": True},
+    {"mode": "b", "a": 0, "b": 2, "flag": 1},
+    {"mode": "a", "a": 0, "b": 0, "flag": "1"},
+    {"mode": "a", "a": 1, "b": 0, "flag": 0},
+]
+
+
+@pytest.mark.parametrize("settings", _CONFIGS, ids=repr)
+def test_config_selects_the_same_nodes(settings: dict[str, object]) -> None:
+    """Names cut at the last `__`, AND of keys, `==` matching and stacking agree."""
+    hamilton_module = make_module(
+        "semantics_config_h",
+        _CONFIG_VARIANTS.format(
+            decorator="from hamilton.function_modifiers import config"
+        ),
+    )
+    fnloom_module = make_module(
+        "semantics_config_f",
+        _CONFIG_VARIANTS.format(decorator="from fnloom import config"),
+    )
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_config(settings)
+        .with_modules(hamilton_module)
+        .build()
+    )
+    # Hamilton adds every config key as a node; fnloom never does (Q56).
+    hamilton_names = sorted(
+        v.name for v in hamilton.list_available_variables() if v.name not in settings
+    )
+    driver = fnloom.Builder().with_config(settings).with_modules(fnloom_module).build()
+    assert driver.node_names() == hamilton_names
+    outputs = [name for name in hamilton_names if name != "x"]
+    assert driver.execute(outputs, inputs={"x": 1}) == hamilton.execute(
+        outputs, inputs={"x": 1}
+    )
+
+
+# A config decorator stacked with `{other}`, in the order `{stack}` gives;
+# `{imports}` imports each library's decorators.
+_STACKED = """
+{imports}
+
+{stack}
+def rows__a(k: int) -> int:
+    return k
+
+@config.when(mode="b")
+def rows__b(x: int) -> int:
+    return x
+"""
+
+_PARAMETERIZE = '@parameterize(r1={"k": value(1)}, r2={"k": value(2)})'
+_TAG = '@tag(owner="desk")'
+_WHEN = '@config.when(mode="a")'
+
+
+@pytest.mark.parametrize("other", [_PARAMETERIZE, _TAG], ids=["parameterize", "tag"])
+@pytest.mark.parametrize("config_first", [True, False], ids=["outer", "inner"])
+@pytest.mark.parametrize("mode", ["a", "b"])
+def test_decorator_order_never_matters(
+    other: str, *, config_first: bool, mode: str
+) -> None:
+    """A config decorator over or under `@parameterize` or `@tag`: the same graph."""
+    stack = f"{_WHEN}\n{other}" if config_first else f"{other}\n{_WHEN}"
+    library = "hamilton.function_modifiers"
+    names = "config, parameterize, tag, value"
+    hamilton_module = make_module(
+        "semantics_stacked_h",
+        _STACKED.format(imports=f"from {library} import {names}", stack=stack),
+    )
+    fnloom_module = make_module(
+        "semantics_stacked_f",
+        _STACKED.format(imports=f"from fnloom import {names}", stack=stack),
+    )
+    settings: dict[str, object] = {"mode": mode}
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_config(settings)
+        .with_modules(hamilton_module)
+        .build()
+    )
+    variables = {
+        v.name: v for v in hamilton.list_available_variables() if v.name != "mode"
+    }
+    driver = fnloom.Builder().with_config(settings).with_modules(fnloom_module).build()
+    assert driver.node_names() == sorted(variables)
+    outputs = [
+        name for name in sorted(variables) if not variables[name].is_external_input
+    ]
+    inputs = {name: 9 for name, v in variables.items() if v.is_external_input}
+    assert driver.execute(outputs, inputs=inputs) == hamilton.execute(
+        outputs, inputs=inputs
+    )
+    for name in outputs:
+        assert driver.nodes[name].tags.get("owner") == variables[name].tags.get("owner")
+
+
+# Producers for the extract tests; `{decorator}` imports each library's
+# `extract_fields`.
+_EXTRACTED = """
+from typing import TypedDict
+{decorator}
+
+class Point(TypedDict):
+    x: int
+    y: str
+
+@extract_fields({{"a": int, "b": str}})
+def mapped(n: int) -> dict:
+    return {{"a": n, "b": str(n), "extra": 0}}
+
+@extract_fields("c", "d")
+def named(n: int) -> dict[str, int]:
+    return {{"c": n, "d": n + 1}}
+
+@extract_fields()
+def point(n: int) -> Point:
+    return {{"x": n, "y": "y"}}
+
+def total(a: int, c: int, x: int) -> int:
+    return a + c + x
+"""
+_HAMILTON_EXTRACT = "from hamilton.function_modifiers import extract_fields"
+_FNLOOM_EXTRACT = "from fnloom import extract_fields"
+
+
+def test_extract_fields_makes_the_same_nodes_types_and_values() -> None:
+    """Each producer is kept under its own name; the fields and their types agree."""
+    hamilton_module = make_module(
+        "semantics_extract_h", _EXTRACTED.format(decorator=_HAMILTON_EXTRACT)
+    )
+    fnloom_module = make_module(
+        "semantics_extract_f", _EXTRACTED.format(decorator=_FNLOOM_EXTRACT)
+    )
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    driver = fnloom.build(fnloom_module)
+    hamilton_types = {
+        v.name: v.type for v in hamilton.list_available_variables() if v.name != "n"
+    }
+    assert driver.node_names() == sorted([*hamilton_types, "n"])
+    for name, produced in hamilton_types.items():
+        if name == "point":
+            # Each module defines its own `Point`.
+            assert driver.nodes[name].type is fnloom_module.Point
+            assert produced is hamilton_module.Point
+        else:
+            assert driver.nodes[name].type == produced, name
+    outputs = sorted(hamilton_types)
+    assert driver.execute(outputs, inputs={"n": 2}) == hamilton.execute(
+        outputs, inputs={"n": 2}
+    )
+
+
+_EMPTY_FIELDS = """
+{decorator}
+
+@extract_fields({{}})
+def p() -> dict:
+    return {{}}
+"""
+
+_NOT_A_TYPE = """
+{decorator}
+
+@extract_fields({{"a": 5}})
+def p() -> dict:
+    return {{"a": 5}}
+"""
+
+
+def test_extract_fields_refuses_the_same_arguments_when_decorating() -> None:
+    """An empty mapping and a non-type value fail at decoration on both sides."""
+    for source_text, fnloom_error in (
+        (_EMPTY_FIELDS, ValueError),
+        (_NOT_A_TYPE, TypeError),
+    ):
+        with pytest.raises(InvalidDecoratorException):
+            make_module(
+                "semantics_extract_bad_h",
+                source_text.format(decorator=_HAMILTON_EXTRACT),
+            )
+        with pytest.raises(fnloom_error):
+            make_module(
+                "semantics_extract_bad_f",
+                source_text.format(decorator=_FNLOOM_EXTRACT),
+            )
+
+
+# The producers for the extract_columns tests; `{decorator}` imports each
+# library's `extract_columns`.
+_COLUMNS = """
+import pandas as pd
+{decorator}
+
+@extract_columns("a", ("b", "The b column."))
+def frame(n: int) -> pd.DataFrame:
+    '''The producer.'''
+    return pd.DataFrame({{"a": [n, n + 1], "b": ["x", "y"], "c": [0, 0]}})
+"""
+_HAMILTON_COLUMNS = "from hamilton.function_modifiers import extract_columns"
+_FNLOOM_COLUMNS = "from fnloom import extract_columns"
+
+
+def _hamilton_pandas() -> None:
+    """Registers Hamilton's pandas extension, which its autoload would load."""
+    from hamilton import registry  # noqa: PLC0415  # only these tests need it
+
+    registry.load_extension("pandas")
+
+
+def test_extract_columns_makes_the_same_nodes_types_docs_and_values() -> None:
+    """The column nodes, their Series type, docs and values, and the kept producer."""
+    pd = pytest.importorskip("pandas")
+    _hamilton_pandas()
+    hamilton_module = make_module(
+        "semantics_columns_h", _COLUMNS.format(decorator=_HAMILTON_COLUMNS)
+    )
+    fnloom_module = make_module(
+        "semantics_columns_f", _COLUMNS.format(decorator=_FNLOOM_COLUMNS)
+    )
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    driver = fnloom.build(fnloom_module)
+    hamilton_nodes = {
+        v.name: (v.type, v.documentation)
+        for v in hamilton.list_available_variables()
+        if v.name != "n"
+    }
+    assert hamilton_nodes == {
+        "a": (pd.Series, "The producer."),
+        "b": (pd.Series, "The b column."),
+        "frame": (pd.DataFrame, "The producer."),
+    }
+    assert driver.node_names() == sorted([*hamilton_nodes, "n"])
+    for name, (produced, doc) in hamilton_nodes.items():
+        assert driver.nodes[name].type is produced, name
+        assert driver.nodes[name].doc == doc, name
+        assert driver.nodes[name].dependencies == (
+            ("n",) if name == "frame" else ("frame",)
+        )
+    outputs = sorted(hamilton_nodes)
+    expected = hamilton.execute(outputs, inputs={"n": 2})
+    result: dict[str, Any] = dict(driver.execute(outputs, inputs={"n": 2}))
+    assert list(result) == outputs
+    for name in outputs:
+        assert result[name].equals(expected[name]), name
+    assert list(result["frame"].columns) == ["a", "b", "c"]
+
+
+def test_extract_columns_refuses_a_list_and_no_columns() -> None:
+    """A list and no columns at all are refused when decorating, on both sides."""
+    from hamilton.function_modifiers import extract_columns  # noqa: PLC0415  # beside fnloom's
+
+    with pytest.raises(InvalidDecoratorException, match=r"Please `\*` in front"):
+        extract_columns(["a", "b"])  # ty: ignore[invalid-argument-type]  # the misuse under test
+    with pytest.raises(TypeError, match=r"put `\*` in front of it to expand it"):
+        fnloom.extract_columns(["a", "b"])  # ty: ignore[invalid-argument-type]  # the misuse under test
+    with pytest.raises(InvalidDecoratorException, match="empty arguments"):
+        extract_columns()
+    with pytest.raises(ValueError, match="got no columns"):
+        fnloom.extract_columns()
+
+
+# A column named like its producer (H2.3l).
+_SELF_COLUMN = """
+import pandas as pd
+{decorator}
+
+@extract_columns("frame", "a")
+def frame(n: int) -> pd.DataFrame:
+    return pd.DataFrame({{"frame": [n], "a": [n]}})
+"""
+
+
+def test_a_column_named_like_its_producer_fails_the_build() -> None:
+    """Both sides refuse the clash with `ValueError` at build, not when run."""
+    pytest.importorskip("pandas")
+    _hamilton_pandas()
+    hamilton_module = make_module(
+        "semantics_self_column_h", _SELF_COLUMN.format(decorator=_HAMILTON_COLUMNS)
+    )
+    with pytest.raises(ValueError, match="more than once"):
+        hamilton_driver.Builder().with_modules(hamilton_module).build()
+    fnloom_module = make_module(
+        "semantics_self_column_f", _SELF_COLUMN.format(decorator=_FNLOOM_COLUMNS)
+    )
+    with pytest.raises(ValueError, match=r"^node 'frame' is defined twice in "):
+        fnloom.build(fnloom_module)
+
+
+# A graph mixing async and sync nodes, with an optional input and a sync row. An
+# async row is left out: Hamilton doesn't await one (Q69).
+_ASYNC_GRAPH = """
+import asyncio
+{decorator}
+
+
+async def doubled(x: int) -> int:
+    await asyncio.sleep(0)
+    return x * 2
+
+
+def plus_one(doubled: int) -> int:
+    return doubled + 1
+
+
+async def shifted(doubled: int, plus_one: int, offset: int = 0) -> int:
+    await asyncio.sleep(0)
+    return doubled * plus_one + offset
+
+
+def scaled(shifted: int, doubled: int) -> int:
+    return shifted - doubled
+
+
+@parameterize(bumped={{"step": value(7)}}, rebased={{"step": source("plus_one")}})
+def moved(scaled: int, step: int) -> int:
+    return scaled + step
+"""
+# Hamilton's AsyncDriver warns on 3.14 from its own code (Q13).
+_HAMILTON_ASYNC_WARNING = (
+    "ignore:'asyncio.iscoroutinefunction' is deprecated:DeprecationWarning"
+)
+
+
+@pytest.mark.filterwarnings(_HAMILTON_ASYNC_WARNING)
+def test_async_driver_computes_the_same_values() -> None:
+    """Hamilton's `AsyncDriver`, through its builder, and fnloom's agree on values."""
+    from hamilton import async_driver  # noqa: PLC0415  # only this test needs it
+
+    hamilton_module = make_module(
+        "semantics_async_h",
+        _ASYNC_GRAPH.format(
+            decorator="from hamilton.function_modifiers import parameterize, "
+            "source, value"
+        ),
+    )
+    module = make_module(
+        "semantics_async_f",
+        _ASYNC_GRAPH.format(decorator="from fnloom import parameterize, source, value"),
+    )
+    outputs = ["rebased", "bumped", "scaled", "shifted", "plus_one", "doubled"]
+    requests: list[tuple[dict[str, object], dict[str, object]]] = [
+        ({"x": 2}, {}),
+        ({"x": 2, "offset": 5}, {}),
+        ({}, {"doubled": 10}),
+        ({"x": 1}, {"plus_one": 0}),
+    ]
+
+    async def hamilton() -> list[dict[str, object]]:
+        # Typed as the sync builder's `build`, which this one makes a coroutine.
+        pending: object = async_driver.Builder().with_modules(hamilton_module).build()
+        built = await cast("Coroutine[Any, Any, async_driver.AsyncDriver]", pending)
+        return [
+            await built.execute(outputs, inputs=inputs, overrides=overrides)
+            for inputs, overrides in requests
+        ]
+
+    async def runs(driver: fnloom.AsyncDriver) -> list[dict[str, object]]:
+        return [
+            await driver.execute(outputs, inputs=inputs, overrides=overrides)
+            for inputs, overrides in requests
+        ]
+
+    expected = asyncio.run(hamilton())
+    assert expected[0] == {
+        "bumped": 23,
+        "doubled": 4,
+        "plus_one": 5,
+        "rebased": 21,
+        "scaled": 16,
+        "shifted": 20,
+    }
+    for sync_nodes in ("thread", "inline"):
+        builder = fnloom.Builder().with_modules(module)
+        driver = builder.build_async(sync_nodes=sync_nodes)
+        assert asyncio.run(runs(driver)) == expected

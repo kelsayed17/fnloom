@@ -5,9 +5,13 @@ import inspect
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from types import MappingProxyType
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from fnloom._stores import Format
+
+if TYPE_CHECKING:
+    from fnloom._config import ConfigPolicy
+    from fnloom._extract import Extraction
 
 _ATTRIBUTE = "__fnloom__"
 
@@ -50,11 +54,16 @@ class CachePolicy:
 
 @dataclass(frozen=True)
 class Decorations:
-    """What the decorators recorded on one function: rows, tags and cache policy."""
+    """What the decorators recorded on one function.
+
+    Its rows, tags, cache policy, config conditions and extraction.
+    """
 
     rows: Mapping[str, Mapping[str, Source | Value]] | None
     tags: Mapping[str, str]
     cache: CachePolicy | None = None
+    config: ConfigPolicy | None = None
+    extract: Extraction | None = None
 
 
 def source(name: str) -> Source:
@@ -77,6 +86,12 @@ def decorations(fn: Callable[..., object]) -> Decorations:
 
 # What a plain function records: no rows, tags or cache policy. One object, shared.
 _UNDECORATED = Decorations(None, MappingProxyType[str, str]({}))
+
+
+def too_many_rows(rows: Mapping[str, object], decorator: str) -> str:
+    """Why `decorator`, an `extract_*`, refuses these rows: it lowers one node."""
+    listed = ", ".join(repr(name) for name in sorted(rows))
+    return f"{decorator} needs one node, but parameterize makes {len(rows)}: {listed}"
 
 
 def _check_rows(
@@ -132,6 +147,9 @@ def parameterize[F: Callable[..., object]](
         if current.rows is not None:
             msg = "function is already parameterized; apply parameterize once"
             raise ValueError(msg)
+        if current.extract is not None and len(frozen) > 1:
+            decorator = f"extract_{current.extract.kind}"
+            raise ValueError(too_many_rows(frozen, decorator))
         # Names only: annotations are evaluated at build, not when decorating.
         forward = annotationlib.Format.FORWARDREF
         params = set(inspect.signature(fn, annotation_format=forward).parameters)

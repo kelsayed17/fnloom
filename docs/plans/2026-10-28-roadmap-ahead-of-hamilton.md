@@ -29,16 +29,16 @@ and the design's change log takes a row when the item is approved.
 | `display_all_functions`, `display_upstream_of`, `display_downstream_of`, `visualize_path_between`, `visualize_execution` | graphviz drawings | Plan 7: DOT text with no dependency; `graphviz` optional for rendering |
 | `materialize`, `validate_materialization`, `visualize_materialization` | write outputs through data savers | Not planned. A design §2 non-goal: the hooks of Plan 6 let a user write outputs in a post-graph hook |
 | `raw_execute`, `export_execution` | execute without a result builder; export a run's graph | Plan 6 (result builders), Plan 7 (export) |
-| `config`, `graph_modules`, `adapter` | what the driver was built from | Plan 3 (`config`), Plan 5 (`modules`), Plan 6 (hooks) |
+| `config`, `graph_modules`, `adapter` | what the driver was built from | `config` done in Plan 3: `Driver.config`, a read-only copy (Q56). Plan 5 (`modules`), Plan 6 (hooks) |
 | `has_cycles` | report a cycle | Not needed: fnloom refuses a cycle at build, naming it (Q27) |
-| `AsyncDriver` | `async def` nodes | Plan 3 |
+| `AsyncDriver` | `async def` nodes | Done in Plan 3: `Builder.build_async()`, with caching (Q11–Q13, Q65–Q69) |
 
 ### Decorators
 
 | Hamilton | fnloom plan |
 |---|---|
-| `@config.when`, `.when_not`, `.when_in`, `.when_not_in`; `Builder.with_config` | Plan 3 |
-| `@extract_fields`, `@extract_columns` | Plan 3 |
+| `@config.when`, `.when_not`, `.when_in`, `.when_not_in`; `Builder.with_config` | Done in Plan 3, with `@config.default` and `name=` on all four forms (Q56–Q60) |
+| `@extract_fields`, `@extract_columns` | Done in Plan 3 (Q61–Q64) |
 | `@parameterize` row as `(bindings, docstring)`; `group(...)`; `parameterize_sources`, `parameterize_values` | Plan 5 (design §5 v1.x "parameterize sugar") |
 | `@check_output`, `@check_output_custom` | Plan 8 ("output validators") |
 | `@pipe_input`, `@pipe_output`, `@mutate`, `@step` | Plan 8 ("step injection") |
@@ -129,7 +129,7 @@ behind); **n/a** (fnloom has no such feature yet; the plan builds it without the
 | `tuple[T, ...]`, `NewType`, PEP 695 aliases, `Literal`, `Annotated`, `Mapping`/`Callable`, iterators | fixed | Q37–Q45 |
 | Numpy scalars refused for `int`/`float`; `int` refused for `float`; 2-D or float32 arrays and mismatched lengths flow into wrong answers | same (register: not yet decided) | Plan 5: an opt-in numeric policy (`Builder.with_numeric_inputs(...)`: widening, `ndim`/`dtype` contracts, length groups), so users stop re-writing it around `execute` |
 | Overrides bypass type checks, and can change a node's type | fixed | Q22 |
-| An adapter implementing the input check replaces the default instead of adding to it; the async path checks no inputs | n/a | Plan 6 and Plan 3: hooks add to the default check; the async driver checks inputs like the sync one |
+| An adapter implementing the input check replaces the default instead of adding to it; the async path checks no inputs | n/a (adapter); fixed (async, Plan 3) | Plan 6: hooks add to the default check. The async driver checks inputs like the sync one (Q67) |
 | An `Any` producer, or a node returning the wrong type, is never checked at run | same | Plan 6: an opt-in output check, done right on the types where Hamilton's crashes (#1738, #1749) |
 
 ### Execution and errors
@@ -149,17 +149,17 @@ behind); **n/a** (fnloom has no such feature yet; the plan builds it without the
 
 | Problem | Status | Fix |
 |---|---|---|
-| A missing or misspelled config key turns a computed node into a required input, with no hint; there is no default variant (#1213) | n/a | Plan 3: at build, "no variant of `out` matched {config}; variants need mode in {a, b}"; `@config.default` |
-| Config keys become input nodes and silently shadow nodes of the same name; config, inputs and overrides are three overlapping channels | n/a | Plan 3: config selects the graph's shape only and never becomes a node or a value |
-| The `__suffix` naming rule is invisible, and a Python redefinition silently keeps the last one | n/a | Plan 3: an explicit `name=` on `@config.when`, and refuse a redefinition |
-| Decorator stacking order is ignored, and collisions name the wrong decorator (#1163) | fixed so far | Plan 3 and Plan 8: one documented order, checked when decorating |
-| `@extract_columns` is a pandas registry (polars after a plugin, which autoload-off disables), with missing columns found only at run; `@extract_fields` checks no types and drops extra keys | n/a | Plan 3: a generic split over any mapping or frame type, fields checked |
+| A missing or misspelled config key turns a computed node into a required input, with no hint; there is no default variant (#1213) | fixed (Plan 3) | A missing key never matches, and a needed node with no variant fails the build, naming each variant's condition; `@config.default` (Q57) |
+| Config keys become input nodes and silently shadow nodes of the same name; config, inputs and overrides are three overlapping channels | fixed (Plan 3) | Config selects the graph's shape only and never becomes a node or a value (Q56) |
+| The `__suffix` naming rule is invisible, and a Python redefinition silently keeps the last one | fixed (Plan 3) | An explicit `name=` on all four `@config.when*` forms, a redefinition refused at build, and misuse refused when decorating (Q58, Q59) |
+| Decorator stacking order is ignored, and collisions name the wrong decorator (#1163) | fixed so far | Done for config and extract in Plan 3: stacked in any order, and two matching variants name both functions (Q58). Plan 8 does the same for its decorators |
+| `@extract_columns` is a pandas registry (polars after a plugin, which autoload-off disables), with missing columns found only at run; `@extract_fields` checks no types and drops extra keys | fixed (Plan 3) | A generic split over any value with `__getitem__`, with no registry or plugin; fields type-checked on every run; extra names refused; `fill_with` never mutates. A missing column is still found at run, when the value first exists, and the error names the columns the producer returned (Q61–Q64) |
 | `@check_output` is pandas-only; `@check_output_custom` sees only the output and renames the node | n/a | Plan 8: validators over any type, seeing inputs and output, without renaming |
 | `@parameterize` + `value()` silently drops a caller's value for that parameter | — | Plan 5: refuse an input or override naming a `value()`-bound parameter |
 | `@pipe_output` can't share work between steps; optional parameters leak in as inputs | n/a | Plan 8 |
 | Two adapters can't implement the same lifecycle method (cache + graceful errors, result builder + type-check opt-out); a raising hook skips the others; hook signatures are checked only at run | n/a | Plan 6: any number of hooks per event, run in a defined order, signatures checked when attached (Q23, Q24) |
 | `execute` returns different types depending on the adapter; the legacy constructor returns a pandas frame that broadcasts scalars | fixed | Q19: always a dict |
-| `AsyncDriver`: async build, pandas default, a deprecated asyncio call, no sibling cancellation, sync nodes block the loop, no graceful partial failure, no caching, and a builder with methods it refuses | n/a | Plan 3 (Q11–Q13): sync build, dict results, cancellation on failure, sync nodes off the loop, and the same feature set as the sync driver |
+| `AsyncDriver`: async build, pandas default, a deprecated asyncio call, no sibling cancellation, sync nodes block the loop, no graceful partial failure, no caching, and a builder with methods it refuses | fixed (Plan 3), except graceful partial failure: n/a, a later design | Sync build, dict results in request order, no deprecated call (Q11–Q13); sync nodes off the loop (Q65); cancellation on failure (Q66); the sync driver's checks (Q67); caching (Q68); async rows awaited (Q69). A failure still raises the first exception (Q66): graceful partial failure is designed with "Graphs that carry I/O and failure" under [Beyond Hamilton](#beyond-hamilton), with Plan 6's failure hook |
 
 ### Caching
 
@@ -198,7 +198,7 @@ tests against Hamilton for every kept behaviour; benchmarks for anything on the 
 
 1. **0.1.x fixes:** the five regressions in the first table above.
 2. **Plan 4 follow-up: issue #10 and `@cache(format=...)`.** It's small and on the shipped path.
-3. **Plan 3: config, `extract_*`, async.** This is the reservation Plan 2 made: `Builder.with_config`,
+3. **Plan 3: config, `extract_*`, async.** Done. This is the reservation Plan 2 made: `Builder.with_config`,
    `Driver.config`, `@config.when*` (with `default` and `name=`), `@extract_fields`, `@extract_columns`, and an async
    driver, with the config and async rows of the ledger above.
 4. **Plan 5: inspection, validation and authoring.** `inputs()`, `outputs()`, `modules`, `validate(...)`,

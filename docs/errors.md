@@ -37,10 +37,18 @@ driver = fnloom.build(pricing)
 | A dependency cycle | `ValueError: dependency cycle: 'a' -> 'b' -> 'a'` |
 | A parameter or the return without an annotation | `ValueError: 'f': parameter 'a' has no type annotation` |
 | A positional-only, `*args` or `**kwargs` parameter | `ValueError: 'f': *args parameter 'a' is not supported` |
-| An `async def` or generator function | `ValueError: 'f': async function is not supported; nodes are called synchronously` |
+| An `async def` given to `build()` (use [`build_async()`](running.md#async)) | `ValueError: 'f': async function is not supported by build(), which calls nodes synchronously; build it with build_async()` |
+| A generator function, sync or async, given to either build | `ValueError: 'f': generator function is not supported; nodes are called synchronously` |
+| `build_async(sync_nodes=...)` with anything but `"thread"` or `"inline"` | `ValueError: sync_nodes must be 'inline' or 'thread', not 'loop'` |
 | An annotation naming something that does not exist at run time, such as an import under `TYPE_CHECKING` | `NameError: name 'Decimal' is not defined`, with a note naming the node and the parameter |
 | Functions annotating the same input with types neither of which feeds the other (`Base` and `Child` are fine: the input is `Child`) | `ValueError: inputs have conflicting types: 'a' is int in 'f', str in 'g'` |
 | A node whose return type a parameter it feeds does not accept, one line per such parameter, sorted (see [Type checks](running.md#type-checks)) | `ValueError: g.f requires int but f returns str` |
+| A node that another node reads, with no `@config.when*` variant matching the config and no `@config.default`, one line per node, sorted (see [Config](writing-nodes.md#config)) | `ValueError: no variant of 'foo' matches the config {'mode': 'c'}; its variants need mode == 'a' (foo__a), mode == 'b' (foo__b); add @config.default or a variant for it` |
+| Two variants of one node matching the config | `ValueError: node 'foo' has more than one variant matching the config {'mode': 'a'}: 'foo__a', 'foo__nb'` |
+| Two `@config.default`s for one node | `ValueError: node 'foo' has more than one @config.default: 'foo__x', 'foo__y'` |
+| A config-decorated function defined twice in one module | `ValueError: function 'foo__a' is defined more than once in module 'm' (lines 4, 8); Python keeps only the last` |
+| A config value whose `==` returns something other than a `bool` (NumPy's boolean scalar counts as one), such as an array, every such key listed, sorted | `TypeError: == on these config keys did not return a bool: 'mode' (numpy.ndarray)` |
+| A config that isn't a mapping, or a key that isn't a `str`, given to `with_config` | `TypeError: config keys must be str, got: int` |
 
 ## When you execute or prepare
 
@@ -60,6 +68,10 @@ driver.execute(["label"], inputs={"price": 1.0})
 driver.execute(["total", "price"])
 # raises ValueError: missing inputs: 'price' (requested as an output, needed by 'total'); 'quantity' (needed by 'total')
 ```
+
+A node that no config variant gave, requested as an output, raises the build's reason: `ValueError: no variant of
+'foo' matches the config ...`. A missing input named like a config key gets a second line, since config is never
+passed to nodes (Q56): `'mode' is a config key; config is not passed to nodes: supply it in inputs=`.
 
 !!! tip "Replacing a function's value"
 
@@ -106,3 +118,11 @@ plan.run(inputs={"price": 1.0})
 Your function's own exception reaches you unchanged, with a note naming the node (see
 [Running a graph](running.md#exceptions-from-your-functions)). Lineage queries raise
 `ValueError: unknown nodes: ...` for a name that isn't in the graph.
+
+An `AsyncDriver` raises a failed node's exception the same way, after cancelling the nodes still running (see
+[Async](running.md#async)). On an `AsyncDriver`, a sync node that returns a coroutine or another awaitable is an
+error, never a value:
+
+```text
+TypeError: node 'f' is a sync function but returned coroutine, an awaitable; make it an async def, so the async driver awaits it
+```

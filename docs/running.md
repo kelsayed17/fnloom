@@ -247,8 +247,8 @@ The view is made once, when the graph is built, and annotations are evaluated th
 
 A driver pickles, and copies with `copy.deepcopy`, so you can hand it to a `concurrent.futures.ProcessPoolExecutor`
 or any other tool that pickles its arguments. It is pickled as the recipe it was built from: the names of its
-modules, whether it checks input types, and its cache store. Loading it imports those modules by name and builds the
-driver again, so its compiled plans don't travel; each process compiles its own.
+modules, whether it checks input types, its config, and its cache store. Loading it imports those modules by name
+and builds the driver again, so its compiled plans don't travel; each process compiles its own.
 
 ```python
 import pickle
@@ -287,3 +287,76 @@ broken.execute(["ratio"], inputs={"numerator": 1, "denominator": 0})
 ```
 
 Python prints the note, `in node 'ratio'`, under the traceback. It's also in the exception's `__notes__`.
+
+## Async
+
+`Builder.build_async()` builds an `AsyncDriver`, for a graph with `async def` nodes. Building is synchronous, like
+`build()`; only running awaits. `execute` is a coroutine, and returns the same dict as the sync driver, in the order
+you asked for:
+
+```python
+# file: rates.py
+import asyncio
+
+
+async def rate(currency: str) -> float:
+    """The exchange rate, as a remote service would return it."""
+    await asyncio.sleep(0)
+    return {"EUR": 1.0, "USD": 1.5}[currency]
+
+
+def converted(rate: float, amount: float) -> float:
+    """The amount in the currency."""
+    return amount * rate
+```
+
+```python
+import asyncio
+
+import rates
+
+async_driver = fnloom.Builder().with_modules(rates).build_async()
+asyncio.run(
+    async_driver.execute(
+        ["converted", "rate"], inputs={"currency": "USD", "amount": 10.0}
+    )
+)
+# -> {'converted': 15.0, 'rate': 1.5}
+```
+
+Everything else is the sync driver's: inputs, overrides, the type checks and their errors, lineage, `nodes` and
+`config`. `prepare` is synchronous too, and returns a plan whose `run` is a coroutine:
+
+```python
+async_plan = async_driver.prepare(
+    ["converted"], inputs={"currency": "EUR", "amount": 0.0}
+)
+asyncio.run(async_plan.run(inputs={"currency": "EUR", "amount": 4.0}))
+# -> {'converted': 4.0}
+```
+
+**How nodes run.** A node starts as soon as everything it reads is ready, so independent `async def` nodes await
+concurrently. A sync node runs in a worker thread of the loop's default executor, through `loop.run_in_executor` with
+your context variables, so the event loop keeps running while it does. A thread costs tens of microseconds, which is
+more than a cheap node such as `converted`. For a graph of cheap sync nodes, `build_async(sync_nodes="inline")` runs
+them on the loop instead. The nodes `@extract_fields` and `@extract_columns` generate always run on the loop.
+
+**When a node fails,** the run cancels every node still running, waits for each `async def` node to stop, and raises
+the failed node's own exception, with the same note naming the node as the sync driver adds. There's no
+`ExceptionGroup`, so `except ZeroDivisionError` works as it does with `Driver`. A sync node in a thread can't be
+interrupted: the run doesn't wait for it, and drops its result when it comes. `asyncio.run` still waits for running
+threads when the loop shuts down, since it shuts the default executor down. If the caller is cancelled, as by
+`asyncio.timeout`, the run cancels its nodes the same way, and the cancellation reaches the caller once each
+`async def` node has stopped. Each node is cancelled once: a second cancellation of the caller, or one after a node
+failed, doesn't interrupt a node's cleanup, and the caller still waits for it.
+
+A few edges follow from that, as with `TaskGroup`:
+
+- A node that swallows its cancellation and never finishes makes the caller wait for it.
+- An exception a node raises while cleaning up from its cancellation is dropped. The run raises the first failure, or
+  the caller's cancellation.
+- A node task that something else cancels fails the run as `node 'name' was cancelled`. That holds even when the node
+  then raises its own `CancelledError`, which can't be told apart from the outside one.
+
+An async driver can cache too: see [Caching on the async driver](caching.md#on-the-async-driver). One made by a builder
+pickles as that builder, as a `Driver` does.
