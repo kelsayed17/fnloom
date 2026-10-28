@@ -67,6 +67,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
   behaviour changed.
 - `@fnloom.exclude`, bare or called, keeps a public function out of the graph and returns it unchanged. Hamilton's
   `@hamilton_exclude` works bare only. An excluded function's annotations are never read, so it needs none (Q73).
+- CodSpeed benchmarks of the Python run path in `benchmarks/` (`uv run pytest benchmarks`): prepared runs on every
+  generated shape, repeated `Driver.execute`, cached runs, the async driver, extraction, config and `Builder.build`.
+  CI runs them once on every pull request, and measures them under CodSpeed when `CODSPEED_ENABLED` is set.
 
 ### Changed
 

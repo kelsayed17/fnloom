@@ -80,6 +80,51 @@ jobs:
           uv run --no-project --python 3.14 scripts/bench_gate.py
           --baseline crates/fnloom-core/benches/baseline.json --results bench.jsonl
 
+  benchmarks-smoke:
+    name: Benchmarks run
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: stable
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          python-version: "3.14"
+      - run: uv sync --locked
+      # The release profile, so the benchmarks measure the optimised extension, not the debug build `uv sync` makes.
+      - run: uv run --no-sync maturin develop --release --locked
+      - run: uv run --no-sync python -m pytest benchmarks
+
+  benchmarks:
+    # CPU-simulation and allocation measurements, compared against main on every pull request. Enable by installing
+    # the CodSpeed GitHub app for this repository and setting the repository variable CODSPEED_ENABLED=true.
+    if: vars.CODSPEED_ENABLED == 'true'
+    name: Benchmarks (CodSpeed)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read # checkout
+      id-token: write # tokenless CodSpeed upload for a public repository
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master, 2026-10-16
+        with:
+          toolchain: stable
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          python-version: "3.14"
+      - run: uv sync --locked
+      # The release profile, so the benchmarks measure the optimised extension, not the debug build `uv sync` makes.
+      - run: uv run --no-sync maturin develop --release --locked
+      - uses: CodSpeedHQ/action@78102a468f96d8e0ccb92d0ec49425753fc42062 # v5.6.0
+        with:
+          mode: simulation,memory
+          run: uv run --no-sync python -m pytest benchmarks --codspeed
+
   zizmor:
     name: Workflow security audit
     runs-on: ubuntu-latest
