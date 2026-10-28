@@ -3821,3 +3821,108 @@ def test_q23_every_hook_sees_the_event_and_no_error_is_masked() -> None:
     assert str(hook_error) == "A after_node"
     assert ("B", "after_node", "boom") not in hamilton_log
     assert ("B", "after_node", "boom") in log
+
+
+_Q86_GRAPH = """
+import asyncio
+
+
+async def slow(x: int) -> int:
+    for _ in range(5):
+        await asyncio.sleep(0)
+    return x + 1
+
+
+async def fast(x: int) -> int:
+    await asyncio.sleep(0)
+    return x + 2
+
+
+def total(fast: int, slow: int) -> int:
+    return fast + slow
+
+
+async def bad(x: int) -> int:
+    await asyncio.sleep(0)
+    raise ValueError("async bad")
+"""
+
+
+@pytest.mark.deliberate("Q86")
+@pytest.mark.filterwarnings(_HAMILTON_ASYNC_WARNING)
+def test_q86_async_hooks_fire_as_nodes_run_with_values() -> None:
+    """Hamilton's sync hooks fire at scheduling, with tasks; fnloom's as nodes run."""
+    module = make_module("differential_q86", _Q86_GRAPH)
+    hamilton_log: list[HookEntry] = []
+    hamilton_hook = HamiltonRecorder("H", hamilton_log)
+
+    async def hamilton_runs() -> tuple[dict[str, Any], BaseException]:
+        pending: object = (
+            hamilton_async.Builder()
+            .with_modules(module)
+            .with_adapters(hamilton_hook)
+            .build()
+        )
+        built = await cast("Coroutine[Any, Any, hamilton_async.AsyncDriver]", pending)
+        result = await built.execute(["total"], inputs={"x": 1})
+        try:
+            await built.execute(["bad"], inputs={"x": 1})
+        except ValueError as error:
+            return result, error
+        pytest.fail("Hamilton's bad node did not raise")
+
+    result, hamilton_error = asyncio.run(hamilton_runs())
+    assert result == {"total": 5}
+    # Each node is reported as it is scheduled, in an order that changes with
+    # `PYTHONHASHSEED`: its after-node comes before the other node starts, though
+    # `slow` and `fast` run at once and `fast` finishes first.
+    assert hamilton_log[0] == ("H", "before_run", None)
+    pairs = [hamilton_log[i : i + 2] for i in (1, 3, 5)]
+    assert all(
+        [stage for _, stage, _ in pair] == ["before_node", "after_node"]
+        and pair[0][2] == pair[1][2]
+        for pair in pairs
+    )
+    assert [pair[0][2] for pair in pairs][2] == "total"
+    assert {pair[0][2] for pair in pairs[:2]} == {"slow", "fast"}
+    calls = hamilton_hook.calls
+    # `total`'s arguments, and every result, are tasks.
+    assert {type(v) for v in calls[5]["node_kwargs"].values()} == {asyncio.Task}
+    assert isinstance(calls[2]["result"], asyncio.Task)
+    # A failing node is reported a success, with its task as the result.
+    failed = calls[-2]
+    assert failed["node_name"] == "bad"
+    assert (failed["success"], failed["error"]) == (True, None)
+    assert isinstance(failed["result"], asyncio.Task)
+    assert calls[-1]["success"] is False
+    assert calls[-1]["error"] is hamilton_error
+
+    log: list[HookEntry] = []
+    ours = FnloomRecorder("F", log)
+    driver = fnloom.Builder().with_modules(module).with_hooks(ours).build_async()
+    assert asyncio.run(driver.execute(["total"], inputs={"x": 1})) == {"total": 5}
+    # Each node reports as it starts and as it finishes.
+    assert log == [
+        ("F", "before_run", None),
+        ("F", "before_node", "fast"),
+        ("F", "before_node", "slow"),
+        ("F", "after_node", "fast"),
+        ("F", "after_node", "slow"),
+        ("F", "before_node", "total"),
+        ("F", "after_node", "total"),
+        ("F", "after_run", None),
+    ]
+    # `nodes` is the plan's order (R1), and the events carry values.
+    assert ours.events[0].nodes == ("fast", "slow", "total")
+    assert dict(ours.events[5].inputs) == {"fast": 3, "slow": 2}
+    assert [e.result for e in ours.events[3:5]] == [3, 2]
+    log.clear()
+    with pytest.raises(ValueError, match="async bad") as raised:
+        asyncio.run(driver.execute(["bad"], inputs={"x": 1}))
+    failed_end = ours.events[-2]
+    assert (failed_end.ok, failed_end.error, failed_end.result) == (
+        False,
+        raised.value,
+        None,
+    )
+    assert (ours.events[-1].ok, ours.events[-1].error) == (False, raised.value)

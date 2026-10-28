@@ -125,6 +125,7 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | A function passed where a module goes | An empty graph | `TypeError` (Q52) |
 | A hook that raises | The later hooks of the event are skipped; a raising before-graph hook skips after-graph too | Every hook sees the event, and after-run always fires (Q23) |
 | A failing node and a raising after-node or after-graph hook | The hook's error, with the node's only in `__context__` | One `ExceptionGroup`, the node's error first (Q23) |
+| A sync hook on the async driver | Called when a node is scheduled, with `Task`s for its arguments and result; a failing node is reported a success | Called as the node starts and finishes, on the loop's thread, with real values and `ok=False` for a failure (Q86) |
 | A module with no nodes, such as a package that only re-exports | Builds; its nodes are unknown at `execute` | `ValueError` at build, saying why each function was skipped (Q53) |
 | A row naming no parameter of its function | `InvalidDecoratorException` | `ValueError`, when decorating (Q33) |
 | A row's defaulted parameter bound to an unsupplied `source()` | `KeyError` when run | The default applies (Q35) |
@@ -174,7 +175,7 @@ fnloom is pre-alpha. The core, the native path, `@parameterize` and its sugar, `
 result caching, the async driver and hooks are done. These Hamilton
 features come next, roughly in this order:
 
-1. **Result builders**, and hooks on the async driver. Hooks on `Driver` are done ([Hooks](hooks.md)).
+1. **Result builders.** Hooks are done on both drivers ([Hooks](hooks.md)).
 2. **Graph visualisation.**
 3. **Dynamic execution**, materializers, `@subdag`, `@check_output` and `@pipe`.
 

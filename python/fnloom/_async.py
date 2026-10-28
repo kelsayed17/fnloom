@@ -13,6 +13,12 @@ node succeeds, so a node that fails, or that a failure cancels, stores nothing. 
 `recompute` nodes something reads run first, on the loop too, so an `async def` one
 is awaited. Every store call runs on the loop's thread.
 
+A run with hooks goes through `_HookedRun`, chosen per plan by the driver, so a run
+without hooks runs exactly the walk below. Its events go through the run's
+`Dispatch`, the sync driver's, always on the loop's thread: `before_node` just
+before a node's task, thread or inline call starts, `after_node` once its value or
+error is in. An error a hook raises fails the run as a node's own would.
+
 Nothing about a run is kept on the schedule, which is shared by every run of its
 plan: each run has its own `_Run`, so runs on one loop, or on loops in several
 threads, never share a value (Review Focus 5). Nothing recurses over the graph's
@@ -20,12 +26,13 @@ depth: each node counts the computed inputs it still waits for.
 """
 
 import asyncio
+import contextlib
 import contextvars
 import functools
 import inspect
 import threading
 from collections import deque
-from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, override
 
 from fnloom import _extract
 from fnloom._caching import HIT_PLAN_CACHE_SIZE
@@ -35,7 +42,8 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping
 
     from fnloom import _core
-    from fnloom._caching import CacheRun
+    from fnloom._caching import CacheOutcome, CacheRun
+    from fnloom._hooks import Dispatch
     from fnloom._scan import NodeDef
 
 # What the walk calls with each node's name and value as the node succeeds.
@@ -154,6 +162,21 @@ class Schedule:
             return values
         return await _Run(self, values, on_value).wait()
 
+    async def hooked(
+        self,
+        inputs: Mapping[str, object],
+        overrides: Mapping[str, object],
+        dispatch: Dispatch,
+        on_value: OnValue | None = None,
+    ) -> dict[str, object]:
+        """`run`, its node events sent to `dispatch`, a run's own dispatcher."""
+        values: dict[str, object] = {name: inputs[name] for name in self.given}
+        for name in self.overridden:
+            values[name] = overrides[name]
+        if not self.calls:
+            return values
+        return await _HookedRun(self, values, on_value, dispatch).wait()
+
 
 class CachedSchedule:
     """A cached plan's runs on the loop: its `CacheRun`, and a `Schedule` per plan.
@@ -189,12 +212,17 @@ class CachedSchedule:
         return entry[1]
 
     async def run(
-        self, inputs: dict[str, object], overrides: dict[str, object]
+        self,
+        inputs: dict[str, object],
+        overrides: dict[str, object],
+        dispatch: Dispatch | None = None,
     ) -> dict[str, object]:
         """Every planned node's value, by name, the hits loaded, the rest stored.
 
         The nested runs of `recompute` nodes go first, innermost first, each
         walked on the loop: a loop, not a recursion, however deep they nest.
+        `dispatch`, when given, hears of the nodes the outermost run computes, as
+        the sync driver's cached run reports them.
         """
         levels = [self._cache_run]
         while (inner := levels[-1].nested) is not None:
@@ -211,9 +239,14 @@ class CachedSchedule:
                 warned=warned,
                 native=False,
             )
-            known = await self._schedule(begun.plan).run(
-                inputs, begun.overrides, functools.partial(level.finish, begun)
-            )
+            schedule = self._schedule(begun.plan)
+            on_value = functools.partial(level.finish, begun)
+            if dispatch is not None and level is self._cache_run:
+                known = await schedule.hooked(
+                    inputs, begun.overrides, dispatch, on_value
+                )
+            else:
+                known = await schedule.run(inputs, begun.overrides, on_value)
         return known
 
 
@@ -521,3 +554,103 @@ class _Run:
             self._finished.set_result(None)
         for future in self._running:
             future.cancel()
+
+
+class _HookedRun(_Run):
+    """A run whose nodes report to hooks, through the run's `Dispatch`.
+
+    `before_node` fires just before a node's task is made, its thread started or
+    its inline call made; `after_node` as its value is stored, or as its own error
+    fails the run. Both run on the loop's thread, as every method of a run does.
+    An error a hook raises fails the run as a node's would, without the node's
+    note: the node never starts when `before_node` raised, and its value is
+    dropped when `after_node` did. A node the failure cancels gets no `after_node`:
+    its outcome is discarded, as without hooks. The dispatcher keeps every error,
+    so the driver raises them from `Dispatch.end`, not from the run.
+    """
+
+    __slots__ = ("_dispatch", "_outcomes", "_started_with")
+
+    def __init__(
+        self,
+        schedule: Schedule,
+        values: dict[str, object],
+        on_value: OnValue | None,
+        dispatch: Dispatch,
+    ) -> None:
+        """A run over `schedule`, as `_Run`, reporting to `dispatch`."""
+        super().__init__(schedule, values, on_value)
+        self._dispatch = dispatch
+        self._outcomes = dispatch.outcomes
+        # Each started node's keyword arguments, until its `after_node`.
+        self._started_with: dict[str, dict[str, object]] = {}
+
+    def _outcome(self, name: str) -> CacheOutcome | None:
+        outcomes = self._outcomes
+        return None if outcomes is None else outcomes.get(name)
+
+    @override
+    def _drain(self) -> None:
+        """`_Run._drain`, firing each node's `before_node` before it starts."""
+        ready = self._ready
+        values = self._values
+        calls = self._schedule.calls
+        while ready and self._failure is None:
+            name = ready.popleft()
+            payload, kind, args = calls[name]
+            kwargs = {keyword: values[source] for source, keyword in args}
+            if not self._begin(name, kwargs):
+                return
+            if kind == "inline":
+                if not self._inline(name, payload, kwargs):
+                    return
+                continue
+            try:
+                future = self._started(payload, kind, kwargs)
+            except _STOPPING:
+                raise
+            except BaseException as error:  # noqa: BLE001  # raised once the run stops
+                self._fail(name, error)
+                return
+            if future.done():
+                if not self._settle(name, kind, future):
+                    return
+                continue
+            self._running[future] = name
+            future.add_done_callback(self._done)
+
+    def _begin(self, name: str, kwargs: dict[str, object]) -> bool:
+        """Fires `before_node`; `False`, the run failed, when a hook raised."""
+        try:
+            self._dispatch.node_started(name, kwargs, self._outcome(name))
+        except BaseException as error:  # noqa: BLE001  # the dispatcher keeps it
+            self._fail(name, error, note=False)
+            return False
+        self._started_with[name] = kwargs
+        return True
+
+    @override
+    def _store(self, name: str, value: object) -> bool:
+        """Fires `after_node`, then stores the value unless a hook raised."""
+        kwargs = self._started_with.pop(name)
+        try:
+            self._dispatch.node_ended(name, kwargs, self._outcome(name), value, None)
+        except BaseException as error:  # noqa: BLE001  # the dispatcher keeps it
+            self._fail(name, error, note=False)
+            return False
+        return super()._store(name, value)
+
+    @override
+    def _fail(self, name: str, error: BaseException, *, note: bool = True) -> None:
+        """Fires `after_node(ok=False)` for a node's own error, then fails the run.
+
+        Before the note is added, as the sync driver's `after_node` sees it.
+        """
+        kwargs = self._started_with.pop(name, None)
+        if note and kwargs is not None and self._failure is None:
+            # Whatever a hook raises, the dispatcher keeps, and `end` raises.
+            with contextlib.suppress(BaseException):
+                self._dispatch.node_ended(
+                    name, kwargs, self._outcome(name), None, error
+                )
+        super()._fail(name, error, note=note)

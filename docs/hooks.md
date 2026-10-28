@@ -228,6 +228,46 @@ A driver's hooks travel with it. `copy.copy` and `rebuild()` keep the same hook 
 pickle, such as an instance of a class defined inside a function, makes the driver fail to pickle, with pickle's own
 error.
 
-`build_async` keeps the hooks too, and `AsyncDriver.hooks` lists them, but an `AsyncDriver` doesn't call them yet. On a
-driver with a cache, a run reports the nodes it computes: a node loaded from the store reports nothing yet, and
-`cache` is `None`.
+`build_async` keeps the hooks too, and `AsyncDriver.hooks` lists them. On a driver with a cache, a run reports the
+nodes it computes: a node loaded from the store reports nothing yet, and `cache` is `None`.
+
+## On the async driver
+
+An [`AsyncDriver`](running.md#async) fires the same events as a `Driver`, with the same rules, and so does its
+`AsyncPreparedPlan.run`. A hook is still a plain `def`; it's never awaited.
+
+- `before_node` fires as a node starts, and `after_node` once its value or error is in. Both carry real values: the
+  node's arguments, then its result, or `ok=False` and its own exception.
+- Nodes that run at once report in the order they start and finish, so another node's events can come between a
+  node's `before_node` and its `after_node`.
+- `RunStart.nodes` lists the nodes in plan order ([Execution order](running.md#execution-order)), not the order of
+  the events, which can change from one run to the next.
+- Every hook runs on the event loop's thread, never in a worker thread, even for a sync node run in one. A hook needs no
+  lock to keep state for one run.
+- A hook that raises fails the run as a failing node does: every node still running is cancelled, and the run waits
+  for each `async def` node to stop. A node the failure cancels gets no `after_node`.
+- A missing or mistyped input fails after `before_run`, as on `Driver`.
+
+```python
+import asyncio
+
+
+class Starts(fnloom.Hook):
+    def __init__(self) -> None:
+        self.names: list[str] = []
+
+    def before_node(self, event: fnloom.NodeStart) -> None:
+        self.names.append(event.node.name)
+
+
+starts = Starts()
+async_driver = fnloom.Builder().with_modules(orders).with_hooks(starts).build_async()
+asyncio.run(async_driver.execute(["total"], inputs={"price": 2.5, "quantity": 4}))
+# -> {'total': 14.5}
+starts.names
+# -> ['subtotal', 'shipping', 'total']
+```
+
+Hamilton's async driver calls a sync hook when it schedules a node, not when the node runs. The hook gets the
+`asyncio.Task`s of the node's dependencies as its arguments and the node's `Task` as its result, and reports a node
+that then fails as a success (Q86).

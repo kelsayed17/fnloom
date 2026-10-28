@@ -428,30 +428,11 @@ class _HookedPlan(PreparedPlan):
         overrides: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         """Runs the plan as `PreparedPlan.run` does, firing the hooks' events."""
-        given_inputs = inputs if type(inputs) is dict else _as_dict(inputs)
-        given_overrides = overrides if type(overrides) is dict else _as_dict(overrides)
-        if (
-            given_inputs.keys() != self._input_names
-            or given_overrides.keys() != self._override_names
-        ):
-            self._refuse_names(given_inputs, given_overrides)
-        # Worked out first, so `RunStart.nodes` is empty when the checks fail and
-        # no node will run (R5); raised after `before_run`, as Hamilton raises it.
-        mismatches: list[str] = []
-        if self._input_checks or self._override_checks:
-            mismatches = _mismatches(self._input_checks, given_inputs)
-            mismatches += _mismatches(self._override_checks, given_overrides)
+        given_inputs, given_overrides, mismatches = self._opened(inputs, overrides)
         dispatch = _hooks.Dispatch(self._hooks, self._views, None)
         error: BaseException | None = None
         try:
-            dispatch.start(
-                self._outputs,
-                given_inputs,
-                given_overrides,
-                () if mismatches else self._views.names,
-            )
-            if mismatches:
-                _raise_mismatches(mismatches)
+            self._start(dispatch, given_inputs, given_overrides, mismatches)
             values = self._plan.run(given_inputs, given_overrides, dispatch.observers())
         except BaseException as caught:  # noqa: BLE001  # raised by `end`, after `after_run`
             error = caught
@@ -464,6 +445,43 @@ class _HookedPlan(PreparedPlan):
         dispatch.end(False, error, None)  # noqa: FBT003  # the dispatcher's interface
         # `end` raises the error itself, or the errors that replace it.
         raise error
+
+    def _opened(
+        self,
+        inputs: Mapping[str, object] | None,
+        overrides: Mapping[str, object] | None,
+    ) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+        """The inputs and overrides as dicts, once their names fit, and mismatches.
+
+        The value checks are worked out here, so `RunStart.nodes` is empty when
+        they fail and no node will run (R5); `_start` raises them after
+        `before_run`, as Hamilton raises them.
+        """
+        given_inputs = inputs if type(inputs) is dict else _as_dict(inputs)
+        given_overrides = overrides if type(overrides) is dict else _as_dict(overrides)
+        if (
+            given_inputs.keys() != self._input_names
+            or given_overrides.keys() != self._override_names
+        ):
+            self._refuse_names(given_inputs, given_overrides)
+        mismatches: list[str] = []
+        if self._input_checks or self._override_checks:
+            mismatches = _mismatches(self._input_checks, given_inputs)
+            mismatches += _mismatches(self._override_checks, given_overrides)
+        return given_inputs, given_overrides, mismatches
+
+    def _start(
+        self,
+        dispatch: _hooks.Dispatch,
+        inputs: dict[str, Any],
+        overrides: dict[str, Any],
+        mismatches: list[str],
+    ) -> None:
+        """Fires `before_run`, then raises the value checks' `mismatches`, if any."""
+        nodes = () if mismatches else self._views.names
+        dispatch.start(self._outputs, inputs, overrides, nodes)
+        if mismatches:
+            _raise_mismatches(mismatches)
 
 
 class Driver:
@@ -1141,6 +1159,55 @@ class AsyncPreparedPlan:
         return {name: values[name] for name in self._outputs}
 
 
+class _HookedAsyncPlan(AsyncPreparedPlan):
+    """An `AsyncPreparedPlan` of a driver with hooks: its runs fire their events.
+
+    Chosen when the plan is prepared, so a driver with no hooks never runs this.
+    A run fires the events `_HookedPlan.run` fires, through the same dispatcher,
+    in the same order around the checks; its nodes report as they run (Q86).
+    """
+
+    def __init__(
+        self,
+        prepared: _HookedPlan,
+        driver: AsyncDriver,
+        schedule: _async.Schedule | _async.CachedSchedule,
+    ) -> None:
+        """The async form of `prepared`, whose hooks its runs fire."""
+        super().__init__(prepared, driver, schedule)
+        self._hooked = prepared
+
+    @override
+    async def run(
+        self,
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Runs as `AsyncPreparedPlan.run` does, firing the hooks' events."""
+        prepared = self._hooked
+        given_inputs, given_overrides, mismatches = prepared._opened(inputs, overrides)  # noqa: SLF001  # the plan this wraps
+        dispatch = _hooks.Dispatch(prepared._hooks, prepared._views, None)  # noqa: SLF001  # the plan this wraps
+        schedule = self._schedule
+        error: BaseException | None = None
+        try:
+            prepared._start(dispatch, given_inputs, given_overrides, mismatches)  # noqa: SLF001  # the plan this wraps
+            if isinstance(schedule, _async.CachedSchedule):
+                values = await schedule.run(given_inputs, given_overrides, dispatch)
+            else:
+                values = await schedule.hooked(given_inputs, given_overrides, dispatch)
+        except BaseException as caught:  # noqa: BLE001  # raised by `end`, after `after_run`
+            error = caught
+        else:
+            results = {name: values[name] for name in self._outputs}
+            # Outside the `except`, so nothing `end` raises gets a `__context__`.
+            dispatch.end(True, None, results)  # noqa: FBT003  # the dispatcher's interface
+            return results
+        dispatch.end(False, error, None)  # noqa: FBT003  # the dispatcher's interface
+        # `end` raises the error itself, or the errors that replace it.
+        raise error
+
+
 class AsyncDriver:
     """Executes a graph whose nodes may be `async def`: `execute` is a coroutine.
 
@@ -1207,8 +1274,7 @@ class AsyncDriver:
     def hooks(self) -> tuple[Hook, ...]:
         """The hooks given to the builder; see `Driver.hooks`.
 
-        Kept and carried, but not yet called: an `AsyncDriver`'s runs fire no
-        events.
+        Its runs fire the same events as a `Driver`'s, on the loop's thread (Q86).
         """
         return self._driver.hooks
 
@@ -1275,7 +1341,11 @@ class AsyncDriver:
             else:
                 msg = f"an AsyncDriver cannot run {type(runnable).__name__}"
                 raise TypeError(msg)
-            plan = AsyncPreparedPlan(prepared, self, schedule)
+            plan = (
+                _HookedAsyncPlan(prepared, self, schedule)
+                if isinstance(prepared, _HookedPlan)
+                else AsyncPreparedPlan(prepared, self, schedule)
+            )
             # Two threads may both get here: either plan will do, and one is kept.
             prepared._async = plan  # noqa: SLF001  # this driver's own plan
         return plan
@@ -1306,7 +1376,15 @@ class AsyncDriver:
         (Q11). The first node to fail cancels every node still running and raises
         its own exception, with a note naming it (Q66).
         """
-        plan = self.prepare(final_vars, inputs=inputs, overrides=overrides)
+        try:
+            plan = self.prepare(final_vars, inputs=inputs, overrides=overrides)
+        except ValueError as error:
+            # A value check of the request, not its shape: hooks see it (decision 4).
+            driver = self._driver
+            hooks = driver._hooks  # noqa: SLF001  # this driver's own
+            if hooks is None or not str(error).startswith(_UNSUPPLIED):
+                raise
+            driver._refuse_after_hooks(hooks, final_vars, inputs, overrides, error)  # noqa: SLF001  # this driver's own
         return await plan.run(inputs=inputs, overrides=overrides)
 
     def explain_cache(
