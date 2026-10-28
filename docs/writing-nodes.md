@@ -285,10 +285,55 @@ by its length and each item (Q80).
 Annotations are evaluated when the graph is built, as in Hamilton. String annotations
 (`from __future__ import annotations`) and forward references to a class further down the module are fine.
 
+An annotation naming something that doesn't exist at run time, such as a class imported only under
+`if TYPE_CHECKING:` (as ruff's `TC003` rule suggests), still builds. Hamilton raises `NameError` instead (Q81). The
+annotation becomes an opaque type, shown as `unresolved 'Decimal'`, with its text as written:
+
+```python
+# file: rates.py
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from decimal import Decimal
+
+
+def rate() -> "Decimal":
+    """The exchange rate."""
+    raise NotImplementedError
+
+
+def converted(rate: "Decimal") -> "Decimal":
+    """Fed by `rate`: the same unresolved text on both ends."""
+    return rate
+
+
+def checked(amount: "Decimal") -> "Decimal":
+    """Reads an input whose type didn't resolve."""
+    return amount
+```
+
+```python
+import fnloom
+import rates
+
+driver = fnloom.build(rates)
+repr(driver.nodes["rate"].type)
+# -> "unresolved 'Decimal'"
+driver.execute(["checked"], inputs={"amount": 1})
+# raises TypeError: amount: cannot check a value against unresolved 'Decimal': it did not resolve when the graph was built; import what it names at run time, not only under TYPE_CHECKING
+```
+
+It surfaces only where a check needs it:
+
+- **Edges:** an edge matches it only from or to an annotation of the same text, or `Any`. Any other edge with it fails
+  the build, naming the text.
+- **Values:** an input or override checked against it raises a `TypeError` saying to import the name at run time. A
+  node never asked for is never checked, and `without_input_type_checks()` skips the check.
+
 !!! warning "Keep annotation imports real"
 
-    Every name in an annotation must exist at run time. If you move an import under `if TYPE_CHECKING:` (as ruff's
-    `TC003` rule suggests), the build raises that name's `NameError`, with a note naming the node and the parameter.
+    An unresolved annotation can't check a value. If a node's inputs should be checked, import the names its
+    annotations use at run time, not only under `TYPE_CHECKING`.
 
 ## Modules together
 

@@ -265,25 +265,6 @@ def test_node_types_match_hamilton(fixture: str) -> None:
     assert views["log"].type is type(None)
 
 
-def test_unresolvable_annotation_same_class() -> None:
-    """A name imported only under `TYPE_CHECKING` fails the build the same way."""
-    module = make_module(
-        "differential_unresolvable",
-        """
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from decimal import Decimal
-
-def price(rate: Decimal) -> int:
-    return 1
-""",
-    )
-    hamilton = nodes_hamilton([module])
-    assert hamilton == Nodes(None, "NameError")
-    assert nodes_fnloom([module]) == hamilton
-
-
 _PROTOCOL_PRODUCERS = [
     "int",
     "float",

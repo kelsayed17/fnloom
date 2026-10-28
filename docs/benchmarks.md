@@ -79,6 +79,23 @@ once, when the plan is prepared: `Optional[int]` is one `isinstance` against `(i
 Hamilton's `execute`, the least at 10,000 parameters, where, as for `fan_in`, the one call with 10,000 keyword
 arguments is most of the cost. The checks cost about 0.18 ms per 1,000 inputs.
 
+**Deep checks and widening** are opt-ins (see
+[Deep checks and numeric widening](running.md#deep-checks-and-numeric-widening)). The `types` shape was timed with
+each on, checks on, alongside the default, as runtimes `fnloom (deep)` and `fnloom (widen)` of `benches.run` (medians
+of three runs, ms, on 2026-10-28; default / deep / widening):
+
+| n | steady execute | prepare |
+| ---: | --- | --- |
+| 10 | 0.004 / 0.004 / 0.003 | 0.035 / 0.035 / 0.027 |
+| 100 | 0.029 / 0.034 / 0.030 | 0.084 / 0.081 / 0.077 |
+| 1,000 | 0.469 / 0.518 / 0.481 | 0.629 / 0.641 / 0.615 |
+| 10,000 | 23.2 / 23.6 / 23.3 | 8.066 / 7.734 / 7.464 |
+
+The default stays within noise of the table above. Deep checks cost about 0.05 ms per 1,000 inputs here, each list
+holding one item: a `list[int]` of exactly the class checks its items in a loop of `isinstance` calls, made when the
+plan is prepared. The cost grows with the items read: a `list[float]` of 100,000 items takes about 2.6 ms, and a
+`list[tuple[int, str]]` of 100,000 about 31 ms. Widening costs nothing on a value that fits without it.
+
 **Steady execution**, the cost of running a prepared plan again, is where fnloom differs most. With checks on, it's
 2.5 to 24 times faster than Hamilton's `execute` on the first four shapes wherever both finish, and 8.6 to 998 times
 on `extract`, because the plan is compiled once and each run is a loop over its steps in Rust. The low end is

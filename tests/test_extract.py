@@ -25,6 +25,7 @@ from fnloom import (
 from fnloom._decorators import decorations
 from fnloom._extract import MISSING_FILL, Extraction, _Extractor, column_type
 from fnloom._scan import collect, resolve
+from fnloom._types import Unresolved
 from helpers import make_module
 
 if TYPE_CHECKING:
@@ -655,8 +656,8 @@ def test_a_clash_found_only_at_build_is_refused() -> None:
         fnloom.build(module)
 
 
-def test_an_unresolved_typed_dict_field_names_the_producer() -> None:
-    """A `TypedDict` field type that does not resolve fails the build, noted."""
+def test_an_unresolved_typed_dict_field_is_unresolved() -> None:
+    """A `TypedDict` field type that does not resolve builds; its check raises (Q81)."""
     module = make_module(
         "extract_unresolved",
         """
@@ -671,15 +672,14 @@ def test_an_unresolved_typed_dict_field_names_the_producer() -> None:
             return {"x": 1}
         """,
     )
-    with pytest.raises(NameError, match="Missing") as raised:
-        fnloom.build(module)
-    assert raised.value.__notes__ == [
-        "resolving the fields of extract_unresolved.Broken, returned by 'p'"
-    ]
+    driver = fnloom.build(module)
+    assert driver.nodes["x"].type == Unresolved("Missing")
+    with pytest.raises(TypeError, match=r"^'p' returned field 'x': cannot check "):
+        driver.execute(["x"])
 
 
-def test_every_producer_with_an_unresolved_typed_dict_is_named() -> None:
-    """Two producers whose `TypedDict` fields do not resolve: one error, both named."""
+def test_every_producer_with_an_unresolved_typed_dict_builds() -> None:
+    """Two producers whose `TypedDict` fields do not resolve both build (Q81)."""
     module = make_module(
         "extract_unresolved_two",
         """
@@ -701,14 +701,9 @@ def test_every_producer_with_an_unresolved_typed_dict_is_named() -> None:
             return {"x": 1}
         """,
     )
-    with pytest.raises(NameError, match="Missing") as raised:
-        fnloom.build(module)
-    assert raised.value.__notes__ == [
-        (
-            "resolving the fields of extract_unresolved_two.Broken, returned by 'p'; "
-            "extract_unresolved_two.Other, returned by 'q'"
-        )
-    ]
+    nodes = fnloom.build(module).nodes
+    assert nodes["x"].type == Unresolved("Missing")
+    assert nodes["y"].type == Unresolved("Absent")
 
 
 class _CountingCache(MemoryCache):

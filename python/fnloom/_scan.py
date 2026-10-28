@@ -20,16 +20,13 @@ from fnloom._config import (
 from fnloom._decorators import _ATTRIBUTE, Source, Value, decorations
 from fnloom._functions import FunctionSource, NodeSpec
 from fnloom._namespaces import qualified
-from fnloom._types import read_aliases
+from fnloom._types import SHALLOW, Rules, resolved_hints
 from fnloom._view import Param
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
     from collections.abc import Set as AbstractSet
     from types import ModuleType
-
-# What evaluating an annotation raises when a name in it does not resolve.
-type _Unresolved = NameError | AttributeError
 
 _UNSUPPORTED_KINDS = {
     inspect.Parameter.POSITIONAL_ONLY: "positional-only parameter",
@@ -890,58 +887,6 @@ def _made(
     return seen
 
 
-def _owner(origin: Callable[..., object], names: list[str]) -> str:
-    """Names the nodes of `origin`: its node, or every row of a parameterized one."""
-    if decorations(origin).rows is None:
-        return f"node {names[0]!r}"
-    rows = ", ".join(repr(name) for name in sorted(names))
-    function = getattr(origin, "__name__", names[0])
-    return f"nodes {rows} (rows of function {function!r})"
-
-
-def _culprit(key: str) -> str:
-    """Names the annotation `key` of a function in an unresolved-annotation note."""
-    return "the return" if key == "return" else f"parameter {key!r}"
-
-
-def _unresolved(origin: Callable[..., object]) -> list[str]:
-    """The annotations of `origin` that do not evaluate, in declaration order."""
-    written = annotationlib.get_annotations(origin, format=annotationlib.Format.STRING)
-    culprits: list[str] = []
-    for key, text in written.items():
-        try:
-            typing.evaluate_forward_ref(annotationlib.ForwardRef(text, owner=origin))
-        except NameError, AttributeError:
-            culprits.append(_culprit(key))
-    return culprits or ["an annotation"]
-
-
-def _unread_aliases(hints: dict[str, object]) -> list[tuple[str, _Unresolved]]:
-    """The annotations among `hints` naming an alias whose value does not evaluate.
-
-    Each is (culprit, the error its value raised), in declaration order (Q44).
-    """
-    culprits: list[tuple[str, _Unresolved]] = []
-    for key, hint in hints.items():
-        try:
-            read_aliases(hint)
-        except (NameError, AttributeError) as error:
-            culprits.append((_culprit(key), error))
-    return culprits
-
-
-def _unresolved_note(failures: list[tuple[str, list[str]]]) -> str:
-    """One note naming every failing annotation; `failures` are (owner, culprits)."""
-    items = [(culprit, owner) for owner, culprits in failures for culprit in culprits]
-    if len(items) == 1:
-        culprit, owner = items[0]
-        if culprit == "the return":
-            return f"resolving the return annotation of {owner}"
-        return f"resolving the annotation of {culprit} of {owner}"
-    listed = "; ".join(f"{culprit} of {owner}" for culprit, owner in items)
-    return f"resolving the annotations of: {listed}"
-
-
 def _all_classes(node: NodeDef) -> bool:
     """Whether every annotation of `node`'s function, as written, is already a class.
 
@@ -963,49 +908,31 @@ def _resigned(fn: Callable[..., object]) -> bool:
     return hasattr(fn, "__wrapped__") or hasattr(fn, "__signature__")
 
 
-def resolve(nodes: Sequence[NodeDef]) -> list[NodeDef]:
+def resolve(nodes: Sequence[NodeDef], rules: Rules = SHALLOW) -> list[NodeDef]:
     """Returns `nodes` with their annotations evaluated to values, as Hamilton does.
 
     `typing.get_type_hints` evaluates them: string annotations, and forward
     references to names defined anywhere in the module, also nested ones such as
-    `list["Later"]`, resolve, and a `None` annotation becomes `NoneType`. When
-    names do not resolve, the `NameError` (or, for a missing attribute such as
-    `decimal.Missing`, the `AttributeError`) of the first failing node by name is
-    raised, as Hamilton raises it, with one note naming every failing node and
-    annotation, sorted by node. A PEP 695 alias's value is evaluated here too, so
-    an alias over a name that does not resolve fails the same way (Q44).
+    `list["Later"]`, resolve, and a `None` annotation becomes `NoneType`. An
+    annotation naming something that does not exist at run time, such as a name
+    imported only under `TYPE_CHECKING` or an alias over one, becomes
+    `Unresolved`, with its text as written, where Hamilton raises `NameError`
+    (Q81). A PEP 695 alias's value, and a `TypeVar`'s bound and constraints, are
+    read here too, so a run never evaluates one (Q44). `rules` are the value
+    checks' rules, which an extracted field's check follows.
     """
-    origins: dict[int, tuple[Callable[..., object], list[str]]] = {}
+    origins: dict[int, Callable[..., object]] = {}
     nodes_of: dict[int, NodeDef] = {}
     # A field node is lowered again from its resolved producer, by `_lowered`.
     own = [node for node in nodes if not _extract.is_generated(node)]
     for node in own:
-        origins.setdefault(id(node.origin), (node.origin, []))[1].append(node.name)
+        origins.setdefault(id(node.origin), node.origin)
         nodes_of.setdefault(id(node.origin), node)
     values: dict[int, dict[str, typing.Any]] = {}
-    # Each failure: (first node name, error, origin, node names, culprits).
-    errors: list[
-        tuple[str, _Unresolved, Callable[..., object], list[str], list[str]]
-    ] = []
-    for key, (origin, names) in origins.items():
+    for key, origin in origins.items():
         if _all_classes(nodes_of[key]) and not _resigned(origin):
             continue
-        try:
-            hints = typing.get_type_hints(origin, include_extras=True)
-        except (NameError, AttributeError) as error:
-            errors.append((min(names), error, origin, names, _unresolved(origin)))
-            continue
-        if unread := _unread_aliases(hints):
-            culprits = [culprit for culprit, _ in unread]
-            errors.append((min(names), unread[0][1], origin, names, culprits))
-        else:
-            values[key] = hints
-    if errors:
-        errors.sort(key=lambda failure: failure[0])
-        failures = [(_owner(o, names), culprits) for _, _, o, names, culprits in errors]
-        error = errors[0][1]
-        error.add_note(_unresolved_note(failures))
-        raise error
+        values[key] = resolved_hints(origin)
     resolved: list[NodeDef] = []
     for node in own:
         if (hints := values.get(id(node.origin))) is None:
@@ -1026,10 +953,10 @@ def resolve(nodes: Sequence[NodeDef]) -> list[NodeDef]:
             resolved.append(node)
         else:
             resolved.append(replace(node, params=params, returns=returns))
-    return _lowered(resolved)
+    return _lowered(resolved, rules)
 
 
-def _lowered(nodes: list[NodeDef]) -> list[NodeDef]:
+def _lowered(nodes: list[NodeDef], rules: Rules) -> list[NodeDef]:
     """`nodes`, resolved, with each producer's field nodes lowered from its return.
 
     `ValueError` listing, sorted, every declared field type a return cannot feed,
@@ -1039,21 +966,15 @@ def _lowered(nodes: list[NodeDef]) -> list[NodeDef]:
         return nodes
     lowered: list[NodeDef] = []
     problems: list[str] = []
-    # Each producer whose `TypedDict` field types do not resolve, with the error.
-    unresolved: list[tuple[str, _Unresolved, str]] = []
     for node in nodes:
         extraction = decorations(node.origin).extract
         if extraction is None:
             lowered.append(node)
             continue
         try:
-            lowered.extend(_extract.lower(node, extraction, resolved=True))
+            lowered.extend(_extract.lower(node, extraction, resolved=True, rules=rules))
         except ValueError as error:
             problems.append(str(error))
-        except (NameError, AttributeError) as error:
-            unresolved.append((node.name, error, _extract.returned_type(node)))
-    if unresolved:
-        _raise_unresolved(unresolved)
     if problems:
         raise ValueError("; ".join(sorted(problems)))
     # A field a forward-referenced `TypedDict` gives is first known here.
@@ -1072,18 +993,3 @@ def _refuse_duplicates(nodes: list[NodeDef]) -> None:
             seen[node.name] = node
     if clashes:
         raise ValueError("; ".join(sorted(clashes)))
-
-
-def _raise_unresolved(unresolved: list[tuple[str, _Unresolved, str]]) -> None:
-    """Raises the first failing producer's error, by name, as `resolve` does.
-
-    With one note naming every producer whose `TypedDict` fields do not resolve;
-    each failure is (producer name, its error, its return type as shown).
-    """
-    unresolved.sort(key=lambda failure: failure[0])
-    listed = "; ".join(
-        f"{shown}, returned by {name!r}" for name, _, shown in unresolved
-    )
-    error = unresolved[0][1]
-    error.add_note(f"resolving the fields of {listed}")
-    raise error

@@ -105,6 +105,8 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | A failing node in an async driver | Its siblings keep running after `execute` raises | They're cancelled; its own exception is raised once, noted with its name (Q66) |
 | `None` for an input declared `x: int` | Passes the check; the node then runs with `None` | `ValueError` before anything runs; annotate `x: int \| None` (Q79) |
 | A `tuple[int, str]` input | Every tuple refused, a correct one too | Checked by length and each item (Q80) |
+| An annotation imported only under `TYPE_CHECKING` | `NameError` at build, naming no node | Builds as `unresolved 'Decimal'`; a value checked against it is a `TypeError` saying to import it (Q81) |
+| An `int` for `float`, a numpy scalar for `int` | Refused | Refused too, unless built `with_numeric_widening()`; items of a collection with `with_deep_type_checks()` |
 | Inputs to an async driver | Types unchecked; `NotImplementedError` or `KeyError` for a missing one | Checked as the sync driver checks them, with the same errors (Q67) |
 | An `async def` under `@parameterize`, in an async driver | Each row's value is an un-awaited coroutine | Awaited, as any `async def` node (Q69) |
 | Hamilton's `AsyncDriver` on Python 3.14 | `DeprecationWarning` on every node; breaks on 3.16 | No warning (Q13) |

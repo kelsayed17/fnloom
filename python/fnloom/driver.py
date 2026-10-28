@@ -11,7 +11,7 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from types import MappingProxyType, ModuleType
-from typing import Any, Literal, Protocol, TypedDict, Unpack, override
+from typing import Any, Literal, NoReturn, Protocol, TypedDict, Unpack, override
 
 from fnloom import _async, _core, _types
 from fnloom._caching import Cache, CacheOutcome, CacheRun
@@ -147,8 +147,30 @@ def _difference(kind: str, prepared: frozenset[str], given: frozenset[str]) -> s
     return f"{kind} {sorted(given)} differ from the prepared {sorted(prepared)}"
 
 
+class _UnresolvedLine(str):
+    """A mismatch line for a value checked against an `Unresolved` type (Q81)."""
+
+    __slots__ = ()
+
+
+def _raise_mismatches(lines: list[str]) -> NoReturn:
+    """Raises every mismatch line, sorted, in one error.
+
+    A `TypeError` when some value was checked against an annotation that did not
+    resolve (Q81), else a `ValueError`.
+    """
+    msg = "\n".join(sorted(lines))
+    if any(isinstance(line, _UnresolvedLine) for line in lines):
+        raise TypeError(msg)
+    raise ValueError(msg)
+
+
 def _mismatches(checks: Sequence[_Check], values: Mapping[str, object]) -> list[str]:
-    """A line for each checked value that does not fit its declared type."""
+    """A line for each checked value that does not fit its declared type.
+
+    A value checked against an annotation that did not resolve gets an
+    `_UnresolvedLine` saying to import it at run time (Q81).
+    """
     found: list[str] = []
     for name, declared, cls, matches in checks:
         value = values[name]
@@ -157,8 +179,13 @@ def _mismatches(checks: Sequence[_Check], values: Mapping[str, object]) -> list[
         if cls is not None:
             if isinstance(value, cls):
                 continue
-        elif matches(value):
-            continue
+        else:
+            try:
+                if matches(value):
+                    continue
+            except _types.UnresolvedError as error:
+                found.append(_UnresolvedLine(f"{name}: {error}"))
+                continue
         found.append(
             f"{name}: expected {inspect.formatannotation(declared)}, "
             f"got {inspect.formatannotation(type(value))}"
@@ -180,11 +207,17 @@ def _edge_mismatches(functions: Mapping[str, NodeView]) -> list[str]:
             upstream = functions.get(p.binding.name)
             if upstream is None or _types.type_matches(upstream.type, p.annotation):
                 continue
-            found.append(
+            line = (
                 f"{view.name}.{p.name} requires "
                 f"{inspect.formatannotation(p.annotation)} but {upstream.name} "
                 f"returns {inspect.formatannotation(upstream.type)}"
             )
+            if isinstance(p.annotation, _types.Unresolved) or isinstance(
+                upstream.type, _types.Unresolved
+            ):
+                # An unresolved annotation matches only the same text and `Any`.
+                line += "; import what the unresolved annotation names at run time"
+            found.append(line)
     return sorted(found)
 
 
@@ -272,8 +305,9 @@ class PreparedPlan:
 
         `ValueError` too, listing each one, when an input the plan reads or an
         override does not fit its node's type (unless the driver was built
-        without input type checks). The result holds each requested output once,
-        in the order first requested.
+        without input type checks); a `TypeError` instead when one of them is
+        checked against an annotation that did not resolve at build (Q81). The
+        result holds each requested output once, in the order first requested.
         """
         given_inputs, given_overrides = self._checked(inputs, overrides)
         values = self._plan.run(given_inputs, given_overrides)
@@ -320,7 +354,7 @@ class PreparedPlan:
             mismatches = _mismatches(self._input_checks, given_inputs)
             mismatches += _mismatches(self._override_checks, given_overrides)
             if mismatches:
-                raise ValueError("\n".join(sorted(mismatches)))
+                _raise_mismatches(mismatches)
         return given_inputs, given_overrides
 
 
@@ -349,13 +383,15 @@ class Driver:
         strict_overrides: bool = False,
         cache: Cache | None = None,
         config: Mapping[str, object] | None = None,
+        rules: _types.Rules = _types.SHALLOW,
     ) -> None:
         """Wraps a native graph; `Builder` is the way to make one from modules.
 
         `config` is the config the graph was built with, kept read-only.
         `check_overrides` is whether overrides are type checked too (it has no
         effect without `check_inputs`), and `strict_overrides` refuses an override
-        of an input that is not supplied (Q75).
+        of an input that is not supplied (Q75). `rules` are the opt-in rules the
+        input and override checks follow: deep checks and numeric widening.
         """
         self._graph = graph
         # The modules it was built from, each once: `Builder` sets them.
@@ -366,6 +402,7 @@ class Driver:
         self._check_inputs = check_inputs
         self._check_overrides = check_overrides
         self._strict_overrides = strict_overrides
+        self._rules = rules
         self._cache = cache
         self._config = (
             config
@@ -413,6 +450,7 @@ class Driver:
             strict_overrides=self._strict_overrides,
             cache=self._cache,
             config=self._config,
+            rules=self._rules,
         )
         copied._modules = self._modules
         copied._builder = self._builder
@@ -553,7 +591,7 @@ class Driver:
         """
         # By type, not view: the views of many inputs are never made at all.
         typed = [(n, self._nodes.type_of(n)) for n in names if n in self._nodes]
-        checks = _types.checks_of(declared for _, declared in typed)
+        checks = _types.checks_of((declared for _, declared in typed), self._rules)
         return tuple(
             (n, declared, classes, matches)
             for (n, declared), (classes, matches) in zip(typed, checks, strict=True)
@@ -1293,6 +1331,8 @@ class _Changes(TypedDict, total=False):
     check_overrides: bool
     strict_overrides: bool
     declared_inputs: tuple[str, ...]
+    deep_type_checks: bool
+    numeric_widening: bool
 
 
 class _Settings(TypedDict):
@@ -1302,6 +1342,8 @@ class _Settings(TypedDict):
     check_overrides: bool
     strict_overrides: bool
     declared_inputs: tuple[str, ...]
+    deep_type_checks: bool
+    numeric_widening: bool
 
 
 class Builder:
@@ -1323,6 +1365,8 @@ class Builder:
         check_overrides: bool = True,
         strict_overrides: bool = False,
         declared_inputs: Sequence[str] = (),
+        deep_type_checks: bool = False,
+        numeric_widening: bool = False,
         store: CacheStore | None = None,
         config: Mapping[str, object] | None = None,
     ) -> None:
@@ -1335,8 +1379,9 @@ class Builder:
         given, caches the results of the driver's runs in it.
         `config`, copied, selects `@config.when*` variants (see `with_config`).
         The other settings are those of `without_input_type_checks`,
-        `without_override_type_checks`, `with_strict_overrides` and
-        `with_declared_inputs`. `TypeError` when an item of `modules` is not a
+        `without_override_type_checks`, `with_strict_overrides`,
+        `with_declared_inputs`, `with_deep_type_checks` and
+        `with_numeric_widening`. `TypeError` when an item of `modules` is not a
         module, or of `declared_inputs` is not a `str`; see `with_functions` for
         the errors `functions` raises.
         """
@@ -1347,6 +1392,7 @@ class Builder:
         self._check_overrides = check_overrides
         self._strict_overrides = strict_overrides
         self._declared_inputs = _checked_names(declared_inputs)
+        self._rules = _types.Rules(deep=deep_type_checks, widen=numeric_widening)
         self._store = store
         # Never changed once made: `with_config` makes a new dict.
         self._config: dict[str, object] = (
@@ -1396,6 +1442,8 @@ class Builder:
             "check_overrides": self._check_overrides,
             "strict_overrides": self._strict_overrides,
             "declared_inputs": self._declared_inputs,
+            "deep_type_checks": self._rules.deep,
+            "numeric_widening": self._rules.widen,
         }
 
     def _with(
@@ -1515,6 +1563,32 @@ class Builder:
         """
         return self._with(declared_inputs=(*self._declared_inputs, *names))
 
+    def with_deep_type_checks(self) -> Builder:
+        """Returns a new builder whose checks read every item of a collection.
+
+        By default a `list[int]` input is checked by its class alone, and a
+        sequence or set of another class by its first item, as Hamilton does.
+        With deep checks, every item of a `list`, `set`, `tuple[T, ...]` and other
+        standard collection is checked, each key and value of a `dict` or other
+        mapping, and nested collections' items in turn, without recursion. An
+        iterator is still never read (Q43). They apply to inputs, overrides,
+        extracted fields and `validate`; edge checks compare types, not values,
+        and are unchanged. A run pays for every item it reads.
+        """
+        return self._with(deep_type_checks=True)
+
+    def with_numeric_widening(self) -> Builder:
+        """Returns a new builder whose checks let a number stand for a wider one.
+
+        An `int` (not a `bool`) and a numpy floating scalar fit `float`, and a
+        numpy integer scalar fits `int`; Hamilton refuses all of them. numpy is
+        recognised by the value's class, never imported. It applies to inputs,
+        overrides, extracted fields and `validate`, inside collections too with
+        deep checks. Edge checks are unchanged: a node returning `int` still
+        does not feed a `float` parameter.
+        """
+        return self._with(numeric_widening=True)
+
     def with_cache(self, store: CacheStore) -> Builder:
         """Returns a new builder whose driver caches every node's result in `store`.
 
@@ -1538,11 +1612,13 @@ class Builder:
         and why each of its functions was skipped: defined in another module (a
         re-export), or private.
 
-        Annotations are evaluated here: a name that does not resolve raises its
-        `NameError` (`AttributeError` for a missing attribute), with a note naming
-        the node. Every edge is type checked: a node whose return type a parameter
-        it feeds does not accept fails the build, with one `ValueError` listing
-        every such parameter.
+        Annotations are evaluated here: one naming something that does not exist
+        at run time, such as a name imported only under `TYPE_CHECKING`, is kept
+        as an opaque `unresolved` type, which matches only the same text and `Any`
+        on an edge, and fails any value check with a `TypeError` (Q81). Every
+        edge is type checked: a node whose return type a parameter it feeds does
+        not accept fails the build, with one `ValueError` listing every such
+        parameter.
 
         The config selects one `@config.when*` variant per node. Two matching
         variants, or a node that a node reads and that no variant or
@@ -1597,7 +1673,7 @@ class Builder:
             functions=self._functions,
             namespaces=self._namespaces,
         )
-        nodes = resolve(scanned.nodes)
+        nodes = resolve(scanned.nodes, self._rules)
         unmatched = scanned.unmatched
         if unmatched:
             # A field of a forward-referenced `TypedDict` is first known resolved.
@@ -1636,6 +1712,7 @@ class Builder:
             strict_overrides=self._strict_overrides,
             cache=cache,
             config=MappingProxyType(self._config),
+            rules=self._rules,
         )
         driver._modules = tuple(dict.fromkeys(self._modules))  # noqa: SLF001  # the builder's own driver
         driver._unmatched = unmatched  # noqa: SLF001  # the builder's own driver

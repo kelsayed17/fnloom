@@ -1,7 +1,10 @@
 """Type rules: `None` only where admitted, fixed tuples, and the public matchers."""
 
+import asyncio
 import collections.abc
+import copy
 import dataclasses
+import pickle
 import re
 import types
 import typing
@@ -330,7 +333,7 @@ def test_a_cycle_no_key_can_see_runs_out_of_budget() -> None:
     itself: list[object] = []
     itself.append(itself)
     fresh = _GenericSeq[Annotated[int, _Meta(1)]]
-    with pytest.raises(TypeError, match=r"^value too deep or too cyclic to check "):
+    with pytest.raises(TypeError, match=r"^value too large or too cyclic to check "):
         _types._walk(fresh, itself, budget=1_000)  # noqa: SLF001  # a small budget, for speed
     # The default budget is far beyond a legitimate value's depth.
     assert fnloom.value_matches(_Rec, _chain(50_000, None)) is True
@@ -525,3 +528,472 @@ def test_changelog_calls_out_the_none_change() -> None:
     assert any(
         b.startswith("**Breaking:**") and "`None`" in b and "Q79" in b for b in bullets
     )
+
+
+# --- Unresolved annotations (Q81) ---------------------------------------------
+
+_TYPE_CHECKING_ONLY = """
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from decimal import Decimal
+
+def rate() -> "Decimal":
+    raise AssertionError("never run")
+
+def price(rate: "Decimal") -> "Decimal":
+    return rate
+
+def converted(given: "Decimal") -> object:
+    return given
+
+def label(amount: int) -> str:
+    return str(amount)
+"""
+
+
+def test_a_type_checking_import_builds() -> None:
+    """A name imported only for type checkers builds, as an opaque type (Q81)."""
+    module = make_module("rules_unresolved_builds", _TYPE_CHECKING_ONLY)
+    driver = fnloom.build(module)
+    unresolved = _types.Unresolved("Decimal")
+    assert driver.nodes["rate"].type == unresolved
+    assert driver.nodes["price"].params[0].annotation == unresolved
+    assert repr(unresolved) == "unresolved 'Decimal'"
+    assert repr(_types.Unresolved("decimal.Decimal")) == "unresolved 'decimal.Decimal'"
+    # A node that never asks for the unresolved type never checks it.
+    assert driver.execute(["label"], inputs={"amount": 2}) == {"label": "2"}
+
+
+def test_unresolved_text_is_kept_as_written() -> None:
+    """Quoted, `from __future__`, nested and alias forms each keep their own text."""
+    module = make_module(
+        "rules_unresolved_forms",
+        """
+from __future__ import annotations
+
+import decimal
+
+type Money = Missing
+
+def quoted(a: "decimal.Nope", b: list[Absent], c: Money, d: int) -> int:
+    return d
+""",
+    )
+    params = {p.name: p.annotation for p in fnloom.build(module).nodes["quoted"].params}
+    assert params == {
+        "a": _types.Unresolved("decimal.Nope"),
+        "b": _types.Unresolved("list[Absent]"),
+        "c": _types.Unresolved("Money"),
+        "d": int,
+    }
+
+
+def test_same_unresolved_name_matches_itself() -> None:
+    """An edge between two annotations of the same unresolved text, or `Any`, builds."""
+    unresolved = _types.Unresolved("decimal.Decimal")
+    assert fnloom.type_matches(unresolved, _types.Unresolved("decimal.Decimal"))
+    assert fnloom.type_matches(unresolved, Any)
+    assert fnloom.type_matches(Any, unresolved)
+    for other in (_types.Unresolved("Decimal"), object, int, int | None, list[int]):
+        assert not fnloom.type_matches(unresolved, other), other
+        assert not fnloom.type_matches(other, unresolved), other
+    module = make_module("rules_unresolved_same", _TYPE_CHECKING_ONLY)
+    driver = fnloom.build(module)
+    assert driver.what_is_the_path_between("rate", "price") == ["rate", "price"]
+
+
+def test_an_unresolved_edge_names_the_annotation() -> None:
+    """Unresolved feeding or fed by another type fails the build, naming the text."""
+    module = make_module(
+        "rules_unresolved_edge",
+        """
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from decimal import Decimal
+
+def amount() -> int:
+    return 1
+
+def rate() -> "Decimal":
+    raise AssertionError("never run")
+
+def price(amount: "Decimal") -> float:
+    return 1.0
+
+def total(rate: float) -> float:
+    return rate
+""",
+    )
+    hint = "; import what the unresolved annotation names at run time"
+    message = (
+        f"price.amount requires unresolved 'Decimal' but amount returns int{hint}\n"
+        f"total.rate requires float but rate returns unresolved 'Decimal'{hint}"
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(message)}$"):
+        fnloom.build(module)
+
+
+def test_an_unresolved_input_check_says_to_import_it() -> None:
+    """A value checked against an unresolved type is a `TypeError` naming it (Q81)."""
+    module = make_module("rules_unresolved_input", _TYPE_CHECKING_ONLY)
+    driver = fnloom.build(module)
+    because = (
+        ": cannot check a value against unresolved 'Decimal': it did not resolve "
+        "when the graph was built; import what it names at run time, not only "
+        "under TYPE_CHECKING"
+    )
+    for value in (1, None):
+        with pytest.raises(TypeError, match=f"^{re.escape('given' + because)}$"):
+            driver.execute(["converted"], inputs={"given": value})
+    # An override is checked against the node's type, so it is refused alike, and
+    # one message lists every culprit, sorted, a plain mismatch with them.
+    message = f"amount: expected int, got str\ngiven{because}\nrate{because}"
+    with pytest.raises(TypeError, match=f"^{re.escape(message)}$"):
+        driver.execute(
+            ["price", "converted", "label"],
+            overrides={"rate": 1},
+            inputs={"amount": "x", "given": 1},
+        )
+    assert driver.validate(["converted"], inputs={"given": 1}) == ["given" + because]
+    # Without input checks nothing is checked, so the value goes through.
+    lenient = fnloom.Builder().with_modules(module).without_input_type_checks().build()
+    assert lenient.execute(["converted"], inputs={"given": 1}) == {"converted": 1}
+    with pytest.raises(TypeError, match=r"^cannot check a value against unresolved "):
+        fnloom.value_matches(_types.Unresolved("Decimal"), 1)
+
+
+def test_an_unresolved_typevar_bound_is_read_at_build() -> None:
+    """A lazy PEP 695 bound that does not resolve is unresolved, checked for `None`.
+
+    It is read once, when building, so a run never raises its `NameError`.
+    """
+    module = make_module(
+        "rules_unresolved_bound",
+        """
+def bounded[U: Undefined](x: U) -> object:
+    return x
+
+def constrained[V: (int, Gone)](y: V) -> object:
+    return y
+""",
+    )
+    driver = fnloom.build(module)
+    assert driver.execute(["bounded"], inputs={"x": 1}) == {"bounded": 1}
+    with pytest.raises(
+        TypeError, match=r"^x: cannot check a value against unresolved 'Undefined'"
+    ):
+        driver.execute(["bounded"], inputs={"x": None})
+    assert driver.execute(["constrained"], inputs={"y": "s"}) == {"constrained": "s"}
+    with pytest.raises(
+        TypeError, match=r"^y: cannot check a value against unresolved 'Gone'"
+    ):
+        driver.execute(["constrained"], inputs={"y": None})
+
+
+def test_an_unresolved_typed_dict_field_checks_only_when_run() -> None:
+    """An unresolved `TypedDict` field type builds; its check raises when run."""
+    module = make_module(
+        "rules_unresolved_field",
+        """
+from typing import TypedDict
+from fnloom import extract_fields
+
+class Broken(TypedDict):
+    x: Missing
+    y: int
+
+@extract_fields()
+def p() -> Broken:
+    return {"x": 1, "y": 2}
+""",
+    )
+    driver = fnloom.build(module)
+    assert driver.nodes["x"].type == _types.Unresolved("Missing")
+    assert driver.execute(["y"]) == {"y": 2}
+    because = "cannot check a value against unresolved 'Missing'"
+    with pytest.raises(TypeError, match=f"^'p' returned field 'x': {because}"):
+        driver.execute(["x"])
+
+
+def test_an_unresolved_annotation_caches_like_any_other() -> None:
+    """Code versions never evaluate annotations: an unresolved one changes nothing."""
+    module = make_module("rules_unresolved_cache", _TYPE_CHECKING_ONLY)
+    driver = (
+        fnloom.Builder().with_modules(module).with_cache(fnloom.MemoryCache()).build()
+    )
+    assert driver.execute(["label"], inputs={"amount": 3}) == {"label": "3"}
+    assert driver.execute(["label"], inputs={"amount": 3}) == {"label": "3"}
+
+
+# --- Deep checks (decision 12d) ------------------------------------------------
+
+type _Nest = list[_Nest | int]
+
+
+def _nested(depth: int, leaf: object) -> list[object]:
+    value: list[object] = [1, leaf]
+    for _ in range(depth):
+        value = [2, value]
+    return value
+
+
+def _deep(module: types.ModuleType, *, widen: bool = False) -> fnloom.Driver:
+    builder = fnloom.Builder().with_modules(module).with_deep_type_checks()
+    return (builder.with_numeric_widening() if widen else builder).build()
+
+
+def test_deep_checks_find_a_bad_item_in_nested_containers_iteratively() -> None:
+    """Every item, 10,000 levels down, is read; a shallow check reads none of them."""
+    good, bad = _nested(10_000, 3), _nested(10_000, 1.5)
+    assert fnloom.value_matches(_Nest, bad) is True
+    assert fnloom.value_matches(_Nest, good, deep=True) is True
+    assert fnloom.value_matches(_Nest, bad, deep=True) is False
+    module = make_module(
+        "rules_deep_nested",
+        """
+from collections.abc import Sequence
+
+def reads(
+    x: list[dict[str, set[int]]], y: tuple[int, ...], z: Sequence[list[int]]
+) -> object:
+    return x
+""",
+    )
+    _, prepared = _types.check_of(_Nest, _types.Rules(deep=True))
+    assert prepared(good) is True
+    assert prepared(bad) is False
+    shallow, deep = fnloom.build(module), _deep(module)
+    wrong = {"x": [{"a": {1}}, {"b": {2, "s"}}], "y": (1, "s"), "z": ([1], ["s"])}
+    assert shallow.validate(["reads"], inputs=wrong) == []
+    assert deep.validate(["reads"], inputs=wrong) == [
+        "x: expected list[dict[str, set[int]]], got list",
+        "y: expected tuple[int, ...], got tuple",
+        "z: expected collections.abc.Sequence[list[int]], got tuple",
+    ]
+    with pytest.raises(
+        ValueError, match=r"^x: expected list\[dict\[str, set\[int\]\]\], got list\n"
+    ):
+        deep.execute(["reads"], inputs=wrong)
+    right = {"x": [{"a": {1}}, {}], "y": (1, 2), "z": ([1], [])}
+    assert deep.execute(["reads"], inputs=right) == {"reads": right["x"]}
+    # Keys are read too, and a list of the exact class no longer passes on its class.
+    assert fnloom.value_matches(dict[str, int], {1: 1}, deep=True) is False
+    assert _types.check_of(list[int], _types.Rules(deep=True))[1](["a"]) is False
+    assert _types.check_of(list[int])[1](["a"]) is True
+
+
+def test_deep_checks_never_read_an_iterator() -> None:
+    """An iterator is checked by kind alone, so no item is lost (Q43)."""
+    items = iter([1, "s"])
+    assert fnloom.value_matches(collections.abc.Iterator[int], items, deep=True)
+    assert list(items) == [1, "s"]
+    generated = (n for n in [1, 2])
+    assert fnloom.value_matches(collections.abc.Iterable[str], generated, deep=True)
+    assert list(generated) == [1, 2]
+
+
+def test_deep_checks_of_a_large_value_stay_within_budget() -> None:
+    """Items of a plain class open no group, so a large value is far from the budget."""
+    ints = list(range(100_000))
+    pairs = [(n, "s") for n in range(100_000)]
+    rows = [[[n]] for n in range(100_000)]
+    expand = _types._expander(_types.Rules(deep=True))  # noqa: SLF001  # the walk's own expansion
+    walk = _types._walk  # noqa: SLF001  # with a budget of its own
+    # One group, the outer list's: its items are checked in a loop.
+    assert walk(list[int], ints, expand, 1) is True
+    assert walk(list[tuple[int, str]], pairs, expand, 1) is True
+    # A container of containers of containers opens one group per middle one.
+    assert walk(list[list[list[int]]], rows, expand, 100_001) is True
+    with pytest.raises(TypeError, match=r"^value too large or too cyclic to check "):
+        walk(list[list[list[int]]], rows, expand, 100_000)
+    assert fnloom.value_matches(list[int], [*ints, "s"], deep=True) is False
+
+
+def test_deep_checks_apply_to_overrides_fields_and_validate() -> None:
+    """Overrides, extracted fields and `validate` follow the builder's deep setting."""
+    module = make_module(
+        "rules_deep_everywhere",
+        """
+from fnloom import extract_fields
+
+def counts() -> list[int]:
+    return [1, 2]
+
+@extract_fields({"items": list[int]})
+def parts(given: dict) -> dict:
+    return given
+
+def total(counts: list[int], items: list[int]) -> int:
+    return len(counts) + len(items)
+""",
+    )
+    shallow, deep = fnloom.build(module), _deep(module)
+    given = {"given": {"items": [1, "s"]}}
+    assert shallow.execute(["items"], inputs=given) == {"items": [1, "s"]}
+    with pytest.raises(ValueError, match=r"^'parts' returned field 'items' as list"):
+        deep.execute(["items"], inputs=given)
+    assert shallow.execute(["counts"], overrides={"counts": ["s"]}) == {"counts": ["s"]}
+    with pytest.raises(ValueError, match=r"^counts: expected list\[int\], got list$"):
+        deep.execute(["counts"], overrides={"counts": ["s"]})
+    assert deep.validate(["counts"], overrides={"counts": ["s"]}) == [
+        "counts: expected list[int], got list"
+    ]
+
+
+# --- Numeric widening (decision 12f) ------------------------------------------
+
+_NUMBERS = """
+def scaled(rate: float, count: int, rates: list[float]) -> float:
+    return rate * count + sum(rates)
+"""
+
+
+def test_widening_is_off_by_default() -> None:
+    """An `int` for `float` is refused, as Hamilton refuses it (H5.10f)."""
+    driver = fnloom.build(make_module("rules_widen_off", _NUMBERS))
+    with pytest.raises(ValueError, match=r"^rate: expected float, got int$"):
+        driver.execute(["scaled"], inputs={"rate": 1, "count": 2, "rates": []})
+    assert fnloom.value_matches(float, 1) is False
+    # The default check stays one `isinstance`; widening needs the general check.
+    assert _types.check_of(float)[0] is float
+    assert _types.check_of(float, _types.Rules(widen=True))[0] is None
+
+
+def test_widening_accepts_int_for_float_and_numpy_scalars() -> None:
+    """With widening an `int` fits `float`, never a `bool`; at the top and inside."""
+    module = make_module("rules_widen_on", _NUMBERS)
+    driver = fnloom.Builder().with_modules(module).with_numeric_widening().build()
+    inputs = {"rate": 1, "count": 2, "rates": [0.5]}
+    assert driver.execute(["scaled"], inputs=inputs) == {"scaled": 2.5}
+    with pytest.raises(ValueError, match=r"^rate: expected float, got bool$"):
+        driver.execute(["scaled"], inputs={**inputs, "rate": True})
+    with pytest.raises(ValueError, match=r"^count: expected int, got float$"):
+        driver.execute(["scaled"], inputs={**inputs, "count": 2.0})
+    assert driver.validate(["scaled"], inputs={**inputs, "rate": 1}) == []
+    # Inside a collection only deep checks read the items.
+    deep = _deep(module, widen=True)
+    assert deep.execute(["scaled"], inputs={**inputs, "rates": [1, 0.5]}) == {
+        "scaled": 3.5
+    }
+    with pytest.raises(ValueError, match=r"^rates: expected list\[float\], got list$"):
+        deep.execute(["scaled"], inputs={**inputs, "rates": [True]})
+    assert fnloom.value_matches(float | str, 1, widen=True) is True
+    assert fnloom.value_matches(tuple[float, int], (1, 2), widen=True) is True
+    assert fnloom.value_matches(float, value=True, widen=True) is False
+    # Edge checks compare types, not values: widening never applies to them.
+    edge = make_module(
+        "rules_widen_edge",
+        "def n() -> int:\n    return 1\n\ndef m(n: float) -> float:\n    return n\n",
+    )
+    with pytest.raises(ValueError, match=r"^m\.n requires float but n returns int$"):
+        fnloom.Builder().with_modules(edge).with_numeric_widening().build()
+    np = pytest.importorskip("numpy")
+    numbers = {"rate": np.float32(1.5), "count": np.int64(2), "rates": []}
+    assert driver.execute(["scaled"], inputs=numbers) == {"scaled": 3.0}
+    with pytest.raises(ValueError, match=r"^count: expected int, got numpy\.float64$"):
+        driver.execute(["scaled"], inputs={**numbers, "count": np.float64(2)})
+    with pytest.raises(ValueError, match=r"^count: expected int, got numpy\.bool$"):
+        driver.execute(["scaled"], inputs={**numbers, "count": np.bool_(True)})  # noqa: FBT003  # a numpy bool is the point
+    strict = fnloom.build(module)
+    with pytest.raises(ValueError, match=r"count: expected int, got numpy\.int64"):
+        strict.execute(["scaled"], inputs=numbers)
+    assert deep.execute(["scaled"], inputs={**inputs, "rates": [np.float32(0.5)]}) == {
+        "scaled": 2.5
+    }
+    assert fnloom.value_matches(int, np.timedelta64(1, "s"), widen=True) is False
+
+
+def test_type_rule_settings_survive_pickling_copying_and_async() -> None:
+    """Deep checks and widening are builder settings, carried wherever it goes."""
+    module = make_module("rules_settings_carried", _NUMBERS)
+    builder = (
+        fnloom.Builder()
+        .with_modules(module)
+        .with_deep_type_checks()
+        .with_numeric_widening()
+    )
+    inputs = {"rate": 1, "count": 2, "rates": [1]}
+    for driver in (
+        builder.build(),
+        pickle.loads(pickle.dumps(builder.build())),  # noqa: S301  # our own pickle
+        pickle.loads(pickle.dumps(builder)).build(),  # noqa: S301  # our own pickle
+        copy.copy(builder.build()),
+        copy.deepcopy(builder.build()),
+        builder.with_config({}).without_override_type_checks().build(),
+    ):
+        assert driver.execute(["scaled"], inputs=inputs) == {"scaled": 3.0}
+        with pytest.raises(ValueError, match=r"^rates: expected list\[float\]"):
+            driver.execute(["scaled"], inputs={**inputs, "rates": [1, "s"]})
+    pickled = pickle.loads(pickle.dumps(builder.build_async()))  # noqa: S301  # our own pickle
+    for built in (builder.build_async(), pickled):
+        assert asyncio.run(built.execute(["scaled"], inputs=inputs)) == {"scaled": 3.0}
+        assert built.validate(["scaled"], inputs={**inputs, "rates": ["s"]}) == [
+            "rates: expected list[float], got list"
+        ]
+    settings = pickle.loads(pickle.dumps(builder))._settings()  # noqa: S301, SLF001  # our own pickle, its settings
+    assert settings["deep_type_checks"] is True
+    assert settings["numeric_widening"] is True
+    default = fnloom.Builder()._settings()  # noqa: SLF001  # the default settings
+    assert default["deep_type_checks"] is False
+    assert default["numeric_widening"] is False
+
+
+_RULED_TYPES: list[object] = [
+    float,
+    int | None,
+    list[int],
+    list[float],
+    dict[str, int],
+    dict[str, list[float]],
+    tuple[int, ...],
+    tuple[float, str],
+    set[float],
+    collections.abc.Sequence[int],
+    collections.abc.Mapping[str, float],
+    list[list[int]],
+    _Nest,
+]
+_RULED_VALUES: list[object] = [
+    1,
+    1.5,
+    True,
+    None,
+    [1, 2],
+    [1, "s"],
+    [1.5, 2],
+    [[1], [2]],
+    [[1], ["s"]],
+    {"a": 1},
+    {"a": 1.5},
+    {1: 1},
+    {"a": [1, 2.5]},
+    (1, 2),
+    (1, "s"),
+    (1.5, "s"),
+    {1.5, 2},
+    "abc",
+    iter([1]),
+]
+
+
+@pytest.mark.parametrize(
+    "rules",
+    [
+        _types.Rules(deep=True),
+        _types.Rules(widen=True),
+        _types.Rules(deep=True, widen=True),
+    ],
+    ids=["deep", "widen", "both"],
+)
+def test_a_prepared_ruled_check_answers_as_value_matches(rules: _types.Rules) -> None:
+    """With deep checks or widening, a prepared check answers as `value_matches`."""
+    for declared in _RULED_TYPES:
+        classes, prepared = _types.check_of(declared, rules)
+        for value in _RULED_VALUES:
+            expected = fnloom.value_matches(
+                declared, value, deep=rules.deep, widen=rules.widen
+            )
+            got = isinstance(value, classes) if classes is not None else prepared(value)
+            assert got is expected, (declared, value)

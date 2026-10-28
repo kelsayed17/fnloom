@@ -40,6 +40,12 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `json` format refuses any value that would not load back as the same types, such as a tuple, so a hit never
   returns a different value (Q54).
 - `len(MemoryCache)`, the number of entries it holds.
+- `Builder.with_deep_type_checks()` checks every item of a `list`, `set`, `tuple[T, ...]` or other standard
+  collection, every key and value of a mapping, and nested collections' items, iteratively; an iterator is still never
+  read. `Builder.with_numeric_widening()` lets an `int` (not a `bool`) or a numpy floating scalar fit `float`, and a
+  numpy integer scalar fit `int`, without importing numpy. Both apply to inputs, overrides, extracted fields and
+  `validate`, not to edges, and survive pickling, copying and `build_async`. `fnloom.value_matches` takes `deep=` and
+  `widen=` to answer the same way.
 - `fnloom.value_matches(declared, value)` and `fnloom.type_matches(produced, expected)`, the checks `execute` runs on
   each input, override and extracted field and `build` runs on each edge, are public. Their docstrings state the
   rules, as Hamilton's `htypes.check_input_type` is public too.
@@ -98,6 +104,12 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - **Breaking:** a fixed-length tuple type, `tuple[int, str]` or `tuple[()]`, now checks a value's length and each item
   with the same rules, nested tuples included. Before, any tuple fitted; Hamilton refuses every one. `tuple[int, ...]`
   and bare `tuple` are unchanged (Q80).
+- An annotation naming something that does not exist at run time, such as a name imported only under
+  `TYPE_CHECKING`, no longer fails the build with `NameError`. It becomes an opaque type, `unresolved 'Decimal'`, with
+  its text as written; an alias over such a name and a `TypedDict` field type do too. An edge matches it only from or
+  to the same text or `Any`, and fails the build, naming the text, otherwise. A value checked against it raises a
+  `TypeError` saying to import it at run time. Code that caught the `NameError` at build should instead import the
+  names its annotations use, or catch the `TypeError` where a value is checked (Q81).
 - A `TypedDict`-typed input or override accepts any `dict`, its keys unchecked, as the shallow container checks do.
   Before, every value failed the check, so such an input could never be supplied (Q61).
 - `build()` still refuses a graph with an `async def` node, and its `ValueError` now names `build_async()` (Q32).

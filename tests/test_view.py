@@ -10,6 +10,7 @@ import pytest
 
 import fnloom
 from fnloom import NodeView, Param, Source, Value
+from fnloom._types import Unresolved
 from fnloom._view import NodeViews
 from helpers import make_module
 
@@ -181,8 +182,8 @@ class Later:
     assert nodes["use"].params[0].annotation is module.Later
 
 
-def test_unresolvable_annotation_raises_name_error_with_a_note_naming_the_node() -> None:  # noqa: E501  # fmt: skip
-    """A name imported only for type checkers fails the build, naming node and param."""
+def test_unresolvable_annotation_builds_as_an_unresolved_type() -> None:
+    """A name imported only for type checkers builds as an opaque type (Q81)."""
     module = make_module(
         "view_unresolvable",
         """
@@ -198,15 +199,12 @@ def price(ok: int, rate: Decimal) -> int:
     return ok
 """,
     )
-    with pytest.raises(NameError, match="Decimal") as raised:
-        fnloom.build(module)
-    assert raised.value.__notes__ == [
-        "resolving the annotation of parameter 'rate' of node 'price'"
-    ]
+    params = fnloom.build(module).nodes["price"].params
+    assert [p.annotation for p in params] == [int, Unresolved("Decimal")]
 
 
-def test_unresolvable_return_annotation_note_names_the_return() -> None:
-    """For a return annotation the note says so; future-style strings fail alike."""
+def test_unresolvable_return_annotation_is_unresolved() -> None:
+    """A return annotation is unresolved alike; future-style strings too (Q81)."""
     module = make_module(
         "view_unresolvable_return",
         """
@@ -216,9 +214,7 @@ def price(a: int) -> Missing:
     return a
 """,
     )
-    with pytest.raises(NameError, match="Missing") as raised:
-        fnloom.build(module)
-    assert raised.value.__notes__ == ["resolving the return annotation of node 'price'"]
+    assert fnloom.build(module).nodes["price"].type == Unresolved("Missing")
 
 
 def test_input_with_conflicting_consumer_types_is_a_value_error_naming_both_consumers() -> None:  # noqa: E501  # fmt: skip
@@ -280,35 +276,34 @@ def test_input_takes_the_narrower_of_an_optional_and_a_plain_type() -> None:
     assert fnloom.build(module).nodes["a"].type is int
 
 
-def test_every_unresolvable_annotation_is_listed_sorted_in_one_note() -> None:
-    """Failures in several functions come in one note, by node name; rows all named."""
+def test_every_unresolvable_annotation_is_unresolved() -> None:
+    """Each failing annotation, in each function and row, is its own text (Q81)."""
     module = make_module(
         "view_unresolvable_many",
         HEADER
         + """
-def zeta(a: Missing) -> int:
+def zeta(m: Missing) -> int:
     return 1
 
 @parameterize(low={"x": source("a")}, high={"x": source("b")})
 def bound(x: int) -> Absent:
     return x
 
-def alpha(a: int, b: list[Gone]) -> int:
+def alpha(a: int, g: list[Gone]) -> int:
     return a
 """,
     )
-    with pytest.raises(NameError, match="Gone") as raised:
-        fnloom.build(module)
-    note = (
-        "resolving the annotations of: parameter 'b' of node 'alpha'; "
-        "the return of nodes 'high', 'low' (rows of function 'bound'); "
-        "parameter 'a' of node 'zeta'"
-    )
-    assert raised.value.__notes__ == [note]
+    nodes = fnloom.build(module).nodes
+    assert nodes["zeta"].params[0].annotation == Unresolved("Missing")
+    assert nodes["high"].type == nodes["low"].type == Unresolved("Absent")
+    assert [p.annotation for p in nodes["alpha"].params] == [
+        int,
+        Unresolved("list[Gone]"),
+    ]
 
 
-def test_unresolvable_annotation_of_a_parameterized_function_names_its_rows() -> None:
-    """A single failing annotation of a parameterized function names every row."""
+def test_unresolvable_annotation_of_a_parameterized_function_is_in_every_row() -> None:
+    """A failing annotation of a parameterized function is unresolved in each row."""
     module = make_module(
         "view_unresolvable_rows",
         HEADER
@@ -318,17 +313,13 @@ def bound(x: Missing) -> int:
     return x
 """,
     )
-    with pytest.raises(NameError, match="Missing") as raised:
-        fnloom.build(module)
-    note = (
-        "resolving the annotation of parameter 'x' of nodes 'high', 'low' "
-        "(rows of function 'bound')"
-    )
-    assert raised.value.__notes__ == [note]
+    nodes = fnloom.build(module).nodes
+    for row in ("high", "low"):
+        assert nodes[row].params[0].annotation == Unresolved("Missing"), row
 
 
-def test_missing_module_attribute_raises_attribute_error_with_a_note_naming_the_node() -> None:  # noqa: E501  # fmt: skip
-    """`decimal.Missing` fails the build with its `AttributeError`, with the note."""
+def test_missing_module_attribute_is_unresolved() -> None:
+    """`decimal.Missing`, whose evaluating raises `AttributeError`, is unresolved."""
     module = make_module(
         "view_missing_attribute",
         """
@@ -340,15 +331,12 @@ def price(a: int, rate: decimal.Missing) -> int:
     return a
 """,
     )
-    with pytest.raises(AttributeError, match="Missing") as raised:
-        fnloom.build(module)
-    assert raised.value.__notes__ == [
-        "resolving the annotation of parameter 'rate' of node 'price'"
-    ]
+    params = fnloom.build(module).nodes["price"].params
+    assert params[1].annotation == Unresolved("decimal.Missing")
 
 
-def test_alias_over_an_unresolvable_name_fails_the_build_with_note() -> None:
-    """An alias over a type-checking-only import fails the build like it (Q44)."""
+def test_alias_over_an_unresolvable_name_is_unresolved() -> None:
+    """An alias over a type-checking-only import is unresolved like it (Q44, Q81)."""
     module = make_module(
         "view_unresolvable_alias",
         """
@@ -367,11 +355,8 @@ def price(ok: int, rate: Prices) -> int:
     return ok
 """,
     )
-    with pytest.raises(NameError, match="Decimal") as raised:
-        fnloom.build(module)
-    assert raised.value.__notes__ == [
-        "resolving the annotation of parameter 'rate' of node 'price'"
-    ]
+    params = fnloom.build(module).nodes["price"].params
+    assert params[1].annotation == Unresolved("Prices")
 
 
 def test_an_input_view_is_made_once_when_first_read() -> None:

@@ -86,13 +86,21 @@ class _Extractor:
     noun: ClassVar[str] = "field"
 
     def __init__(
-        self, producer: str, field: str, declared: object, fill: object
+        self,
+        producer: str,
+        field: str,
+        declared: object,
+        fill: object,
+        rules: _types.Rules = _types.SHALLOW,
     ) -> None:
-        """Reads `field` from node `producer`'s value, checked against `declared`."""
+        """Reads `field` from node `producer`'s value, checked against `declared`.
+
+        The check follows `rules`, the driver's deep checks and widening.
+        """
         self._producer = producer
         self._field = field
         self._declared = declared
-        self._cls, self._matches = _types.check_of(declared)
+        self._cls, self._matches = _types.check_of(declared, rules)
         self._fill = fill
 
     @property
@@ -140,8 +148,15 @@ class _Extractor:
         if cls is not None:
             if isinstance(found, cls):
                 return found
-        elif self._matches(found):
-            return found
+        else:
+            try:
+                if self._matches(found):
+                    return found
+            except _types.UnresolvedError as error:
+                msg = (
+                    f"{self._producer!r} returned {self.noun} {self._field!r}: {error}"
+                )
+                raise TypeError(msg) from None
         msg = (
             f"{self._producer!r} returned {self.noun} {self._field!r} as "
             f"{inspect.formatannotation(type(found))}, but it is declared "
@@ -580,8 +595,8 @@ def _field_types(producer: NodeDef, extraction: Extraction) -> list[tuple[str, o
         raise ValueError(problem)
     returns = _types.stripped(producer.returns)
     if typing.is_typeddict(returns):
-        # A field type that does not resolve raises; `_scan` names every producer.
-        given = typing.get_type_hints(returns)
+        # A field type that does not resolve is `Unresolved` (Q81).
+        given = _types.resolved_hints(returns, extras=False)
         items = extraction.items or tuple((name, None, None) for name in sorted(given))
     else:
         given = None
@@ -608,7 +623,11 @@ def _field_types(producer: NodeDef, extraction: Extraction) -> list[tuple[str, o
 
 
 def lower(
-    producer: NodeDef, extraction: Extraction, *, resolved: bool
+    producer: NodeDef,
+    extraction: Extraction,
+    *,
+    resolved: bool,
+    rules: _types.Rules = _types.SHALLOW,
 ) -> list[NodeDef]:
     """`producer`, unchanged, then one generated node per extracted field.
 
@@ -617,16 +636,16 @@ def lower(
     `_Extractor` payload, which reads the field by its own name. With `resolved`,
     `producer`'s annotations are resolved: each field's type is read from the
     return, and a declared type it cannot feed is a `ValueError` naming every
-    such field; a `TypedDict` field type that does not resolve raises its
-    `NameError` or `AttributeError`. Without, as when scanning, the field nodes
-    are placeholders, used only to find duplicate names: a field the decorator
-    gave no type is typed `Any`, and nothing is checked yet. Column nodes are
+    such field; a `TypedDict` field type that does not resolve is `Unresolved`
+    (Q81). Each field's check follows `rules`. Without, as when scanning, the
+    field nodes are placeholders, used only to find duplicate names: a field the
+    decorator gave no type is typed `Any`, and nothing is checked yet. Column nodes are
     typed by `column_type` of the resolved return, and `Any` before it resolves;
     each carries its own doc.
     """
     if extraction.kind == "columns":
         declared = column_type(producer.returns) if resolved else Any
-        return _lowered_columns(producer, extraction, declared)
+        return _lowered_columns(producer, extraction, declared, rules)
     if resolved:
         typed = _field_types(producer, extraction)
     else:
@@ -649,7 +668,9 @@ def lower(
                 producer,
                 name=qualified(producer.namespace, name),
                 params=(param,),
-                payload=_Extractor(producer.name, name, declared, extraction.fill),
+                payload=_Extractor(
+                    producer.name, name, declared, extraction.fill, rules
+                ),
                 returns=declared,
                 renames={},
             )
@@ -659,7 +680,10 @@ def lower(
 
 
 def _lowered_columns(
-    producer: NodeDef, extraction: Extraction, declared: object
+    producer: NodeDef,
+    extraction: Extraction,
+    declared: object,
+    rules: _types.Rules = _types.SHALLOW,
 ) -> list[NodeDef]:
     """`producer`, then a node per column, each typed `declared`, with its doc."""
     param = Param(producer.name, Source(producer.name), True, producer.returns)  # noqa: FBT003  # `required`, in field order
@@ -671,7 +695,7 @@ def _lowered_columns(
                 name=qualified(producer.namespace, name),
                 params=(param,),
                 payload=_ColumnExtractor(
-                    producer.name, name, declared, extraction.fill
+                    producer.name, name, declared, extraction.fill, rules
                 ),
                 returns=declared,
                 renames={},
@@ -691,8 +715,3 @@ def extractor(node: NodeDef) -> _Extractor | None:
     """The payload of a node `lower` made; `None` for any other node."""
     payload = node.payload
     return payload if isinstance(payload, _Extractor) else None
-
-
-def returned_type(node: NodeDef) -> str:
-    """`node`'s return type as an error shows it."""
-    return inspect.formatannotation(_types.stripped(node.returns))

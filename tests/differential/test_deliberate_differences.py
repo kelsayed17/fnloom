@@ -46,6 +46,7 @@ from type_matrix import (
 import fnloom
 from fnloom import CacheOutcome, CacheWarning, DiskCache
 from fnloom import _caching as fnloom_caching
+from fnloom import _types as fnloom_types
 from fnloom._types import type_matches, value_matches
 from helpers import make_module
 
@@ -3301,3 +3302,59 @@ def empty(e: tuple[()]) -> object:
     ):
         assert run_hamilton([module], [output], {name: wrong}) == refused, wrong
         assert run_fnloom([module], [output], {name: wrong}) == refused, wrong
+
+
+_Q81_SOURCE = """
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from decimal import Decimal
+
+def rate() -> "Decimal":
+    raise AssertionError("never run")
+
+def price(rate: "Decimal") -> object:
+    return rate
+
+def loose(rate: Any) -> object:
+    return rate
+
+def converted(given: "Decimal") -> object:
+    return given
+"""
+
+
+@pytest.mark.deliberate("Q81")
+def test_q81_unresolved_annotations_build_as_opaque_types() -> None:
+    """Hamilton raises `NameError`, naming no node; fnloom builds (H5.10a)."""
+    module = make_module("differential_q81", _Q81_SOURCE)
+    with pytest.raises(NameError, match=r"^name 'Decimal' is not defined$") as raised:
+        hamilton_driver.Builder().with_modules(module).build()
+    assert not any(name in str(raised.value) for name in ("rate", "price", "converted"))
+    built = fnloom.build(module)
+    unresolved = fnloom_types.Unresolved("Decimal")
+    assert repr(unresolved) == "unresolved 'Decimal'"
+    assert built.nodes["rate"].type == unresolved
+    # The same text, and `Any`, are fed by it: both edges built.
+    assert built.what_is_the_path_between("rate", "price") == ["rate", "price"]
+    assert built.what_is_the_path_between("rate", "loose") == ["rate", "loose"]
+    for value in (1, None):
+        with pytest.raises(
+            TypeError, match=r"^given: .*import what it names at run time"
+        ):
+            built.execute(["converted"], inputs={"given": value})
+        with pytest.raises(
+            TypeError, match=r"^rate: .*import what it names at run time"
+        ):
+            built.execute(["price"], overrides={"rate": value})
+    other = make_module(
+        "differential_q81_other",
+        _Q81_SOURCE + "\ndef counted(rate: int) -> object:\n    return rate\n",
+    )
+    with pytest.raises(NameError):
+        hamilton_driver.Builder().with_modules(other).build()
+    with pytest.raises(
+        ValueError,
+        match=r"^counted\.rate requires int but rate returns unresolved 'Decimal'",
+    ):
+        fnloom.build(other)

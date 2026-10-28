@@ -250,8 +250,9 @@ driver.execute(["total"], inputs={"price": None, "quantity": 4})
 | A PEP 695 alias (`type Price = float`) | As what it names |
 | `list`, `dict`, `tuple` and other plain classes | `isinstance` |
 | `tuple[int, str]`, `tuple[()]` and other fixed-length tuples | A tuple of that length whose items each fit, nested tuples included; `tuple[()]` takes only `()` (Q80) |
-| `list[T]`, `tuple[T, ...]`, `Sequence[T]`, `set[T]`, `Iterable[T]` | A value of exactly the declared class (a `list` for `list[T]`) by class only, so `["a"]` fits `list[int]`. Any other value by kind, plus its first element |
-| `dict[K, V]` | By class only: the value's class must be exactly `dict` |
+| `list[T]`, `tuple[T, ...]`, `Sequence[T]`, `set[T]`, `Iterable[T]` | A value of exactly the declared class (a `list` for `list[T]`) by class only, so `["a"]` fits `list[int]`. Any other value by kind, plus its first element. Every item with [deep checks](#deep-checks-and-numeric-widening) |
+| `dict[K, V]` | By class only: the value's class must be exactly `dict`. Every key and value with deep checks |
+| An annotation that didn't resolve at build, such as `Decimal` imported only under `TYPE_CHECKING` | No value fits: a `TypeError` saying to import it at run time (Q81). See [Annotations](writing-nodes.md#annotations) |
 | Other `collections.abc` generics (`Mapping[str, int]`, `Callable[[int], int]`, ...) | By kind only, so any `dict` fits `Mapping[str, int]` |
 | An iterator | By kind only. It's never read, so no items are lost |
 
@@ -269,6 +270,60 @@ fnloom.value_matches(tuple[int, str], (1, "a")), fnloom.value_matches(int, None)
 fnloom.type_matches(int, int | None)
 # -> True
 ```
+
+### Deep checks and numeric widening
+
+Two opt-ins make the value checks stricter or looser. Both apply to inputs, overrides, extracted fields and
+[`validate`](#validate), and both are carried by `build_async`, pickling and copying. Edge checks compare types, not
+values, so neither changes them.
+
+```python
+# file: baskets.py
+def basket_total(prices: list[float]) -> float:
+    """The sum of every price in the basket."""
+    return sum(prices)
+```
+
+`Builder.with_deep_type_checks()` checks every item of a `list`, `set`, `tuple[T, ...]` or other standard
+collection, every key and value of a `dict` or other mapping, and the items of nested collections in turn, however deep,
+without recursion. An iterator is still never read (Q43). By default a `list` passes `list[float]` on its class alone,
+as in Hamilton:
+
+```python
+import baskets
+
+fnloom.build(baskets).validate(["basket_total"], inputs={"prices": [1.5, "2"]})
+# -> []
+deep = fnloom.Builder().with_modules(baskets).with_deep_type_checks().build()
+deep.validate(["basket_total"], inputs={"prices": [1.5, "2"]})
+# -> ['prices: expected list[float], got list']
+```
+
+A deep check reads every item on every run, so it costs time in proportion to the value: about 2.6 ms for a list of
+100,000 floats (see [Benchmarks](benchmarks.md)). An item whose type is a plain class costs one `isinstance` call. A
+value holding more than a million collections whose own items are collections is refused with a `TypeError` rather
+than read.
+
+`Builder.with_numeric_widening()` lets an `int` (but not a `bool`) and a numpy floating scalar fit `float`, and a
+numpy integer scalar fit `int`. Hamilton refuses all three, as fnloom does by default. numpy is recognised from the
+value's class and never imported. Inside a collection, widening needs deep checks, since only they read the items:
+
+```python
+widening = fnloom.Builder().with_modules(pricing).with_numeric_widening().build()
+widening.execute(["total"], inputs={"price": 2, "quantity": 4})
+# -> {'total': 8}
+both = (
+    fnloom.Builder()
+    .with_modules(baskets)
+    .with_deep_type_checks()
+    .with_numeric_widening()
+    .build()
+)
+both.execute(["basket_total"], inputs={"prices": [1, 2.5]})
+# -> {'basket_total': 3.5}
+```
+
+`fnloom.value_matches(declared, value, deep=True, widen=True)` answers as a driver with both settings.
 
 ### Unsupported annotations
 
@@ -390,8 +445,8 @@ The view is made once, when the graph is built, and annotations are evaluated th
 
 - a module using `from __future__ import annotations` gives the same types as one without it;
 - an annotation can name a class defined further down the module;
-- a name that doesn't resolve, such as one imported only under `TYPE_CHECKING`, fails the build with its `NameError`
-  and a note naming the node and the parameter;
+- a name that doesn't resolve, such as one imported only under `TYPE_CHECKING`, builds as an opaque `unresolved` type
+  (Q81); see [Annotations](writing-nodes.md#annotations);
 - if two functions annotate the same input with types that disagree, the build raises a `ValueError` naming the input
   and each function.
 

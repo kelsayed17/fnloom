@@ -40,7 +40,7 @@ driver = fnloom.build(pricing)
 | An `async def` given to `build()` (use [`build_async()`](running.md#async)) | `ValueError: 'f': async function is not supported by build(), which calls nodes synchronously; build it with build_async()` |
 | A generator function, sync or async, given to either build | `ValueError: 'f': generator function is not supported; nodes are called synchronously` |
 | `build_async(sync_nodes=...)` with anything but `"thread"` or `"inline"` | `ValueError: sync_nodes must be 'inline' or 'thread', not 'loop'` |
-| An annotation naming something that does not exist at run time, such as an import under `TYPE_CHECKING` | `NameError: name 'Decimal' is not defined`, with a note naming the node and the parameter |
+| An edge between an annotation naming something that does not exist at run time, such as an import under `TYPE_CHECKING`, and any type but the same text or `Any` (Q81) | `ValueError: total.rate requires float but rate returns unresolved 'Decimal'; import what the unresolved annotation names at run time` |
 | Functions annotating the same input with types neither of which feeds the other (`Base` and `Child` are fine: the input is `Child`) | `ValueError: inputs have conflicting types: 'a' is int in 'f', str in 'g'` |
 | A node whose return type a parameter it feeds does not accept, one line per such parameter, sorted (see [Type checks](running.md#type-checks)) | `ValueError: g.f requires int but f returns str` |
 | A node that another node reads, with no `@config.when*` variant matching the config and no `@config.default`, one line per node, sorted (see [Config](writing-nodes.md#config)) | `ValueError: no variant of 'foo' matches the config {'mode': 'c'}; its variants need mode == 'a' (foo__a), mode == 'b' (foo__b); add @config.default or a variant for it` |
@@ -116,7 +116,16 @@ driver.execute(["label"], inputs={"price": None, "quantity": 2})
 # raises ValueError: price: expected float, got NoneType
 ```
 
-Build with `Builder.without_input_type_checks()` to skip these (see [Type checks](running.md#type-checks)).
+A value checked against an annotation that didn't resolve at build, such as a name imported only under
+`TYPE_CHECKING`, raises a `TypeError` instead, listing the plain mismatches with it (Q81):
+`amount: cannot check a value against unresolved 'Decimal': it did not resolve when the graph was built; import what
+it names at run time, not only under TYPE_CHECKING`. An extracted field names its producer and field first.
+
+Build with `Builder.without_input_type_checks()` to skip these (see [Type checks](running.md#type-checks)). With
+`Builder.with_deep_type_checks()`, a collection's items are checked too, and with `Builder.with_numeric_widening()`
+an `int` fits `float` (see [Deep checks and numeric widening](running.md#deep-checks-and-numeric-widening)). A value
+holding more than a million collections whose own items are collections, or a cycle no check can see, raises
+`TypeError: value too large or too cyclic to check against ...`.
 
 ## When you run a prepared plan
 

@@ -92,12 +92,18 @@ def _fnloom(
     inputs: Mapping[str, object],
     *,
     input_checks: bool,
+    rules: str = "",
 ) -> Runtime[fnloom.Driver]:
+    """fnloom, its checks on or off; `rules` `"deep"` or `"widen"` turns one on."""
 
     def build() -> fnloom.Driver:
         builder = fnloom.Builder().with_modules(module)
         if not input_checks:
             builder = builder.without_input_type_checks()
+        if rules == "deep":
+            builder = builder.with_deep_type_checks()
+        elif rules == "widen":
+            builder = builder.with_numeric_widening()
         return builder.build()
 
     def steady_call(driver: fnloom.Driver) -> Callable[[], object]:
@@ -105,7 +111,7 @@ def _fnloom(
         return lambda: prepared.run(inputs=inputs)
 
     return Runtime(
-        "fnloom",
+        f"fnloom ({rules})" if rules else "fnloom",
         build,
         lambda driver: driver.execute(outputs, inputs=inputs),
         steady_call,
@@ -176,7 +182,9 @@ def _check_answer(
 def measure_case(shape: Shape, n: int) -> list[Row]:
     """Times Hamilton and fnloom, checks on and off, on one graph.
 
-    Aborts if an answer is not the closed form.
+    The `types` shape is timed too with deep checks and with numeric widening on,
+    as runtimes `fnloom (deep)` and `fnloom (widen)`. Aborts if an answer is not
+    the closed form.
     """
     outputs, inputs = make_request(shape, n)
     expected = make_expected(shape, n)
@@ -185,11 +193,17 @@ def measure_case(shape: Shape, n: int) -> list[Row]:
         generated(shape, n, "hamilton") as hamilton_module,
         generated(shape, n, "fnloom") as fnloom_module,
     ):
-        for runtime in (
+        runtimes = [
             _hamilton(hamilton_module, outputs, inputs),
             _fnloom(fnloom_module, outputs, inputs, input_checks=True),
             _fnloom(fnloom_module, outputs, inputs, input_checks=False),
-        ):
+        ]
+        if shape == "types":
+            runtimes += [
+                _fnloom(fnloom_module, outputs, inputs, input_checks=True, rules=rules)
+                for rules in ("deep", "widen")
+            ]
+        for runtime in runtimes:
             row, result = _measure(runtime, shape, n)
             _check_answer(row, result, expected)
             rows.append(row)
@@ -197,7 +211,7 @@ def measure_case(shape: Shape, n: int) -> list[Row]:
 
 
 def main() -> None:
-    """Prints the 72 rows as JSON lines, or those of the shapes named as arguments."""
+    """Prints the 80 rows as JSON lines, or those of the shapes named as arguments."""
     every = get_args(Shape.__value__)
     named = sys.argv[1:]
     if unknown := sorted(set(named) - set(every)):
