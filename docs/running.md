@@ -203,6 +203,46 @@ driver.what_is_downstream_of("total")
 
 Each query returns sorted names, including the nodes you named. `node_names()` lists every node, inputs included.
 
+`what_is_the_path_between(upstream, downstream)` returns every node on a path from one to the other, both included.
+Either end may be an input. The order is topological, with ties broken by name, so it's the same on every run:
+
+```python
+driver.what_is_the_path_between("price", "label")
+# -> ['price', 'total', 'discounted', 'label']
+driver.what_is_the_path_between("label", "price")
+# -> []
+driver.what_is_the_path_between("total", "total")
+# -> ['total']
+driver.what_is_the_path_between("prise", "lable")
+# raises ValueError: unknown nodes: 'lable', 'prise'
+```
+
+No path, as when you ask in the wrong direction, is an empty list. An unknown name raises a `ValueError` naming every
+unknown end, sorted. The async driver has the same method.
+
+## Inputs and outputs
+
+`driver.inputs()` maps each input to an `InputView`, in name order: its `type`, whether some consumer `required` it,
+and its `consumers`, sorted. `driver.outputs()` lists the nodes nothing reads, sorted: the usual `final_vars`.
+
+```python
+driver.inputs()["discount"] == fnloom.InputView(
+    "discount", float, required=False, consumers=("discounted",)
+)
+# -> True
+driver.inputs()["price"].required
+# -> True
+list(driver.inputs())
+# -> ['currency', 'discount', 'price', 'quantity']
+driver.outputs()
+# -> ['label']
+driver.modules == (pricing,)
+# -> True
+```
+
+An input is required when any consumer has no default for it, so `currency` is optional here. `driver.modules` holds
+the modules the graph was built from, each once, in the order you gave them. The async driver has all three.
+
 ## Inspecting a graph
 
 `driver.nodes` maps every node name, inputs included, to a read-only `NodeView`, in name order:

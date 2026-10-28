@@ -18,9 +18,9 @@ workload.
 - **DEFER**: to be decided later.
 
 **Evidence.** The behaviours below were first reported by an earlier investigation (2026-10-22) against Hamilton 1.90.0
-and partly confirmed by reading its source. Rows Q4, Q5, Q6, Q7, Q10, Q11 to Q13, Q16, Q22, Q25 to Q48 and Q50 to Q69
-have differential tests in `tests/differential/test_deliberate_differences.py`, each marked `deliberate("<id>")`, that
-assert Hamilton's behaviour and fnloom's side by side; Q3 and Q23 are covered by fnloom-only tests
+and partly confirmed by reading its source. Rows Q4, Q5, Q6, Q7, Q10, Q11 to Q13, Q16, Q22, Q25 to Q48, Q50 to Q70 and
+Q78 have differential tests in `tests/differential/test_deliberate_differences.py`, each marked `deliberate("<id>")`,
+that assert Hamilton's behaviour and fnloom's side by side; Q3 and Q23 are covered by fnloom-only tests
 (`tests/test_driver.py`, `tests/test_binding.py` and the executor's unit tests), and Q49, a KEEP row, by
 `tests/test_caching.py`. Every other row is not yet re-run for this repository and becomes a differential test before it
 is relied on. Source line numbers are deliberately omitted.
@@ -93,6 +93,8 @@ is relied on. Source line numbers are deliberately omitted.
 | Q67 | `AsyncDriver.execute` checks no input or override type. A missing input raises `NotImplementedError: x was expected to be passed in but was not.`, and an unsupplied input requested as an output raises `KeyError`. | FIX | The `AsyncDriver` checks a request as `Driver` does, with the same errors: input and override types, unknown names, a missing input as `ValueError` naming what needs it, and an unsupplied input requested as an output. |
 | Q68 | `with_cache(...)` on the async driver's builder fails at build, with `ValueError: Multiple adapters cannot (currently) implement the same lifecycle method. Sync methods: ['do_node_execute']. Async methods: []`. The async driver can't cache, and the message doesn't say so. | FIX | `Builder.with_cache(...).build_async()` caches as `Driver` does: the same keys, stores, `@cache` policies and `explain_cache`, so a cached result is shared between the two drivers. A node is stored as it succeeds; a node that fails, or that a failure cancels, stores nothing. A `recompute` node runs first in every run, awaited when it's an `async def`. Store calls run on the event loop's thread. |
 | Q69 | The `AsyncDriver` doesn't await an `async def` under `@parameterize`: each row's value is the un-awaited coroutine object, since the row's wrapper is a sync function. A plain `async def` is awaited. | FIX | Every `async def` node is awaited, a row of one included: a row's call returns its function's coroutine, and the driver awaits it. |
+| Q70 | `list_available_variables`, `graph_modules` and `what_is_the_path_between` are Hamilton's inspection. `graph_modules` keeps a module given twice (a build allows that only with `allow_module_overrides`). `what_is_the_path_between(a, b)` includes both endpoints and returns a `set`'s order, which changes with `PYTHONHASHSEED`; for an unknown name it names only the first one, upstream before downstream. Nothing lists the inputs with their consumers, or the nodes nothing consumes. | FIX | `Driver.inputs()` maps each input to an `InputView` (type, whether some consumer requires it, its consumers), in name order; `Driver.outputs()` lists the nodes nothing consumes, sorted; `Driver.modules` holds each module once, in build order. `what_is_the_path_between` includes both endpoints and takes an input as either, as Hamilton does, but returns topological order with ties broken by name, on every seed, and its `ValueError` names every unknown endpoint, sorted. `AsyncDriver` has all four. |
+| Q78 | An input nobody supplied, requested as an output, returns `None` for it: `{'x': None}`. An input with a default in its consumer reads `None` too, not the default. | REFUSE | `ValueError: missing inputs: 'x' (requested as an output)`. The default of a consumer's parameter belongs to that consumer, so it's never an input's value. |
 
 ## Not yet decided
 

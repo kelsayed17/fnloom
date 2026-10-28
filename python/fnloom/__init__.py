@@ -25,7 +25,7 @@ from fnloom._stores import (
     Format,
     MemoryCache,
 )
-from fnloom._view import NodeView, Param
+from fnloom._view import InputView, NodeView, Param
 from fnloom.driver import (
     AsyncDriver,
     AsyncPreparedPlan,
@@ -50,6 +50,7 @@ __all__ = [
     "DiskCache",
     "Driver",
     "Format",
+    "InputView",
     "MemoryCache",
     "NodeView",
     "Param",

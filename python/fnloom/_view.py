@@ -1,5 +1,6 @@
 """Read-only descriptions of a built graph's nodes."""
 
+import heapq
 import inspect
 
 # `Callable` is imported for real: `NodeView`'s signature annotates with it, and
@@ -65,6 +66,54 @@ class NodeView:
                 {p.binding.name for p in self.params if isinstance(p.binding, Source)}
             )
         )
+
+
+@dataclass(frozen=True, slots=True)
+class InputView:
+    """One input of a built graph: a name no node produces, and who reads it.
+
+    `type` is the narrowest annotation of the parameters that read it, as
+    `NodeView.type` is for an input. `required` is True when some consumer
+    needs it, and False when every consumer has a default for it. `consumers`
+    are the nodes that read it, each once, sorted.
+    """
+
+    name: str
+    type: object
+    required: bool
+    consumers: tuple[str, ...]
+
+
+def output_names(views: NodeViews) -> list[str]:
+    """The function nodes no node reads, sorted: what a run is usually asked for."""
+    read = {dep for view in views.functions.values() for dep in view.dependencies}
+    return sorted(name for name in views.functions if name not in read)
+
+
+def topological(names: set[str], views: NodeViews) -> list[str]:
+    """`names` in dependency order, ties broken by name; no recursion.
+
+    Only the edges between `names` count. An input has no dependencies.
+    """
+    waiting: dict[str, int] = {}
+    readers: dict[str, list[str]] = {}
+    for name in names:
+        view = views.functions.get(name)
+        deps = () if view is None else [d for d in view.dependencies if d in names]
+        waiting[name] = len(deps)
+        for dep in deps:
+            readers.setdefault(dep, []).append(name)
+    ready = [name for name, count in waiting.items() if count == 0]
+    heapq.heapify(ready)
+    ordered: list[str] = []
+    while ready:
+        name = heapq.heappop(ready)
+        ordered.append(name)
+        for reader in readers.get(name, ()):
+            waiting[reader] -= 1
+            if waiting[reader] == 0:
+                heapq.heappush(ready, reader)
+    return ordered
 
 
 class _Consumer(NamedTuple):

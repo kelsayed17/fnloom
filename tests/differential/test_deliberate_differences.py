@@ -4,7 +4,9 @@ import asyncio
 import collections.abc
 import importlib.util
 import inspect
+import os
 import pickle
+import subprocess
 import sys
 import textwrap
 import types
@@ -19,6 +21,7 @@ from hamilton import htypes
 from hamilton.function_modifiers.base import InvalidDecoratorException
 from hamilton.lifecycle import NoEdgeAndInputTypeChecking
 from harness import (
+    FIXTURES,
     Nodes,
     Outcome,
     load_fixture,
@@ -2238,3 +2241,77 @@ def test_q69_an_async_row_is_awaited() -> None:
         "shifted": 4,
         "plain": 2,
     }
+
+
+_HAMILTON_PATH_ORDER = """
+import json
+import sys
+
+from hamilton import driver
+
+sys.path.insert(0, sys.argv[1])
+import diamond
+
+built = driver.Builder().with_modules(diamond).build()
+path = built.what_is_the_path_between("a", "join")
+print(json.dumps([node.name for node in path]))
+"""
+
+
+@pytest.mark.deliberate("Q70")
+def test_q70_inspection() -> None:
+    """Hamilton's path order follows the hash seed and its errors name one name."""
+    module = load_fixture("diamond")
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    built = fnloom.build(module)
+    # Hamilton: a set's order, which a hash seed changes; fnloom: one topological order.
+    orders = {
+        seed: subprocess.run(  # noqa: S603  # our own interpreter and script
+            [sys.executable, "-c", _HAMILTON_PATH_ORDER, str(FIXTURES)],
+            env={
+                **os.environ,
+                "PYTHONHASHSEED": seed,
+                "HAMILTON_AUTOLOAD_EXTENSIONS": "0",
+            },
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for seed in ("0", "1", "2", "3", "4", "5")
+    }
+    assert len(set(orders.values())) > 1
+    assert built.what_is_the_path_between("a", "join") == [
+        "a",
+        "root",
+        "left",
+        "right",
+        "join",
+    ]
+    # Hamilton names the first unknown endpoint only; fnloom names both.
+    with pytest.raises(ValueError, match="Upstream node nope not found") as caught:
+        hamilton.what_is_the_path_between("nope", "nada")
+    assert "nada" not in str(caught.value)
+    with pytest.raises(ValueError, match="'nada', 'nope'"):
+        built.what_is_the_path_between("nope", "nada")
+    # Hamilton lists a module given twice twice; fnloom lists it once.
+    # Hamilton builds a module given twice only with `allow_module_overrides`.
+    twice = (
+        hamilton_driver.Builder()
+        .with_modules(module, module)
+        .allow_module_overrides()
+        .build()
+    )
+    assert twice.graph_modules == (module, module)
+    assert fnloom.Builder().with_modules(module, module).build().modules == (module,)
+
+
+@pytest.mark.deliberate("Q78")
+@pytest.mark.parametrize("fixture", ["chain", "optional"])
+def test_q78_unsupplied_input_as_an_output(fixture: str) -> None:
+    """Hamilton returns `None` for an unsupplied input, even one with a default."""
+    module = load_fixture(fixture)
+    requested = "a" if fixture == "chain" else "factor"
+    assert run_hamilton([module], [requested]) == Outcome({requested: None}, None)
+    assert run_fnloom([module], [requested]) == Outcome(None, "ValueError")
+    with pytest.raises(ValueError, match=rf"missing inputs: '{requested}'"):
+        fnloom.build(module).execute([requested])

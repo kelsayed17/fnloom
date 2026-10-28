@@ -146,6 +146,31 @@ def test_lineage_queries_name_the_same_nodes(
     assert lineage_fnloom([module], direction, names) == hamilton
 
 
+@pytest.mark.parametrize(
+    ("upstream", "downstream", "expected"),
+    [
+        ("root", "join", {"root", "left", "right", "join"}),
+        ("a", "join", {"a", "root", "left", "right", "join"}),
+        ("root", "left", {"root", "left"}),
+        ("join", "root", set()),
+        ("left", "right", set()),
+        ("a", "a", {"a"}),
+        ("join", "join", {"join"}),
+    ],
+)
+def test_path_between_has_the_same_nodes(
+    upstream: str, downstream: str, expected: set[str]
+) -> None:
+    """Endpoints are included, an input is an endpoint, and no path is empty."""
+    module = load_fixture("diamond")
+    built = hamilton_driver.Builder().with_modules(module).build()
+    hamilton = {n.name for n in built.what_is_the_path_between(upstream, downstream)}
+    assert hamilton == expected
+    path = fnloom.build(module).what_is_the_path_between(upstream, downstream)
+    assert set(path) == expected
+    assert len(path) == len(expected)
+
+
 SCANNED = {
     "underscore": "def _hidden(a: int) -> int:\n    return a\n"
     "def f(a: int) -> int:\n    return a\n",

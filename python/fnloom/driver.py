@@ -18,7 +18,14 @@ from fnloom._caching import Cache, CacheOutcome, CacheRun
 from fnloom._decorators import Source
 from fnloom._scan import NodeDef, core_inputs, resolve, scan
 from fnloom._stores import CacheStore
-from fnloom._view import NodeView, NodeViews, node_views
+from fnloom._view import (
+    InputView,
+    NodeView,
+    NodeViews,
+    node_views,
+    output_names,
+    topological,
+)
 
 type _PlanKey = tuple[tuple[str, ...], frozenset[str], frozenset[str]]
 # A request's final_vars (a list or tuple, copied), its input and override names,
@@ -55,6 +62,10 @@ class _GraphLike(Protocol):
 
     def downstream_of(self, names: list[str]) -> list[str]:
         """Returns the nodes that depend on the named nodes."""
+        ...
+
+    def between(self, a: str, b: str) -> list[str]:
+        """Returns the nodes strictly between `a` and `b`, endpoints excluded."""
         ...
 
     def prepare(
@@ -170,6 +181,24 @@ def _edge_mismatches(functions: Mapping[str, NodeView]) -> list[str]:
                 f"returns {inspect.formatannotation(upstream.type)}"
             )
     return sorted(found)
+
+
+def _input_views(views: NodeViews) -> dict[str, InputView]:
+    """Every input of `views`, by name in name order, with its consumers."""
+    required: dict[str, bool] = {}
+    consumers: dict[str, list[str]] = {}
+    for view in views.functions.values():
+        for name, needed in core_inputs(view.params):
+            if name in views.functions:
+                continue
+            required[name] = required.get(name, False) or needed
+            consumers.setdefault(name, []).append(view.name)
+    return {
+        name: InputView(
+            name, views.type_of(name), required[name], tuple(sorted(consumers[name]))
+        )
+        for name in sorted(consumers)
+    }
 
 
 class PreparedPlan:
@@ -318,6 +347,11 @@ class Driver:
         `config` is the config the graph was built with, kept read-only.
         """
         self._graph = graph
+        # The modules it was built from, each once: `Builder` sets them.
+        self._modules: tuple[ModuleType, ...] = ()
+        # Made on first use and kept: a graph with many inputs pays only if asked.
+        self._inputs: Mapping[str, InputView] | None = None
+        self._outputs: list[str] | None = None
         self._check_inputs = check_inputs
         self._cache = cache
         self._config = (
@@ -363,6 +397,7 @@ class Driver:
             cache=self._cache,
             config=self._config,
         )
+        copied._modules = self._modules
         copied._builder = self._builder
         copied._unmatched = self._unmatched
         return copied
@@ -513,6 +548,59 @@ class Driver:
         """Every node, inputs included, by name: read-only, iterating in name order."""
         return self._nodes
 
+    @property
+    def modules(self) -> tuple[ModuleType, ...]:
+        """The modules the graph was built from, each once, in build order (Q70).
+
+        Hamilton's `graph_modules` keeps a module given twice. A function a later
+        `Builder.with_functions` adds is no module, so it is not listed.
+        """
+        return self._modules
+
+    def inputs(self) -> Mapping[str, InputView]:
+        """Every input of the graph by name, in name order, with its consumers (Q70).
+
+        An input is a name no node produces. Each `InputView` has its type, whether
+        some consumer requires it, and its consumers, sorted. Read-only, and made
+        once.
+        """
+        if self._inputs is None:
+            self._inputs = MappingProxyType(_input_views(self._nodes))
+        return self._inputs
+
+    def outputs(self) -> list[str]:
+        """The nodes no other node reads, sorted (Q70).
+
+        Inputs are never outputs: each is read by the node that makes it an input.
+        """
+        if self._outputs is None:
+            self._outputs = output_names(self._nodes)
+        return list(self._outputs)
+
+    def what_is_the_path_between(self, upstream: str, downstream: str) -> list[str]:
+        """Returns every node on a path from `upstream` to `downstream` (Q70).
+
+        Both endpoints are included, and an input can be either one. The order is
+        topological, ties broken by name, so it never depends on
+        `PYTHONHASHSEED`. Empty when `downstream` doesn't depend on `upstream`;
+        `[upstream]` when they're the same node. `ValueError` names every unknown
+        endpoint, sorted; `TypeError` when one is not a `str`.
+        """
+        for end in (upstream, downstream):
+            if not isinstance(end, str):
+                msg = f"node names must be str, got {type(end).__name__}"
+                raise TypeError(msg)
+        ends = {upstream, downstream}
+        if unknown := sorted(n for n in ends if n not in self._nodes):
+            msg = f"unknown nodes: {', '.join(map(repr, unknown))}"
+            raise ValueError(msg)
+        if upstream == downstream:
+            return [upstream]
+        if downstream not in set(self._graph.downstream_of([upstream])):
+            return []
+        between = self._graph.between(upstream, downstream)
+        return topological({upstream, downstream, *between}, self._nodes)
+
     def what_is_upstream_of(self, *names: str) -> list[str]:
         """Returns the named nodes and every node they depend on, sorted."""
         return sorted({*names, *self._graph.upstream_of(list(names))})
@@ -632,6 +720,23 @@ class AsyncDriver:
     def nodes(self) -> Mapping[str, NodeView]:
         """Every node, inputs included, by name; see `Driver.nodes`."""
         return self._driver.nodes
+
+    @property
+    def modules(self) -> tuple[ModuleType, ...]:
+        """The modules the graph was built from; see `Driver.modules`."""
+        return self._driver.modules
+
+    def inputs(self) -> Mapping[str, InputView]:
+        """Every input of the graph; see `Driver.inputs`."""
+        return self._driver.inputs()
+
+    def outputs(self) -> list[str]:
+        """The nodes no other node reads, sorted; see `Driver.outputs`."""
+        return self._driver.outputs()
+
+    def what_is_the_path_between(self, upstream: str, downstream: str) -> list[str]:
+        """The nodes between two, inclusive; see `Driver.what_is_the_path_between`."""
+        return self._driver.what_is_the_path_between(upstream, downstream)
 
     def node_names(self) -> list[str]:
         """Returns every node name, sorted."""
@@ -1007,6 +1112,7 @@ class Builder:
             cache=cache,
             config=MappingProxyType(self._config),
         )
+        driver._modules = tuple(dict.fromkeys(self._modules))  # noqa: SLF001  # the builder's own driver
         driver._unmatched = unmatched  # noqa: SLF001  # the builder's own driver
         driver._builder = self  # noqa: SLF001  # the builder's own driver
         return driver

@@ -11,6 +11,10 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Added
 
+- `Driver.inputs()` and `outputs()`, `Driver.modules` and `Driver.what_is_the_path_between(a, b)`, on `AsyncDriver` too,
+  with `fnloom.InputView`. The path includes both ends and is in topological order, ties broken by name, on every hash
+  seed; its error names every unknown node (Q70). An unsupplied input requested as an output stays a `ValueError`
+  (Q78).
 - `@cache(format=...)` picks how `DiskCache` writes a node's result: a `fnloom.Format` (a name with a `dumps` and
   `loads` pair) or the name of one the store knows. `"pickle"` and `"json"` are built in, and
   `DiskCache(formats=...)` adds more. A name the store does not know is refused when the driver is built (Q55). The

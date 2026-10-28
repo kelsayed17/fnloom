@@ -56,6 +56,10 @@ class SpyGraph:
         """Delegates."""
         return self.graph.downstream_of(names)
 
+    def between(self, a: str, b: str) -> list[str]:
+        """Delegates."""
+        return self.graph.between(a, b)
+
     def prepare(
         self, outputs: list[str], inputs: list[str], overrides: list[str]
     ) -> _core.Plan:
@@ -352,6 +356,7 @@ def test_public_api_is_exported() -> None:
         "DiskCache",
         "Driver",
         "Format",
+        "InputView",
         "MISSING",
         "MemoryCache",
         "NodeView",
