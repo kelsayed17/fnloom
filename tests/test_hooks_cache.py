@@ -6,6 +6,7 @@ run walks in the binding, and a `DiskCache`, which it walks in Python.
 """
 
 import asyncio
+import warnings
 from typing import TYPE_CHECKING, Literal, cast
 
 import pytest
@@ -371,3 +372,76 @@ def test_the_async_driver_fires_the_sync_drivers_events(
             for (_, stage, node), event in zip(hook.log, hook.events, strict=True)
         ]
     assert logs["sync"] == logs["async"]
+
+
+BOUNDED = """
+from fnloom import cache
+
+
+def symbol(code: str) -> str:
+    return code.upper()
+
+
+@cache(behavior="recompute")
+def price(symbol: str) -> float:
+    return 100.0
+
+
+def units(lots: int) -> int:
+    return lots * 10
+
+
+def value(price: float, units: int) -> float:
+    return price * units
+"""
+
+
+def test_a_recompute_run_lists_nodes_it_may_not_report(
+    kind: Kind, store: StoreKind, tmp_path: Path
+) -> None:
+    """R9: before `price` runs, `nodes` can only bound what the outer level reports."""
+    hook = Recorder()
+    cached = Cached(BOUNDED, kind, store, tmp_path, hook)
+    inputs: dict[str, object] = {"code": "abc", "lots": 2}
+    assert cached.execute(["value"], inputs=inputs) == {"value": 2000.0}
+    hook.log.clear()
+    hook.events.clear()
+    assert cached.execute(["value"], inputs=inputs) == {"value": 2000.0}
+    reported = tuple(e.node.name for e in hook.of(NodeStart))
+    # `value` hits, so `units`, which only it needs, neither runs nor reports...
+    assert reported == ("symbol", "price", "value")
+    nodes = hook.of(RunStart)[0].nodes
+    # ...yet `nodes`, fixed before `price` ran, lists it: an upper bound.
+    assert nodes[:2] == ("symbol", "price")
+    assert set(nodes) == {"symbol", "price", "units", "value"}
+    assert "units" not in reported
+    assert hook.of(RunEnd)[0].nodes == nodes
+
+
+BROKEN = """
+class Broken:
+    def __fnloom_fingerprint__(self) -> object:
+        raise RuntimeError("no fingerprint")
+
+
+def held(thing: Broken) -> int:
+    return 1
+"""
+
+
+def test_a_lookup_that_raises_starts_the_run_with_no_nodes(
+    kind: Kind, store: StoreKind, tmp_path: Path
+) -> None:
+    """A lookup that raises before `before_run`: it fires with no nodes, then ends."""
+    hook = Recorder()
+    cached = Cached(BROKEN, kind, store, tmp_path, hook)
+    inputs: dict[str, object] = {"thing": cached.module.Broken()}
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", fnloom.CacheWarning)
+        with pytest.raises(fnloom.CacheWarning, match="cannot fingerprint 'thing'"):
+            cached.execute(["held"], inputs=inputs)
+    assert _stages(hook) == [("before_run", None), ("after_run", None)]
+    start, end = hook.of(RunStart)[0], hook.of(RunEnd)[0]
+    assert start.nodes == end.nodes == ()
+    assert not end.ok
+    assert isinstance(end.error, fnloom.CacheWarning)

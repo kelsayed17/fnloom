@@ -34,7 +34,7 @@ from fnloom._scan import core_inputs
 from fnloom._stores import MISSING, CacheStore, CacheWarning, Format, MemoryCache
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Generator, Mapping, Sequence
 
     from fnloom._hooks import Dispatch
     from fnloom._scan import NodeDef
@@ -477,7 +477,7 @@ class CacheRun:
             self._nested = CacheRun(
                 cache, graph, nested, first, input_names, override_names
             )
-            self._levels = (self, *self._nested.levels)
+            self._levels = (self, *self._nested._levels)  # noqa: SLF001  # the same class
         # Insertion order is recency order: a hit moves its plan to the end.
         self._plans: dict[frozenset[str], _core.Plan] = {}
         self._plans_lock = threading.Lock()
@@ -486,11 +486,6 @@ class CacheRun:
     def nested(self) -> CacheRun | None:
         """The run of the `recompute` nodes something reads, which goes first."""
         return self._nested
-
-    @property
-    def levels(self) -> tuple[CacheRun, ...]:
-        """This run, its nested run, that one's, and so on; the last runs first."""
-        return self._levels
 
     def run(
         self,
@@ -525,9 +520,15 @@ class CacheRun:
         begun: Begun,
         inputs: dict[str, object],
         observers: Sequence[_core.ObserverBase] = (),
+        on_value: Callable[[str, object], None] | _core.Keys | None = None,
     ) -> dict[str, object]:
-        """Runs a begun run's plan, storing each value as its node succeeds."""
-        on_value = begun.pending
+        """Runs a begun run's plan, storing each value as its node succeeds.
+
+        `on_value`, when given, takes each value instead: by default the binding's
+        keys store it, or else `finish` does.
+        """
+        if on_value is None:
+            on_value = begun.pending
         result = begun.plan.run(
             inputs,
             begun.overrides,
@@ -656,24 +657,54 @@ class CacheRun:
         )
 
     def versions(
+        self, inputs: dict[str, object], overrides: dict[str, object], warned: set[str]
+    ) -> dict[str, bytes | None]:
+        """The fingerprint of every input and override a key reads; see `begin`."""
+        return self._versions(inputs, overrides, warned)
+
+    def reported_levels(
         self,
         inputs: dict[str, object],
         overrides: dict[str, object],
-        warned: set[str],
-        reasons: dict[str, str] | None = None,
-    ) -> dict[str, bytes | None]:
-        """The fingerprint of every input and override a key reads; see `begin`.
+        dispatch: Dispatch,
+        start: Callable[[tuple[str, ...]], None],
+    ) -> Generator[tuple[CacheRun, Begun], dict[str, object]]:
+        """A reported run's levels, innermost first, for either driver to run.
 
-        `reasons`, when given, receives why each one with no fingerprint has none.
+        The one copy of what both drivers do around their runs, so they fire the
+        same events. The innermost level looks its hits up first; then `start`
+        fires `before_run` with the nodes the run reports, or with none, and the
+        error raised, when the lookups raise. Each level then reports its hits to
+        `dispatch` and is yielded with its `Begun`, for the caller to run its plan
+        and send back every value the run computed or loaded, the next level's
+        `known`.
         """
-        return self._versions(inputs, overrides, warned, reasons)
+        levels = self._levels
+        warned: set[str] = set()
+        reasons: dict[str, str] = {}
+        known: dict[str, object] = {}
+        try:
+            versions = self._versions(inputs, overrides, warned, reasons)
+            begun = self._begin_reported(
+                levels[-1], inputs, overrides, known, versions, warned, reasons
+            )
+        except BaseException:
+            start(())
+            raise
+        start(self._reported(begun, levels[-1]))
+        for at, level in enumerate(reversed(levels)):
+            if at:
+                begun = self._begin_reported(
+                    level, inputs, overrides, known, versions, warned, reasons
+                )
+            dispatch.loaded(begun)
+            known = yield level, begun
 
-    def begin_reported(  # noqa: PLR0913  # the request, and what the run has so far
+    def _begin_reported(  # noqa: PLR0913, PLR0917  # the request, and what the run has so far
         self,
         level: CacheRun,
         inputs: dict[str, object],
         overrides: dict[str, object],
-        *,
         known: dict[str, object],
         versions: dict[str, bytes | None],
         warned: set[str],
@@ -696,7 +727,7 @@ class CacheRun:
             reasons=reasons if outer else dict(reasons),
         )
 
-    def reported(self, begun: Begun, level: CacheRun) -> tuple[str, ...]:
+    def _reported(self, begun: Begun, level: CacheRun) -> tuple[str, ...]:
         """The nodes a reported run reports, in order, once `level` has begun.
 
         When `level` is this run, exactly its hits and then the nodes it computes.
@@ -719,54 +750,24 @@ class CacheRun:
     ) -> dict[str, object]:
         """`run`, reporting every node to `dispatch`, a run's own dispatcher.
 
-        `start` fires `before_run` with the nodes the run reports, once the first
-        level has looked its hits up. Each level, innermost first, reports its hits
-        and then runs, its nodes reporting through `dispatch`'s observers; a node
-        whose `after_node` raised is not stored.
+        Runs `reported_levels`: each level's nodes report through `dispatch`'s
+        observers, and a node whose `after_node` raised is not stored (`kept`).
         """
-        levels = self._levels
-        warned: set[str] = set()
-        reasons: dict[str, str] = {}
-        known: dict[str, object] = {}
-        try:
-            versions = self._versions(inputs, overrides, warned, reasons)
-            begun = self.begin_reported(
-                levels[-1],
+        levels = self.reported_levels(inputs, overrides, dispatch, start)
+        level, begun = next(levels)
+        while True:
+            result = level._finished(  # noqa: SLF001  # the same class
+                begun,
                 inputs,
-                overrides,
-                known=known,
-                versions=versions,
-                warned=warned,
-                reasons=reasons,
-            )
-        except BaseException:
-            start(())
-            raise
-        start(self.reported(begun, levels[-1]))
-        result: dict[str, object] = {}
-        for at, level in enumerate(reversed(levels)):
-            if at:
-                begun = self.begin_reported(
-                    level,
-                    inputs,
-                    overrides,
-                    known=known,
-                    versions=versions,
-                    warned=warned,
-                    reasons=reasons,
-                )
-            dispatch.loaded(begun)
-            result = begun.plan.run(
-                inputs,
-                begun.overrides,
                 dispatch.observers(),
-                on_value=functools.partial(level.kept, begun, dispatch),
+                functools.partial(level.kept, begun, dispatch),
             )
-            if begun.values is not None:
-                begun.values.update(begun.hits)
-                begun.values.update(result)
-                known = begun.values
-        return result
+            try:
+                level, begun = levels.send(
+                    result if begun.values is None else begun.values
+                )
+            except StopIteration:
+                return result
 
     def kept(self, begun: Begun, dispatch: Dispatch, name: str, value: object) -> None:
         """`finish`, unless `dispatch`'s hooks refused the value (R8).

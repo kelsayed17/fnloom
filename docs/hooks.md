@@ -288,7 +288,8 @@ An [`AsyncDriver`](running.md#async) fires the same events as a `Driver`, with t
 - Nodes that run at once report in the order they start and finish, so another node's events can come between a
   node's `before_node` and its `after_node`.
 - `RunStart.nodes` lists the nodes in plan order ([Execution order](running.md#execution-order)), not the order of
-  the events, which can change from one run to the next.
+  the events, which can change from one run to the next. On a driver with a cache it lists the hits first, then the
+  nodes the run computes in plan order, as on `Driver` ([With a cache](#with-a-cache)).
 - Every hook runs on the event loop's thread, never in a worker thread, even for a sync node run in one. A hook needs no
   lock to keep state for one run.
 - A hook that raises fails the run as a failing node does: every node still running is cancelled, and the run waits

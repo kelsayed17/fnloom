@@ -251,47 +251,21 @@ class CachedSchedule:
     ) -> dict[str, object]:
         """`run`, reporting every node to `dispatch`, as `CacheRun.hooked` does.
 
-        `start` fires `before_run` once the first level has looked its hits up.
-        Each level, innermost first, reports its hits, then walks its plan as a
-        hooked run, so its nodes report as they start and finish. A node whose
-        `after_node` raised is never stored: the walk drops its value first.
+        Runs `CacheRun.reported_levels`, the sync driver's levels and events: each
+        level walks its plan as a hooked run, so its nodes report as they start
+        and finish. A node whose `after_node` raised is never stored: the walk
+        drops its value first.
         """
-        cache_run = self._cache_run
-        levels = cache_run.levels
-        warned: set[str] = set()
-        reasons: dict[str, str] = {}
-        known: dict[str, object] = {}
-        try:
-            versions = cache_run.versions(inputs, overrides, warned, reasons)
-            begun = cache_run.begin_reported(
-                levels[-1],
-                inputs,
-                overrides,
-                known=known,
-                versions=versions,
-                warned=warned,
-                reasons=reasons,
-            )
-        except BaseException:
-            start(())
-            raise
-        start(cache_run.reported(begun, levels[-1]))
-        for at, level in enumerate(reversed(levels)):
-            if at:
-                begun = cache_run.begin_reported(
-                    level,
-                    inputs,
-                    overrides,
-                    known=known,
-                    versions=versions,
-                    warned=warned,
-                    reasons=reasons,
-                )
-            dispatch.loaded(begun)
+        levels = self._cache_run.reported_levels(inputs, overrides, dispatch, start)
+        level, begun = next(levels)
+        while True:
             schedule = self._schedule(begun.plan)
             on_value = functools.partial(level.finish, begun)
             known = await schedule.hooked(inputs, begun.overrides, dispatch, on_value)
-        return known
+            try:
+                level, begun = levels.send(known)
+            except StopIteration:
+                return known
 
 
 async def walk(
