@@ -7,8 +7,6 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ## [Unreleased]
 
-## [0.2.0] - 2026-10-28
-
 ### Added
 
 - `Driver.rebuild()` and `AsyncDriver.rebuild()` build a new driver from the same builder, with its modules, functions,
@@ -53,12 +51,6 @@ change the public API; such changes are listed under **Changed** and **Removed**
   that is no input, each naming the closest node (Q75). Both are off by default. `Builder.without_override_type_checks()`
   skips only the override type checks, keeping input checks on, for overriding a node with a value of another type
   such as `nan` (Q22). All three survive pickling, copying and `build_async`.
-- `@cache(format=...)` picks how `DiskCache` writes a node's result: a `fnloom.Format` (a name with a `dumps` and
-  `loads` pair) or the name of one the store knows. `"pickle"` and `"json"` are built in, and
-  `DiskCache(formats=...)` adds more. A name the store does not know is refused when the driver is built (Q55). The
-  `json` format refuses any value that would not load back as the same types, such as a tuple, so a hit never
-  returns a different value (Q54).
-- `len(MemoryCache)`, the number of entries it holds.
 - `Builder.with_deep_type_checks()` checks every item of a `list`, `set`, `tuple[T, ...]` or other standard
   collection, every key and value of a mapping, and nested collections' items, iteratively; an iterator, or a value of
   any class but a standard collection's, is never read in full. `Builder.with_numeric_widening()` lets an `int` (not a
@@ -69,38 +61,12 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - `fnloom.value_matches(declared, value)` and `fnloom.type_matches(produced, expected)`, the checks `execute` runs on
   each input, override and extracted field and `build` runs on each edge, are public. Their docstrings state the
   rules, as Hamilton's `htypes.check_input_type` is public too.
-- `Builder.with_config(...)` and `Driver.config`, a read-only, shallow copy. `@config.when`, `when_not`, `when_in` and
-  `when_not_in` pick a function's variant at build, and `@config.default` marks the variant used when no other matches.
-  `name=` names the node on all four forms. Config shapes the graph only: a key is never a node, an input or a value
-  (Q56). A key the config doesn't have never matches, and a node something needs that no variant gives fails the build,
-  naming what each variant needs; so does a row or extracted field only an unselected variant gives (Q57). Two matching
-  variants fail the build, naming both, and so does a config-decorated function defined twice in its module, naming the
-  lines of each (Q58). Misuse, such as `@config.when` without parentheses or `when_in(mode="ab")`, is refused when
-  decorating (Q59). The user's function is never changed, and `NodeView.config` holds the conditions that picked a node,
-  each a `fnloom.Condition` (Q60).
-- `@extract_fields` splits a node's mapping into one node per field. Each field's value is checked against its
-  declared type on every run, even with input checks off, and declared types are checked at build against a
-  `TypedDict` or `dict[str, T]` return (Q61). A `Mapping[str, T]` return works. `fill_with` never changes the
-  producer's value, and `None` is a fill (Q62). With a cache, a field or column is never stored or served from the
-  store: it reruns from its cached producer whenever it's needed, its check with it, and its key covers its name,
-  declared type and fill.
-- `@extract_columns` splits any value with `__getitem__`, such as a pandas or polars frame or a mapping, into one node
-  per column, with no registry or extension to load (Q64). A missing column raises `ValueError` when run, naming the
-  columns the producer did return. `@tag` on an `@extract_*` function tags the producer and every field or column
-  (Q63).
 - An input or override naming a parameter that only `value()` bindings supply is refused as an unknown name, as any
   input nothing reads is (Q4, Q5); Hamilton drops it, even a wrong-typed one. When another node reads the name, the
   caller's value feeds that node alone and the `value()` rows keep their constant (Q77). Documented and tested; no
   behaviour changed.
-- `Builder.build_async()` and `AsyncDriver`, for graphs with `async def` nodes. The build is synchronous (Q12), and
-  `execute` and `AsyncPreparedPlan.run` are coroutines that return the sync driver's dict, in request order (Q11). Sync
-  nodes run in a worker thread, or on the loop with `build_async(sync_nodes="inline")` (Q65). A failing node cancels its
-  running siblings, each once, waits for them and raises its own exception, noted with its name (Q66). Requests are
-  checked as the sync driver checks them (Q67), and an `async def` `@parameterize` row is awaited (Q69).
 - `@fnloom.exclude`, bare or called, keeps a public function out of the graph and returns it unchanged. Hamilton's
   `@hamilton_exclude` works bare only. An excluded function's annotations are never read, so it needs none (Q73).
-- Caching on the async driver: `with_cache(...).build_async()` uses the sync driver's keys, stores, policies and
-  `explain_cache`. A node is stored as it succeeds; one that fails, or that a failure cancels, stores nothing (Q68).
 
 ### Changed
 
@@ -130,6 +96,46 @@ change the public API; such changes are listed under **Changed** and **Removed**
   to the same text or `Any`, and fails the build, naming the text, otherwise. A value checked against it raises a
   `TypeError` saying to import it at run time. Code that caught the `NameError` at build should instead import the
   names its annotations use, or catch the `TypeError` where a value is checked (Q81).
+
+## [0.2.0] - 2026-10-28
+
+### Added
+
+- `@cache(format=...)` picks how `DiskCache` writes a node's result: a `fnloom.Format` (a name with a `dumps` and
+  `loads` pair) or the name of one the store knows. `"pickle"` and `"json"` are built in, and
+  `DiskCache(formats=...)` adds more. A name the store does not know is refused when the driver is built (Q55). The
+  `json` format refuses any value that would not load back as the same types, such as a tuple, so a hit never
+  returns a different value (Q54).
+- `len(MemoryCache)`, the number of entries it holds.
+- `Builder.with_config(...)` and `Driver.config`, a read-only, shallow copy. `@config.when`, `when_not`, `when_in` and
+  `when_not_in` pick a function's variant at build, and `@config.default` marks the variant used when no other matches.
+  `name=` names the node on all four forms. Config shapes the graph only: a key is never a node, an input or a value
+  (Q56). A key the config doesn't have never matches, and a node something needs that no variant gives fails the build,
+  naming what each variant needs; so does a row or extracted field only an unselected variant gives (Q57). Two matching
+  variants fail the build, naming both, and so does a config-decorated function defined twice in its module, naming the
+  lines of each (Q58). Misuse, such as `@config.when` without parentheses or `when_in(mode="ab")`, is refused when
+  decorating (Q59). The user's function is never changed, and `NodeView.config` holds the conditions that picked a node,
+  each a `fnloom.Condition` (Q60).
+- `@extract_fields` splits a node's mapping into one node per field. Each field's value is checked against its
+  declared type on every run, even with input checks off, and declared types are checked at build against a
+  `TypedDict` or `dict[str, T]` return (Q61). A `Mapping[str, T]` return works. `fill_with` never changes the
+  producer's value, and `None` is a fill (Q62). With a cache, a field or column is never stored or served from the
+  store: it reruns from its cached producer whenever it's needed, its check with it, and its key covers its name,
+  declared type and fill.
+- `@extract_columns` splits any value with `__getitem__`, such as a pandas or polars frame or a mapping, into one node
+  per column, with no registry or extension to load (Q64). A missing column raises `ValueError` when run, naming the
+  columns the producer did return. `@tag` on an `@extract_*` function tags the producer and every field or column
+  (Q63).
+- `Builder.build_async()` and `AsyncDriver`, for graphs with `async def` nodes. The build is synchronous (Q12), and
+  `execute` and `AsyncPreparedPlan.run` are coroutines that return the sync driver's dict, in request order (Q11). Sync
+  nodes run in a worker thread, or on the loop with `build_async(sync_nodes="inline")` (Q65). A failing node cancels its
+  running siblings, each once, waits for them and raises its own exception, noted with its name (Q66). Requests are
+  checked as the sync driver checks them (Q67), and an `async def` `@parameterize` row is awaited (Q69).
+- Caching on the async driver: `with_cache(...).build_async()` uses the sync driver's keys, stores, policies and
+  `explain_cache`. A node is stored as it succeeds; one that fails, or that a failure cancels, stores nothing (Q68).
+
+### Changed
+
 - A `TypedDict`-typed input or override accepts any `dict`, its keys unchecked, as the shallow container checks do.
   Before, every value failed the check, so such an input could never be supplied (Q61).
 - `build()` still refuses a graph with an `async def` node, and its `ValueError` now names `build_async()` (Q32).
