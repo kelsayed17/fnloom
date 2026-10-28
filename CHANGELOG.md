@@ -18,8 +18,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - `Driver.validate(final_vars, *, inputs=None, overrides=None)`, on `AsyncDriver` too (not a coroutine), returns every
   problem `execute` would raise for a request, one sorted line each, and runs nothing: unknown outputs, inputs and
   overrides, missing inputs (naming only the consumers the request needs), input and override types, and outputs no
-  config variant gave. Every unknown name in an error now ends in `(did you mean 'x'?)` when a node is close to it,
-  and a missing input names the closest supplied name that matched no input (Q71).
+  config variant gave, and functions in `final_vars` no node comes from. Every unknown name in an error now ends in
+  `(did you mean 'x'?)` when a node is close to it; in `validate`, a missing input also names the closest supplied
+  name that is no node of the graph (Q71).
 - `@cache(format=...)` picks how `DiskCache` writes a node's result: a `fnloom.Format` (a name with a `dumps` and
   `loads` pair) or the name of one the store knows. `"pickle"` and `"json"` are built in, and
   `DiskCache(formats=...)` adds more. A name the store does not know is refused when the driver is built (Q55). The

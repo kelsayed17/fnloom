@@ -2501,6 +2501,9 @@ def test_q71_validate() -> None:
     assert [keywords[n].kind for n in ("inputs", "overrides")] == [
         inspect.Parameter.KEYWORD_ONLY
     ] * 2
+    # A valid request: Hamilton returns `None`, fnloom an empty list.
+    assert hamilton.validate_execution(["a"], inputs={"x": 1}) is None
+    assert built.validate(["a"], inputs={"x": 1}) == []
     # A missing input: Hamilton names every consumer and raises; fnloom names `a`.
     with pytest.raises(ValueError, match=r"for nodes: \['a', 'c'\]\.$"):
         hamilton.validate_execution(["a"])

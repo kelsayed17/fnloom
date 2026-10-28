@@ -332,6 +332,9 @@ def test_validate_runs_nothing() -> None:
     ]
     assert driver.validate(["margin"], inputs=GOOD) == []
     assert module.calls == []
+    # No plan is kept: neither the cache of plans nor the last request changes.
+    assert driver._plans == {}  # noqa: SLF001  # the state validate must not touch
+    assert driver._last is None  # noqa: SLF001  # the state validate must not touch
     # `prepare` only reads the names: the values are checked when the plan runs.
     plan = driver.prepare(["margin"], inputs=bad)
     assert module.calls == []
@@ -417,3 +420,77 @@ def test_validate_matches_execute_messages() -> None:
     with pytest.raises(ValueError, match="config key") as hinted:
         built.execute(["taxed"])
     assert built.validate(["taxed"]) == sorted(str(hinted.value).split("\n"))
+
+
+def test_validate_lists_a_function_no_node_comes_from() -> None:
+    """A node-less function is a line, beside an unknown name and a type (Q30, Q71)."""
+    _, driver = _priced("val_absent")
+    other = make_module("val_absent_other", "def stray(x: int) -> int:\n    return x\n")
+    with pytest.raises(ValueError, match=r"^final_vars: ") as alone:
+        driver.execute([other.stray], inputs=GOOD)
+    lines = driver.validate(
+        [other.stray, "margn", "margin"], inputs={**GOOD, "revenue": "s"}
+    )
+    assert lines == [
+        str(alone.value),
+        "revenue: expected int, got str",
+        "unknown outputs: 'margn' (did you mean 'margin'?)",
+    ]
+    # A malformed item still raises, as `execute` raises it.
+    with pytest.raises(TypeError, match="final_vars items must be str"):
+        driver.validate([other.stray, 5])  # ty: ignore[invalid-argument-type]  # the refusal is the point
+
+
+ODD_NAMES = """
+import fnloom
+
+
+@fnloom.parameterize(**{"a; b": {"v": fnloom.source("x")}})
+def semi(v: int) -> int:
+    return v
+
+
+@fnloom.parameterize(quoted={"v": fnloom.source("in' (x")})
+def paren(v: int) -> int:
+    return v
+
+
+def revenue_total(revenue: int) -> int:
+    return revenue
+"""
+
+
+def test_odd_names_agree_between_execute_and_validate() -> None:
+    """Names holding `; `, `' (` or `', '` are never parsed out of a message."""
+    driver = fnloom.build(make_module("val_odd", ODD_NAMES))
+    requests: list[tuple[list[str], dict[str, object]]] = [
+        (["a; b"], {}),
+        (["quoted"], {}),
+        (["revenue_total"], {"revenue": 1, "x', 'revenu": 2}),
+    ]
+    for final_vars, inputs in requests:
+        with pytest.raises(ValueError, match=r".") as info:
+            driver.execute(final_vars, inputs=inputs)
+        assert driver.validate(final_vars, inputs=inputs) == [str(info.value)]
+    assert driver.validate(["a; b"]) == ["missing inputs: 'x' (needed by 'a; b')"]
+    assert driver.validate(["quoted"]) == [
+        "missing inputs: 'in' (x' (needed by 'quoted')"
+    ]
+
+
+def test_missing_suggestions_come_from_names_not_in_the_graph() -> None:
+    """A supplied computed node is no candidate for a missing input's suggestion."""
+    module = make_module(
+        "val_strangers",
+        "def revenues(revenue: int) -> int:\n    return revenue\n\n\n"
+        "def other(revenue: int) -> int:\n    return revenue\n",
+    )
+    driver = fnloom.build(module)
+    assert driver.validate(["other"], inputs={"revenues": 1}) == [
+        "missing inputs: 'revenue' (needed by 'other')",
+        "unknown inputs: 'revenues' (did you mean 'revenue'?)",
+    ]
+    assert driver.validate(["other"], inputs={"revenuex": 1}) == [
+        "missing inputs: 'revenue' (needed by 'other') (did you mean 'revenuex'?)",
+        "unknown inputs: 'revenuex' (did you mean 'revenue'?)",
+    ]

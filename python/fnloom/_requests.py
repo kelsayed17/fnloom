@@ -28,13 +28,32 @@ def output_names(
 
     A name is not checked against the graph here: compiling the plan does.
     """
+    names, absent = requested(final_vars, views)
+    if absent:
+        raise ValueError(ABSENT + "; ".join(absent))
+    return names
+
+
+# How the error for functions no node comes from starts.
+ABSENT = "final_vars: "
+
+
+def requested(
+    final_vars: Sequence[str | Callable[..., object]], views: NodeViews
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The names `final_vars` resolves to, and each function no node comes from.
+
+    `output_names` without its `ValueError`: the problem of each function no node
+    comes from is returned, once each, sorted, for `Driver.validate` to list (Q71).
+    The `TypeError`s of `output_names` are raised as it raises them.
+    """
     if isinstance(final_vars, str):
         msg = "final_vars must be a sequence of names, not a single str"
         raise TypeError(msg)
     # Copied before checking, so a one-shot iterator is read once and not exhausted.
     items = tuple(final_vars)
     if all(isinstance(item, str) for item in items):
-        return items  # ty: ignore[invalid-return-type]  # every item was just checked
+        return items, ()  # ty: ignore[invalid-return-type]  # every item was just checked
     names: list[str] = []
     # Each culprit once, whatever its kind; `malformed` makes the error a `TypeError`.
     culprits: set[str] = set()
@@ -46,12 +65,10 @@ def output_names(
             continue
         culprits.add(text)
         malformed = malformed or kind != "absent"
-    if culprits:
-        if malformed:
-            msg = "final_vars items must be str or a function: "
-            raise TypeError(msg + "; ".join(sorted(culprits)))
-        raise ValueError("final_vars: " + "; ".join(sorted(culprits)))
-    return tuple(names)
+    if malformed:
+        msg = "final_vars items must be str or a function: "
+        raise TypeError(msg + "; ".join(sorted(culprits)))
+    return tuple(names), tuple(sorted(culprits))
 
 
 def _read(item: object, views: NodeViews) -> tuple[str, str]:

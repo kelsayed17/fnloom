@@ -70,10 +70,10 @@ driver.execute(["total", "price"])
 ```
 
 An unknown name is followed by `(did you mean 'x'?)`, after a space, when a node is close to it: the closest one that
-`difflib.get_close_matches` finds at cutoff 0.8, as for `'tota'` above. A missing input gets the same suggestion from
-the supplied names that matched no input, so a misspelled key and the input it was meant for point at each other.
-`execute` raises unknown inputs before missing ones, so you see the second in [`validate`](running.md#validate), which
-lists every problem at once (Q71).
+`difflib.get_close_matches` finds at cutoff 0.8, as for `'tota'` above. Only
+[`validate`](running.md#validate), which lists every problem at once, suggests a name for a missing input: the closest
+supplied name that is no node of the graph, so a misspelled key and the input it was meant for point at each other.
+`execute` raises that unknown input first, on its own (Q71).
 
 A node that no config variant gave, requested as an output, raises the build's reason: `ValueError: no variant of
 'foo' matches the config ...`. A missing input named like a config key gets a second line, since config is never

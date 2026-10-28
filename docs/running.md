@@ -109,7 +109,8 @@ driver.validate(["total"], inputs={"price": 1.5, "quantty": 3})
 Each line is the line `execute` raises for that problem on its own, so `validate` reports what `execute` would, all
 at once instead of one kind at a time. It covers unknown outputs, inputs and overrides; missing inputs; the types of
 input and override values; and outputs no `@config.when*` variant gave. A missing input names only the nodes this
-request needs it for. A malformed request still raises, as `prepare` does:
+request needs it for, and a function in `final_vars` that no node comes from gets the line `execute` raises for it.
+A malformed request still raises a `TypeError`, as does `inputs` or `overrides` that isn't a mapping:
 
 ```python
 driver.validate("label")

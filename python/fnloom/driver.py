@@ -17,8 +17,8 @@ from fnloom import _async, _core, _types
 from fnloom._caching import Cache, CacheOutcome, CacheRun
 from fnloom._decorators import Source
 from fnloom._extract import is_generated
+from fnloom._requests import ABSENT, requested, suggest
 from fnloom._requests import output_names as _requested_names
-from fnloom._requests import suggest
 from fnloom._scan import NodeDef, core_inputs, resolve, scan
 from fnloom._stores import CacheStore
 from fnloom._view import (
@@ -461,7 +461,7 @@ class Driver:
                 list(outputs), sorted(input_names), sorted(override_names)
             )
         except ValueError as error:
-            msg = "\n".join(self._explained(str(error), input_names))
+            msg = "\n".join(self._explained(str(error), key))
             if msg == str(error):
                 raise
             raise ValueError(msg) from None
@@ -495,30 +495,70 @@ class Driver:
             for declared in (self._nodes.type_of(n),)
         )
 
-    def _explained(self, message: str, input_names: AbstractSet[str]) -> list[str]:
-        """The lines of the core's error `message`, each name with its suggestion.
+    def _explained(self, message: str, key: _PlanKey) -> list[str]:
+        """The lines of the core's error `message` for request `key`, with suggestions.
 
-        The core names unknown outputs, inputs or overrides, or missing inputs, in
-        its own format, which is kept: each unknown name gains the closest node
-        (Q71), and each missing input the closest supplied name that matched
-        nothing, followed by a line for any that is a config key (Q56).
+        The core's message only says which kind of problem it is: the names are
+        worked out here from the request and the views, and the line is rebuilt in
+        the core's format, each unknown name with the closest node (Q71). When the
+        rebuilt line, without suggestions, is not the core's, the core's is kept.
+        A missing input gets a line for each config key it names (Q56); `execute`
+        never suggests one, since a supplied name that is no input is raised first.
         """
         for kind in ("outputs", "inputs", "overrides"):
-            prefix = f"unknown {kind}: "
-            if message.startswith(prefix):
-                # The core quotes each name as `'name'`, joined by `, `.
-                names = message.removeprefix(prefix)[1:-1].split("', '")
-                return [_unknown(kind, names, self._graph.node_names())]
-        if not message.startswith(_MISSING):
-            return [message]
-        line = _missing(message, self._not_inputs(input_names))
-        hint = _config_hint(line, self._config)
-        return [line] if hint is None else [line, hint]
+            if message.startswith(f"unknown {kind}: "):
+                names = self._unknown_names(kind, key)
+                if names and _unknown(kind, names, ()) == message:
+                    return [_unknown(kind, names, list(self._nodes))]
+                return [message]
+        hint = _config_hint(message, self._config)
+        return [message] if hint is None else [message, hint]
 
-    def _not_inputs(self, names: AbstractSet[str]) -> list[str]:
-        """Those of `names` that are no input of the graph, sorted."""
+    def _unknown_names(self, kind: str, key: _PlanKey) -> list[str]:
+        """The names of request `key` of `kind` the graph lacks, sorted.
+
+        An output or override is unknown when it is no node; an input when it is
+        no input of the graph.
+        """
+        outputs, input_names, override_names = key
+        if kind == "inputs":
+            functions = self._nodes.functions
+            return sorted(
+                n for n in input_names if n not in self._nodes or n in functions
+            )
+        names = outputs if kind == "outputs" else override_names
+        return sorted({n for n in names if n not in self._nodes})
+
+    def _missing_entries(
+        self, plan: _core.Plan, outputs: Sequence[str], supplied: AbstractSet[str]
+    ) -> list[tuple[str, str]]:
+        """Each input missing from a request, as the core lists it, by name.
+
+        `plan` was compiled with every input of the graph supplied: an input it
+        reads that the request does not supply is missing when it was requested,
+        or a computed node of the plan reads it by a required edge, as the core's
+        `'x' (requested as an output, needed by 'a', 'b')`.
+        """
+        steps = plan.steps()
         functions = self._nodes.functions
-        return sorted(n for n in names if n not in self._nodes or n in functions)
+        readers: dict[str, list[str]] = {}
+        for node, action in steps:
+            view = functions.get(node)
+            if action != "compute" or view is None:
+                continue
+            for name, needed in core_inputs(view.params):
+                if needed:
+                    readers.setdefault(name, []).append(node)
+        wanted = set(outputs)
+        entries: list[tuple[str, str]] = []
+        unsupplied = (n for n, a in steps if a == "use_input" and n not in supplied)
+        for name in sorted(unsupplied):
+            reasons = ["requested as an output"] if name in wanted else []
+            if consumers := sorted(readers.get(name, ())):
+                reasons.append(f"needed by {', '.join(f"'{c}'" for c in consumers)}")
+            if reasons:
+                entries.append((name, f"'{name}' ({', '.join(reasons)})"))
+        return entries
 
     def validate(
         self,
@@ -531,12 +571,20 @@ class Driver:
 
         Runs nothing, and keeps no plan. The lines are sorted, and empty when the
         request is valid; each is the line `execute` raises for that problem on
-        its own. They cover unknown outputs, inputs and overrides; missing inputs,
-        naming only the consumers this request plans; the types of the input and
-        override values (unless the driver was built without input type checks);
-        and outputs no `@config.when*` variant gave. A malformed request raises,
-        as `prepare` does: `TypeError` for a bare `str` or a non-mapping, and the
-        errors of a function in `final_vars` (Q30).
+        its own. They cover functions in `final_vars` no node comes from (Q30);
+        unknown outputs, inputs and overrides; missing inputs, naming only the
+        consumers this request plans; the types of the input and override values
+        (unless the driver was built without input type checks); and outputs no
+        `@config.when*` variant gave.
+
+        Only `validate` suggests a name for a missing input: the closest supplied
+        name that is no node of the graph. `execute` raises that unknown input
+        first, on its own.
+
+        A malformed request raises: `TypeError` for a bare `str`, an item of
+        `final_vars` that is neither a name nor a function, or a function that
+        makes several nodes, as `execute` raises it; and `TypeError` for `inputs`
+        or `overrides` that is not a mapping, which `execute` refuses too.
         """
         for kind, values in (("inputs", inputs), ("overrides", overrides)):
             if values is not None and not isinstance(values, Mapping):
@@ -545,39 +593,38 @@ class Driver:
                     f"got {type(values).__name__}"
                 )
                 raise TypeError(msg)
-        outputs, input_names, override_names = _Request.check(
-            final_vars, self._nodes, inputs, overrides
-        )
-        nodes = self._graph.node_names()
-        known = frozenset(nodes)
+        outputs, absent_functions = requested(final_vars, self._nodes)
+        key: _PlanKey = (outputs, _names(inputs), _names(overrides))
+        _, input_names, override_names = key
         wanted = list(dict.fromkeys(outputs))
-        absent = sorted(set(wanted) & self._unmatched.keys())
-        lines = [self._unmatched[n] for n in absent]
-        unknown_inputs = self._not_inputs(input_names)
+        lines = [ABSENT + culprit for culprit in absent_functions]
+        lines += [
+            self._unmatched[n] for n in sorted(set(wanted) & self._unmatched.keys())
+        ]
         unknown = {
-            "outputs": sorted(
-                {n for n in wanted if n not in known and n not in self._unmatched}
-            ),
-            "inputs": unknown_inputs,
-            "overrides": sorted(override_names - known),
+            kind: [
+                n for n in self._unknown_names(kind, key) if n not in self._unmatched
+            ]
+            for kind in ("outputs", "inputs", "overrides")
         }
+        nodes = list(self._nodes)
         lines += [
             _unknown(kind, names, nodes) for kind, names in unknown.items() if names
         ]
-        planned = [n for n in wanted if n in known]
-        supplied = input_names.difference(unknown_inputs)
-        overridden = override_names & known
+        planned = [n for n in wanted if n in self._nodes]
+        supplied = input_names.difference(unknown["inputs"])
+        overridden = override_names.difference(unknown["overrides"])
+        plan: _core.Plan | None
         try:
             plan = self._graph.prepare(planned, sorted(supplied), sorted(overridden))
         except ValueError as error:
-            line = _missing(str(error), unknown_inputs)
+            plan, line = self._missing_line(
+                str(error), (planned, supplied, overridden), input_names
+            )
             lines.append(line)
             if (hint := _config_hint(line, self._config)) is not None:
                 lines.append(hint)
-            # Planned again with the missing inputs supplied, to find what is read.
-            every = supplied | _missing_names(str(error))
-            plan = self._graph.prepare(planned, sorted(every), sorted(overridden))
-        if self._check_inputs:
+        if self._check_inputs and plan is not None:
             read = sorted(
                 node
                 for node, action in plan.steps()
@@ -588,6 +635,32 @@ class Driver:
                 self._declared(sorted(overridden)), overrides or _NO_VALUES
             )
         return sorted(lines)
+
+    def _missing_line(
+        self,
+        message: str,
+        request: tuple[list[str], frozenset[str], frozenset[str]],
+        input_names: frozenset[str],
+    ) -> tuple[_core.Plan | None, str]:
+        """The plan with every input supplied, and the missing-input line.
+
+        `message` is the core's error for `request`, whose names are all known. The
+        line is rebuilt from the plan, each input with the closest supplied name
+        that is no node (Q71); when the rebuilt line, without suggestions, is not
+        the core's, or the plan can't be made, it is `message` unchanged.
+        """
+        planned, supplied, overridden = request
+        functions = self._nodes.functions
+        every = supplied | {n for n in self._nodes if n not in functions}
+        try:
+            plan = self._graph.prepare(planned, sorted(every), sorted(overridden))
+        except ValueError:
+            return None, message
+        entries = self._missing_entries(plan, planned, supplied)
+        if not entries or _missing(entries, ()) != message:
+            return plan, message
+        strangers = sorted(n for n in input_names if n not in self._nodes)
+        return plan, _missing(entries, strangers)
 
     def execute(
         self,
@@ -938,33 +1011,10 @@ def _unknown(kind: str, names: Sequence[str], candidates: Sequence[str]) -> str:
     return f"unknown {kind}: {listed}"
 
 
-def _missing_entries(message: str) -> list[str]:
-    """The entries of the core's missing-input `message`: `'x' (needed by 'a')`.
-
-    The core joins them with `; `, and a consumer list with `, `.
-    """
-    return message.removeprefix(_MISSING).split("; ")
-
-
-def _missing_names(message: str) -> frozenset[str]:
-    """The inputs the core's missing-input `message` names."""
-    return frozenset(
-        entry[1 : entry.index("' (")] for entry in _missing_entries(message)
-    )
-
-
-def _missing(message: str, unmatched: Sequence[str]) -> str:
-    """The core's missing-input `message`, each input with its suggestion (Q71).
-
-    The candidates are the `unmatched` supplied names: those that are no input.
-    """
-    if not unmatched:
-        return message
-    entries = [
-        entry + suggest(entry[1 : entry.index("' (")], unmatched)
-        for entry in _missing_entries(message)
-    ]
-    return _MISSING + "; ".join(entries)
+def _missing(entries: Sequence[tuple[str, str]], candidates: Sequence[str]) -> str:
+    """The core's missing-input line for `entries`, each with its suggestion (Q71)."""
+    listed = "; ".join(text + suggest(name, candidates) for name, text in entries)
+    return _MISSING + listed
 
 
 def _config_hint(message: str, config: Mapping[str, object]) -> str | None:
