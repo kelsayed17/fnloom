@@ -94,7 +94,7 @@ impl Plan {
             } else {
                 inputs
             };
-            let key = keyword(py, keywords, graph.core().node(id));
+            let key = keyword(py, keywords, id, &graph.core().node(id).name);
             match values.get_item(key) {
                 Ok(value) => value.map(|value| Arc::new(value.unbind())),
                 Err(error) => {
@@ -120,7 +120,8 @@ impl Plan {
         let outputs = outcome.map_err(|error| run_error(py, error))?;
         let result = PyDict::new(py);
         for (id, value) in outputs {
-            result.set_item(keyword(py, keywords, graph.core().node(id)), value.bind(py))?;
+            let name = &graph.core().node(id).name;
+            result.set_item(keyword(py, keywords, id, name), value.bind(py))?;
         }
         Ok(result)
     }
@@ -146,15 +147,16 @@ const fn action_name(action: Action) -> &'static str {
     }
 }
 
-/// The interned name of `node`, interned when the graph was built; interned now only if
-/// the table lacks it, which a plan run on its own graph rules out.
-fn keyword<'py, P>(
+/// The interned name of node `id`, called `name`, interned when the graph was built;
+/// interned now only if the table lacks it, which a plan run on its own graph rules out.
+fn keyword<'py>(
     py: Python<'py>,
     keywords: &[Py<PyString>],
-    node: &Node<P>,
+    id: NodeId,
+    name: &str,
 ) -> Bound<'py, PyString> {
-    keywords.get(node.id.index()).map_or_else(
-        || PyString::intern(py, &node.name),
+    keywords.get(id.index()).map_or_else(
+        || PyString::intern(py, name),
         |keyword| keyword.bind(py).clone(),
     )
 }
@@ -206,15 +208,12 @@ impl Observer<PyErr> for ValueHook<'_, '_> {
             return Ok(());
         }
         let py = self.callback.py();
-        let name = self.keywords.get(id.index()).map_or_else(
-            || PyString::intern(py, node),
-            |keyword| keyword.bind(py).clone(),
-        );
+        let name = keyword(py, self.keywords, id, node);
         caught(|| self.callback.call1((name, value.bind(py))).map(drop))
     }
 }
 
-impl<'py> Caller<'py, '_> {
+impl Caller<'_, '_> {
     /// Calls `function`, the payload of `consumer`, with `args` as keyword arguments.
     fn call(
         &self,
@@ -229,20 +228,11 @@ impl<'py> Caller<'py, '_> {
             // takes the slow path, which makes an n-parameter call cost O(n²).
             let keyword = match self.graph.renamed(consumer, arg.node) {
                 Some(renamed) => renamed.bind(self.py).clone(),
-                None => self.keyword(arg),
+                None => keyword(self.py, self.keywords, arg.node, arg.name),
             };
             kwargs.set_item(keyword, arg.value.bind(self.py))?;
         }
         let result = function.bind(self.py).call((), Some(&kwargs))?;
         Ok(Arc::new(result.unbind()))
-    }
-
-    /// The interned keyword for `arg`, interned when built; interned now only if the
-    /// table lacks it, which a plan run on its own graph rules out.
-    fn keyword(&self, arg: &Arg<'_, Value>) -> Bound<'py, PyString> {
-        self.keywords.get(arg.node.index()).map_or_else(
-            || PyString::intern(self.py, arg.name),
-            |keyword| keyword.bind(self.py).clone(),
-        )
     }
 }
