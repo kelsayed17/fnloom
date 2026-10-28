@@ -376,6 +376,7 @@ def test_public_api_is_exported() -> None:
         "Source",
         "UnfingerprintableError",
         "Value",
+        "ValueCheck",
         "build",
         "cache",
         "config",

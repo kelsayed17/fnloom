@@ -1202,7 +1202,11 @@ def check_of(
 
 
 type ValueCheck = collections.abc.Callable[[object, object], bool]
-"""A custom value check (Q21): whether a value fits a declared type, given both."""
+"""A custom value check (Q21), exported as `fnloom.ValueCheck`.
+
+Called as `check(declared, value)` for a value the default check refuses; a true
+result admits the value. See `Builder.with_value_check`.
+"""
 
 
 def checks_everything(declared: object) -> bool:

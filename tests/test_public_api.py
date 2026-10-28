@@ -72,4 +72,6 @@ def test_the_regressed_callables_are_covered() -> None:
         "PreparedPlan.run_raw",
         "AsyncDriver.raw_execute",
         "AsyncPreparedPlan.run_raw",
+        "Builder.with_output_type_checks",
+        "Builder.with_value_check",
     }

@@ -37,6 +37,7 @@ from fnloom._requests import ABSENT, requested, suggest
 from fnloom._requests import output_names as _requested_names
 from fnloom._scan import LeftOut, NodeDef, core_inputs, resolve, scan
 from fnloom._stores import CacheStore
+from fnloom._types import ValueCheck
 from fnloom._view import (
     InputView,
     NodeView,
@@ -232,16 +233,20 @@ def _output_checked(
     nodes: list[NodeDef],
     rules: _types.Rules,
     value_checks: tuple[_types.ValueCheck, ...],
+    *,
+    awaits: bool,
 ) -> list[NodeDef]:
     """`nodes`, each one's payload checking its result against its return type (Q87).
 
     A node returning `Any` or `object` is kept as it is, and so is an extracted
-    field's node, whose payload checks its value already.
+    field's node, whose payload checks its value already. With `awaits`, for the
+    async driver, a sync node's awaitable result is passed on unchecked, so the
+    driver refuses it with its own guided error.
     """
     return [
         node
         if is_generated(node) or _types.checks_everything(node.returns)
-        else replace(node, payload=_returning(node, rules, value_checks))
+        else replace(node, payload=_returning(node, rules, value_checks, awaits=awaits))
         for node in nodes
     ]
 
@@ -250,6 +255,8 @@ def _returning(
     node: NodeDef,
     rules: _types.Rules,
     value_checks: tuple[_types.ValueCheck, ...],
+    *,
+    awaits: bool,
 ) -> Callable[..., object]:
     """`node`'s payload, its result checked as an input would be; see `_output_checked`.
 
@@ -257,7 +264,9 @@ def _returning(
     notes the node on it, and `after_node` gets it. A node that raises raises
     its own error, never checked. An `async def` node's awaited result is
     checked, by a coroutine function the async driver awaits as it would the
-    node's own.
+    node's own. With `awaits`, a sync node's awaitable result is not checked:
+    the async driver refuses it, saying to make the node an `async def`, and
+    closes it, so it never warns as never awaited.
     """
     name, declared, payload = node.name, node.returns, node.payload
     classes, matches = _types.admitting(
@@ -293,6 +302,9 @@ def _returning(
     def call(**kwargs: object) -> object:
         value = payload(**kwargs)
         if classes is not None and isinstance(value, classes):
+            return value
+        if awaits and inspect.isawaitable(value):
+            # The async driver's own refusal, which names the fix, applies.
             return value
         return checked(value)
 
@@ -744,7 +756,7 @@ class Driver[R = dict[str, object]]:
         rules: _types.Rules = _types.SHALLOW,
         hooks: Sequence[Hook] = (),
         result_builder: _ResultBuilder[R] | None = None,
-        value_checks: Sequence[_types.ValueCheck] = (),
+        value_checks: Sequence[ValueCheck] = (),
     ) -> None:
         """Wraps a native graph; `Builder` is the way to make one from modules.
 
@@ -2090,7 +2102,7 @@ class Builder[R = dict[str, object]]:
         hooks: Sequence[Hook] = (),
         result_builder: _ResultBuilder[R] | None = None,
         output_type_checks: bool = False,
-        value_checks: Sequence[_types.ValueCheck] = (),
+        value_checks: Sequence[ValueCheck] = (),
     ) -> None:
         """Starts with the given modules (none by default), checking input types.
 
@@ -2351,7 +2363,7 @@ class Builder[R = dict[str, object]]:
         """
         return self._with(output_type_checks=True)
 
-    def with_value_check(self, check: _types.ValueCheck) -> Builder[R]:
+    def with_value_check(self, check: ValueCheck) -> Builder[R]:
         """Returns a new builder whose checks also admit what `check` admits (Q21).
 
         `check(declared, value)` is called with the declared type and the
@@ -2508,7 +2520,9 @@ class Builder[R = dict[str, object]]:
             nodes, frozenset(node.name for node in nodes if is_generated(node))
         )
         if self._output_type_checks:
-            nodes = _output_checked(nodes, self._rules, self._value_checks)
+            nodes = _output_checked(
+                nodes, self._rules, self._value_checks, awaits=awaits
+            )
         graph = _graph_of(nodes)
         if mismatches := _edge_mismatches(views.functions):
             raise ValueError("\n".join(mismatches))

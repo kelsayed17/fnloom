@@ -33,7 +33,7 @@ from fnloom._stores import (
     Format,
     MemoryCache,
 )
-from fnloom._types import type_matches, value_matches
+from fnloom._types import ValueCheck, type_matches, value_matches
 from fnloom._view import InputView, NodeView, Param
 from fnloom.driver import (
     AsyncDriver,
@@ -74,6 +74,7 @@ __all__ = [
     "Source",
     "UnfingerprintableError",
     "Value",
+    "ValueCheck",
     "build",
     "cache",
     "config",

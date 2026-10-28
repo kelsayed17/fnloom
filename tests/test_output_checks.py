@@ -1,7 +1,9 @@
 """Output type checks (Q87) and custom value checks (Q21), on both drivers."""
 
 import asyncio
+import collections.abc
 import copy
+import gc
 import pickle
 import typing
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -604,4 +606,39 @@ def test_the_check_types_are_typed() -> None:
     typing.assert_type(
         fnloom.Builder().with_value_check(digits).with_output_type_checks(),
         fnloom.Builder,
+    )
+
+
+LEAKS = """
+async def _inner() -> int:
+    return 1
+
+
+def leaks() -> int:
+    return _inner()
+"""
+
+
+@pytest.mark.filterwarnings("error::RuntimeWarning")
+@pytest.mark.parametrize("how", ASYNC_DRIVERS)
+def test_a_sync_node_returning_an_awaitable_keeps_the_async_refusal(how: str) -> None:
+    """The driver's own guided refusal, as without the setting; nothing leaks."""
+    module = _module(LEAKS)
+    message = (
+        r"^node 'leaks' is a sync function but returned coroutine, an awaitable; "
+        r"make it an async def"
+    )
+    for builder in (fnloom.Builder().with_modules(module), _checked(module)):
+        with pytest.raises(TypeError, match=message):
+            _run(builder, how, ["leaks"])
+    gc.collect()
+
+
+def test_the_value_check_type_is_public() -> None:
+    """`with_value_check` is annotated with the exported `fnloom.ValueCheck`."""
+    assert "ValueCheck" in fnloom.__all__
+    hints = typing.get_type_hints(fnloom.Builder.with_value_check)
+    assert hints["check"] is fnloom.ValueCheck
+    assert (
+        fnloom.ValueCheck.__value__ == collections.abc.Callable[[object, object], bool]
     )

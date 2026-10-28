@@ -374,7 +374,8 @@ by its length and items (Q80), `NewType`s and generics such as `Callable[[int], 
 and with [deep checks and numeric widening](running.md#deep-checks-and-numeric-widening) when they're on. A mismatch
 is a `TypeError` raised as the node's own failure, so it carries the node's `in node 'score'` note, and a
 [hook](hooks.md)'s `after_node` gets `ok=False` with that error. A node that raises keeps its own error: its missing
-result is never checked. An `async def` node's awaited result is what's checked.
+result is never checked. An `async def` node's awaited result is what's checked. On an `AsyncDriver`, a sync node
+that returns a coroutine still gets the driver's own error, saying to make it an `async def`.
 
 The checks are made at build, around only the nodes that need one. A node returning `Any` or `object` gets no check
 and costs nothing, and without the setting no node is touched. An extracted field is checked either way
