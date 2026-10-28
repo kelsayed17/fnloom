@@ -372,7 +372,8 @@ def test_a_missing_input_named_like_an_excluded_function_says_so() -> None:
         driver.execute(["needs_marked"])
     lines = str(raised.value).splitlines()
     assert (
-        f"'marked' is a function in module {module.__name__!r} marked @exclude" in lines
+        f"'marked' is a function in module {module.__name__!r} "
+        "marked @exclude and not listed in its __all__" in lines
     )
 
 
@@ -509,3 +510,218 @@ def test_an_excluded_function_is_never_a_node_by_identity() -> None:
     problems = driver.validate([second.total], inputs={"x": 2})
     assert len(problems) == 1
     assert "auth_id_second" in problems[0]
+
+
+_LEFT_OUT_TWICE = """
+import fnloom
+
+__all__ = ["reader{n}"]
+
+
+def shared(x: int) -> int:
+    return x
+
+
+@fnloom.exclude
+def shared_{n}(x: int) -> int:
+    return x
+
+
+def reader{n}(shared: int) -> int:
+    return shared
+"""
+
+
+def test_the_hint_does_not_depend_on_module_order() -> None:
+    """A name left out of two modules gives the same lines in either order."""
+    first = make_module("auth_order_a", _LEFT_OUT_TWICE.format(n="a"))
+    second = make_module("auth_order_b", _LEFT_OUT_TWICE.format(n="b"))
+    messages = []
+    for modules in ((first, second), (second, first)):
+        driver = fnloom.Builder().with_modules(*modules).build()
+        with pytest.raises(ValueError, match=r"missing inputs: 'shared'") as raised:
+            driver.execute(["readera"])
+        messages.append(str(raised.value))
+    assert messages[0] == messages[1]
+    lines = messages[0].splitlines()
+    assert lines[1:] == [
+        "'shared' is a function in module 'auth_order_a' not listed in its __all__",
+        "'shared' is a function in module 'auth_order_b' not listed in its __all__",
+    ]
+
+
+def test_a_name_left_out_of_one_module_but_a_node_of_another_has_no_hint() -> None:
+    """The hint only explains a missing name: a real node of that name is no culprit."""
+    left_out = make_module(
+        "auth_real_left",
+        """
+        import fnloom
+
+
+        @fnloom.exclude
+        def total(x: int) -> int:
+            return x * 3
+
+
+        def other(x: int) -> int:
+            return x
+        """,
+    )
+    real = make_module(
+        "auth_real_node",
+        """
+        def total(x: int) -> int:
+            return x * 2
+
+
+        def reader(total: int, q: int) -> int:
+            return total + q
+        """,
+    )
+    driver = fnloom.Builder().with_modules(left_out, real).build()
+    assert driver.execute(["reader"], inputs={"x": 1, "q": 1}) == {"reader": 3}
+    with pytest.raises(ValueError, match=r"missing inputs: 'q'") as raised:
+        driver.execute(["reader"], inputs={"x": 1})
+    assert "is a function in module" not in str(raised.value)
+    assert not any(
+        "is a function in module" in line for line in driver.validate(["reader"])
+    )
+
+
+_VARIANTS = """
+import fnloom
+
+__all__ = ["price__eu", "report"]
+
+
+@fnloom.config.when(region="eu")
+def price__eu(x: int) -> int:
+    return x
+
+
+@fnloom.config.when(region="us")
+def price__us(x: int) -> int:
+    return x * 2
+
+
+def report(price: int) -> int:
+    return price
+"""
+
+
+def test_a_config_variant_left_out_names_its_function_in_the_hint() -> None:
+    """The missing node's name `price` is explained by the variant `price__us`."""
+    module = make_module("auth_variant_hint", _VARIANTS)
+    only_us = make_module(
+        "auth_variant_only_us",
+        """
+        import fnloom
+
+        __all__ = ["report"]
+
+
+        @fnloom.config.when(region="us")
+        def price__us(x: int) -> int:
+            return x * 2
+
+
+        def report(price: int) -> int:
+            return price
+        """,
+    )
+    assert module.report is not None
+    driver = (
+        fnloom.Builder().with_modules(only_us).with_config({"region": "us"}).build()
+    )
+    with pytest.raises(ValueError, match=r"missing inputs: 'price'") as raised:
+        driver.execute(["report"])
+    assert (
+        "'price__us' (node 'price') is a function in module 'auth_variant_only_us' "
+        "not listed in its __all__"
+    ) in raised.value.__str__().splitlines()
+
+
+def test_an_unmatched_variant_error_mentions_variants_left_out() -> None:
+    """With `__all__` listing only `price__eu` and `region=us`, `price__us` is named."""
+    module = make_module("auth_variant_unmatched", _VARIANTS)
+    with pytest.raises(ValueError, match=r"no variant of 'price' matches") as raised:
+        fnloom.Builder().with_modules(module).with_config({"region": "us"}).build()
+    message = str(raised.value)
+    assert "its variants need region == 'eu' (price__eu)" in message
+    assert (
+        "'price__us' (node 'price') is a function in module "
+        "'auth_variant_unmatched' not listed in its __all__"
+    ) in message
+    # With the matching region the variant is selected and nothing is said.
+    driver = fnloom.Builder().with_modules(module).with_config({"region": "eu"}).build()
+    assert driver.execute(["report"], inputs={"x": 4}) == {"report": 4}
+
+
+def test_an_unmatched_variant_error_names_excluded_variants_too() -> None:
+    """`@exclude` on a variant is a reason as `__all__` is."""
+    module = make_module(
+        "auth_variant_excluded",
+        """
+        import fnloom
+
+
+        @fnloom.config.when(region="eu")
+        def price__eu(x: int) -> int:
+            return x
+
+
+        @fnloom.exclude
+        @fnloom.config.when(region="us")
+        def price__us(x: int) -> int:
+            return x * 2
+
+
+        def report(price: int) -> int:
+            return price
+        """,
+    )
+    with pytest.raises(ValueError, match=r"no variant of 'price' matches") as raised:
+        fnloom.Builder().with_modules(module).with_config({"region": "us"}).build()
+    assert (
+        "'price__us' (node 'price') is a function in module "
+        "'auth_variant_excluded' marked @exclude"
+    ) in str(raised.value)
+
+
+@pytest.mark.parametrize("bad", [None, int, len, 3])
+def test_exclude_refuses_anything_but_a_function(bad: object) -> None:
+    """`@exclude(None)`, a class and a built-in all get the same message."""
+    with pytest.raises(TypeError, match=r"exclude takes a function or nothing, got"):
+        fnloom.exclude(cast("Any", bad))
+
+
+def test_exclude_with_a_class_says_a_class() -> None:
+    """The message names the kind of thing it was given."""
+    with pytest.raises(TypeError, match=r"got a class"):
+        fnloom.exclude(cast("Any", int))
+    with pytest.raises(TypeError, match=r"got NoneType"):
+        fnloom.exclude(cast("Any", None))
+
+
+def test_a_function_both_excluded_and_unlisted_gives_both_reasons_when_empty() -> None:
+    """The empty-module error lists both reasons for one function."""
+    module = make_module(
+        "auth_both_reasons",
+        """
+        import fnloom
+
+        __all__ = []
+
+
+        @fnloom.exclude
+        def both(x: int) -> int:
+            return x
+        """,
+    )
+    with pytest.raises(
+        ValueError, match=r"module 'auth_both_reasons' has no nodes"
+    ) as raised:
+        fnloom.build(module)
+    assert "'both' is marked @exclude and not listed in its __all__" in str(
+        raised.value
+    )

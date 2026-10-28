@@ -349,14 +349,27 @@ def _leaving_out(listed: frozenset[str] | None, name: str, value: object) -> str
 
     `listed` is the module's `__all__`, or `None` when it has none.
 
-    Excluded wins over unlisted. A function no decorator touched has no record in
-    its `__dict__`, so it costs a dict lookup, the common case.
+    Both reasons are given when both hold. A function no decorator touched has no
+    record in its `__dict__`, so it costs a dict lookup, the common case.
     """
+    reasons: list[str] = []
     if _ATTRIBUTE in getattr(value, "__dict__", ()) and decorations(value).excluded:  # ty: ignore[invalid-argument-type]  # `value` is a function here
-        return _EXCLUDED
+        reasons.append(_EXCLUDED)
     if listed is not None and name not in listed:
-        return _UNLISTED
-    return None
+        reasons.append(_UNLISTED)
+    return " and ".join(reasons) or None
+
+
+class LeftFunction(NamedTuple):
+    """A function `@exclude` or `__all__` left out of a module."""
+
+    # The name it is listed under in `__all__`: its attribute name.
+    name: str
+    # The node name it would have made: its own name, or its variant's node.
+    node: str
+    why: str
+    # Whether it is a `@config` variant.
+    variant: bool
 
 
 class ModuleFunctions(NamedTuple):
@@ -364,8 +377,8 @@ class ModuleFunctions(NamedTuple):
 
     functions: list[Found]
     configured: bool
-    # Each function `@exclude` or `__all__` left out: (name, reason).
-    left_out: list[tuple[str, str, str]]
+    # Each function `@exclude` or `__all__` left out.
+    left_out: list[LeftFunction]
 
 
 def _found(module: ModuleType) -> ModuleFunctions:
@@ -377,14 +390,15 @@ def _found(module: ModuleType) -> ModuleFunctions:
     listed under in `__all__`, the node name it would have made, why).
     """
     functions: list[Found] = []
-    left_out: list[tuple[str, str, str]] = []
+    left_out: list[LeftFunction] = []
     configured = False
     listed = _listed(module)
     for name, value in vars(module).items():
         if not _is_node(module, name, value):
             continue
         if (why := _leaving_out(listed, name, value)) is not None:
-            left_out.append((name, _node_name(value), why))
+            variant = decorations(value).config is not None
+            left_out.append(LeftFunction(name, _node_name(value), why, variant))
             continue
         functions.append((module, name, value))
         if not configured and _ATTRIBUTE in value.__dict__:
@@ -454,6 +468,23 @@ class Gathered(NamedTuple):
     functions: list[Found]
     configured: list[ModuleType]
     left_out: LeftOut
+    # The lines for `@config` variants left out, by the node they would give.
+    variants: LeftOut
+
+
+def _record(
+    module: ModuleType, left: list[LeftFunction], left_out: LeftOut, variants: LeftOut
+) -> None:
+    """Adds a line for each function of `module` that was left out, by name (Q73)."""
+    for function in left:
+        shown = repr(function.name)
+        if function.node != function.name:
+            shown += f" (node {function.node!r})"
+        line = f"{shown} is a function in module {module.__name__!r} {function.why}"
+        for key in dict.fromkeys((function.name, function.node)):
+            left_out.setdefault(key, []).append(line)
+        if function.variant:
+            variants.setdefault(function.node, []).append(line)
 
 
 def _functions(modules: Sequence[ModuleType]) -> Gathered:
@@ -473,6 +504,7 @@ def _functions(modules: Sequence[ModuleType]) -> Gathered:
     configured: list[ModuleType] = []
     empty: list[str] = []
     left_out: LeftOut = {}
+    variants: LeftOut = {}
     for module in unique:
         gathered = _found(module)
         if not gathered.functions:
@@ -480,13 +512,13 @@ def _functions(modules: Sequence[ModuleType]) -> Gathered:
         elif gathered.configured:
             configured.append(module)
         found.extend(gathered.functions)
-        for name, node_name, why in gathered.left_out:
-            line = f"{{}} is a function in module {module.__name__!r} {why}"
-            for key in dict.fromkeys((name, node_name)):
-                left_out.setdefault(key, []).append(line.format(repr(key)))
+        _record(module, gathered.left_out, left_out, variants)
     if empty:
         raise ValueError("; ".join(empty))
-    return Gathered(found, configured, left_out)
+    # Sorted, so the lines do not depend on the order the modules were given in.
+    for lines in (*left_out.values(), *variants.values()):
+        lines.sort()
+    return Gathered(found, configured, left_out, variants)
 
 
 # No config: what a build without `with_config` selects with. Read, never written.
@@ -541,7 +573,7 @@ def scan(
     variants is selected is not empty. Without a config-decorated function
     there is nothing to select, and selection is skipped entirely.
     """
-    found, configured, left_out = _functions(modules)
+    found, configured, left_out, variants = _functions(modules)
     unmatched: dict[str, str] = {}
     if configured:
         if redefined := sorted(line for m in configured for line in redefinitions(m)):
@@ -562,6 +594,9 @@ def scan(
         raise ValueError("; ".join(message for _, message in clashes))
     # A node a plain function or another variant defines is not missing.
     missing = {n: why for n, why in unmatched.items() if n not in seen}
+    for name in missing.keys() & variants.keys():
+        # A variant the scan left out is a reason too: say so beside the others.
+        missing[name] = "; ".join([missing[name], *variants[name]])
     return Scanned(list(seen.values()), missing, left_out)
 
 

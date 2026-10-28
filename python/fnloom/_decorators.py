@@ -5,7 +5,7 @@ import inspect
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Literal, overload
+from typing import TYPE_CHECKING, Final, Literal, overload
 
 from fnloom._stores import Format
 
@@ -334,8 +334,27 @@ def defaults[F: Callable[..., object]](
 
 def _mark_excluded[F: Callable[..., object]](fn: F) -> F:
     """Records on `fn` that it is not a node; returns `fn` itself."""
-    setattr(fn, _ATTRIBUTE, replace(decorations(fn), excluded=True))
+    # Typed as `object`: a caller may pass anything, whatever the hint says.
+    given: object = fn
+    if not callable(given) or isinstance(given, type):
+        msg = f"exclude takes a function or nothing, got {_shown(given)}"
+        raise TypeError(msg)
+    try:
+        setattr(fn, _ATTRIBUTE, replace(decorations(fn), excluded=True))
+    except AttributeError, TypeError:
+        # A callable that takes no attributes, such as a built-in function.
+        msg = f"exclude takes a function or nothing, got {_shown(given)}"
+        raise TypeError(msg) from None
     return fn
+
+
+def _shown(given: object) -> str:
+    """What the exclude error calls `given`: its kind, or `a class` for a class."""
+    return "a class" if isinstance(given, type) else type(given).__name__
+
+
+# What `exclude()` was called with when nothing was: `None` is a value to refuse.
+_NOTHING: Final = object()
 
 
 @overload
@@ -346,18 +365,14 @@ def exclude[F: Callable[..., object]](fn: F, /) -> F: ...
 def exclude[F: Callable[..., object]]() -> Callable[[F], F]: ...
 
 
-def exclude[F: Callable[..., object]](fn: F | None = None, /) -> F | Callable[[F], F]:
+def exclude[F: Callable[..., object]](fn: F = _NOTHING, /) -> F | Callable[[F], F]:  # ty: ignore[invalid-parameter-default]  # a sentinel for "called with nothing"
     """Keeps a public function out of the graph: written bare or called, `@exclude()`.
 
     Only records the mark: the function is returned unchanged, still callable, and
-    stacks with the other decorators in any order. The scan skips it, so its
-    annotations are never read. Hamilton's `hamilton_exclude` works bare only (Q73).
+    stacks with the other decorators in either order. The scan skips it, so its
+    annotations are never read. Anything but a function, `None` and a class
+    included, is a `TypeError`. Hamilton's `hamilton_exclude` works bare only (Q73).
     """
-    # Typed as `object`: a caller may pass anything, whatever the hint says.
-    given: object = fn
-    if given is None:
+    if fn is _NOTHING:
         return _mark_excluded
-    if not callable(given):
-        msg = f"exclude takes a function or nothing, got {type(given).__name__}"
-        raise TypeError(msg)
-    return _mark_excluded(fn)  # ty: ignore[invalid-argument-type]  # narrowed through `given`
+    return _mark_excluded(fn)

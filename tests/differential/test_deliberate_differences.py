@@ -2551,11 +2551,14 @@ _Q73_SOURCE = """
 from typing import TYPE_CHECKING
 
 from {exclude} import {name}
+from {other} import imported
 
 if TYPE_CHECKING:
     from decimal import Decimal
 
-__all__ = ["public_one", "reader"]
+__all__ = ["public_one", "reader", "imported", "LIMIT", "_helper", "listed_marked"]
+
+LIMIT = 3
 
 
 def public_one(x: int) -> int:
@@ -2566,8 +2569,17 @@ def not_in_all(x: int) -> int:
     return x
 
 
+def _helper(x: int) -> int:
+    return x
+
+
 @{name}
 def legacy(x: "Decimal") -> "Decimal":
+    return x
+
+
+@{name}
+def listed_marked(x: int) -> int:
     return x
 
 
@@ -2575,59 +2587,256 @@ def reader(legacy: int, not_in_all: int) -> int:
     return legacy + not_in_all
 """
 
+_Q73_VARIANTS = """
+{import_}
+
+__all__ = ["price__eu"]
+
+
+@{when}(region="eu")
+def price__eu(x: int) -> int:
+    return x
+
+
+@{when}(region="us")
+def price__us(x: int) -> int:
+    return x * 2
+"""
+
+_Q73_STACKED = """
+from {exclude} import {name}
+from {tag} import tag
+
+
+@{name}
+@tag(kind="a")
+def above(x: int) -> int:
+    return x
+
+
+@tag(kind="b")
+@{name}
+def below(x: int) -> int:
+    return x
+
+
+def kept(x: int) -> int:
+    return x
+"""
+
+
+def _q73_nodes(driver: hamilton_driver.Driver) -> set[str]:
+    """The names Hamilton lists for `driver`, inputs included."""
+    return {variable.name for variable in driver.list_available_variables()}
+
 
 @pytest.mark.deliberate("Q73")
 def test_q73_all_and_exclude() -> None:
     """Hamilton ignores `__all__`, and its exclude works bare; fnloom honours both."""
+    make_module(
+        "differential_q73_other", "def imported(x: int) -> int:\n    return x\n"
+    )
     hamilton_module = make_module(
         "differential_q73_hamilton",
         _Q73_SOURCE.format(
-            exclude="hamilton.function_modifiers", name="hamilton_exclude"
+            exclude="hamilton.function_modifiers",
+            name="hamilton_exclude",
+            other="differential_q73_other",
         ),
     )
     fnloom_module = make_module(
         "differential_q73_fnloom",
-        _Q73_SOURCE.format(exclude="fnloom", name="exclude"),
+        _Q73_SOURCE.format(
+            exclude="fnloom", name="exclude", other="differential_q73_other"
+        ),
     )
     # Hamilton: `__all__` is ignored, so `not_in_all` is a node; the excluded
-    # function, with an unresolvable annotation, is not.
+    # function, with an unresolvable annotation, is not, listed or not.
     hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
-    names = {variable.name for variable in hamilton.list_available_variables()}
+    names = _q73_nodes(hamilton)
     assert {"public_one", "not_in_all", "reader"} <= names
     assert "legacy" in names  # an input of `reader`, not a node
+    assert "listed_marked" not in names  # exclude beats a listing
+    assert "_helper" not in names  # a listing never makes a private function a node
+    assert "imported" not in names  # re-exports and constants are not nodes
+    assert "LIMIT" not in names
     assert hamilton.execute(["not_in_all"], inputs={"x": 1}) == {"not_in_all": 1}
     # fnloom: only `public_one` and `reader` are nodes; the other two are inputs.
     built = fnloom.build(fnloom_module)
     assert built.node_names() == ["legacy", "not_in_all", "public_one", "reader", "x"]
     assert not {"public_one", "reader"} - set(built.nodes)
     assert {"legacy", "not_in_all"} <= set(built.inputs())
-    assert fnloom_module.legacy(1) == 1
+    assert not {"listed_marked", "_helper", "imported", "LIMIT"} & set(
+        built.node_names()
+    )
     with pytest.raises(ValueError, match=r"missing inputs: 'legacy'.*") as left_out:
         built.execute(["reader"], inputs={"not_in_all": 1})
     assert (
-        "'legacy' is a function in module 'differential_q73_fnloom' marked @exclude"
-        in str(left_out.value)
-    )
+        "'legacy' is a function in module 'differential_q73_fnloom' "
+        "marked @exclude and not listed in its __all__"
+    ) in str(left_out.value)
     with pytest.raises(ValueError, match=r"missing inputs: 'not_in_all'") as unlisted:
         built.execute(["reader"], inputs={"legacy": 1})
     assert (
         "'not_in_all' is a function in module 'differential_q73_fnloom' "
         "not listed in its __all__"
     ) in str(unlisted.value)
-    # Hamilton's exclude is an instance that only works bare; fnloom's works called.
+
+
+@pytest.mark.deliberate("Q73")
+def test_q73_exclude_forms_and_stacking() -> None:
+    """The bare form returns the function, the called form works, and order is free."""
+
+    def fresh_hamilton(x: int) -> int:
+        return x
+
+    def fresh_bare(x: int) -> int:
+        return x
+
+    def fresh_called(x: int) -> int:
+        return x
+
+    # Hamilton's is an instance that only works bare, and returns the function.
     assert not isinstance(hamilton_exclude, type)
+    assert hamilton_exclude(fresh_hamilton) is fresh_hamilton
     with pytest.raises(
         TypeError, match=r"missing 1 required positional argument: 'fn'"
     ):
         hamilton_exclude()  # the call under test
-    assert fnloom.exclude()(fnloom_module.public_one) is fnloom_module.public_one
-    # A malformed `__all__` is not checked by Hamilton.
-    bad = "__all__ = 'a'\n\n\ndef a(x: int) -> int:\n    return x\n"
-    bad_hamilton = make_module("differential_q73_bad_hamilton", bad)
-    hamilton_driver.Builder().with_modules(bad_hamilton).build()
-    bad_fnloom = make_module("differential_q73_bad_fnloom", bad)
-    with pytest.raises(TypeError, match=r"__all__ must be a list or tuple of str"):
-        fnloom.build(bad_fnloom)
+    assert fnloom.exclude(fresh_bare) is fresh_bare
+    assert fnloom.exclude()(fresh_called) is fresh_called
+    # Stacked with `@tag` either way round, both exclude.
+    hamilton_stacked = make_module(
+        "differential_q73_stack_hamilton",
+        _Q73_STACKED.format(
+            exclude="hamilton.function_modifiers",
+            name="hamilton_exclude",
+            tag="hamilton.function_modifiers",
+        ),
+    )
+    fnloom_stacked = make_module(
+        "differential_q73_stack_fnloom",
+        _Q73_STACKED.format(exclude="fnloom", name="exclude", tag="fnloom"),
+    )
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_stacked).build()
+    assert _q73_nodes(hamilton) == {"kept", "x"}
+    assert fnloom.build(fnloom_stacked).node_names() == ["kept", "x"]
+
+
+@pytest.mark.deliberate("Q73")
+def test_q73_config_variants_are_listed_by_attribute_name() -> None:
+    """Hamilton picks `price__us` though `__all__` omits it; fnloom does not."""
+    hamilton_module = make_module(
+        "differential_q73_variant_hamilton",
+        _Q73_VARIANTS.format(
+            import_="from hamilton.function_modifiers import config",
+            when="config.when",
+        ),
+    )
+    fnloom_module = make_module(
+        "differential_q73_variant_fnloom",
+        _Q73_VARIANTS.format(import_="import fnloom", when="fnloom.config.when"),
+    )
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(hamilton_module)
+        .with_config({"region": "us"})
+        .build()
+    )
+    assert hamilton.execute(["price"], inputs={"x": 2}) == {"price": 4}
+    # Listed as `price__eu`, that variant is the only one considered.
+    eu = fnloom.Builder().with_modules(fnloom_module).with_config({"region": "eu"})
+    assert eu.build().execute(["price"], inputs={"x": 2}) == {"price": 2}
+    us = fnloom.Builder().with_modules(fnloom_module).with_config({"region": "us"})
+    with pytest.raises(ValueError, match=r"no variant of 'price'") as unmatched:
+        us.build().execute(["price"], inputs={"x": 2})
+    assert (
+        "'price__us' (node 'price') is a function in module "
+        "'differential_q73_variant_fnloom' not listed in its __all__"
+    ) in str(unmatched.value)
+
+
+@pytest.mark.deliberate("Q73")
+def test_q73_empty_module_reasons() -> None:
+    """Hamilton builds a module with every function excluded; fnloom says why not."""
+    hamilton_module = make_module(
+        "differential_q73_empty_hamilton",
+        "from hamilton.function_modifiers import hamilton_exclude\n\n__all__ = []\n\n\n"
+        "@hamilton_exclude\ndef both(x: int) -> int:\n    return x\n\n\n"
+        "def unlisted(x: int) -> int:\n    return x\n",
+    )
+    # `unlisted` is a node for Hamilton, which ignores `__all__`.
+    assert "unlisted" in _q73_nodes(
+        hamilton_driver.Builder().with_modules(hamilton_module).build()
+    )
+    fnloom_module = make_module(
+        "differential_q73_empty_fnloom",
+        "import fnloom\n\n__all__ = []\n\n\n"
+        "@fnloom.exclude\ndef both(x: int) -> int:\n    return x\n\n\n"
+        "@fnloom.exclude\ndef marked(x: int) -> int:\n    return x\n\n\n"
+        "def unlisted(x: int) -> int:\n    return x\n",
+    )
+    with pytest.raises(ValueError, match=r"has no nodes") as empty:
+        fnloom.build(fnloom_module)
+    message = str(empty.value)
+    assert "'both' is marked @exclude and not listed in its __all__" in message
+    assert "'unlisted' is not listed in its __all__" in message
+
+
+@pytest.mark.deliberate("Q73")
+def test_q73_final_vars_identity_refuses_an_excluded_function() -> None:
+    """Hamilton maps an excluded function to its name; fnloom decides by identity."""
+    source_first = "def total(x: int) -> int:\n    return x * 2\n"
+    source_second = (
+        "{import_}\n\n\n@{name}\ndef total(x: int) -> int:\n    return x * 3\n"
+        "\n\ndef other(x: int) -> int:\n    return x\n"
+    )
+    h_first = make_module("differential_q73_id_h1", source_first)
+    h_second = make_module(
+        "differential_q73_id_h2",
+        source_second.format(
+            import_="from hamilton.function_modifiers import hamilton_exclude",
+            name="hamilton_exclude",
+        ),
+    )
+    f_first = make_module("differential_q73_id_f1", source_first)
+    f_second = make_module(
+        "differential_q73_id_f2",
+        source_second.format(import_="import fnloom", name="fnloom.exclude"),
+    )
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(h_first, h_second)
+        .allow_module_overrides()
+        .build()
+    )
+    assert hamilton.execute([h_second.total], inputs={"x": 2}) == {"total": 4}
+    built = fnloom.Builder().with_modules(f_first, f_second).build()
+    assert built.execute([f_first.total], inputs={"x": 2}) == {"total": 4}
+    with pytest.raises(ValueError, match=r"not the function behind node 'total'"):
+        built.execute([f_second.total], inputs={"x": 2})
+
+
+@pytest.mark.deliberate("Q73")
+def test_q73_malformed_all_names_every_module_sorted() -> None:
+    """Hamilton builds a malformed `__all__`; fnloom lists each module, sorted."""
+    bad = "__all__ = {}\n\n\ndef a(x: int) -> int:\n    return x\n"
+    hamilton_modules = [
+        make_module("differential_q73_bad_h_zed", bad.format("'a'")),
+        make_module("differential_q73_bad_h_alpha", bad.format("[1]")),
+    ]
+    hamilton_driver.Builder().with_modules(
+        *hamilton_modules
+    ).allow_module_overrides().build()
+    zed = make_module("differential_q73_bad_zed", bad.format("'a'"))
+    alpha = make_module("differential_q73_bad_alpha", bad.format("[1]"))
+    with pytest.raises(TypeError) as malformed:
+        fnloom.Builder().with_modules(zed, alpha).build()
+    message = str(malformed.value)
+    assert "__all__ must be a list or tuple of str" in message
+    assert message.index("'differential_q73_bad_alpha'") < message.index(
+        "'differential_q73_bad_zed'"
+    )
 
 
 @pytest.mark.deliberate("Q75")
