@@ -5,7 +5,7 @@ import inspect
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Literal, overload
 
 from fnloom._stores import Format
 
@@ -71,7 +71,8 @@ class DefaultsPolicy:
 class Decorations:
     """What the decorators recorded on one function.
 
-    Its rows, tags, cache policy, config conditions, extraction and defaults.
+    Its rows, tags, cache policy, config conditions, extraction, defaults, and whether
+    `@exclude` marked it.
     """
 
     rows: Mapping[str, Mapping[str, Source | Value]] | None
@@ -80,6 +81,7 @@ class Decorations:
     config: ConfigPolicy | None = None
     extract: Extraction | None = None
     defaults: DefaultsPolicy | None = None
+    excluded: bool = False
 
 
 def source(name: str) -> Source:
@@ -328,3 +330,34 @@ def defaults[F: Callable[..., object]](
         return fn
 
     return apply
+
+
+def _mark_excluded[F: Callable[..., object]](fn: F) -> F:
+    """Records on `fn` that it is not a node; returns `fn` itself."""
+    setattr(fn, _ATTRIBUTE, replace(decorations(fn), excluded=True))
+    return fn
+
+
+@overload
+def exclude[F: Callable[..., object]](fn: F, /) -> F: ...
+
+
+@overload
+def exclude[F: Callable[..., object]]() -> Callable[[F], F]: ...
+
+
+def exclude[F: Callable[..., object]](fn: F | None = None, /) -> F | Callable[[F], F]:
+    """Keeps a public function out of the graph: written bare or called, `@exclude()`.
+
+    Only records the mark: the function is returned unchanged, still callable, and
+    stacks with the other decorators in any order. The scan skips it, so its
+    annotations are never read. Hamilton's `hamilton_exclude` works bare only (Q73).
+    """
+    # Typed as `object`: a caller may pass anything, whatever the hint says.
+    given: object = fn
+    if given is None:
+        return _mark_excluded
+    if not callable(given):
+        msg = f"exclude takes a function or nothing, got {type(given).__name__}"
+        raise TypeError(msg)
+    return _mark_excluded(fn)  # ty: ignore[invalid-argument-type]  # narrowed through `given`

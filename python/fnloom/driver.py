@@ -20,7 +20,7 @@ from fnloom._defaults import default_problems
 from fnloom._extract import is_generated
 from fnloom._requests import ABSENT, requested, suggest
 from fnloom._requests import output_names as _requested_names
-from fnloom._scan import NodeDef, core_inputs, resolve, scan
+from fnloom._scan import LeftOut, NodeDef, core_inputs, resolve, scan
 from fnloom._stores import CacheStore
 from fnloom._view import (
     InputView,
@@ -361,6 +361,8 @@ class Driver:
         )
         # Each node no `@config.when*` variant gave, with why: see `prepare`.
         self._unmatched: Mapping[str, str] = {}
+        # Each function `@exclude` or `__all__` left out, with why: see `_hints`.
+        self._left_out: Mapping[str, Sequence[str]] = {}
         self._nodes = (
             nodes if isinstance(nodes, NodeViews) else NodeViews(nodes or {}, {})
         )
@@ -402,6 +404,7 @@ class Driver:
         copied._modules = self._modules
         copied._builder = self._builder
         copied._unmatched = self._unmatched
+        copied._left_out = self._left_out
         return copied
 
     @property
@@ -555,8 +558,16 @@ class Driver:
                 if names and _unknown(kind, names, ()) == message:
                     return [_unknown(kind, names, list(self._nodes))]
                 return [message]
-        hint = _config_hint(message, self._config)
-        return [message] if hint is None else [message, hint]
+        return [message, *self._hints(message)]
+
+    def _hints(self, line: str) -> list[str]:
+        """The lines explaining a missing input in `line`: config keys, left out."""
+        hints: list[str] = []
+        if (hint := _config_hint(line, self._config)) is not None:
+            hints.append(hint)
+        if line.startswith(_MISSING):
+            hints += _left_out_hints(line, self._left_out)
+        return hints
 
     def _unknown_names(self, kind: str, key: _PlanKey) -> list[str]:
         """The names of request `key` of `kind` the graph lacks, sorted.
@@ -667,8 +678,7 @@ class Driver:
                 str(error), (planned, supplied, overridden), input_names
             )
             lines.append(line)
-            if (hint := _config_hint(line, self._config)) is not None:
-                lines.append(hint)
+            lines += self._hints(line)
         if plan is not None and self._strict_overrides:
             refused = self._unsupplied_overrides(plan, input_names, overridden)
             lines += _strict(refused).splitlines() if refused else []
@@ -1099,6 +1109,20 @@ def _config_hint(message: str, config: Mapping[str, object]) -> str | None:
     )
 
 
+def _left_out_hints(message: str, left_out: Mapping[str, Sequence[str]]) -> list[str]:
+    """A line for each missing input in `message` that is a function left out (Q73).
+
+    The name of a function `@exclude` marks, or a module's `__all__` does not list,
+    is a missing input like any other name: this says why it is not a node.
+    """
+    return [
+        line
+        for name in sorted(left_out)
+        if f"'{name}' (" in message
+        for line in left_out[name]
+    ]
+
+
 def _checked_config(config: object) -> dict[str, object]:
     """A copy of `config`; `TypeError` for a non-mapping or a key that is no `str`."""
     if not isinstance(config, Mapping):
@@ -1395,10 +1419,10 @@ class Builder:
         variants, or a node that a node reads and that no variant or
         `@config.default` gives, are a `ValueError` naming each (Q57, Q58).
         """
-        nodes, views, graph, unmatched = self._scanned(awaits=False)
+        nodes, views, graph, unmatched, left_out = self._scanned(awaits=False)
         # Called here, so a `CacheWarning` points at the caller's `build`.
         cache = None if self._store is None else Cache.of(self._store, nodes)
-        return self._driver(graph, views, unmatched, cache)
+        return self._driver(graph, views, unmatched, left_out, cache)
 
     def build_async(
         self, *, sync_nodes: Literal["thread", "inline"] = "thread"
@@ -1417,11 +1441,11 @@ class Builder:
         or that a failure cancels, stores nothing. Store calls run on the loop.
         """
         checked = _async.checked_sync_nodes(sync_nodes)
-        nodes, views, graph, unmatched = self._scanned(awaits=True)
+        nodes, views, graph, unmatched, left_out = self._scanned(awaits=True)
         # Called here, so a `CacheWarning` points at the caller's `build_async`.
         cache = None if self._store is None else Cache.of(self._store, nodes)
         built = AsyncDriver(
-            self._driver(graph, views, unmatched, cache),
+            self._driver(graph, views, unmatched, left_out, cache),
             {node.name: node for node in nodes},
             sync_nodes=checked,
         )
@@ -1430,10 +1454,11 @@ class Builder:
 
     def _scanned(
         self, *, awaits: bool
-    ) -> tuple[list[NodeDef], NodeViews, _core.Graph, dict[str, str]]:
+    ) -> tuple[list[NodeDef], NodeViews, _core.Graph, dict[str, str], LeftOut]:
         """The checked nodes, their views and graph; see `build`.
 
-        Also why each node no variant gave is absent. With `awaits`, an
+        Also why each node no variant gave is absent, and each function `@exclude` or
+        `__all__` left out. With `awaits`, an
         `async def` is a node too.
         """
         scanned = scan(self._modules, self._config, awaits=awaits)
@@ -1457,13 +1482,14 @@ class Builder:
             refused := _undeclared(views, self._declared_inputs)
         ):
             raise ValueError("\n".join(refused))
-        return nodes, views, graph, unmatched
+        return nodes, views, graph, unmatched, scanned.left_out
 
     def _driver(
         self,
         graph: _core.Graph,
         views: NodeViews,
         unmatched: dict[str, str],
+        left_out: LeftOut,
         cache: Cache | None,
     ) -> Driver:
         """This builder's driver over a scanned graph."""
@@ -1478,6 +1504,7 @@ class Builder:
         )
         driver._modules = tuple(dict.fromkeys(self._modules))  # noqa: SLF001  # the builder's own driver
         driver._unmatched = unmatched  # noqa: SLF001  # the builder's own driver
+        driver._left_out = left_out  # noqa: SLF001  # the builder's own driver
         driver._builder = self  # noqa: SLF001  # the builder's own driver
         return driver
 

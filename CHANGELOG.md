@@ -60,11 +60,19 @@ change the public API; such changes are listed under **Changed** and **Removed**
   nodes run in a worker thread, or on the loop with `build_async(sync_nodes="inline")` (Q65). A failing node cancels its
   running siblings, each once, waits for them and raises its own exception, noted with its name (Q66). Requests are
   checked as the sync driver checks them (Q67), and an `async def` `@parameterize` row is awaited (Q69).
+- `@fnloom.exclude`, bare or called, keeps a public function out of the graph and returns it unchanged. Hamilton's
+  `@hamilton_exclude` works bare only. An excluded function's annotations are never read, so it needs none (Q73).
 - Caching on the async driver: `with_cache(...).build_async()` uses the sync driver's keys, stores, policies and
   `explain_cache`. A node is stored as it succeeds; one that fails, or that a failure cancels, stores nothing (Q68).
 
 ### Changed
 
+- **Breaking:** a module that defines `__all__` now makes nodes of only the functions it names. Hamilton ignores
+  `__all__`, and so did fnloom, so a function the module left out stops being a node, and anything reading its name
+  now sees an input. A function listed by its attribute name, `price__eu` for a `@config` variant, is the one
+  considered. To keep a function as a node, add its name to `__all__`, or remove `__all__`. An `__all__` that is not a
+  list or tuple of `str` is a `TypeError` at build. A missing input named like a function `__all__` or `@exclude` left
+  out now says so, and so does the error for a module with no nodes (Q73).
 - **Breaking:** the build refuses a parameter with a default that reads a computed node, and an input that two
   consumers give different defaults. Hamilton lets the node replace the default, and each consumer keep its own. One
   `ValueError` lists every case, sorted, naming the parameter, the node or the other consumers, and the opt-out. To

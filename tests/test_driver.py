@@ -369,6 +369,7 @@ def test_public_api_is_exported() -> None:
         "cache",
         "config",
         "defaults",
+        "exclude",
         "extract_columns",
         "extract_fields",
         "fingerprint",

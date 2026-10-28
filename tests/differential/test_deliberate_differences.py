@@ -18,6 +18,7 @@ import pytest
 from hamilton import async_driver as hamilton_async
 from hamilton import driver as hamilton_driver
 from hamilton import htypes
+from hamilton.function_modifiers import hamilton_exclude
 from hamilton.function_modifiers.base import InvalidDecoratorException
 from hamilton.lifecycle import NoEdgeAndInputTypeChecking
 from harness import (
@@ -2544,6 +2545,89 @@ def profit(revenu: int, cost: int = 3) -> int:
 def revenue() -> int:
     return 5
 """
+
+
+_Q73_SOURCE = """
+from typing import TYPE_CHECKING
+
+from {exclude} import {name}
+
+if TYPE_CHECKING:
+    from decimal import Decimal
+
+__all__ = ["public_one", "reader"]
+
+
+def public_one(x: int) -> int:
+    return x
+
+
+def not_in_all(x: int) -> int:
+    return x
+
+
+@{name}
+def legacy(x: "Decimal") -> "Decimal":
+    return x
+
+
+def reader(legacy: int, not_in_all: int) -> int:
+    return legacy + not_in_all
+"""
+
+
+@pytest.mark.deliberate("Q73")
+def test_q73_all_and_exclude() -> None:
+    """Hamilton ignores `__all__`, and its exclude works bare; fnloom honours both."""
+    hamilton_module = make_module(
+        "differential_q73_hamilton",
+        _Q73_SOURCE.format(
+            exclude="hamilton.function_modifiers", name="hamilton_exclude"
+        ),
+    )
+    fnloom_module = make_module(
+        "differential_q73_fnloom",
+        _Q73_SOURCE.format(exclude="fnloom", name="exclude"),
+    )
+    # Hamilton: `__all__` is ignored, so `not_in_all` is a node; the excluded
+    # function, with an unresolvable annotation, is not.
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    names = {variable.name for variable in hamilton.list_available_variables()}
+    assert {"public_one", "not_in_all", "reader"} <= names
+    assert "legacy" in names  # an input of `reader`, not a node
+    assert hamilton.execute(["not_in_all"], inputs={"x": 1}) == {"not_in_all": 1}
+    # fnloom: only `public_one` and `reader` are nodes; the other two are inputs.
+    built = fnloom.build(fnloom_module)
+    assert built.node_names() == ["legacy", "not_in_all", "public_one", "reader", "x"]
+    assert not {"public_one", "reader"} - set(built.nodes)
+    assert {"legacy", "not_in_all"} <= set(built.inputs())
+    assert fnloom_module.legacy(1) == 1
+    with pytest.raises(ValueError, match=r"missing inputs: 'legacy'.*") as left_out:
+        built.execute(["reader"], inputs={"not_in_all": 1})
+    assert (
+        "'legacy' is a function in module 'differential_q73_fnloom' marked @exclude"
+        in str(left_out.value)
+    )
+    with pytest.raises(ValueError, match=r"missing inputs: 'not_in_all'") as unlisted:
+        built.execute(["reader"], inputs={"legacy": 1})
+    assert (
+        "'not_in_all' is a function in module 'differential_q73_fnloom' "
+        "not listed in its __all__"
+    ) in str(unlisted.value)
+    # Hamilton's exclude is an instance that only works bare; fnloom's works called.
+    assert not isinstance(hamilton_exclude, type)
+    with pytest.raises(
+        TypeError, match=r"missing 1 required positional argument: 'fn'"
+    ):
+        hamilton_exclude()  # the call under test
+    assert fnloom.exclude()(fnloom_module.public_one) is fnloom_module.public_one
+    # A malformed `__all__` is not checked by Hamilton.
+    bad = "__all__ = 'a'\n\n\ndef a(x: int) -> int:\n    return x\n"
+    bad_hamilton = make_module("differential_q73_bad_hamilton", bad)
+    hamilton_driver.Builder().with_modules(bad_hamilton).build()
+    bad_fnloom = make_module("differential_q73_bad_fnloom", bad)
+    with pytest.raises(TypeError, match=r"__all__ must be a list or tuple of str"):
+        fnloom.build(bad_fnloom)
 
 
 @pytest.mark.deliberate("Q75")

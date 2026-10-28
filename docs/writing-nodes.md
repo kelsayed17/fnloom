@@ -35,6 +35,109 @@ fnloom.build(orders).node_names()
 # -> ['quantity', 'units']
 ```
 
+## Keeping a function out
+
+A public function that isn't meant to be a node, such as a helper, can be kept out in two ways (Q73).
+
+**`@fnloom.exclude`** marks one function. It works bare or called, `@fnloom.exclude()`, and only records the mark: the
+function is returned unchanged, so you can still call it, and it stacks with the other decorators in either order. An
+excluded function is never read, so it may omit its annotations. Hamilton's `@hamilton_exclude` raises when called.
+
+```python
+# file: pricing.py
+import fnloom
+
+
+@fnloom.exclude
+def round_cents(value: float) -> float:
+    """A public helper the graph doesn't need to know about."""
+    return round(value, 2)
+
+
+def price(cost: float) -> float:
+    return round_cents(cost * 1.2)
+```
+
+```python
+import fnloom
+import pricing
+
+fnloom.build(pricing).node_names()
+# -> ['cost', 'price']
+pricing.round_cents(1.239)
+# -> 1.24
+```
+
+**`__all__`** limits a module to the functions it names. Hamilton ignores `__all__`; fnloom honours it, which is a
+breaking change for a module that defines one and relied on the rest becoming nodes. Names it lists that aren't
+functions the module defines, such as re-exports and constants, are ignored, and listing a private function doesn't
+make it a node. `@fnloom.exclude` wins when a function is both listed and marked.
+
+```python
+# file: public_api.py
+import fnloom
+
+__all__ = ["revenue", "margin"]
+
+
+def revenue(units: int) -> int:
+    return units * 10
+
+
+def margin(revenue: int) -> int:
+    return revenue // 4
+
+
+def scratch(units: int) -> int:
+    """Not listed: not a node."""
+    return units
+```
+
+```python
+import fnloom
+import public_api
+
+fnloom.build(public_api).node_names()
+# -> ['margin', 'revenue', 'units']
+```
+
+`__all__` is read as the attribute names a module defines, so a `@fnloom.config.when` variant `price__eu` has to be
+listed as `price__eu` to be considered at all. An `__all__` that is not a list or tuple of `str` is a `TypeError` at
+build, naming every such module.
+
+When something reads the name of a function that was left out, it's a missing input, and the error adds a line saying
+why the name isn't a node:
+
+```python
+# file: reports.py
+import fnloom
+
+__all__ = ["summary"]
+
+
+def discount(rate: float) -> float:
+    return rate / 2
+
+
+def summary(discount: float) -> float:
+    return discount
+```
+
+```python
+import fnloom
+import reports
+
+try:
+    fnloom.build(reports).execute(["summary"])
+except ValueError as error:
+    hint = str(error).splitlines()[-1]
+hint
+# -> "'discount' is a function in module 'reports' not listed in its __all__"
+```
+
+A function `@fnloom.exclude` marked gets `marked @exclude` in place of `not listed in its __all__`. A module whose
+functions are all left out has no nodes, and the build says so, giving each function's reason.
+
 ## Inputs
 
 A parameter that doesn't name any function becomes an **input** node, whose value comes from the caller. Above,

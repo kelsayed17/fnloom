@@ -306,34 +306,120 @@ def _node_defs(
     return nodes
 
 
-def _found(module: ModuleType) -> tuple[list[Found], bool]:
+# Why a function that would be a node is not: the phrase the errors use.
+_EXCLUDED = "marked @exclude"
+_UNLISTED = "not listed in its __all__"
+
+
+def _listed(module: ModuleType) -> frozenset[str] | None:
+    """The names in `module.__all__`, or `None` when it defines none (Q73).
+
+    `TypeError` when it is not a list or tuple of `str`; `_functions` has checked
+    every module before this is called on one.
+    """
+    if "__all__" not in vars(module):
+        return None
+    given: object = vars(module)["__all__"]
+    if isinstance(given, list | tuple):
+        return frozenset(str(n) for n in given if isinstance(n, str))
+    return frozenset[str]()
+
+
+def _malformed_all(module: ModuleType) -> str | None:
+    """What is wrong with `module.__all__`, or `None` when it is fine or absent."""
+    if "__all__" not in vars(module):
+        return None
+    given: object = vars(module)["__all__"]
+    if not isinstance(given, list | tuple):
+        return (
+            f"module {module.__name__!r}: __all__ must be a list or tuple of str, "
+            f"got {type(given).__name__}"
+        )
+    not_str = sorted({type(n).__name__ for n in given if not isinstance(n, str)})
+    if not_str:
+        return (
+            f"module {module.__name__!r}: __all__ must be a list or tuple of str, "
+            f"got an item of {', '.join(not_str)}"
+        )
+    return None
+
+
+def _leaving_out(listed: frozenset[str] | None, name: str, value: object) -> str | None:
+    """Why `value`, a function a module defines publicly, is no node, or `None`.
+
+    `listed` is the module's `__all__`, or `None` when it has none.
+
+    Excluded wins over unlisted. A function no decorator touched has no record in
+    its `__dict__`, so it costs a dict lookup, the common case.
+    """
+    if _ATTRIBUTE in getattr(value, "__dict__", ()) and decorations(value).excluded:  # ty: ignore[invalid-argument-type]  # `value` is a function here
+        return _EXCLUDED
+    if listed is not None and name not in listed:
+        return _UNLISTED
+    return None
+
+
+class ModuleFunctions(NamedTuple):
+    """What one module holds: its node functions, and each function left out."""
+
+    functions: list[Found]
+    configured: bool
+    # Each function `@exclude` or `__all__` left out: (name, reason).
+    left_out: list[tuple[str, str, str]]
+
+
+def _found(module: ModuleType) -> ModuleFunctions:
     """The module's node functions, in definition order, with their attribute names.
 
     And whether any is config-decorated: a function no decorator touched has no
-    record in its `__dict__`, so it costs a dict lookup, the common case.
+    record in its `__dict__`, so it costs a dict lookup, the common case. And
+    each function that `@exclude` or `__all__` left out, as (the name it is
+    listed under in `__all__`, the node name it would have made, why).
     """
     functions: list[Found] = []
+    left_out: list[tuple[str, str, str]] = []
     configured = False
+    listed = _listed(module)
     for name, value in vars(module).items():
-        if _is_node(module, name, value):
-            functions.append((module, name, value))
-            if not configured and _ATTRIBUTE in value.__dict__:
-                configured = decorations(value).config is not None
-    return functions, configured
+        if not _is_node(module, name, value):
+            continue
+        if (why := _leaving_out(listed, name, value)) is not None:
+            left_out.append((name, _node_name(value), why))
+            continue
+        functions.append((module, name, value))
+        if not configured and _ATTRIBUTE in value.__dict__:
+            configured = decorations(value).config is not None
+    return ModuleFunctions(functions, configured, left_out)
+
+
+def _node_name(fn: Callable[..., object]) -> str:
+    """The name `fn` would give its node: its own, cut at `__` for a config variant."""
+    full = str(getattr(fn, "__name__", ""))
+    recorded = decorations(fn)
+    if recorded.config is None:
+        return full
+    try:
+        return _config.node_name(fn, recorded.config.name)
+    except ValueError:
+        return full
 
 
 def _skipped(module: ModuleType) -> str:
     """Why `module` has no node: each function it holds, and why it is not one."""
-    reasons = sorted(
-        f"{name!r} is defined in {value.__module__!r}"
-        if value.__module__ != module.__name__
-        else f"{name!r} is private"
-        for name, value in vars(module).items()
-        if inspect.isfunction(value)
-    )
+    listed = _listed(module)
+    reasons: list[str] = []
+    for name, value in vars(module).items():
+        if not inspect.isfunction(value):
+            continue
+        if value.__module__ != module.__name__:
+            reasons.append(f"{name!r} is defined in {value.__module__!r}")
+        elif name.startswith("_"):
+            reasons.append(f"{name!r} is private")
+        elif (why := _leaving_out(listed, name, value)) is not None:
+            reasons.append(f"{name!r} is {why}")
     if not reasons:
         return f"module {module.__name__!r} has no nodes: it defines no functions"
-    return f"module {module.__name__!r} has no nodes: {', '.join(reasons)}"
+    return f"module {module.__name__!r} has no nodes: {', '.join(sorted(reasons))}"
 
 
 def _definition(node: NodeDef) -> str:
@@ -358,27 +444,49 @@ def _duplicate(first: NodeDef, second: NodeDef) -> str:
     )
 
 
-def _functions(
-    modules: Sequence[ModuleType],
-) -> tuple[list[Found], list[ModuleType]]:
-    """Every module's node functions, and the modules holding a config-decorated one.
+# A function left out of a module, by name: the lines saying why, one per module.
+type LeftOut = dict[str, list[str]]
 
+
+class Gathered(NamedTuple):
+    """Every module's node functions, and what the scan left out."""
+
+    functions: list[Found]
+    configured: list[ModuleType]
+    left_out: LeftOut
+
+
+def _functions(modules: Sequence[ModuleType]) -> Gathered:
+    """Every module's node functions, config-decorated modules, and what was left out.
+
+    A function `@exclude` or `__all__` left out is kept by name, with why (Q73).
+    `TypeError` naming every module whose `__all__` is malformed, sorted, and then
     `ValueError` naming every module with no node function (Q53).
     """
+    # Modules hash by identity, so this drops repeats of one module, keeping the first.
+    unique = list(dict.fromkeys(modules))
+    if malformed := sorted(
+        line for module in unique if (line := _malformed_all(module)) is not None
+    ):
+        raise TypeError("; ".join(malformed))
     found: list[Found] = []
     configured: list[ModuleType] = []
     empty: list[str] = []
-    # Modules hash by identity, so this drops repeats of one module, keeping the first.
-    for module in dict.fromkeys(modules):
-        functions, has_config = _found(module)
-        if not functions:
+    left_out: LeftOut = {}
+    for module in unique:
+        gathered = _found(module)
+        if not gathered.functions:
             empty.append(_skipped(module))
-        elif has_config:
+        elif gathered.configured:
             configured.append(module)
-        found.extend(functions)
+        found.extend(gathered.functions)
+        for name, node_name, why in gathered.left_out:
+            line = f"{{}} is a function in module {module.__name__!r} {why}"
+            for key in dict.fromkeys((name, node_name)):
+                left_out.setdefault(key, []).append(line.format(repr(key)))
     if empty:
         raise ValueError("; ".join(empty))
-    return found, configured
+    return Gathered(found, configured, left_out)
 
 
 # No config: what a build without `with_config` selects with. Read, never written.
@@ -386,10 +494,15 @@ _NO_CONFIG: Mapping[str, object] = MappingProxyType({})
 
 
 class Scanned(NamedTuple):
-    """What a scan found: the nodes, and why each node no variant gave is absent."""
+    """What a scan found: the nodes, and why each node no variant gave is absent.
+
+    `left_out` maps each function `@exclude` or `__all__` left out to a line saying
+    so, per module, for the missing-input hint (Q73).
+    """
 
     nodes: list[NodeDef]
     unmatched: dict[str, str]
+    left_out: LeftOut
 
 
 def collect(
@@ -402,7 +515,10 @@ def collect(
 
     Every duplicate name is listed, sorted by name, in one `ValueError`. A module
     with no node is refused too, before duplicates, every such module in one
-    `ValueError` naming each function it holds and why that is not a node (Q53).
+    `ValueError` naming each function it holds and why that is not a node (Q53). A
+    function `@exclude` marks, or a module's `__all__` does not name, is not a node
+    (Q73); an `__all__` that is not a list or tuple of `str` is a `TypeError`
+    naming every such module.
 
     `config` selects among `@config.when*` variants (see `scan`), and `awaits`
     accepts `async def` nodes, as `build_async` does.
@@ -425,7 +541,7 @@ def scan(
     variants is selected is not empty. Without a config-decorated function
     there is nothing to select, and selection is skipped entirely.
     """
-    found, configured = _functions(modules)
+    found, configured, left_out = _functions(modules)
     unmatched: dict[str, str] = {}
     if configured:
         if redefined := sorted(line for m in configured for line in redefinitions(m)):
@@ -446,7 +562,7 @@ def scan(
         raise ValueError("; ".join(message for _, message in clashes))
     # A node a plain function or another variant defines is not missing.
     missing = {n: why for n, why in unmatched.items() if n not in seen}
-    return Scanned(list(seen.values()), missing)
+    return Scanned(list(seen.values()), missing, left_out)
 
 
 def _owner(origin: Callable[..., object], names: list[str]) -> str:
