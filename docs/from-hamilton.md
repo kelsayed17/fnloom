@@ -89,6 +89,9 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `what_is_the_path_between(a, b)` | `HamiltonNode` objects in an order that changes with `PYTHONHASHSEED`; the error names one unknown name | Sorted-by-dependency names, ties broken by name; both endpoints included, as in Hamilton; the error names every unknown name (Q70) |
 | `graph_modules` | A tuple, keeping a module given twice | `driver.modules`: each module once, in build order (Q70) |
 | `list_available_variables()` | Every node, including inputs, as objects | `driver.nodes` for the nodes; `driver.inputs()` for the inputs with their types, requiredness and consumers; `driver.outputs()` for the nodes nothing reads (Q70) |
+| `htypes.check_input_type(t, v)` | Public, with Hamilton's rules | `fnloom.value_matches(t, v)` answers as the input check, and `fnloom.type_matches(produced, expected)` as the edge check ([What the checks understand](running.md#what-the-checks-understand)) |
+| An override's value | Not type checked | Checked as an input is; `without_override_type_checks()` skips only the override checks (Q22) |
+| After `importlib.reload(module)` | A new `Builder` to see the edit | `driver.rebuild()` builds again with every setting; the old driver keeps its old code, as Hamilton's does (Q83) |
 
 </div>
 
@@ -114,6 +117,8 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | Inputs to an async driver | Types unchecked; `NotImplementedError` or `KeyError` for a missing one | Checked as the sync driver checks them, with the same errors (Q67) |
 | An `async def` under `@parameterize`, in an async driver | Each row's value is an un-awaited coroutine | Awaited, as any `async def` node (Q69) |
 | Hamilton's `AsyncDriver` on Python 3.14 | `DeprecationWarning` on every node; breaks on 3.16 | No warning (Q13) |
+| An input nobody supplied, requested as an output | `None` for it | `ValueError: missing inputs: 'x' (requested as an output)` (Q78) |
+| One driver shared between threads | Works, undocumented | A documented guarantee, stress-tested on the default and free-threaded builds ([Threads](running.md#threads)) |
 | A function passed where a module goes | An empty graph | `TypeError` (Q52) |
 | A module with no nodes, such as a package that only re-exports | Builds; its nodes are unknown at `execute` | `ValueError` at build, saying why each function was skipped (Q53) |
 | A row naming no parameter of its function | `InvalidDecoratorException` | `ValueError`, when decorating (Q33) |
@@ -159,8 +164,9 @@ value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](
 
 ## Not there yet
 
-fnloom is pre-alpha. The core, the native path, `@parameterize`, `@tag`, `@config`, `@extract_fields`,
-`@extract_columns`, graph inspection, type checks, result caching and the async driver are done. These Hamilton
+fnloom is pre-alpha. The core, the native path, `@parameterize` and its sugar, `@tag`, `@config`, `@extract_fields`,
+`@extract_columns`, `@exclude`, graph inspection, `validate`, graphs from plain functions, namespaces, type checks,
+result caching and the async driver are done. These Hamilton
 features come next, roughly in this order:
 
 1. **Adapters and lifecycle hooks**, and result builders.

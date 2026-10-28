@@ -3,7 +3,8 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** approved by the maintainer, 2026-10-28. Being built on `claude/plan-5-inspection-validation-authoring`.
+**Status:** done, 2026-10-28, on `claude/plan-5-inspection-validation-authoring`. Approved by the maintainer the same
+day. [As built](#as-built) records where the build went beyond the plan or narrowed it.
 
 **Goal:** close the roadmap's step 4. That means:
 
@@ -268,7 +269,7 @@ the roadmap's ledger
           don't appear.
         - `what_is_the_path_between(upstream: str, downstream: str) -> list[str]`.
 - Register rows Q70 (decision 1) and Q78 (decision 11) go in first.
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
     - `test_inputs_lists_every_input_with_type_requiredness_and_consumers`
     - `test_outputs_are_the_unconsumed_nodes`
     - `test_modules_are_unique_in_build_order`
@@ -280,13 +281,13 @@ the roadmap's ledger
     - differential KEEP tests: endpoints included; an empty result for no path or a reversed pair; `a == b` gives
       `[a]`
     - `deliberate` Q70 (order and unknown names, H5.1e) and Q78 (H5.12)
-- [ ] **Step 2: Run** `UV_NO_SYNC=1 uv run pytest tests/test_inspection.py -q`. Expected: fail.
-- [ ] **Step 3: Implement.**
+- [x] **Step 2: Run** `UV_NO_SYNC=1 uv run pytest tests/test_inspection.py -q`. Expected: fail.
+- [x] **Step 3: Implement.**
     - `what_is_the_path_between` uses the core's `Graph.between`. Check its argument order and its endpoint
       inclusion, and order the result with the plan's topological order.
     - `inputs()` is built once at build, from `core_inputs` and the views.
-- [ ] **Step 4: Run** `bash scripts/check.sh`. Expected: exit 0.
-- [ ] **Step 5: Commit** `inspection: inputs, outputs, modules and path between`.
+- [x] **Step 4: Run** `bash scripts/check.sh`. Expected: exit 0.
+- [x] **Step 5: Commit** `inspection: inputs, outputs, modules and path between`.
 
 ### Task 2: Functions in `final_vars`
 
@@ -306,7 +307,7 @@ the roadmap's ledger
     - A bare `str` stays a `TypeError` (Q6).
 - Q30's row changes from DEFER to FIX. Its old deliberate test changes to assert the new rule on fnloom's side and
   Hamilton's mapping (H5.3a–g) on Hamilton's.
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
     - `test_a_plain_function_names_its_node`
     - `test_an_extract_function_names_its_producer`
     - `test_a_parameterize_function_lists_its_rows`
@@ -315,11 +316,11 @@ the roadmap's ledger
     - `test_identity_not_name_decides` (Review Focus 4)
     - `test_async_and_prepare_accept_functions`
     - the `deliberate("Q30")` rewrite
-- [ ] **Step 2: Run** them. Expected: fail.
-- [ ] **Step 3: Implement.** Map views by `id(origin)` once per driver, held with the views.
-- [ ] **Step 4: Run** `bash scripts/check.sh`, and `uv run python -m benches.run` for steady execute on `chain 1,000`.
+- [x] **Step 2: Run** them. Expected: fail.
+- [x] **Step 3: Implement.** Map views by `id(origin)` once per driver, held with the views.
+- [x] **Step 4: Run** `bash scripts/check.sh`, and `uv run python -m benches.run` for steady execute on `chain 1,000`.
   Expected: exit 0, and execute within noise, since string-only requests take the existing fast path.
-- [ ] **Step 5: Commit** `requests: functions in final_vars`.
+- [x] **Step 5: Commit** `requests: functions in final_vars`.
 
 ### Task 3: `validate` and spelling suggestions
 
@@ -339,7 +340,7 @@ the roadmap's ledger
   suggestion, so the core's messages are wrapped where they're raised in Python. The 0.1.1 missing-input consumers
   format stays.
 - Register row Q71 (decisions 2 and 3) goes in first.
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
     - `test_validate_returns_every_problem_sorted`: unknown output, misspelled input, missing input, wrong input
       type, wrong override type, and an unmatched variant, in one call
     - `test_validate_on_a_valid_request_is_empty`
@@ -348,11 +349,11 @@ the roadmap's ledger
     - `test_errors_suggest_close_names`, plus a case with no suggestion below the 0.8 cutoff
     - `test_validate_matches_execute_messages`: each line equals the line `execute` raises for the same lone problem
     - a `deliberate("Q71")` test against `validate_execution` (H5.2a–e)
-- [ ] **Step 2: Run** them. Expected: fail.
-- [ ] **Step 3: Implement.** `validate` reuses `_Request.check` and the compiled checks without raising at the first
+- [x] **Step 2: Run** them. Expected: fail.
+- [x] **Step 3: Implement.** `validate` reuses `_Request.check` and the compiled checks without raising at the first
   problem, collecting lines instead.
-- [ ] **Step 4: Run** `bash scripts/check.sh`. Expected: exit 0.
-- [ ] **Step 5: Commit** `requests: validate returns every problem; suggest close names`.
+- [x] **Step 4: Run** `bash scripts/check.sh`. Expected: exit 0.
+- [x] **Step 5: Commit** `requests: validate returns every problem; suggest close names`.
 
 ### Task 4: Strict overrides and declared inputs
 
@@ -369,7 +370,7 @@ the roadmap's ledger
       a graph input fails the build too, with a suggestion.
 - Both settings are carried through pickling and `rebuild()`.
 - Register row Q75 goes in first.
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
     - `test_strict_overrides_refuse_an_unsupplied_input`: the message matches Q7's old Hamilton rule, and the
       default is unchanged
     - `test_declared_inputs_refuse_an_undeclared_input_naming_the_closest`
@@ -377,10 +378,10 @@ the roadmap's ledger
     - `test_declaring_a_non_input_fails`
     - `test_settings_survive_pickling`
     - differential KEEP: strict overrides behave as Hamilton (H5.5) on a fixture
-- [ ] **Step 2: Run** them. Expected: fail.
-- [ ] **Step 3: Implement** both in `Builder` and `Driver`.
-- [ ] **Step 4: Run** `bash scripts/check.sh`. Expected: exit 0.
-- [ ] **Step 5: Commit** `builder: strict overrides and declared inputs`.
+- [x] **Step 2: Run** them. Expected: fail.
+- [x] **Step 3: Implement** both in `Builder` and `Driver`.
+- [x] **Step 4: Run** `bash scripts/check.sh`. Expected: exit 0.
+- [x] **Step 5: Commit** `builder: strict overrides and declared inputs`.
 
 ### Task 5: Defaults, and `value()`-bound names
 
@@ -397,7 +398,7 @@ the roadmap's ledger
 - The build errors for decision 9 are `ValueError`s. Each lists every case, sorted, naming the parameter, the node or
   the other consumer, and the opt-out.
 - Register rows Q76 and Q77 go in first.
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
     - `test_a_node_shadowing_a_default_fails_the_build`
     - `test_differing_defaults_fail_the_build`
     - `test_opt_outs_restore_hamilton_behaviour`, where shadowed takes the node and differing keeps each default
@@ -405,10 +406,10 @@ the roadmap's ledger
     - `test_a_value_bound_name_is_refused_unless_read_elsewhere`
     - `deliberate` Q76 (H5.6c, H5.6d) and Q77 (H5.4e)
     - a CHANGELOG **Changed** entry
-- [ ] **Step 2: Run** them. Expected: fail.
-- [ ] **Step 3: Implement** the checks in the build, once.
-- [ ] **Step 4: Run** `bash scripts/check.sh`. Expected: exit 0.
-- [ ] **Step 5: Commit** `wiring: refuse shadowed and differing defaults`.
+- [x] **Step 2: Run** them. Expected: fail.
+- [x] **Step 3: Implement** the checks in the build, once.
+- [x] **Step 4: Run** `bash scripts/check.sh`. Expected: exit 0.
+- [x] **Step 5: Commit** `wiring: refuse shadowed and differing defaults`.
 
 ### Task 6: `@exclude` and `__all__`
 
@@ -426,7 +427,7 @@ the roadmap's ledger
   skipped names per module, for the missing-input hint and the 0.1.1 empty-module error, which must now also give
   "excluded" and "not in `__all__`" as reasons.
 - Register row Q73 goes in first.
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
     - `test_exclude_bare_and_called`
     - `test_all_limits_nodes`
     - `test_a_missing_input_named_like_a_function_left_out_of_all_says_so`
@@ -435,11 +436,11 @@ the roadmap's ledger
     - `test_an_all_only_module_with_no_listed_function_is_refused_as_empty`, giving the reason
     - `deliberate` Q73 (H5.7b, H5.7c)
     - a CHANGELOG **Changed** entry, since `__all__` can remove nodes from existing modules
-- [ ] **Step 2: Run** them. Expected: fail.
-- [ ] **Step 3: Implement** in `_scan._is_node` and `collect`.
-- [ ] **Step 4: Run** `bash scripts/check.sh` and the build benchmark (`chain` and `rows` at 1,000). Expected: exit
+- [x] **Step 2: Run** them. Expected: fail.
+- [x] **Step 3: Implement** in `_scan._is_node` and `collect`.
+- [x] **Step 4: Run** `bash scripts/check.sh` and the build benchmark (`chain` and `rows` at 1,000). Expected: exit
   0, and build within noise.
-- [ ] **Step 5: Commit** `scan: @exclude and __all__`.
+- [x] **Step 5: Commit** `scan: @exclude and __all__`.
 
 ### Task 7: `with_functions` and `fnloom.node`
 
@@ -462,7 +463,7 @@ the roadmap's ledger
 - `collect` takes function sources beside modules. Duplicates across modules and functions get the existing clash
   message. Config, extract, cache and tags work on them.
 - Register row Q72 goes in first.
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
     - `test_with_functions_builds_without_a_module`, where `sys.modules` is unchanged
     - `test_decorated_functions_keep_their_decorations`
     - `test_node_names_and_binds_a_callable`
@@ -471,10 +472,10 @@ the roadmap's ledger
     - `test_cache_keys_use_the_function_module`
     - `test_pickling_by_qualified_name`, plus the `TypeError` for a local function
     - `deliberate` Q72 (H5.9a: `create_temporary_module` copies functions and registers a module)
-- [ ] **Step 2: Run** them. Expected: fail.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `bash scripts/check.sh`. Expected: exit 0.
-- [ ] **Step 5: Commit** `authoring: graphs from functions; fnloom.node`.
+- [x] **Step 2: Run** them. Expected: fail.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** `bash scripts/check.sh`. Expected: exit 0.
+- [x] **Step 5: Commit** `authoring: graphs from functions; fnloom.node`.
 
 ### Task 8: Namespaces
 
@@ -494,7 +495,7 @@ the roadmap's ledger
       namespace's own names.
 - `NodeView` gains `namespace: str | None`.
 - Register row Q74 goes in first.
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
     - `test_a_namespace_prefixes_every_node`
     - `test_parameters_resolve_inside_then_outside`
     - `test_one_module_under_two_namespaces`
@@ -503,11 +504,11 @@ the roadmap's ledger
     - `test_namespaced_config_extract_and_parameterize`
     - `test_bad_namespace_is_refused`
     - `deliberate` Q74 (H5.8a: last-wins; H5.8c: only `@subdag`)
-- [ ] **Step 2: Run** them. Expected: fail.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `bash scripts/check.sh` and a new build benchmark row: `layered` at 1,000 split over 10
+- [x] **Step 2: Run** them. Expected: fail.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** `bash scripts/check.sh` and a new build benchmark row: `layered` at 1,000 split over 10
   namespaces. Expected: exit 0, and a build within 10% of the un-namespaced one.
-- [ ] **Step 5: Commit** `wiring: namespaces`.
+- [x] **Step 5: Commit** `wiring: namespaces`.
 
 ### Task 9: Type rules I, covering `None`, fixed tuples, public matchers and the `Any` row
 
@@ -525,7 +526,7 @@ the roadmap's ledger
     - Both are public, exported, and documented with the rules they implement.
 - The `None` rule (decision 12a) and fixed-length tuples (decision 12b) live in `_fits`.
 - Register rows Q79 and Q80 go in first.
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
     - `test_none_passes_only_types_that_admit_it`: the table of decision 12a
     - `test_optional_default_still_receives_none` (Review Focus 3)
     - `test_fixed_tuples_check_length_and_items`, with nested tuples and `tuple[()]`
@@ -533,12 +534,12 @@ the roadmap's ledger
     - a KEEP differential test for the `Any` and `int` consumers (H5.10b)
     - `deliberate` Q79 (H5.2i) and Q80 (H5.10d)
     - a CHANGELOG **Changed** entry for `None`
-- [ ] **Step 2: Run** them. Expected: fail.
-- [ ] **Step 3: Implement.** Correct the roadmap's `Any` row per decision 12g.
-- [ ] **Step 4: Run** `bash scripts/check.sh`. Then add a `types` shape to `benches/run.py`: one node whose inputs are
+- [x] **Step 2: Run** them. Expected: fail.
+- [x] **Step 3: Implement.** Correct the roadmap's `Any` row per decision 12g.
+- [x] **Step 4: Run** `bash scripts/check.sh`. Then add a `types` shape to `benches/run.py`: one node whose inputs are
   `Optional[int]`, `tuple[int, str, float]` and `list[int]`. Run it, and record its rows. Expected: steady execute on
   existing shapes within noise.
-- [ ] **Step 5: Commit** `types: None only where admitted; fixed tuples checked; public matchers`.
+- [x] **Step 5: Commit** `types: None only where admitted; fixed tuples checked; public matchers`.
 
 ### Task 10: Type rules II, covering unresolved annotations, deep checks and widening
 
@@ -557,7 +558,7 @@ the roadmap's ledger
 - `resolve` maps a failing annotation to `Unresolved` instead of raising. The Plan 1 `NameError` tests change to
   assert the new behaviour. The register keeps the old behaviour as Hamilton's side.
 - Register row Q81 goes in first. Decisions 12d and 12f are opt-ins, documented in their pages, and need no row.
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
     - `test_a_type_checking_import_builds`
     - `test_an_unresolved_edge_names_the_annotation`
     - `test_an_unresolved_input_check_says_to_import_it`
@@ -566,11 +567,11 @@ the roadmap's ledger
     - `test_widening_accepts_int_for_float_and_numpy_scalars`, guarded by `importorskip("numpy")` for the numpy half
     - `test_widening_is_off_by_default`
     - `deliberate` Q81 (H5.10a)
-- [ ] **Step 2: Run** them. Expected: fail.
-- [ ] **Step 3: Implement.** The deep check walks with an explicit stack, and uses `plain_class` fast paths per item.
-- [ ] **Step 4: Run** `bash scripts/check.sh`. Then run the `types` shape with deep checks on and off, and record
+- [x] **Step 2: Run** them. Expected: fail.
+- [x] **Step 3: Implement.** The deep check walks with an explicit stack, and uses `plain_class` fast paths per item.
+- [x] **Step 4: Run** `bash scripts/check.sh`. Then run the `types` shape with deep checks on and off, and record
   both. Expected: shallow within noise of Task 9's rows.
-- [ ] **Step 5: Commit** `types: unresolved annotations, deep checks, numeric widening`.
+- [x] **Step 5: Commit** `types: unresolved annotations, deep checks, numeric widening`.
 
 ### Task 11: `@parameterize` sugar
 
@@ -591,7 +592,7 @@ the roadmap's ledger
 - Doc templating: `str.format_map` with a mapping that raises a `ValueError` naming any unknown placeholder, when
   decorating.
 - Register row Q82 goes in first.
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
     - `test_tuple_rows_keep_their_doc_verbatim`
     - `test_function_doc_is_templated_per_row`
     - `test_unknown_placeholder_is_refused`
@@ -599,11 +600,11 @@ the roadmap's ledger
     - `test_parameterize_sources_and_values`, plus the non-`str` source and empty `assigned_output` refusals
     - differential KEEP: values, docs, and `group` results (H5.4a–d)
     - `deliberate` Q82
-- [ ] **Step 2: Run** them. Expected: fail.
-- [ ] **Step 3: Implement.** `group` lowers to a payload that assembles the list or dict from the core's keywords. Its
+- [x] **Step 2: Run** them. Expected: fail.
+- [x] **Step 3: Implement.** `group` lowers to a payload that assembles the list or dict from the core's keywords. Its
   sources become ordinary core inputs, typed by the element type.
-- [ ] **Step 4: Run** `bash scripts/check.sh`. Expected: exit 0.
-- [ ] **Step 5: Commit** `decorators: parameterize sugar`.
+- [x] **Step 4: Run** `bash scripts/check.sh`. Expected: exit 0.
+- [x] **Step 5: Commit** `decorators: parameterize sugar`.
 
 ### Task 12: Threads, `rebuild`, and closing the ledger
 
@@ -618,17 +619,17 @@ the roadmap's ledger
 - Produces `Driver.rebuild() -> Driver`, and `AsyncDriver.rebuild() -> AsyncDriver`. Each builds from the stored
   builder, every setting included.
 - Register row Q83 goes in first.
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
     - `test_one_driver_across_threads`: 16 threads × 200 runs over a mixed graph with config, extract and a cache.
       Results are checked, and no shared state leaks. CI runs it on 3.14t.
     - `test_rebuild_sees_a_reloaded_module`
     - `test_rebuild_keeps_every_setting`
     - `deliberate` Q83 (H5.11b)
-- [ ] **Step 2: Run** them. Expected: fail.
-- [ ] **Step 3: Implement.**
-- [ ] **Step 4: Run** `bash scripts/check.sh` and `uv run python -m benches.run`. Expected: exit 0, and every
+- [x] **Step 2: Run** them. Expected: fail.
+- [x] **Step 3: Implement.**
+- [x] **Step 4: Run** `bash scripts/check.sh` and `uv run python -m benches.run`. Expected: exit 0, and every
   existing steady row within noise.
-- [ ] **Step 5: Close the ledger:**
+- [x] **Step 5: Close the ledger:**
     - **Rows fixed:** mark each wiring, types and execution row this plan covers as fixed, with its Q-number.
     - **Rows corrected:** correct the `Any` row (decision 12g), and the "numpy scalars" row to "fixed (opt-in
       widening); contracts deferred".
@@ -640,7 +641,30 @@ the roadmap's ledger
     - **This plan:** tick it and set its status to done.
     - **Expected:** no wiring or types row says **same** or **worse**, except "Container checks are shallow", which
       says "same, deliberately" with the opt-in named, and the roadmap allows that.
-- [ ] **Step 6: Commit** `threads and rebuild; close the inspection, wiring and types ledger rows`.
+- [x] **Step 6: Commit** `threads and rebuild; close the inspection, wiring and types ledger rows`.
+
+## As built
+
+- **`Builder.without_override_type_checks()`** was added in Task 4, though no decision named it. It keeps input
+  checks on and skips only the override checks, for overriding a node with a value of another type such as `nan`.
+  Before, `without_input_type_checks()` was the only route, and it dropped both. Q22 is "fixed, with an opt-out".
+  Custom additive checks (Q21) stay in Plan 6.
+- **`node()` and `with_functions` take functions only.** This narrows decision 5's "any annotated callable". A
+  `functools.partial` is refused in favour of `bind=`, and a callable instance must be wrapped in a `def`. Code
+  versions and pickling by qualified name both need a function object.
+- **`Unresolved` covers more than names.** An alias over an unresolvable name, and a `TypedDict` field type, are
+  unresolved too, since decision 12c covers any annotation that doesn't resolve at build. The Q44 row says so.
+- **The value walk has a budget and an answer cache.** Task 9 made value matching an explicit worklist, with no
+  recursion over value or type depth. Task 10 then bounded it:
+    - **Budget:** a `TypeError` when more than about 10,000 groups are open about one value at once, which only a
+      runaway type reaches.
+    - **Answer cache:** answers are cached per walk with a lowlink rule, and inside a cycle they are provisional
+      until the cycle's root closes. Shared and cyclic values are read once per fitting check.
+- **Group slots are in cache keys.** Task 11 frames each `group` item's slot (list index or dict key) in the node's
+  key, so moving or renaming items misses instead of serving a stale hit. A `group` source is required even when its
+  parameter has a default (Q82).
+- **`rebuild()` is "build again from the stored builder".** A function given to `with_functions` is the object
+  given, so after a reload it must be given again to a new builder. Modules are scanned again.
 
 ## Self-review
 

@@ -11,6 +11,19 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Added
 
+- `Driver.rebuild()` and `AsyncDriver.rebuild()` build a new driver from the same builder, with its modules, functions,
+  namespaces, config, cache store and every setting, and `sync_nodes` for the async driver. After `importlib.reload`,
+  the new driver runs the edited code and, with a shared store, misses on the edited node; the old driver keeps its
+  code, as Hamilton's does. A driver made from a native graph raises `TypeError` (Q83).
+- One `Driver` shared between threads is a documented guarantee: `execute`, `prepare`, `validate`, `explain_cache`,
+  inspection and `PreparedPlan.run` are safe to call at once, on the default and free-threaded builds, and a stress
+  test of 16 threads over one cached driver pins it. A user's own mutable values, and nodes that mutate their inputs,
+  are not covered.
+- A function in `final_vars` means the node it makes in this driver, matched by identity with `NodeView.origin`, never
+  by name, in `execute`, `prepare`, `validate` and `explain_cache`, on both drivers; the result is keyed by name. An
+  `@extract_*` function means its producer. A function that makes several nodes, such as a `@parameterize` function,
+  is a `TypeError` listing them, unless one is named like the function; a function no node comes from is a
+  `ValueError` naming it and why. Hamilton maps every function to its `__name__` (Q30).
 - `@parameterize` sugar. A row may be `(bindings, doc)`, the doc used as written; otherwise the function's docstring is
   a template filled per row (`{output_name}`, each bound parameter), and a placeholder the row lacks is a `ValueError`
   when decorating, where Hamilton prints the bare key. `fnloom.group(*deps)` and `group(**deps)` bind a parameter to a

@@ -437,6 +437,25 @@ class Driver:
             raise TypeError(msg)
         return Builder.build, (self._builder,)
 
+    def rebuild(self) -> Driver:
+        """A new driver, built again from this driver's builder (Q83).
+
+        The same as `build` on that builder: its modules, functions, namespaces,
+        config, cache store and every setting. A module is scanned again, so after
+        `importlib.reload` the new driver runs the edited code, and its code
+        versions are read again, so a shared store misses on an edited node. This
+        driver keeps the code it was built with. A function given to
+        `with_functions` is the object given, so give a reloaded one to a new
+        builder. `TypeError` for a driver made from a native graph.
+        """
+        if self._builder is None:
+            msg = (
+                "cannot rebuild a Driver made from a native graph; "
+                "make it with Builder or build to rebuild it"
+            )
+            raise TypeError(msg)
+        return self._builder.build()
+
     def __copy__(self) -> Driver:
         """A driver over the same graph, store and settings, with no compiled plans.
 
@@ -983,6 +1002,19 @@ class AsyncDriver:
             )
             raise TypeError(msg)
         return _build_async_again, (self._builder, self._sync_nodes)
+
+    def rebuild(self) -> AsyncDriver:
+        """A new driver, built again from this driver's builder and `sync_nodes`.
+
+        See `Driver.rebuild`. `TypeError` for a driver made from a `Driver`.
+        """
+        if self._builder is None:
+            msg = (
+                "cannot rebuild an AsyncDriver made from a Driver; "
+                "make it with Builder.build_async to rebuild it"
+            )
+            raise TypeError(msg)
+        return self._builder.build_async(sync_nodes=self._sync_nodes)
 
     def __copy__(self) -> AsyncDriver:
         """A driver over the same graph and settings, with no compiled plans."""

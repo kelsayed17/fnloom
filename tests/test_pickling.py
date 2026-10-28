@@ -411,3 +411,105 @@ def test_loading_a_function_that_moved_names_it(
         patch.setattr(picklable_functions, "doubled", rebound)
         loaded = cast("Builder", pickle.loads(data))  # noqa: S301  # our own pickle
         assert loaded.build().execute(["doubled"], inputs={"a": 2}) == {"doubled": 200}
+
+
+def _every_setting() -> Builder:
+    """A builder with every setting off its default, and a cache store."""
+    return (
+        Builder()
+        .with_modules(picklable_nodes)
+        .with_modules(picklable_nodes, namespace="ns")
+        .with_modules(picklable_config_nodes)
+        .with_functions(
+            fnloom.node(
+                picklable_functions.scaled,
+                name="tenfold",
+                bind={"value": fnloom.source("total"), "factor": fnloom.value(10)},
+            )
+        )
+        .with_config({"mode": "b"})
+        .without_override_type_checks()
+        .with_strict_overrides()
+        .with_declared_inputs("a", "b")
+        .with_deep_type_checks()
+        .with_numeric_widening()
+        .with_cache(MemoryCache(max_entries=7))
+    )
+
+
+def _state(driver: Driver) -> tuple[object, ...]:
+    """Everything a driver's builder decides, public and private, store by bounds."""
+    cache = driver._cache  # noqa: SLF001  # the settings under test
+    store = None if cache is None else cache.store
+    return (
+        driver.modules,
+        dict(driver.inputs()),
+        driver.outputs(),
+        dict(driver.nodes),
+        dict(driver.config),
+        driver._check_inputs,  # noqa: SLF001  # the settings under test
+        driver._check_overrides,  # noqa: SLF001  # the settings under test
+        driver._strict_overrides,  # noqa: SLF001  # the settings under test
+        driver._rules,  # noqa: SLF001  # the settings under test
+        dict(driver._unmatched),  # noqa: SLF001  # the settings under test
+        dict(driver._left_out),  # noqa: SLF001  # the settings under test
+        type(store),
+        store.__reduce__() if store is not None else None,
+        None if cache is None else dict(cache.keys),
+    )
+
+
+@pytest.mark.parametrize(
+    "copier",
+    [lambda driver: driver, _round_trip, copy.copy, copy.deepcopy],
+    ids=["itself", "pickle", "copy", "deepcopy"],
+)
+def test_rebuild_keeps_every_setting(copier: Any) -> None:  # noqa: ANN401  # each copier returns its argument's type
+    """`rebuild` is a fresh `build` of the same builder, after any copy too."""
+    builder = _every_setting()
+    fresh = builder.build()
+    rebuilt = copier(fresh).rebuild()
+    assert isinstance(rebuilt, Driver)
+    assert rebuilt is not fresh
+    assert _state(rebuilt) == _state(fresh)
+    assert rebuilt.modules == (picklable_nodes, picklable_config_nodes)
+    assert rebuilt.execute(["tenfold", "scale"], inputs={"a": 2, "b": 1}) == {
+        "tenfold": 50,
+        "scale": 20,
+    }
+    # The store is the builder's own, unless a copy rebuilt it from its bounds.
+    stores = [d._cache.store for d in (rebuilt, fresh) if d._cache]  # noqa: SLF001  # the store under test
+    assert len(stores) == 2  # noqa: PLR2004  # one store each
+    assert (stores[0] is stores[1]) == (copier not in {_round_trip, copy.deepcopy})
+    with pytest.raises(ValueError, match="override of input 'a' refused"):
+        rebuilt.execute(["total"], inputs={"b": 1}, overrides={"a": 1})
+    assert rebuilt.execute(
+        ["total"], inputs={"a": 2, "b": 1}, overrides={"doubled": 2.5}
+    ) == {"total": 3.5}
+    # Input checks stay on, override checks off.
+    with pytest.raises(ValueError, match="a: expected int, got str"):
+        rebuilt.execute(["total"], inputs={"a": "s", "b": 1})
+    # Rebuilding again is rebuilding the same builder.
+    assert _state(rebuilt.rebuild()) == _state(fresh)
+
+
+@pytest.mark.parametrize(
+    "copier",
+    [lambda driver: driver, _round_trip, copy.copy, copy.deepcopy],
+    ids=["itself", "pickle", "copy", "deepcopy"],
+)
+def test_async_rebuild_keeps_every_setting(copier: Any) -> None:  # noqa: ANN401  # each copier returns its argument's type
+    """`AsyncDriver.rebuild` keeps `sync_nodes` and every builder setting."""
+    builder = _every_setting()
+    fresh = builder.build_async(sync_nodes="inline")
+    rebuilt = copier(fresh).rebuild()
+    assert isinstance(rebuilt, fnloom.AsyncDriver)
+    assert rebuilt is not fresh
+    assert rebuilt._sync_nodes == "inline"  # noqa: SLF001  # the setting under test
+    assert _state(rebuilt._driver) == _state(fresh._driver)  # noqa: SLF001  # the settings under test
+    assert rebuilt.modules == fresh.modules
+    assert rebuilt.inputs() == fresh.inputs()
+    assert rebuilt.outputs() == fresh.outputs()
+    assert rebuilt.rebuild()._sync_nodes == "inline"  # noqa: SLF001  # the setting under test
+    threaded = copier(builder.build_async()).rebuild()
+    assert threaded._sync_nodes == "thread"  # noqa: SLF001  # the setting under test

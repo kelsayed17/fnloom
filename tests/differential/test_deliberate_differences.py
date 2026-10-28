@@ -3543,3 +3543,84 @@ def test_q82_parameterize_sugar_is_checked_when_decorating() -> None:
     once = _refused(ours["listed"])[1]
     assert "'xs' (int) needs list[X] for its group" in once
     assert once.count("'xs'") == 1
+
+
+_Q83_BEFORE = """
+def a(x: int) -> int:
+    return x + 1
+
+
+def b(a: int) -> int:
+    return a * 10
+"""
+
+_Q83_AFTER = """
+def a(x: int) -> int:
+    return x + 1000
+
+
+def b(a: int) -> int:
+    return a * 10
+
+
+def c(b: int) -> int:
+    return b + 1
+"""
+
+
+@pytest.mark.deliberate("Q83")
+def test_q83_rebuild_after_reload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both keep a driver's code across a reload; only fnloom builds it again."""
+    monkeypatch.syspath_prepend(str(tmp_path))
+    # No bytecode, so the rewrite is never read from a stale cache.
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    path = tmp_path / "q83_reloaded.py"
+    path.write_text(_Q83_BEFORE, encoding="utf-8")
+    module = importlib.import_module("q83_reloaded")
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    store = fnloom.MemoryCache()
+    ours = fnloom.Builder().with_modules(module).with_cache(store).build()
+    old_a = module.a
+    assert hamilton.execute(["b"], inputs={"x": 1}) == {"b": 20}
+    assert ours.execute(["b"], inputs={"x": 1}) == {"b": 20}
+
+    def version() -> object:
+        found = [n for n in hamilton.list_available_variables() if n.name == "a"]
+        return found[0].version
+
+    before = version()
+    path.write_text(_Q83_AFTER, encoding="utf-8")
+    # Hamilton's version reads the edited file before any reload; fnloom's code
+    # version is the built one, so its store still hits.
+    assert version() != before
+    assert ours.explain_cache(["a"], inputs={"x": 1})["a"].status == "hit"
+    importlib.reload(module)
+    assert module.a is not old_a
+
+    # Both run the old code, and know no node the edit added.
+    assert hamilton.execute(["b"], inputs={"x": 1}) == {"b": 20}
+    assert ours.execute(["b"], inputs={"x": 1}) == {"b": 20}
+    with pytest.raises(ValueError, match=r"Unknown nodes \[c\] requested"):
+        hamilton.execute(["c"], inputs={"x": 1})
+    with pytest.raises(ValueError, match="unknown outputs: 'c'"):
+        ours.execute(["c"], inputs={"x": 1})
+    # The reloaded function: Hamilton maps its name to the old node; fnloom refuses.
+    assert hamilton.execute([module.a], inputs={"x": 1}) == {"a": 2}
+    with pytest.raises(ValueError, match="is not the function behind node 'a'"):
+        ours.execute([module.a], inputs={"x": 1})
+
+    # Only a new Builder builds Hamilton again; `rebuild` does it for fnloom.
+    assert not hasattr(hamilton, "rebuild")
+    fresh = hamilton_driver.Builder().with_modules(module).build()
+    assert fresh.execute(["c"], inputs={"x": 1}) == {"c": 10011}
+    rebuilt = ours.rebuild()
+    assert rebuilt.explain_cache(["a"], inputs={"x": 1})["a"].status == "miss"
+    assert rebuilt.execute(["c"], inputs={"x": 1}) == {"c": 10011}
+    assert rebuilt.execute([module.a], inputs={"x": 1}) == {"a": 1001}
+    built_async = fnloom.Builder().with_modules(module).build_async()
+    assert not hasattr(hamilton_async.AsyncDriver, "rebuild")
+    assert asyncio.run(built_async.rebuild().execute(["c"], inputs={"x": 1})) == {
+        "c": 10011
+    }

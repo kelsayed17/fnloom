@@ -1,6 +1,8 @@
 """Inspection: `inputs`, `outputs`, `modules` and `what_is_the_path_between`."""
 
+import asyncio
 import copy
+import importlib
 import subprocess
 import sys
 import textwrap
@@ -13,6 +15,7 @@ from fnloom import InputView
 from helpers import make_module
 
 if TYPE_CHECKING:
+    from pathlib import Path
     from types import ModuleType
 
 PRICING = """
@@ -204,3 +207,78 @@ def test_async_driver_has_the_same_inspection() -> None:
     )
     with pytest.raises(ValueError, match="unknown nodes: 'nope'"):
         built.what_is_the_path_between("a", "nope")
+
+
+RELOADED = """
+def a(x: int) -> int:
+    return x + 1
+
+
+def b(a: int) -> int:
+    return a * 10
+"""
+
+EDITED = """
+def a(x: int) -> int:
+    return x + 1000
+
+
+def b(a: int) -> int:
+    return a * 10
+
+
+def c(b: int) -> int:
+    return b + 1
+"""
+
+
+def _importable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, name: str, source: str
+) -> ModuleType:
+    """Writes `source` as module `name` on a fresh path entry and imports it."""
+    monkeypatch.syspath_prepend(str(tmp_path))
+    # No bytecode, so a rewrite within the same second is never read from a stale cache.
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    (tmp_path / f"{name}.py").write_text(textwrap.dedent(source), encoding="utf-8")
+    return importlib.import_module(name)
+
+
+def test_rebuild_sees_a_reloaded_module(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """After a reload, `rebuild` runs the edit; the old driver keeps its code."""
+    module = _importable(tmp_path, monkeypatch, "rebuild_reloaded", RELOADED)
+    store = fnloom.MemoryCache()
+    builder = fnloom.Builder().with_modules(module).with_cache(store)
+    driver = builder.build()
+    built_async = builder.build_async(sync_nodes="inline")
+    assert driver.execute(["b"], inputs={"x": 1}) == {"b": 20}
+    (tmp_path / "rebuild_reloaded.py").write_text(EDITED, encoding="utf-8")
+    importlib.reload(module)
+
+    rebuilt = driver.rebuild()
+    assert rebuilt is not driver
+    assert rebuilt.modules == (module,)
+    # The store is shared, and code versions are read at each build (Q48): the
+    # edited node misses on the rebuilt driver, and the old one still hits.
+    assert rebuilt.explain_cache(["a"], inputs={"x": 1})["a"].status == "miss"
+    assert driver.explain_cache(["a"], inputs={"x": 1})["a"].status == "hit"
+    assert rebuilt.execute(["c"], inputs={"x": 1}) == {"c": 10011}
+    assert asyncio.run(built_async.rebuild().execute(["c"], inputs={"x": 1})) == {
+        "c": 10011
+    }
+    # The existing drivers keep the functions they were built with (H5.11b).
+    assert driver.execute(["b"], inputs={"x": 1}) == {"b": 20}
+    assert asyncio.run(built_async.execute(["b"], inputs={"x": 1})) == {"b": 20}
+    assert "c" not in driver.node_names()
+    assert rebuilt.execute(["b"], inputs={"x": 1}) == {"b": 10010}
+
+
+def test_rebuild_needs_a_builder() -> None:
+    """A driver made from a native graph has no builder to build again from."""
+    native = fnloom.Driver(fnloom._core.Graph([], {}))  # noqa: SLF001  # a native graph on purpose
+    with pytest.raises(TypeError, match="cannot rebuild a Driver made from a native"):
+        native.rebuild()
+    made = fnloom.AsyncDriver(native, {})
+    with pytest.raises(TypeError, match="cannot rebuild an AsyncDriver made from"):
+        made.rebuild()

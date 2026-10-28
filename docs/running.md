@@ -463,7 +463,8 @@ The view is made once, when the graph is built, and annotations are evaluated th
 
 A driver pickles, and copies with `copy.deepcopy`, so you can hand it to a `concurrent.futures.ProcessPoolExecutor`
 or any other tool that pickles its arguments. It is pickled as the recipe it was built from: the names of its
-modules, its type-check, strict-override and declared-input settings, its config, and its cache store. Loading it
+modules and their namespaces, the functions given to `with_functions`, by module and qualified name, every setting,
+its config, and its cache store. Loading it
 imports those modules by name and builds the driver again, so its compiled plans don't travel; each process compiles
 its own.
 
@@ -482,6 +483,48 @@ again.execute(["total"], inputs={"price": 2.0, "quantity": 3})
   rebuilt driver.
 - A `DiskCache` reopens the same directory, so worker processes share its entries with you. A `MemoryCache` comes
   back empty, with the same bounds: its entries belong to the process that stored them.
+
+## Threads
+
+One driver can be shared by any number of threads, on the default build and on the free-threaded `3.14t`, where
+fnloom keeps the GIL off. A run keeps its values to itself, and never writes to the `inputs` or `overrides` you pass.
+These are safe to call from several threads at once:
+
+- on a `Driver`: `execute`, `prepare`, `validate`, `explain_cache`, and the inspection methods: `nodes`, `inputs()`,
+  `outputs()`, `modules`, `what_is_the_path_between` and the lineage methods;
+- `PreparedPlan.run`, on one plan shared between threads;
+- a `Builder`, whose methods return new builders, its `build`, and `rebuild`;
+- `MemoryCache` and `DiskCache`, so a cached driver can be shared too.
+
+An `AsyncDriver`'s synchronous methods, `prepare`, `validate` and inspection, are the `Driver`'s, and as safe.
+
+fnloom can't make your own code safe:
+
+- **Your values.** A mutable value you pass, such as a list, is shared by every thread you pass it to, and a cached
+  result is shared by every run that hits it.
+- **Nodes that mutate.** A node that changes its arguments, or a module global, races with every other run that
+  reads them.
+- **Your store.** A store of your own must be safe to call from several threads at once
+  ([Stores](caching.md#stores)).
+
+## Rebuilding after an edit
+
+A driver keeps the functions it was built with. After `importlib.reload` it still runs the old code, as Hamilton's
+does. `rebuild()` builds a new driver from the same builder, with every setting, its config and its cache store, so it
+sees the reloaded module (Q83):
+
+```python
+fresh = driver.rebuild()
+fresh.execute(["total"], inputs={"price": 2.0, "quantity": 3})
+# -> {'total': 6.0}
+```
+
+- The old driver is unchanged, and keeps running its old code until you drop it.
+- Code versions are read again, so with a shared cache store the edited node, and everything downstream of it,
+  misses on the new driver ([Code versions](caching.md#code-versions)).
+- A function given to `with_functions` is the object you gave. After a reload, give the new one to a new builder.
+- `AsyncDriver.rebuild()` keeps `sync_nodes` too. A driver made from a native graph has no builder, and raises a
+  `TypeError`.
 
 ## Exceptions from your functions
 
