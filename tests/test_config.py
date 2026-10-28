@@ -490,6 +490,24 @@ def plain() -> int:
         Builder().with_config({"mode": "a"}).with_modules(module).build()
 
 
+def test_source_that_no_longer_parses_skips_the_check(tmp_path: Path) -> None:
+    """Source edited after import into invalid Python is skipped, as no source is."""
+    module = _file_module(
+        tmp_path,
+        "cfg_unparsable",
+        """\
+from fnloom import config
+
+@config.when(mode="a")
+def foo__a() -> int:
+    return 1
+""",
+    )
+    (tmp_path / "cfg_unparsable.py").write_text("def broken(:\n", encoding="utf-8")
+    driver = Builder().with_config({"mode": "a"}).with_modules(module).build()
+    assert driver.execute(["foo"]) == {"foo": 1}
+
+
 def test_a_conditional_definition_is_not_a_redefinition(tmp_path: Path) -> None:
     """Two `def`s under an `if` and its `else` are one definition, not two."""
     module = _file_module(
@@ -555,9 +573,101 @@ def test_a_non_bool_comparison_names_the_key() -> None:
     """An `==` returning something other than a bool is a `TypeError` naming the key."""
     with pytest.raises(
         TypeError,
-        match=r"^config key 'mode': == returned list, not bool$",
+        match=(
+            r"^== on these config keys did not return a bool: "
+            r"'mode' \(builtins\.list\)$"
+        ),
     ):
         _built("cfg_non_bool", _VARIANTS, {"mode": _Elementwise()})
+
+
+def test_every_non_bool_comparison_is_listed() -> None:
+    """Two keys whose `==` returns no bool are named in one error, sorted."""
+    source_code = """
+from fnloom import config
+
+@config.when(zone="x")
+def foo__z() -> int:
+    return 1
+
+@config.when(area="y")
+def bar__a() -> int:
+    return 1
+"""
+    with pytest.raises(
+        TypeError,
+        match=(
+            r"^== on these config keys did not return a bool: "
+            r"'area' \(builtins\.list\), 'zone' \(builtins\.list\)$"
+        ),
+    ):
+        _built(
+            "cfg_non_bools",
+            source_code,
+            {"zone": _Elementwise(), "area": _Elementwise()},
+        )
+
+
+class _StandInBool:
+    """A boolean scalar named as NumPy's is: module `numpy`, type `bool`."""
+
+    def __init__(self, value: bool) -> None:  # noqa: FBT001  # mirrors `bool(value)`
+        self._value = value
+
+    def __bool__(self) -> bool:
+        return self._value
+
+
+_StandInBool.__module__ = "numpy"
+_StandInBool.__name__ = "bool"
+
+
+class _StandInScalar:
+    """A config value whose `==` returns the stand-in boolean, as NumPy's does."""
+
+    def __init__(self, value: object) -> None:
+        self._value = value
+
+    @override
+    def __eq__(self, other: object) -> bool:
+        return _StandInBool(self._value == other)  # ty: ignore[invalid-return-type]  # mimics NumPy
+
+    __hash__ = None  # unhashable, as compared values may be
+
+
+def test_a_numpy_boolean_counts_as_a_bool() -> None:
+    """A result typed `numpy.bool` is read with `bool(...)`, without importing NumPy."""
+    for mode, expected in (("a", 3), ("b", 102)):
+        driver = _built(
+            f"cfg_stand_in_{mode}", _VARIANTS, {"mode": _StandInScalar(mode)}
+        )
+        assert driver.execute(["bar"], inputs={"x": 1}) == {"bar": expected}
+
+
+def test_real_numpy_values() -> None:
+    """A NumPy scalar config value matches; a NumPy array is refused, by type."""
+    numpy = pytest.importorskip("numpy")
+    source_code = """
+from fnloom import config
+
+@config.when(level=2)
+def foo__two(x: int) -> int:
+    return x + 2
+
+@config.when(level=3)
+def foo__three(x: int) -> int:
+    return x + 3
+"""
+    driver = _built("cfg_numpy_scalar", source_code, {"level": numpy.int64(2)})
+    assert driver.execute(["foo"], inputs={"x": 1}) == {"foo": 3}
+    with pytest.raises(
+        TypeError,
+        match=(
+            r"^== on these config keys did not return a bool: "
+            r"'level' \(numpy\.ndarray\)$"
+        ),
+    ):
+        _built("cfg_numpy_array", source_code, {"level": numpy.array([2, 3])})
 
 
 def test_an_unhashable_config_value_compares() -> None:

@@ -45,7 +45,7 @@ driver = fnloom.build(pricing)
 | Two variants of one node matching the config | `ValueError: node 'foo' has more than one variant matching the config {'mode': 'a'}: 'foo__a', 'foo__nb'` |
 | Two `@config.default`s for one node | `ValueError: node 'foo' has more than one @config.default: 'foo__x', 'foo__y'` |
 | A config-decorated function defined twice in one module | `ValueError: function 'foo__a' is defined more than once in module 'm' (lines 4, 8); Python keeps only the last` |
-| A config value whose `==` returns something other than a `bool`, such as an array | `TypeError: config key 'mode': == returned ndarray, not bool` |
+| A config value whose `==` returns something other than a `bool` (NumPy's boolean scalar counts as one), such as an array, every such key listed, sorted | `TypeError: == on these config keys did not return a bool: 'mode' (numpy.ndarray)` |
 | A config that isn't a mapping, or a key that isn't a `str`, given to `with_config` | `TypeError: config keys must be str, got: int` |
 
 ## When you execute or prepare

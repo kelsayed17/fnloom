@@ -243,7 +243,8 @@ post.nodes["cost"].origin is shipping.cost__post
 - **A key the config doesn't have never matches,** whichever form tests it. Hamilton reads a missing key as `None`, so
   `when_not(carrier="post")` matches an empty config there (Q57).
 - **Values compare with `==`,** so `when(level=1)` matches a config of `{"level": True}`. An `==` that returns
-  anything but a `bool`, as a NumPy array's does, is a `TypeError` naming the key.
+  anything but a `bool`, as a NumPy array's does, is a `TypeError` naming the key; NumPy's boolean scalar
+  counts as a `bool`.
 - **Stacked decorators all apply:** `@config.when(carrier="post")` over `@config.when_not(region="eu")` needs both.
   The order you stack them in, and their order with `@parameterize` and `@tag`, never matters.
 - `@parameterize` under a config decorator gives its rows only when the variant is selected.

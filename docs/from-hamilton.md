@@ -47,7 +47,7 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `@cache(format=...)` | The same, imported from `fnloom`: a format's name, or a `fnloom.Format` ([Caching](caching.md#stores)) |
 | `target_=...` | Not there. fnloom adds `version=` to pin a code version |
 | `@config.when`, `when_not`, `when_in`, `when_not_in` | The same, imported from `fnloom`, with the same `foo__variant` naming ([Config](writing-nodes.md#config)) |
-| `@config.when(name="x")` | The same. `name=` is the node name on all four forms, `when_not_in` too |
+| `@config.when(name="x")` | The same on `when`, `when_not` and `when_in`. On `when_not_in`, Hamilton reads `name` as a config key, while fnloom reads it as the node name, as on the other forms (Q59) |
 | `@config.default` | Not in Hamilton: the variant used when no other matches |
 | `@config(lambda cfg: ...)` | Not there |
 | A row as `(bindings, docstring)`, `group(...)`, `parameterize_sources`, `parameterize_values` | Not yet. A row is a mapping |

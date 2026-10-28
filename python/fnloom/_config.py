@@ -280,36 +280,73 @@ class Selection:
     unmatched: dict[str, str]
 
 
-def _equal(key: str, have: object, want: object) -> bool:
+# A comparison that returned no bool: the config key, and the result's type by
+# qualified name.
+type _Unequal = tuple[str, str]
+
+# The names NumPy gives its boolean scalar type (`bool` since 2.0, `bool_` before).
+_NUMPY_BOOLS = frozenset({"bool", "bool_"})
+
+
+def _is_bool(result: object) -> bool:
+    """Whether `result` is a `bool`, or NumPy's boolean scalar, read without NumPy."""
+    kind = type(result)
+    return kind is bool or (
+        kind.__module__ == "numpy" and kind.__name__ in _NUMPY_BOOLS
+    )
+
+
+def _equal(key: str, have: object, want: object, bad: set[_Unequal]) -> bool:
+    """`have == want` as a `bool`; a result of any other type goes into `bad`."""
     result = have == want
-    if type(result) is not bool:
-        msg = f"config key {key!r}: == returned {type(result).__name__}, not bool"
-        raise TypeError(msg)
-    return result
+    if _is_bool(result):
+        return bool(result)
+    kind = type(result)
+    bad.add((key, f"{kind.__module__}.{kind.__qualname__}"))
+    return False
 
 
-def _holds(condition: Condition, config: Mapping[str, object]) -> bool:
+def _holds(
+    condition: Condition, config: Mapping[str, object], bad: set[_Unequal]
+) -> bool:
     if condition.key not in config:
         return False
     have = config[condition.key]
-    hits = [_equal(condition.key, have, want) for want in condition.values]
+    hits = [_equal(condition.key, have, want, bad) for want in condition.values]
     if condition.kind in {"when", "when_in"}:
         return any(hits)
     return not any(hits)
+
+
+def _unequal_error(bad: set[_Unequal]) -> TypeError:
+    """One error naming every key whose `==` returned no bool, sorted."""
+    listed = ", ".join(f"{key!r} ({kind})" for key, kind in sorted(bad))
+    return TypeError(f"== on these config keys did not return a bool: {listed}")
+
+
+def _matches(
+    policy: ConfigPolicy, config: Mapping[str, object], bad: set[_Unequal]
+) -> bool:
+    # Every condition is evaluated, so every bad comparison is found.
+    held = [_holds(condition, config, bad) for condition in policy.conditions]
+    return all(held)
 
 
 def matches(policy: ConfigPolicy, config: Mapping[str, object]) -> bool:
     """Whether every condition of `policy` holds for `config`.
 
     A condition on a key `config` does not have is false, whichever its kind.
+    An `==` must return a `bool`, or NumPy's boolean scalar, which counts as one.
 
     Raises:
-        TypeError: An `==` returned something other than a `bool`, such as an
-            array; the message names the key.
+        TypeError: An `==` returned anything else, such as an array; one
+            message names every such key and the type it returned, sorted.
     """
-    # Every condition is evaluated, so a bad comparison raises whatever its order.
-    held = [_holds(condition, config) for condition in policy.conditions]
-    return all(held)
+    bad: set[_Unequal] = set()
+    held = _matches(policy, config, bad)
+    if bad:
+        raise _unequal_error(bad)
+    return held
 
 
 def _variant(fn: Callable[..., object], policy: ConfigPolicy) -> Variant:
@@ -375,7 +412,10 @@ def unmatched(
 
 
 def _pick(
-    node: str, variants: list[Variant], config: Mapping[str, object]
+    node: str,
+    variants: list[Variant],
+    config: Mapping[str, object],
+    bad: set[_Unequal],
 ) -> tuple[Variant | None, str | None]:
     """The variant selected for `node`, or `None`; and a problem to refuse, if any."""
     labels = _labels(variants)
@@ -383,7 +423,9 @@ def _pick(
     if len(defaults) > 1:
         listed = ", ".join(repr(label) for label in defaults)
         return None, f"node {node!r} has more than one @config.default: {listed}"
-    hits = [v for v in variants if not v.policy.default and matches(v.policy, config)]
+    hits = [
+        v for v in variants if not v.policy.default and _matches(v.policy, config, bad)
+    ]
     if len(hits) > 1:
         culprits = sorted(labels[id(v.function)] for v in hits)
         listed = ", ".join(repr(label) for label in culprits)
@@ -419,9 +461,10 @@ def resolve_variants(
     chosen: set[int] = set()
     problems: list[tuple[str, str]] = []
     missing: dict[str, str] = {}
+    bad: set[_Unequal] = set()
     for node in sorted(groups):
         variants = groups[node]
-        picked, problem = _pick(node, variants, config)
+        picked, problem = _pick(node, variants, config, bad)
         if problem is not None:
             problems.append((node, problem))
         elif picked is not None:
@@ -430,6 +473,9 @@ def resolve_variants(
             reason = unmatched(node, config, variants)
             for produced in sorted({p for v in variants for p in v.produces}):
                 missing[produced] = reason
+    # A bad comparison leaves the selection unknown, so it is raised first.
+    if bad:
+        raise _unequal_error(bad)
     if problems:
         raise ValueError("; ".join(problem for _, problem in problems))
     selected: list[Found] = []
@@ -453,7 +499,8 @@ def select(functions: Sequence[Found], config: Mapping[str, object]) -> list[Fou
     Raises:
         ValueError: Two variants of one node match, or one node has two
             defaults; every such node in one message, sorted.
-        TypeError: An `==` did not return a `bool` (see `matches`).
+        TypeError: An `==` did not return a `bool` (see `matches`); every
+            such key in one message.
     """
     return resolve_variants(functions, config).functions
 
@@ -467,10 +514,12 @@ def redefinitions(module: ModuleType) -> list[str]:
     """
     try:
         source = inspect.getsource(module)
-    except OSError, TypeError:
+        tree = ast.parse(source)
+    except OSError, TypeError, SyntaxError:
+        # No source, or source edited since import that no longer parses.
         return []
     lines: dict[str, list[int]] = {}
-    for statement in ast.parse(source).body:
+    for statement in tree.body:
         if isinstance(statement, ast.FunctionDef | ast.AsyncFunctionDef):
             lines.setdefault(statement.name, []).append(statement.lineno)
     found: list[str] = []

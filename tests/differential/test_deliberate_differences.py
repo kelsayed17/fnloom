@@ -1062,6 +1062,50 @@ def test_q57_a_missing_key_and_a_missing_variant() -> None:
     assert _fnloom_configured({}, without_bar).node_names() == ["bar", "x"]
 
 
+_MISSING_KEY = """
+{decorator}
+
+@config.when(mode=None)
+def a__none() -> int:
+    return 1
+
+@config.when_not(mode="a")
+def b__not_a() -> int:
+    return 2
+
+@config.when_in(mode=["a", None])
+def c__in() -> int:
+    return 3
+
+@config.when_not_in(mode=["a"])
+def d__not_in() -> int:
+    return 4
+"""
+
+
+@pytest.mark.deliberate("Q57")
+def test_q57_a_missing_key_matches_no_form() -> None:
+    """Hamilton reads a missing key as `None` in all four forms; fnloom matches none."""
+    hamilton_module = make_module(
+        "differential_q57_forms_h", _MISSING_KEY.format(decorator=_HAMILTON_CONFIG)
+    )
+    hamilton = _hamilton_configured({}, hamilton_module)
+    assert _hamilton_names(hamilton) == ["a", "b", "c", "d"]
+    assert hamilton.execute(["a", "b", "c", "d"]) == {"a": 1, "b": 2, "c": 3, "d": 4}
+    fnloom_module = make_module(
+        "differential_q57_forms_f", _MISSING_KEY.format(decorator=_FNLOOM_CONFIG)
+    )
+    assert _fnloom_configured({}, fnloom_module).node_names() == []
+    # With the key present, fnloom's forms read it as Hamilton's do.
+    both: dict[str, object] = {"mode": "b"}
+    assert _fnloom_configured(both, fnloom_module).node_names() == ["b", "d"]
+    assert _hamilton_names(_hamilton_configured(both, hamilton_module)) == [
+        "b",
+        "d",
+        "mode",
+    ]
+
+
 _TWO_MATCHES = """
 {decorator}
 
@@ -1177,6 +1221,78 @@ def test_q59_misuse_is_refused_when_decorating() -> None:
             f"{_FNLOOM_CONFIG}\n\n@config.when(mode='a')\n"
             "def foo__() -> int:\n    return 1\n",
         )
+
+
+_POSITIONAL_NAME = """
+{decorator}
+
+@config.when("alpha", mode="a")
+def thing() -> int:
+    return 1
+"""
+
+_NOT_ITERABLE = """
+{decorator}
+
+@config.when_in(mode=5)
+def foo__a() -> int:
+    return 1
+"""
+
+_NOT_IN_NAME = """
+{decorator}
+
+@config.when_not_in(name=["a"])
+def foo__x() -> int:
+    return 1
+"""
+
+
+@pytest.mark.deliberate("Q59")
+def test_q59_a_name_and_a_non_iterable() -> None:
+    """Hamilton reads a name or a non-iterable loosely; fnloom refuses when decorating.
+
+    Hamilton takes a positional string as the node name, reads `name` on
+    `when_not_in` as a config key, and fails a non-iterable only at build.
+    """
+    positional = make_module(
+        "differential_q59_pos_h", _POSITIONAL_NAME.format(decorator=_HAMILTON_CONFIG)
+    )
+    assert _hamilton_names(_hamilton_configured({"mode": "a"}, positional)) == [
+        "alpha",
+        "mode",
+    ]
+    not_iterable = make_module(
+        "differential_q59_nonit_h", _NOT_ITERABLE.format(decorator=_HAMILTON_CONFIG)
+    )
+    with pytest.raises(TypeError, match="is not a container or iterable"):
+        _hamilton_configured({"mode": 5}, not_iterable)
+    not_in = make_module(
+        "differential_q59_nin_h", _NOT_IN_NAME.format(decorator=_HAMILTON_CONFIG)
+    )
+    assert "foo" in _hamilton_names(_hamilton_configured({"name": "b"}, not_in))
+    assert "foo" not in _hamilton_names(_hamilton_configured({"name": "a"}, not_in))
+    with pytest.raises(TypeError, match=r"as a mapping or keywords, got str"):
+        make_module(
+            "differential_q59_pos_f", _POSITIONAL_NAME.format(decorator=_FNLOOM_CONFIG)
+        )
+    with pytest.raises(TypeError, match=r"need a collection of values: 'mode' \(int\)"):
+        make_module(
+            "differential_q59_nonit_f", _NOT_ITERABLE.format(decorator=_FNLOOM_CONFIG)
+        )
+    # `name=` is the node name on `when_not_in` too, never a key: no condition is left.
+    with pytest.raises(ValueError, match=r"when_not_in needs at least one condition"):
+        make_module(
+            "differential_q59_nin_f", _NOT_IN_NAME.format(decorator=_FNLOOM_CONFIG)
+        )
+    keyed = make_module(
+        "differential_q59_nin_keyed_f",
+        _NOT_IN_NAME.format(decorator=_FNLOOM_CONFIG).replace(
+            '(name=["a"])', '({"name": ["a"]})'
+        ),
+    )
+    assert _fnloom_configured({"name": "b"}, keyed).node_names() == ["foo"]
+    assert _fnloom_configured({"name": "a"}, keyed).node_names() == []
 
 
 _ONE_VARIANT = """
