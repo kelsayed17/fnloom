@@ -26,6 +26,7 @@ from fnloom._decorators import (
     decorations,
     too_many_rows,
 )
+from fnloom._namespaces import qualified
 from fnloom._view import Param
 
 if TYPE_CHECKING:
@@ -613,7 +614,8 @@ def lower(
     """`producer`, unchanged, then one generated node per extracted field.
 
     Each generated node reads the producer under its name, has the producer's
-    origin, module, tags and config, and an `_Extractor` payload. With `resolved`,
+    origin, module, tags, config and namespace, under which it is named, and an
+    `_Extractor` payload, which reads the field by its own name. With `resolved`,
     `producer`'s annotations are resolved: each field's type is read from the
     return, and a declared type it cannot feed is a `ValueError` naming every
     such field; a `TypedDict` field type that does not resolve raises its
@@ -646,7 +648,7 @@ def lower(
         *(
             replace(
                 producer,
-                name=name,
+                name=qualified(producer.namespace, name),
                 params=(param,),
                 payload=_Extractor(producer.name, name, declared, extraction.fill),
                 returns=declared,
@@ -667,7 +669,7 @@ def _lowered_columns(
         *(
             replace(
                 producer,
-                name=name,
+                name=qualified(producer.namespace, name),
                 params=(param,),
                 payload=_ColumnExtractor(
                     producer.name, name, declared, extraction.fill

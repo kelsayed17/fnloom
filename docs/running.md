@@ -355,7 +355,9 @@ view.doc
 ```
 
 `origin` is the function the node came from, `module` is its module's name, and `tags` are the ones you wrote with
-`@tag`. An input has no function, so its `origin`, `module` and `doc` are `None` and its `params` are empty. Its `type`
+`@tag`. `namespace` is the one its module was given under, or `None`
+([Namespaces](writing-nodes.md#namespaces)). An input has no function, so its `origin`, `module`, `doc` and
+`namespace` are `None` and its `params` are empty. Its `type`
 is the annotation of the parameters that read it:
 
 ```python

@@ -17,8 +17,9 @@ def output_names(
     A function means the node it produces in this driver, matched by identity with
     the node's origin, never by name (Q30): a plain function is its node, and an
     `@extract_*` function is its producer, not its fields. When a function makes
-    several nodes, the one named like it is its node, as for an alias; otherwise it
-    is an error. Every culprit of every kind is listed once, sorted, in one message:
+    several nodes, the one named like it is its node, as for an alias, unless a
+    namespace holds one of them (Q74); otherwise it is an error. Every culprit of
+    every kind is listed once, sorted, in one message:
 
     - `TypeError` for a bare `str` (Q6), and when any culprit is malformed: an item
       that is neither a `str` nor a function, or a function that makes several nodes,
@@ -80,8 +81,10 @@ def _read(item: object, views: NodeViews) -> tuple[str, str]:
     owned = views.owners.get(id(item), ())
     if len(owned) > 1:
         # An alias, `alias = base`, or a row named like the function: that one node.
+        # Not when a namespace has a copy too: the plain node is then one of several.
         named = [name for name in owned if name == getattr(item, "__name__", None)]
-        if len(named) == 1:
+        functions = views.functions
+        if len(named) == 1 and all(functions[n].namespace is None for n in owned):
             return "name", named[0]
         return "several", _several(item, owned)
     if owned:

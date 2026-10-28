@@ -2921,6 +2921,130 @@ def test_q73_malformed_all_names_every_module_sorted() -> None:
     )
 
 
+_Q74_FIRST = """
+def dup() -> int:
+    return 1
+
+
+def uses_dup(dup: int) -> int:
+    return dup + 100
+
+
+def only_a(x: int) -> int:
+    return x
+"""
+
+_Q74_SUBDAG = """
+from hamilton.function_modifiers import subdag
+
+import differential_q74_first
+
+
+@subdag(differential_q74_first, inputs={{}}, config={{}})
+def sub(only_a: int) -> int:
+    return only_a
+"""
+
+
+def _q74_dependencies(driver: hamilton_driver.Driver) -> dict[str, list[str]]:
+    """Each Hamilton node's required dependencies, sorted, by name."""
+    return {
+        variable.name: sorted(variable.required_dependencies)
+        for variable in driver.list_available_variables()
+    }
+
+
+@pytest.mark.deliberate("Q74")
+def test_q74_namespaces_and_no_module_overrides() -> None:
+    """Hamilton namespaces only by `@subdag` and overrides last-wins; fnloom neither."""
+    first = make_module("differential_q74_first", _Q74_FIRST)
+    second = make_module("differential_q74_second", "def dup() -> int:\n    return 2\n")
+    # Hamilton: `with_modules` takes modules only, and no builder method namespaces.
+    assert list(inspect.signature(hamilton_driver.Builder.with_modules).parameters) == [
+        "self",
+        "modules",
+    ]
+    assert not [
+        name
+        for name in dir(hamilton_driver.Builder)
+        if "namespace" in name or "prefix" in name
+    ]
+    # Hamilton: a name two modules define fails the build...
+    with pytest.raises(ValueError, match="Cannot define function dup more than once"):
+        hamilton_driver.Builder().with_modules(first, second).build()
+    # ...unless overrides are on: the later module's function wins, for every reader.
+    for order, dup in (((first, second), 2), ((second, first), 1)):
+        hamilton = (
+            hamilton_driver.Builder()
+            .with_modules(*order)
+            .allow_module_overrides()
+            .build()
+        )
+        assert hamilton.execute(["dup", "uses_dup"]) == {
+            "dup": dup,
+            "uses_dup": dup + 100,
+        }
+    # Hamilton: one module given twice is one set of nodes, overrides on: no reuse.
+    twice = (
+        hamilton_driver.Builder()
+        .with_modules(first, first)
+        .allow_module_overrides()
+        .build()
+    )
+    assert {v.name for v in twice.list_available_variables()} == {
+        "dup",
+        "uses_dup",
+        "only_a",
+        "x",
+    }
+    # Hamilton: `@subdag` names its nodes `<function>.<name>`; inside, `uses_dup`
+    # reads the subdag's `dup`, and `only_a` the plain input `x`.
+    subdag_module = make_module("differential_q74_subdag", _Q74_SUBDAG.format())
+    subdag = hamilton_driver.Builder().with_modules(subdag_module).build()
+    subdag_dependencies = _q74_dependencies(subdag)
+    assert subdag_dependencies["sub.uses_dup"] == ["sub.dup"]
+    assert subdag_dependencies["sub.only_a"] == ["x"]
+    # fnloom: `namespace=` gives the module's nodes the same names, read the same way.
+    driver = fnloom.Builder().with_modules(first, namespace="sub").build()
+    assert driver.node_names() == ["sub.dup", "sub.only_a", "sub.uses_dup", "x"]
+    assert set(driver.node_names()) < set(subdag_dependencies)
+    assert driver.nodes["sub.uses_dup"].dependencies == ("sub.dup",)
+    assert driver.nodes["sub.only_a"].dependencies == ("x",)
+    assert driver.execute(["sub.uses_dup", "sub.only_a"], inputs={"x": 3}) == (
+        subdag.execute(["sub.uses_dup", "sub.only_a"], inputs={"x": 3})
+    )
+    # fnloom: a name the namespace doesn't define reads the plain node.
+    outer = (
+        fnloom.Builder()
+        .with_modules(second)
+        .with_modules(
+            make_module(
+                "differential_q74_reader",
+                "def reads(dup: int) -> int:\n    return dup\n",
+            ),
+            namespace="ns",
+        )
+        .build()
+    )
+    assert outer.nodes["ns.reads"].dependencies == ("dup",)
+    assert outer.execute(["ns.reads"]) == {"ns.reads": 2}
+    # fnloom: one module under two namespaces is two sets of nodes.
+    reused = (
+        fnloom.Builder()
+        .with_modules(first, namespace="a")
+        .with_modules(first, namespace="b")
+        .build()
+    )
+    assert reused.execute(["a.uses_dup", "b.uses_dup"]) == {
+        "a.uses_dup": 101,
+        "b.uses_dup": 101,
+    }
+    # fnloom: nothing overrides; a name two modules define fails the build.
+    assert not hasattr(fnloom.Builder, "allow_module_overrides")
+    with pytest.raises(ValueError, match="node 'dup' is defined in both"):
+        fnloom.Builder().with_modules(first, second).build()
+
+
 @pytest.mark.deliberate("Q75")
 def test_q75_strict_overrides_and_declared_inputs() -> None:
     """Hamilton refuses an unsupplied overridden input, and builds a misspelled one."""

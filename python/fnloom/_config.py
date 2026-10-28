@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, Literal
 
 from fnloom import _extract
 from fnloom._decorators import _ATTRIBUTE, decorations
+from fnloom._namespaces import qualified
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -258,14 +259,18 @@ class Variant:
     Attributes:
         function: The function as written, never changed.
         policy: What its config decorators recorded.
-        node: The node name: `name=`, or the function's name cut at the last `__`.
-        produces: The names of the nodes it makes: its rows, or `node` itself.
+        node: The node name: `name=`, or the function's name cut at the last `__`,
+            under its namespace.
+        produces: The names of the nodes it makes: its rows, or `node` itself,
+            and its fields, each under its namespace.
+        namespace: The namespace its module was given under, or `None`.
     """
 
     function: Callable[..., object]
     policy: ConfigPolicy
     node: str
     produces: tuple[str, ...]
+    namespace: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -351,13 +356,23 @@ def matches(policy: ConfigPolicy, config: Mapping[str, object]) -> bool:
     return held
 
 
-def _variant(fn: Callable[..., object], policy: ConfigPolicy) -> Variant:
+def _variant(
+    fn: Callable[..., object], policy: ConfigPolicy, namespace: str | None
+) -> Variant:
     node = node_name(fn, policy.name)
     recorded = decorations(fn)
     produces = (node,) if recorded.rows is None else tuple(recorded.rows)
     if recorded.extract is not None:
         produces = (*produces, *_extract.field_names(fn, recorded.extract))
-    return Variant(fn, policy, node, produces)
+    if namespace is None:
+        return Variant(fn, policy, node, produces)
+    return Variant(
+        fn,
+        policy,
+        qualified(namespace, node),
+        tuple(qualified(namespace, name) for name in produces),
+        namespace,
+    )
 
 
 def _labels(variants: Sequence[Variant]) -> dict[int, str]:
@@ -463,27 +478,41 @@ def _pick(
     return next((v for v in variants if v.policy.default), None), None
 
 
-def _groups(functions: Sequence[Found]) -> dict[str, list[Variant]]:
-    """The config-decorated functions as variants, by the node they name."""
+def _groups(
+    functions: Sequence[Found], namespaces: Sequence[str | None]
+) -> dict[str, list[Variant]]:
+    """The config-decorated functions as variants, by the node they name.
+
+    `namespaces` holds each function's namespace, in order.
+    """
     groups: dict[str, list[Variant]] = {}
-    seen: set[int] = set()
-    for _, _, fn in functions:
+    seen: set[tuple[str | None, int]] = set()
+    for (_, _, fn), namespace in zip(functions, namespaces, strict=True):
         policy = decorations(fn).config
-        # A function bound under two names, or a module given twice, is one variant.
-        if policy is None or id(fn) in seen:
+        # A function bound under two names, or a module given twice, is one
+        # variant in each namespace.
+        if policy is None or (namespace, id(fn)) in seen:
             continue
-        seen.add(id(fn))
-        variant = _variant(fn, policy)
+        seen.add((namespace, id(fn)))
+        variant = _variant(fn, policy, namespace)
         groups.setdefault(variant.node, []).append(variant)
     return groups
 
 
 def resolve_variants(
-    functions: Sequence[Found], config: Mapping[str, object]
+    functions: Sequence[Found],
+    config: Mapping[str, object],
+    namespaces: Sequence[str | None] = (),
 ) -> Selection:
-    """Selects one variant per node; see `select`. Also says why a node has none."""
-    groups = _groups(functions)
-    chosen: set[int] = set()
+    """Selects one variant per node; see `select`. Also says why a node has none.
+
+    `namespaces`, when given, holds the namespace of each of `functions`, in
+    order (Q74): a variant's node is named under it, so each namespace selects
+    its own, and a function found under two namespaces is a variant in each.
+    """
+    under = namespaces or (None,) * len(functions)
+    groups = _groups(functions, under)
+    chosen: set[tuple[str | None, int]] = set()
     problems: list[tuple[str, str]] = []
     missing: dict[str, str] = {}
     bad: set[_Unequal] = set()
@@ -493,7 +522,7 @@ def resolve_variants(
         if problem is not None:
             problems.append((node, problem))
         elif picked is not None:
-            chosen.add(id(picked.function))
+            chosen.add((picked.namespace, id(picked.function)))
             missing.update(_not_given(picked, variants, config))
         else:
             reason = unmatched(node, config, variants)
@@ -505,12 +534,12 @@ def resolve_variants(
     if problems:
         raise ValueError("; ".join(problem for _, problem in problems))
     selected: list[Found] = []
-    for found in functions:
+    for found, namespace in zip(functions, under, strict=True):
         fn = found[2]
         if decorations(fn).config is None:
             selected.append(found)
-        elif id(fn) in chosen:
-            chosen.discard(id(fn))
+        elif (namespace, id(fn)) in chosen:
+            chosen.discard((namespace, id(fn)))
             selected.append(found)
     return Selection(selected, missing)
 

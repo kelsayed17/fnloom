@@ -10,9 +10,16 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, NamedTuple
 
 from fnloom import _config, _extract
-from fnloom._config import Condition, Found, redefinitions, resolve_variants
+from fnloom._config import (
+    Condition,
+    Found,
+    Selection,
+    redefinitions,
+    resolve_variants,
+)
 from fnloom._decorators import _ATTRIBUTE, Source, Value, decorations
 from fnloom._functions import FunctionSource, NodeSpec
+from fnloom._namespaces import qualified
 from fnloom._types import read_aliases
 from fnloom._view import Param
 
@@ -43,7 +50,8 @@ class NodeDef:
     `resolve`, as are the params' annotations. `config` holds the conditions that
     selected the function, empty for a plain one or a `@config.default`. `doc` is
     the node's own docstring, as an `extract_columns` `(name, doc)` sets it, or
-    `None` for `origin`'s.
+    `None` for `origin`'s. `namespace` is the one its module was given under, or
+    `None`; `name` is then `namespace.<name>` (Q74).
     """
 
     name: str
@@ -56,6 +64,7 @@ class NodeDef:
     renames: Mapping[str, str] = field(default_factory=dict)
     config: tuple[Condition, ...] = ()
     doc: str | None = None
+    namespace: str | None = None
 
 
 def core_inputs(params: tuple[Param, ...]) -> list[tuple[str, bool]]:
@@ -167,17 +176,55 @@ def _signature_parameters(
     return parameters
 
 
+class Within(NamedTuple):
+    """A namespace, and its nodes' full names by their names in it (Q74)."""
+
+    namespace: str
+    names: Mapping[str, str]
+
+
 def _bind(
-    parameters: Sequence[_Parameter], row: Mapping[str, Source | Value]
+    parameters: Sequence[_Parameter],
+    row: Mapping[str, Source | Value],
+    within: Within | None = None,
 ) -> tuple[Param, ...]:
-    """Binds each parameter to the row's source or value, or to its own name."""
+    """Binds each parameter to the row's source or value, or to its own name.
+
+    `within` a namespace, a source the namespace defines reads its node there.
+    """
     params: list[Param] = []
     for name, has_default, annotation in parameters:
         # A `Source` is made only for a parameter the row does not bind.
         binding = row[name] if name in row else Source(name)
+        if (
+            within is not None
+            and isinstance(binding, Source)
+            and binding.name in within.names
+        ):
+            binding = Source(within.names[binding.name])
         required = not has_default or isinstance(binding, Value)
         params.append(Param(name, binding, required, annotation))
     return tuple(params)
+
+
+def _bind_within(
+    parameters: Sequence[_Parameter], within: Within
+) -> tuple[tuple[Param, ...], dict[str, str]]:
+    """A plain function's parameters `within` a namespace, and the renames.
+
+    Each reads the namespace's node of its name when the namespace defines one,
+    under the parameter's keyword, and its own name otherwise: `_bind` and
+    `_payload` for a function binding nothing, in one cheaper pass.
+    """
+    names = within.names
+    params: list[Param] = []
+    renames: dict[str, str] = {}
+    for name, has_default, annotation in parameters:
+        read = names.get(name, name)
+        if read is not name:
+            renames[read] = name
+        params.append(Param(name, Source(read), not has_default, annotation))
+    return tuple(params), renames
 
 
 def _payload(
@@ -238,20 +285,24 @@ def _check_kind(name: str, fn: Callable[..., object], *, awaits: bool) -> None:
     raise ValueError(msg)
 
 
-def _node_defs(
+def _node_defs(  # noqa: PLR0913  # keyword-only options, one per kind of source
     module: str,
     name: str,
     fn: Callable[..., object],
     *,
     awaits: bool,
     bind: Mapping[str, Source | Value] | None = None,
+    within: Within | None = None,
 ) -> list[NodeDef]:
     """One node for a plain function; one per row for a parameterized one.
 
     `module` is the name of the module the nodes belong to. `bind`, from a
     `fnloom.node` spec, makes `fn` one row named `name`; `node` has refused a
     parameterized function or a variant. With `awaits`, as `build_async` scans,
-    an `async def` is a node too (Q32).
+    an `async def` is a node too (Q32). `within` a namespace, each node is named
+    under it, and a parameter or source reads the namespace's node when the
+    namespace defines its name, and the name as written otherwise (Q74): the
+    core passes the namespaced node under the parameter's keyword (`renames`).
     """
     _check_kind(name, fn, awaits=awaits)
     annotations = annotationlib.get_annotations(
@@ -272,14 +323,31 @@ def _node_defs(
         conditions = recorded.config.conditions
     if rows is None:
         # A plain function is one node, of its own name, binding nothing, so each
-        # parameter reads its own name and the payload is the function itself.
-        params = _bind(parameters, {})
+        # parameter reads its own name, or its namespace's node of that name, and
+        # the payload is the function itself.
         returns = annotations["return"]
         tags = recorded.tags
-        if not conditions:
+        if within is not None:
+            params, renames = _bind_within(parameters, within)
+            node = NodeDef(
+                within.names.get(name) or qualified(within.namespace, name),
+                params,
+                tags,
+                fn,
+                fn,
+                module,
+                returns,
+                renames,
+                conditions,
+                None,
+                within.namespace,
+            )
+        elif not conditions:
+            params = _bind(parameters, {})
             # Positional and without `config`: the common case, kept cheapest.
             node = NodeDef(name, params, tags, fn, fn, module, returns)
         else:
+            params = _bind(parameters, {})
             node = NodeDef(name, params, tags, fn, fn, module, returns, {}, conditions)
         if recorded.extract is None:
             return [node]
@@ -288,12 +356,13 @@ def _node_defs(
         # from the resolved return, with their checks.
         return _extract.lower(node, recorded.extract, resolved=False)
     nodes: list[NodeDef] = []
+    namespace = None if within is None else within.namespace
     for node_name, row in rows.items():
-        params = _bind(parameters, row)
+        params = _bind(parameters, row, within)
         payload, renames = _payload(fn, params)
         nodes.append(
             NodeDef(
-                node_name,
+                qualified(namespace, node_name),
                 params,
                 recorded.tags,
                 payload,
@@ -302,6 +371,7 @@ def _node_defs(
                 annotations["return"],
                 renames,
                 conditions,
+                namespace=namespace,
             )
         )
     if recorded.extract is not None:
@@ -460,9 +530,25 @@ def _definition(node: NodeDef, given: AbstractSet[int]) -> str:
     return f"a row of function {function!r}{suffix}"
 
 
+def _source(node: NodeDef, given: AbstractSet[int]) -> str:
+    """Where `node` came from, for a clash under a namespace: what, which module."""
+    where = f"by {_definition(node, set())} in module {node.module!r}"
+    if node.namespace is not None:
+        where += f" under namespace {node.namespace!r}"
+    if id(node) in given:
+        where += " (given to with_functions)"
+    return where
+
+
 def _duplicate(
     first: NodeDef, second: NodeDef, given: AbstractSet[int] = frozenset()
 ) -> str:
+    if first.namespace is not None or second.namespace is not None:
+        # A dotted row name can meet a namespaced node: name both sources in full.
+        return (
+            f"node {first.name!r} is defined twice: {_source(first, given)}, "
+            f"and {_source(second, given)}"
+        )
     if first.module != second.module:
         marks = [
             " (given to with_functions)" if id(node) in given else ""
@@ -485,31 +571,47 @@ type LeftOut = dict[str, list[str]]
 class Gathered(NamedTuple):
     """Every module's node functions, and what the scan left out."""
 
-    functions: list[Found]
+    # Each namespace's node functions (`None` for none), in the order first given.
+    functions: dict[str | None, list[Found]]
     configured: list[ModuleType]
+    # The namespaces holding a config-decorated function.
+    selecting: set[str | None]
     left_out: LeftOut
     # The lines for `@config` variants left out, by the node they would give.
     variants: LeftOut
 
 
 def _record(
-    module: ModuleType, left: list[LeftFunction], left_out: LeftOut, variants: LeftOut
+    module: ModuleType,
+    namespace: str | None,
+    left: list[LeftFunction],
+    found: tuple[LeftOut, LeftOut],
 ) -> None:
-    """Adds a line for each function of `module` that was left out, by name (Q73)."""
+    """Adds a line for each function of `module` that was left out, by name (Q73).
+
+    `found` is the lines by name, and the lines for variants by node. A line is
+    kept under the plain name, which a missing input has, since an input is never
+    namespaced; under a namespace it names the node it would have been (Q74).
+    """
+    left_out, variants = found
     for function in left:
         shown = repr(function.name)
-        if function.node != function.name:
-            shown += f" (node {function.node!r})"
+        node = qualified(namespace, function.node)
+        if node != function.name:
+            shown += f" (node {node!r})"
         line = f"{shown} is a function in module {module.__name__!r} {function.why}"
         for key in dict.fromkeys((function.name, function.node)):
             left_out.setdefault(key, []).append(line)
         if function.variant:
-            variants.setdefault(function.node, []).append(line)
+            variants.setdefault(node, []).append(line)
 
 
-def _functions(modules: Sequence[ModuleType]) -> Gathered:
+def _functions(
+    modules: Sequence[ModuleType], namespaces: Sequence[str | None] = ()
+) -> Gathered:
     """Every module's node functions, config-decorated modules, and what was left out.
 
+    `namespaces`, when given, holds the namespace of each of `modules`, in order.
     A function `@exclude` or `__all__` left out is kept by name, with why (Q73).
     `TypeError` naming every module whose `__all__` is malformed, sorted, and then
     `ValueError` naming every module with no node function (Q53).
@@ -520,25 +622,41 @@ def _functions(modules: Sequence[ModuleType]) -> Gathered:
         line for module in unique if (line := _malformed_all(module)) is not None
     ):
         raise TypeError("; ".join(malformed))
-    found: list[Found] = []
     configured: list[ModuleType] = []
     empty: list[str] = []
-    left_out: LeftOut = {}
-    variants: LeftOut = {}
+    scanned: dict[int, ModuleFunctions] = {}
     for module in unique:
         gathered = _found(module)
+        scanned[id(module)] = gathered
         if not gathered.functions:
             empty.append(_skipped(module))
         elif gathered.configured:
             configured.append(module)
-        found.extend(gathered.functions)
-        _record(module, gathered.left_out, left_out, variants)
     if empty:
         raise ValueError("; ".join(empty))
+    under = namespaces or (None,) * len(modules)
+    found: dict[str | None, list[Found]] = {}
+    selecting: set[str | None] = set()
+    left_out: LeftOut = {}
+    variants: LeftOut = {}
+    # A module given twice under one namespace counts once there.
+    for module, namespace in dict.fromkeys(zip(modules, under, strict=True)):
+        gathered = scanned[id(module)]
+        if namespace is None or not gathered.configured:
+            found.setdefault(namespace, []).extend(gathered.functions)
+        else:
+            # Each its own tuple, so a selection keeps this namespace's variants
+            # apart from another's: it keeps the tuples it selects, by identity.
+            found.setdefault(namespace, []).extend(
+                (name, attribute, fn) for name, attribute, fn in gathered.functions
+            )
+        if gathered.configured:
+            selecting.add(namespace)
+        _record(module, namespace, gathered.left_out, (left_out, variants))
     # Sorted, so the lines do not depend on the order the modules were given in.
     for lines in (*left_out.values(), *variants.values()):
         lines.sort()
-    return Gathered(found, configured, left_out, variants)
+    return Gathered(found, configured, selecting, left_out, variants)
 
 
 # No config: what a build without `with_config` selects with. Read, never written.
@@ -563,6 +681,7 @@ def collect(
     *,
     awaits: bool = False,
     functions: Sequence[FunctionSource] = (),
+    namespaces: Sequence[str | None] = (),
 ) -> list[NodeDef]:
     """Returns the nodes of `modules`; `ValueError` on a malformed or duplicate one.
 
@@ -575,11 +694,14 @@ def collect(
 
     `config` selects among `@config.when*` variants (see `scan`), and `awaits`
     accepts `async def` nodes, as `build_async` does. `functions` are the node
-    sources given to `with_functions`, after the modules' (Q72).
+    sources given to `with_functions`, after the modules' (Q72). `namespaces`
+    holds each module's namespace, in order (see `scan`).
 
     Annotations are read without being evaluated; `resolve` evaluates them.
     """
-    return scan(modules, config, awaits=awaits, functions=functions).nodes
+    return scan(
+        modules, config, awaits=awaits, functions=functions, namespaces=namespaces
+    ).nodes
 
 
 def _given(
@@ -590,7 +712,9 @@ def _given(
     A function is found under its own name, in its own module; a spec is kept
     as it is. Functions and specs hash by identity, so a repeat is dropped, and
     so is a function a module given to the same builder already has: one
-    function object counts once, wherever it was found.
+    function object counts once, wherever it was found. `found` are the
+    functions of the modules given without a namespace, since the dedup holds
+    within one namespace only (Q74).
     """
     if not functions:
         return []
@@ -604,12 +728,17 @@ def _given(
     ]
 
 
+# A node source with the namespace it was given under.
+type _Entry = tuple[str | None, Found | NodeSpec]
+
+
 def scan(
     modules: Sequence[ModuleType],
     config: Mapping[str, object] = _NO_CONFIG,
     *,
     awaits: bool = False,
     functions: Sequence[FunctionSource] = (),
+    namespaces: Sequence[str | None] = (),
 ) -> Scanned:
     """`collect`, with the reason each node that no variant gave is absent.
 
@@ -619,29 +748,121 @@ def scan(
     there is nothing to select, and selection is skipped entirely. A function
     given to `with_functions` takes part in selection as a module's does; a
     `fnloom.node` spec is never a variant.
+
+    `namespaces`, when given, holds the namespace of each of `modules` (Q74).
+    Each node of a namespaced module is named `namespace.<name>`, and reads the
+    namespace's nodes first, by the names every module given under it defines,
+    found before any node is made. A function found under several namespaces
+    makes nodes in each, and the identity dedup of functions holds within one
+    namespace only.
     """
-    found, configured, left_out, variants = _functions(modules)
-    given = _given(functions, found)
-    entries: list[Found | NodeSpec] = [*found, *given]
-    unmatched: dict[str, str] = {}
-    if configured or any(
+    gathered = _functions(modules, namespaces)
+    groups = gathered.functions
+    given = _given(functions, groups.get(None, ()))
+    if given:
+        groups.setdefault(None, []).extend(given)  # ty: ignore[invalid-argument-type]  # specs join the plain group
+    entries: list[_Entry] = [
+        (namespace, entry) for namespace, group in groups.items() for entry in group
+    ]
+    selecting = gathered.selecting
+    if any(
         not isinstance(e, NodeSpec) and decorations(e[2]).config is not None
         for e in given
     ):
-        if redefined := sorted(line for m in configured for line in redefinitions(m)):
-            raise ValueError("; ".join(redefined))
-        selection = resolve_variants(
-            [e for e in entries if not isinstance(e, NodeSpec)], config
+        selecting = {*selecting, None}
+    # Each namespace's names, from every function given under it, unselected
+    # variants too: reading a name no variant gave is the unmatched error.
+    names = {
+        namespace: _names_in(namespace, group)
+        for namespace, group in groups.items()
+        if namespace is not None
+    }
+    unmatched: dict[str, str] = {}
+    if selecting:
+        entries, selection = _selected(
+            entries, gathered.configured, config, namespaced=bool(names)
         )
-        chosen = {id(e) for e in selection.functions}
-        entries = [e for e in entries if isinstance(e, NodeSpec) or id(e) in chosen]
         unmatched = selection.unmatched
+    seen = _made(entries, given, names, awaits=awaits)
+    # A node a plain function or another variant defines is not missing.
+    missing = {n: why for n, why in unmatched.items() if n not in seen}
+    for name in missing.keys() & gathered.variants.keys():
+        # A variant the scan left out is a reason too: say so beside the others.
+        missing[name] = "; ".join([missing[name], *gathered.variants[name]])
+    return Scanned(list(seen.values()), missing, gathered.left_out)
+
+
+def _selected(
+    entries: list[_Entry],
+    configured: Sequence[ModuleType],
+    config: Mapping[str, object],
+    *,
+    namespaced: bool,
+) -> tuple[list[_Entry], Selection]:
+    """`entries` with only the variants `config` selects, and the selection.
+
+    `ValueError` first for a config-decorated function a module defines twice.
+    With `namespaced`, each namespace selects its own variants (Q74).
+    """
+    if redefined := sorted(line for m in configured for line in redefinitions(m)):
+        raise ValueError("; ".join(redefined))
+    functions = [(n, e) for n, e in entries if not isinstance(e, NodeSpec)]
+    selection = resolve_variants(
+        [entry for _, entry in functions],
+        config,
+        [namespace for namespace, _ in functions] if namespaced else (),
+    )
+    chosen = {id(e) for e in selection.functions}
+    kept = [(n, e) for n, e in entries if isinstance(e, NodeSpec) or id(e) in chosen]
+    return kept, selection
+
+
+def _names_in(namespace: str, group: Sequence[Found | NodeSpec]) -> Within:
+    """The names the functions of `group` give their nodes in `namespace`.
+
+    A plain function's attribute name, a variant's node name, every row, and
+    every field an `@extract_*` names or a `TypedDict` return gives, each with
+    its full name. One string per name, shared by every node that reads it.
+    """
+    names: set[str] = set()
+    for entry in group:
+        if isinstance(entry, NodeSpec):
+            names.add(entry.name)
+            continue
+        _, attribute, fn = entry
+        if _ATTRIBUTE not in getattr(fn, "__dict__", ()):
+            names.add(attribute)
+            continue
+        recorded = decorations(fn)
+        if recorded.rows is not None:
+            names.update(recorded.rows)
+        elif recorded.config is not None:
+            names.add(_node_name(fn))
+        else:
+            names.add(attribute)
+        if recorded.extract is not None:
+            names.update(_extract.field_names(fn, recorded.extract))
+    return Within(namespace, {name: f"{namespace}.{name}" for name in names})
+
+
+def _made(
+    entries: list[_Entry],
+    given: Sequence[Found | NodeSpec],
+    names: Mapping[str, Within],
+    *,
+    awaits: bool,
+) -> dict[str, NodeDef]:
+    """The nodes `entries` make, by name; `ValueError` naming every clash, sorted.
+
+    `given` are the sources given to `with_functions`, which a clash line names;
+    `names` holds each namespace's names, which its nodes read first.
+    """
     # The ids of the given sources, and of the nodes they make, for the clash lines.
     sourced = {id(e) for e in given}
     from_given: set[int] = set()
     seen: dict[str, NodeDef] = {}
     clashes: list[tuple[str, str]] = []
-    for entry in entries:
+    for namespace, entry in entries:
         if isinstance(entry, NodeSpec):
             fn = entry.fn
             made = _node_defs(
@@ -652,7 +873,8 @@ def scan(
                 bind=entry.bind or None,
             )
         else:
-            made = _node_defs(*entry, awaits=awaits)
+            within = None if namespace is None else names[namespace]
+            made = _node_defs(*entry, awaits=awaits, within=within)
         if sourced and id(entry) in sourced:
             from_given.update(id(node) for node in made)
         for node in made:
@@ -665,12 +887,7 @@ def scan(
         # Sorted by node name; a name clashing more than once keeps scan order.
         clashes.sort(key=lambda clash: clash[0])
         raise ValueError("; ".join(message for _, message in clashes))
-    # A node a plain function or another variant defines is not missing.
-    missing = {n: why for n, why in unmatched.items() if n not in seen}
-    for name in missing.keys() & variants.keys():
-        # A variant the scan left out is a reason too: say so beside the others.
-        missing[name] = "; ".join([missing[name], *variants[name]])
-    return Scanned(list(seen.values()), missing, left_out)
+    return seen
 
 
 def _owner(origin: Callable[..., object], names: list[str]) -> str:

@@ -126,6 +126,20 @@ a release build, median of nine builds each, interleaved in one process (ms):
 Measured on the machine above, on 2026-10-28. Giving the functions costs under a tenth more than scanning the module:
 each function is checked once, when it is given, and then scanned as a module's function is.
 
+### Building with namespaces
+
+`benches/builds.py` also builds the 1,000-node `layered` graph two ways: as one module, and as ten modules of 100 nodes,
+each under its own namespace, `ns0` to `ns9`, all reading the one input `seed` (Q74). Same machine and release build,
+median of nine builds each, interleaved in one process (ms):
+
+| shape | n | one module | 10 namespaces |
+| --- | ---: | ---: | ---: |
+| layered | 1,000 | 6.326 | 6.798 |
+
+Measured on 2026-10-28. Namespaces cost under a tenth more: every parameter of a namespaced node reads a node of its
+namespace under a dotted name, so the core passes it under the parameter's own keyword, one rename per edge. The
+namespace's names are found once, before any node is made, so each parameter is bound in the same pass as without one.
+
 ### Per run
 
 A prepared plan run once per incoming record (a market bar, say) pays its per-run overhead every time. Microseconds

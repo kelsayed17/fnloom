@@ -15,6 +15,10 @@ change the public API; such changes are listed under **Changed** and **Removed**
   nothing is registered in `sys.modules`. `fnloom.node(fn, *, name=None, bind=None)` makes one node from a function,
   named and bound with `source()` and `value()` without decorating it, and returns a `fnloom.NodeSpec`. A lambda needs
   `name=`. Builders and drivers of functions pickle them by module and qualified name (Q72).
+- `Builder.with_modules(*modules, namespace="ns")` names each node of those modules `ns.<name>`, so one module can be
+  used under several namespaces. Inside a namespace, a parameter reads the namespace's own node when one is defined,
+  and otherwise the plain name; inputs are never namespaced. `NodeView.namespace` says which namespace a node is in.
+  Names still clash as before: there is no `allow_module_overrides` (Q74).
 - `Driver.inputs()` and `outputs()`, `Driver.modules` and `Driver.what_is_the_path_between(a, b)`, on `AsyncDriver` too,
   with `fnloom.InputView`. The path includes both ends and is in topological order, ties broken by name, on every hash
   seed; its error names every unknown node (Q70). An unsupplied input requested as an output stays a `ValueError`

@@ -28,6 +28,7 @@ from fnloom._functions import (
     references,
     unimportable,
 )
+from fnloom._namespaces import checked_namespace
 from fnloom._requests import ABSENT, requested, suggest
 from fnloom._requests import output_names as _requested_names
 from fnloom._scan import LeftOut, NodeDef, core_inputs, resolve, scan
@@ -1227,6 +1228,25 @@ def _checked_modules(modules: Sequence[object]) -> tuple[ModuleType, ...]:
     return tuple(checked)
 
 
+def _checked_namespaces(
+    namespaces: Sequence[object], count: int
+) -> tuple[str | None, ...]:
+    """Each module's namespace, one per module; `None` for each when none is given.
+
+    `ValueError` when `namespaces` is given with another length than `count`, the
+    number of modules; each is checked as `with_modules` checks its `namespace`.
+    """
+    if not namespaces:
+        return (None,) * count
+    if len(namespaces) != count:
+        msg = (
+            f"namespaces must hold one per module: {count} modules, "
+            f"{len(namespaces)} namespaces"
+        )
+        raise ValueError(msg)
+    return tuple(checked_namespace(namespace) for namespace in namespaces)
+
+
 def _unimportable_module(module: ModuleType) -> str | None:
     """Why `module` cannot be imported again by its name, or `None` when it can."""
     name = module.__name__
@@ -1237,17 +1257,22 @@ def _unimportable_module(module: ModuleType) -> str | None:
     )
 
 
-def _builder_of(
+def _builder_of(  # noqa: PLR0913, PLR0917  # pickle passes each part positionally
     names: tuple[str, ...],
     settings: _Settings,
     store: CacheStore | None,
     config: Mapping[str, object] | None = None,
     functions: tuple[FunctionReference, ...] = (),
+    namespaces: tuple[str | None, ...] = (),
 ) -> Builder:
-    """A pickled builder, its modules imported again by name, its functions too."""
+    """A pickled builder, its modules imported again by name, its functions too.
+
+    `namespaces` holds each module's namespace, in order, or is empty for none.
+    """
     modules = tuple(importlib.import_module(name) for name in names)
     return Builder(
         modules,
+        namespaces=namespaces,
         store=store,
         config=config,
         functions=from_references(functions),
@@ -1277,15 +1302,16 @@ class Builder:
     """Accumulates modules and functions, then builds a `Driver`.
 
     Its methods return new builders. A builder pickles as the names of its
-    modules, which must import them, the module and qualified name of each
-    function `with_functions` gave it, which must find it again, its settings,
-    its config and its store, which must pickle too.
+    modules, which must import them, each module's namespace, the module and
+    qualified name of each function `with_functions` gave it, which must find it
+    again, its settings, its config and its store, which must pickle too.
     """
 
     def __init__(  # noqa: PLR0913  # keyword-only switches, one per builder setting
         self,
         modules: tuple[ModuleType, ...] = (),
         *,
+        namespaces: Sequence[str | None] = (),
         functions: Sequence[FunctionSource] = (),
         check_inputs: bool = True,
         check_overrides: bool = True,
@@ -1296,6 +1322,9 @@ class Builder:
     ) -> None:
         """Starts with the given modules (none by default), checking input types.
 
+        `namespaces` holds each module's namespace, in order, or is empty when
+        none has one (see `with_modules`); a `ValueError` when it is given with
+        another length, or holds a bad namespace.
         `functions` are the node sources of `with_functions`. `store`, when
         given, caches the results of the driver's runs in it.
         `config`, copied, selects `@config.when*` variants (see `with_config`).
@@ -1306,6 +1335,7 @@ class Builder:
         the errors `functions` raises.
         """
         self._modules = _checked_modules(modules)
+        self._namespaces = _checked_namespaces(namespaces, len(self._modules))
         self._functions = checked_functions(functions)
         self._check_inputs = check_inputs
         self._check_overrides = check_overrides
@@ -1328,9 +1358,10 @@ class Builder:
             CacheStore | None,
             dict[str, object],
             tuple[FunctionReference, ...],
+            tuple[str | None, ...],
         ],
     ]:
-        """The modules' names, the functions' references and the settings.
+        """The modules' names and namespaces, the functions' references, the settings.
 
         Imported again on load. `TypeError` naming every module and function that
         would not be found again, sorted.
@@ -1349,6 +1380,7 @@ class Builder:
             self._store,
             self._config,
             references(self._functions),
+            self._namespaces,
         )
 
     def _settings(self) -> _Settings:
@@ -1364,6 +1396,7 @@ class Builder:
         self,
         modules: tuple[ModuleType, ...] | None = None,
         *,
+        namespaces: tuple[str | None, ...] | None = None,
         functions: tuple[FunctionSource, ...] | None = None,
         store: CacheStore | None = None,
         config: Mapping[str, object] | None = None,
@@ -1377,6 +1410,7 @@ class Builder:
         """
         built = Builder(
             self._modules if modules is None else modules,
+            namespaces=self._namespaces if namespaces is None else namespaces,
             store=self._store if store is None else store,
             config=self._config if config is None else config,
             **{**self._settings(), **settings},
@@ -1385,12 +1419,28 @@ class Builder:
         built._functions = self._functions if functions is None else functions
         return built
 
-    def with_modules(self, *modules: ModuleType) -> Builder:
+    def with_modules(
+        self, *modules: ModuleType, namespace: str | None = None
+    ) -> Builder:
         """Returns a new builder with `modules` appended to this one's.
 
-        `TypeError` when an item is not a module, such as a function.
+        With `namespace`, a non-empty dotted identifier path such as `"eu"` or
+        `"a.b"`, each node of `modules` is named `namespace.<name>` (Q74). Inside
+        the namespace a parameter, or a `source("x")`, reads `namespace.x` when
+        some module given under that namespace defines `x`, and otherwise `x`
+        itself: a node given without a namespace, or an input. Inputs are never
+        namespaced. A module may be given under several namespaces, making
+        separate nodes from the same functions in each.
+
+        `TypeError` when an item is not a module, such as a function, or when
+        `namespace` is neither a `str` nor `None`; `ValueError` for a `str` that
+        is not a dotted identifier path.
         """
-        return self._with((*self._modules, *modules))
+        checked = checked_namespace(namespace)
+        return self._with(
+            (*self._modules, *modules),
+            namespaces=(*self._namespaces, *(checked,) * len(modules)),
+        )
 
     def with_functions(self, *items: Callable[..., object] | NodeSpec) -> Builder:
         """Returns a new builder with `items` appended to this one's functions (Q72).
@@ -1535,7 +1585,11 @@ class Builder:
         `async def` is a node too.
         """
         scanned = scan(
-            self._modules, self._config, awaits=awaits, functions=self._functions
+            self._modules,
+            self._config,
+            awaits=awaits,
+            functions=self._functions,
+            namespaces=self._namespaces,
         )
         nodes = resolve(scanned.nodes)
         unmatched = scanned.unmatched

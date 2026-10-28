@@ -46,7 +46,9 @@ class NodeView:
     function's declaration order and are empty for an input. `tags` are the ones
     written with `@tag`, read-only. `config` holds the conditions of the
     `@config.when*` variant that is the node, sorted by key; it is empty for an
-    input, a plain function and a `@config.default`.
+    input, a plain function and a `@config.default`. `namespace` is the one the
+    node's module was given under, and `None` for an input, which is never
+    namespaced, and for a node of a module given without one (Q74).
     """
 
     name: str
@@ -58,6 +60,7 @@ class NodeView:
     tags: Mapping[str, str]
     doc: str | None
     config: tuple[Condition, ...] = ()
+    namespace: str | None = None
 
     @property
     def dependencies(self) -> tuple[str, ...]:
@@ -341,6 +344,7 @@ def node_views(
             _read_only(node.tags),
             _doc(node.origin) if node.doc is None else node.doc,
             node.config,
+            node.namespace,
         )
         for node in nodes
     }

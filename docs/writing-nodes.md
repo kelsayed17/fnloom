@@ -323,6 +323,103 @@ A few details:
 - Passing the same module twice adds its nodes once.
 - Defining the same name in two different modules is a `ValueError` naming both.
 
+## Namespaces
+
+`Builder.with_modules(*modules, namespace="eu")` names each node of those modules `eu.<name>`, so one module can be
+used more than once in a graph (Q74). A namespace is a dotted path of identifiers, such as `"eu"` or `"shop.eu"`:
+
+```python
+# file: regional.py
+def net(gross: float, tax_rate: float) -> float:
+    """The price without tax."""
+    return gross / (1 + tax_rate)
+
+
+def tax_rate() -> float:
+    """This region's tax rate, 20%."""
+    return 0.2
+```
+
+```python
+# file: totals.py
+def tax_rate() -> float:
+    """The default tax rate, 10%."""
+    return 0.1
+
+
+def both(eu_net: float, us_net: float) -> tuple[float, float]:
+    """Each region's net price."""
+    return (eu_net, us_net)
+```
+
+Inside a namespace, a parameter reads the namespace's own node when one of its modules defines that name, and
+otherwise the plain name: a node given without a namespace, or an input. Here `eu.net` reads `eu.tax_rate`, which
+shadows the plain `tax_rate` for readers inside `eu` only. An input is never namespaced, so both copies of `net` read
+the one input `gross`:
+
+```python
+import fnloom
+import regional
+import totals
+
+driver = (
+    fnloom.Builder()
+    .with_modules(totals)
+    .with_modules(regional, namespace="eu")
+    .with_modules(regional, namespace="us")
+    .build()
+)
+driver.node_names()
+# -> ['both', 'eu.net', 'eu.tax_rate', 'eu_net', 'gross', 'tax_rate', 'us.net', 'us.tax_rate', 'us_net']
+driver.nodes["eu.net"].dependencies
+# -> ('eu.tax_rate', 'gross')
+driver.nodes["eu.net"].namespace
+# -> 'eu'
+list(driver.inputs())
+# -> ['eu_net', 'gross', 'us_net']
+driver.execute(["eu.net", "tax_rate"], inputs={"gross": 12.0})
+# -> {'eu.net': 10.0, 'tax_rate': 0.1}
+```
+
+A node outside reads a namespaced node by its full name, with `source(...)` in a `@parameterize` row or
+`fnloom.node(fn, bind=...)`, since a parameter name can't hold a dot:
+
+```python
+import fnloom
+import regional
+import totals
+
+driver = (
+    fnloom.Builder()
+    .with_modules(regional, namespace="eu")
+    .with_modules(regional, namespace="us")
+    .with_functions(
+        fnloom.node(
+            totals.both,
+            bind={"eu_net": fnloom.source("eu.net"), "us_net": fnloom.source("us.net")},
+        )
+    )
+    .build()
+)
+driver.execute(["both"], inputs={"gross": 12.0})
+# -> {'both': (10.0, 10.0)}
+```
+
+A few details:
+
+- A parameter can't read another namespace's node: a parameter `net` in namespace `us` reads `us.net` or the plain
+  `net`, never `eu.net`. Naming the full name in `source("eu.net")` reads that node, from anywhere.
+- Every name a namespaced module makes is prefixed: `@config` variants, `@parameterize` rows and extracted fields. Each
+  namespace selects its own `@config` variant, and the errors, `validate`, `inputs()`, `outputs()`,
+  `what_is_the_path_between` and suggestions all use full names.
+- The same module under the same namespace twice counts once. Under two namespaces, the same function makes a node in
+  each, so passing the function in `final_vars` is a `TypeError` naming both nodes: pass a name instead.
+- Names clash as they do without namespaces, and nothing overrides: a `@parameterize` row named `"eu.net"` in a module
+  given without a namespace is a build error naming both definitions. Hamilton's `allow_module_overrides()` silently
+  keeps the later module's function instead.
+- Cache keys use the full node name, and each function keeps one code version. `with_functions` takes no
+  `namespace=`.
+
 ## Graphs without modules
 
 `Builder.with_functions` builds from functions directly, with no module to scan (Q72). Each function makes the nodes it
