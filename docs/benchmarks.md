@@ -317,3 +317,24 @@ graphs of 1,000 and 10,000 nodes (`crates/fnloom-core/benches/core.rs`). A rise 
 Counts depend on the CPU architecture, the toolchain and the C library, so the baseline is generated in the job's own
 environment: the `rust:1.99.1` image on aarch64 Linux. A change that costs instructions on purpose regenerates it with
 `--write-baseline` and says why in its commit message.
+
+## The CodSpeed gate
+
+The Python run path is measured by [CodSpeed](https://codspeed.io) as well. `benchmarks/` holds pytest benchmarks of
+a prepared plan's steady `run` on each generated shape, `Driver.execute` on a repeated request, cached runs against a
+`MemoryCache` (warm and cold), the async driver in both `sync_nodes` modes, `@extract_fields`, `@extract_columns` and
+`@config`, and `Builder.build` on a 1,000-node graph. The extension is built in release mode first, so the numbers
+are those of the optimised build.
+
+CodSpeed counts simulated CPU instructions and allocations instead of reading a clock, so a result is stable on a shared
+runner, and each pull request is compared against `main`. It complements the tables above, which are wall clock on one
+machine and show how fnloom compares with Hamilton, and the callgrind gate above, which covers only the Rust core:
+CodSpeed sees the whole call from Python, the scan, the plan cache and the node calls included.
+
+To enable it, install the CodSpeed GitHub app for the repository and set the repository variable
+`CODSPEED_ENABLED=true`. Until then the `benchmarks` job is skipped, and the `benchmarks-smoke` job still runs every
+benchmark once as a test on every pull request, so none of them rots. Locally:
+
+```sh
+uv run pytest benchmarks
+```
