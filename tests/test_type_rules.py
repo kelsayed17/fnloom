@@ -333,7 +333,7 @@ def test_a_cycle_no_key_can_see_runs_out_of_budget() -> None:
     itself: list[object] = []
     itself.append(itself)
     fresh = _GenericSeq[Annotated[int, _Meta(1)]]
-    with pytest.raises(TypeError, match=r"^value too large or too cyclic to check "):
+    with pytest.raises(TypeError, match=r"^value too cyclic to check "):
         _types._walk(fresh, itself, budget=1_000)  # noqa: SLF001  # a small budget, for speed
     # The default budget is far beyond a legitimate value's depth.
     assert fnloom.value_matches(_Rec, _chain(50_000, None)) is True
@@ -656,7 +656,9 @@ def test_an_unresolved_input_check_says_to_import_it() -> None:
             overrides={"rate": 1},
             inputs={"amount": "x", "given": 1},
         )
-    assert driver.validate(["converted"], inputs={"given": 1}) == ["given" + because]
+    lines = driver.validate(["converted"], inputs={"given": 1})
+    assert lines == ["given" + because]
+    assert type(lines[0]) is str
     # Without input checks nothing is checked, so the value goes through.
     lenient = fnloom.Builder().with_modules(module).without_input_type_checks().build()
     assert lenient.execute(["converted"], inputs={"given": 1}) == {"converted": 1}
@@ -794,21 +796,70 @@ def test_deep_checks_never_read_an_iterator() -> None:
     assert list(generated) == [1, 2]
 
 
-def test_deep_checks_of_a_large_value_stay_within_budget() -> None:
-    """Items of a plain class open no group, so a large value is far from the budget."""
-    ints = list(range(100_000))
-    pairs = [(n, "s") for n in range(100_000)]
-    rows = [[[n]] for n in range(100_000)]
+def test_deep_checks_of_a_large_value_take_no_type_steps() -> None:
+    """Steps into new items are never counted: a value of any size fits the budget."""
+    size = 1_000
+    values: list[tuple[object, object]] = [
+        (list[int], list(range(size))),
+        (list[tuple[int, str]], [(n, "s") for n in range(size)]),
+        (list[list[list[int]]], [[[n]] for n in range(size)]),
+        (list[list[int] | None], [[1]] * size),
+        (list[tuple[int, list[int]]], [(n, [n]) for n in range(size)]),
+        (list[dict[str, list[float]]], [{"a": [1.5]}] * size),
+    ]
     expand = _types._expander(_types.Rules(deep=True))  # noqa: SLF001  # the walk's own expansion
     walk = _types._walk  # noqa: SLF001  # with a budget of its own
-    # One group, the outer list's: its items are checked in a loop.
-    assert walk(list[int], ints, expand, 1) is True
-    assert walk(list[tuple[int, str]], pairs, expand, 1) is True
-    # A container of containers of containers opens one group per middle one.
-    assert walk(list[list[list[int]]], rows, expand, 100_001) is True
-    with pytest.raises(TypeError, match=r"^value too large or too cyclic to check "):
-        walk(list[list[list[int]]], rows, expand, 100_000)
-    assert fnloom.value_matches(list[int], [*ints, "s"], deep=True) is False
+    for declared, value in values:
+        # A budget of 10 type steps, for 1,000 items each opening a group.
+        assert walk(declared, value, expand, 10) is True, declared
+    assert fnloom.value_matches(list[int], [*range(size), "s"], deep=True) is False
+
+
+type _FreshUnion[T] = _FreshUnion[Annotated[T, _Meta(1)]] | str  # ty: ignore[cyclic-type-alias-definition]  # the cycle is the point
+
+
+def test_a_runaway_through_types_alone_still_trips_the_budget() -> None:
+    """A union made afresh on each reading, about one value, counts every step."""
+    with pytest.raises(TypeError, match=r"^value too cyclic to check "):
+        _types._walk(_FreshUnion[int], 1.5, budget=1_000)  # noqa: SLF001  # a small budget, for speed
+    expand = _types._expander(_types.Rules(deep=True))  # noqa: SLF001  # the walk's own expansion
+    with pytest.raises(TypeError, match=r"^value too cyclic to check "):
+        _types._walk(_FreshUnion[int], 1.5, expand, 1_000)  # noqa: SLF001  # a small budget, for speed
+
+
+_ENDLESS_LIMIT = 1_000
+
+
+class _Endless:
+    """An iterable of its own class, endless: it fails the test past 1,000 items."""
+
+    def __init__(self, item: object) -> None:
+        self.item = item
+        self.read = 0
+
+    def __iter__(self) -> collections.abc.Iterator[object]:
+        while True:
+            self.read += 1
+            if self.read > _ENDLESS_LIMIT:
+                pytest.fail("an endless iterable was read past its first item")
+            yield self.item
+
+
+def test_deep_checks_read_only_standard_collections() -> None:
+    """A user iterable keeps the shallow rules: endless ones end, read as far."""
+    ints = _Endless(1)
+    assert fnloom.value_matches(collections.abc.Iterable[int], ints, deep=True)
+    shallow = _Endless(1)
+    assert fnloom.value_matches(collections.abc.Iterable[int], shallow)
+    assert ints.read == shallow.read == 1
+    nested = _Endless(_Endless(1))
+    declared = collections.abc.Iterable[collections.abc.Iterable[int]]
+    assert fnloom.value_matches(declared, nested, deep=True)
+    assert nested.read == 1
+    assert fnloom.value_matches(declared, _Endless(_Endless("s")), deep=True) is False
+    # A standard collection holding one is read in full, and the user one shallowly.
+    assert fnloom.value_matches(list[collections.abc.Iterable[int]], [ints], deep=True)
+    assert ints.read == 2  # noqa: PLR2004  # one more first item read
 
 
 def test_deep_checks_apply_to_overrides_fields_and_validate() -> None:
@@ -872,7 +923,9 @@ def test_widening_accepts_int_for_float_and_numpy_scalars() -> None:
     with pytest.raises(ValueError, match=r"^count: expected int, got float$"):
         driver.execute(["scaled"], inputs={**inputs, "count": 2.0})
     assert driver.validate(["scaled"], inputs={**inputs, "rate": 1}) == []
-    # Inside a collection only deep checks read the items.
+    # Every item of a collection is read only with deep checks; the first item a
+    # shallow check reads, and a fixed tuple's items, widen without them.
+    assert driver.validate(["scaled"], inputs={**inputs, "rates": (1, "s")}) == []
     deep = _deep(module, widen=True)
     assert deep.execute(["scaled"], inputs={**inputs, "rates": [1, 0.5]}) == {
         "scaled": 3.5
@@ -903,6 +956,12 @@ def test_widening_accepts_int_for_float_and_numpy_scalars() -> None:
         "scaled": 2.5
     }
     assert fnloom.value_matches(int, np.timedelta64(1, "s"), widen=True) is False
+    # Widening composes: what fits `int` fits `float`.
+    assert driver.execute(["scaled"], inputs={**numbers, "rate": np.int64(2)}) == {
+        "scaled": 4
+    }
+    assert fnloom.value_matches(float, np.int32(1), widen=True) is True
+    assert fnloom.value_matches(float, np.int32(1)) is False
 
 
 def test_type_rule_settings_survive_pickling_copying_and_async() -> None:

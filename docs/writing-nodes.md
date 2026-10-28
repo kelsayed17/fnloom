@@ -328,7 +328,9 @@ It surfaces only where a check needs it:
 - **Edges:** an edge matches it only from or to an annotation of the same text, or `Any`. Any other edge with it fails
   the build, naming the text.
 - **Values:** an input or override checked against it raises a `TypeError` saying to import the name at run time. A
-  node never asked for is never checked, and `without_input_type_checks()` skips the check.
+  node never asked for is never checked, and `without_input_type_checks()` skips the check. An input two nodes share
+  is checked as its merged type, the narrower of their annotations, so an unresolved one wins over `Any` and is
+  checked even for the `Any` consumer.
 
 !!! warning "Keep annotation imports real"
 

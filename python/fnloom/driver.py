@@ -748,7 +748,8 @@ class Driver:
                 lines += _mismatches(
                     self._declared(sorted(overridden)), overrides or _NO_VALUES
                 )
-        return sorted(lines)
+        # Plain `str`s: an `_UnresolvedLine` only picks the error class to raise.
+        return sorted(str.__str__(line) for line in lines)
 
     def _missing_line(
         self,
@@ -1566,6 +1567,11 @@ class Builder:
     def with_deep_type_checks(self) -> Builder:
         """Returns a new builder whose checks read every item of a collection.
 
+        Only a value of a standard class (`list`, `dict`, `set`, `tuple`,
+        `deque`, ...) has its items read; any other value, such as an iterable
+        class of your own, keeps the default checks, so an endless one is never
+        read to its end.
+
         By default a `list[int]` input is checked by its class alone, and a
         sequence or set of another class by its first item, as Hamilton does.
         With deep checks, every item of a `list`, `set`, `tuple[T, ...]` and other
@@ -1580,12 +1586,14 @@ class Builder:
     def with_numeric_widening(self) -> Builder:
         """Returns a new builder whose checks let a number stand for a wider one.
 
-        An `int` (not a `bool`) and a numpy floating scalar fit `float`, and a
-        numpy integer scalar fits `int`; Hamilton refuses all of them. numpy is
-        recognised by the value's class, never imported. It applies to inputs,
-        overrides, extracted fields and `validate`, inside collections too with
-        deep checks. Edge checks are unchanged: a node returning `int` still
-        does not feed a `float` parameter.
+        An `int` (not a `bool`) and a numpy integer or floating scalar fit
+        `float`, and a numpy integer scalar fits `int`; Hamilton refuses all of
+        them. numpy is recognised by the value's class, never imported. It
+        applies to inputs, overrides, extracted fields and `validate`, wherever
+        a check reads a value: the value itself, a fixed tuple's items, the first
+        item a shallow check reads, and with deep checks every item. Edge checks
+        are unchanged: a node returning `int` still does not feed a `float`
+        parameter.
         """
         return self._with(numeric_widening=True)
 

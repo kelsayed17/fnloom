@@ -66,8 +66,8 @@ class Rules:
 
     `deep` checks every item of a standard collection, nested ones included,
     where the default reads at most the first. `widen` lets an `int` (not a
-    `bool`) and a numpy floating scalar fit `float`, and a numpy integer scalar
-    fit `int`.
+    `bool`) and a numpy integer or floating scalar fit `float`, and a numpy
+    integer scalar fit `int`.
     """
 
     deep: bool = False
@@ -346,15 +346,14 @@ def _pair(declared: object, value: object) -> _Pair:
 
 
 WALK_BUDGET = 1_000_000
-"""How many groups one check may open before it gives up with a `TypeError`.
+"""How many type steps one check may take before it gives up with a `TypeError`.
 
-A group is opened for a value whose items need questions of their own: a union,
-a fixed tuple, or under deep checks a collection whose item type is no plain
-class. A legitimate value opens a few per level it is read to, so this is far
-beyond any real depth. Deep checks open one per container of containers, so a
-list of 100,000 `int`s or of 100,000 `tuple[int, str]`s opens one; a value holding
-over a million collections whose own items are collections ends here, as does a
-cycle the walk cannot see.
+A type step opens a group about a value already being asked about: a union's or
+an alias's members about the same value, or an item that is a value still open
+further up, as in a cyclic value. A step into a new item of the value is never
+counted, so a value of any size fits, however many items deep checks read. Only a
+cycle the walk cannot see by its keys, such as a type made afresh on each reading,
+takes steps without end, and it ends here.
 """
 
 
@@ -455,6 +454,43 @@ type _Expand = collections.abc.Callable[[object, object], _Expanded]
 """One rule set's answer to a question, or the group of questions it depends on."""
 
 
+class _Steps:
+    """The walk's type steps, counted against its budget (see `WALK_BUDGET`).
+
+    It keeps how many open groups ask about each value, keyed as a pair's value
+    is: a group opened about a value already open, or by a group that does not
+    step into items, is a type step.
+    """
+
+    __slots__ = ("_budget", "_declared", "_open", "_taken")
+
+    def __init__(self, declared: object, budget: int) -> None:
+        self._declared = declared
+        self._budget = budget
+        self._open: dict[int | str, int] = {}
+        self._taken = 0
+
+    def open(self, key: int | str, *, descends: bool) -> None:
+        """Counts a group opened about value `key`; `TypeError` past the budget."""
+        held = self._open.get(key, 0)
+        if not descends or held:
+            self._taken += 1
+            if self._taken > self._budget:
+                msg = (
+                    f"value too cyclic to check against {self._declared!r}: "
+                    f"more than {self._budget:,} type steps"
+                )
+                raise TypeError(msg)
+        self._open[key] = held + 1
+
+    def close(self, key: int | str) -> None:
+        """Forgets one group about value `key`, now answered."""
+        if (held := self._open[key] - 1) == 0:
+            del self._open[key]
+        else:
+            self._open[key] = held
+
+
 def _walk(  # noqa: C901  # one loop, its branches the walk's states
     declared: object,
     value: object,
@@ -477,10 +513,10 @@ def _walk(  # noqa: C901  # one loop, its branches the walk's states
     - **A string**, whose first item is a string again: it does not fit, as a
       recursive alias never ends in one.
 
-    Past `budget` groups, a cycle no key can see (a type made afresh on each
-    reading), or a value with more containers of containers than that, it raises
-    `TypeError` naming the type. A value that does not fit because an
-    `Unresolved` type was asked about raises `UnresolvedError` (Q81).
+    Past `budget` type steps (see `WALK_BUDGET`), a cycle no key can see (a type
+    made afresh on each reading), it raises `TypeError` naming the type. A value
+    that does not fit because an `Unresolved` type was asked about raises
+    `UnresolvedError` (Q81).
     """
     answer = expand(declared, value)
     if isinstance(answer, bool):
@@ -489,7 +525,8 @@ def _walk(  # noqa: C901  # one loop, its branches the walk's states
         return answer
     stack = [_Frame(answer, _pair(declared, value), 0)]
     open_pairs = {stack[0].pair: 0}
-    opened = 1
+    steps = _Steps(declared, budget)
+    steps.open(stack[0].pair[1], descends=True)
     finished: bool | None = None
     unresolved: Unresolved | None = None
     while True:
@@ -515,19 +552,14 @@ def _walk(  # noqa: C901  # one loop, its branches the walk's states
                     unresolved = question
                 finished = expanded
                 continue
-            opened += 1
-            if opened > budget:
-                msg = (
-                    f"value too large or too cyclic to check against {declared!r}: "
-                    f"more than {budget:,} steps"
-                )
-                raise TypeError(msg)
+            steps.open(pair[1], descends=group.descends)
             stack.append(_Frame(expanded, pair, descents))
             open_pairs[pair] = descents
             finished = None
             continue
         stack.pop()
         del open_pairs[frame.pair]
+        steps.close(frame.pair[1])
         if not stack:
             if not answer and unresolved is not None:
                 raise UnresolvedError(unresolved)
@@ -564,13 +596,14 @@ def _numpy_kind(cls: type) -> str | None:
 def _widened(classes: tuple[type, ...], value: object) -> bool:
     """Whether numeric widening lets `value` fit one of `classes`, which it does not.
 
-    An `int`, not a `bool`, and a numpy floating scalar fit `float`; a numpy
-    integer scalar fits `int`.
+    An `int`, not a `bool`, and a numpy integer or floating scalar fit `float`; a
+    numpy integer scalar fits `int`. Widening composes: what fits `int` fits
+    `float`.
     """
     cls = type(value)
     if float in classes and (
         (isinstance(value, int) and not isinstance(value, bool))
-        or _numpy_kind(cls) == "floating"
+        or _numpy_kind(cls) is not None
     ):
         return True
     return int in classes and _numpy_kind(cls) == "integer"
@@ -605,6 +638,8 @@ def _widening(expand: _Expand) -> _Expand:
 # The origins whose items a deep check reads: the standard collections, never an
 # iterator or a generator, and never `type[T]`, whose value is a class.
 _DEEP_MODULES = frozenset({"builtins", "collections", "collections.abc"})
+# The modules of the value classes a deep check reads: `list`, `dict`, `deque`...
+_DEEP_VALUES = frozenset({"builtins", "collections"})
 
 
 def _reads_items(origin: type) -> bool:
@@ -614,6 +649,15 @@ def _reads_items(origin: type) -> bool:
         and issubclass(origin, collections.abc.Iterable)
         and not issubclass(origin, collections.abc.Iterator)
     )
+
+
+def _reads_value(value: object) -> bool:
+    """Whether a deep check reads `value`'s items: a standard collection's only.
+
+    Any other value, such as a class of the caller's own that is iterable, may be
+    endless or costly to read, so it keeps the shallow rules.
+    """
+    return type(value).__module__ in _DEEP_VALUES
 
 
 def _kind_fits(origin: type, value: object) -> bool:
@@ -648,7 +692,8 @@ def _item_classes(declared: object) -> Classes | None:
 class _Deep:
     """The deep rules' expansion (decision 12d), with numeric widening or without.
 
-    A standard collection asks about every item: each item of a `list`, `set`,
+    A standard collection, one whose value class is from `builtins` or
+    `collections`, asks about every item: each item of a `list`, `set`,
     `tuple[T, ...]` or other iterable, each key and value of a mapping, and a
     nested collection's items in turn. An item type that is flat, a plain class
     or a fixed tuple of them, is checked in a loop, with no question per item.
@@ -748,6 +793,7 @@ class _Deep:
             or _is_union(declared)
             or isinstance(value, collections.abc.Iterator)
             or not _reads_items(origin)
+            or not _reads_value(value)
         ):
             return self._shallow(declared, value)
         if origin is tuple:
@@ -798,9 +844,9 @@ def value_matches(
 
     `deep` and `widen` apply the opt-in rules of `Builder.with_deep_type_checks()`
     and `Builder.with_numeric_widening()`: every item of a standard collection is
-    checked, nested ones too, and an `int` or numpy floating scalar fits `float`,
-    and a numpy integer scalar `int`. A value with more than `WALK_BUDGET`
-    containers of containers, or a cycle no check can see, raises `TypeError`.
+    checked, nested ones too, and an `int` or numpy integer or floating scalar
+    fits `float`, and a numpy integer scalar `int`. A cycle no check can see,
+    past `WALK_BUDGET` type steps, raises `TypeError`.
     """
     if not deep and not widen:
         return _fits(declared, value)

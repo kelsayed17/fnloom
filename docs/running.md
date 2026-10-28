@@ -300,13 +300,17 @@ deep.validate(["basket_total"], inputs={"prices": [1.5, "2"]})
 ```
 
 A deep check reads every item on every run, so it costs time in proportion to the value: about 2.6 ms for a list of
-100,000 floats (see [Benchmarks](benchmarks.md)). An item whose type is a plain class costs one `isinstance` call. A
-value holding more than a million collections whose own items are collections is refused with a `TypeError` rather
-than read.
+100,000 floats (see [Benchmarks](benchmarks.md)). An item whose type is a plain class costs one `isinstance` call. Only
+a value of a standard class (`list`, `dict`, `set`, `tuple`, `deque`, ...) has its items read: any other value, such
+as an iterable class of your own, keeps the default checks, so an endless one is never read to its end. A value of any
+size is read in full: the checks' budget counts only steps through types about a value already being checked, which
+only a type made afresh on each reading can run past.
 
-`Builder.with_numeric_widening()` lets an `int` (but not a `bool`) and a numpy floating scalar fit `float`, and a
-numpy integer scalar fit `int`. Hamilton refuses all three, as fnloom does by default. numpy is recognised from the
-value's class and never imported. Inside a collection, widening needs deep checks, since only they read the items:
+`Builder.with_numeric_widening()` lets an `int` (but not a `bool`) and a numpy integer or floating scalar fit
+`float`, and a numpy integer scalar fit `int`. Hamilton refuses them all, as fnloom does by default. numpy is
+recognised from the value's class and never imported. Widening applies wherever a check reads a value: the value
+itself, a fixed tuple's items and the first item a default check reads. Every item of a collection is read only with
+deep checks:
 
 ```python
 widening = fnloom.Builder().with_modules(pricing).with_numeric_widening().build()

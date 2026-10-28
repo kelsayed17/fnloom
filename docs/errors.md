@@ -124,8 +124,9 @@ it names at run time, not only under TYPE_CHECKING`. An extracted field names it
 Build with `Builder.without_input_type_checks()` to skip these (see [Type checks](running.md#type-checks)). With
 `Builder.with_deep_type_checks()`, a collection's items are checked too, and with `Builder.with_numeric_widening()`
 an `int` fits `float` (see [Deep checks and numeric widening](running.md#deep-checks-and-numeric-widening)). A value
-holding more than a million collections whose own items are collections, or a cycle no check can see, raises
-`TypeError: value too large or too cyclic to check against ...`.
+of any size fits the checks' budget, which counts only steps through types about a value already being checked. Only a
+cycle no check can see, such as a type made afresh on each reading, runs past it, and raises
+`TypeError: value too cyclic to check against ...`.
 
 ## When you run a prepared plan
 

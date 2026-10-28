@@ -3321,6 +3321,12 @@ def loose(rate: Any) -> object:
 
 def converted(given: "Decimal") -> object:
     return given
+
+def anything() -> Any:
+    return 1
+
+def takes(anything: "Decimal") -> object:
+    return anything
 """
 
 
@@ -3338,6 +3344,9 @@ def test_q81_unresolved_annotations_build_as_opaque_types() -> None:
     # The same text, and `Any`, are fed by it: both edges built.
     assert built.what_is_the_path_between("rate", "price") == ["rate", "price"]
     assert built.what_is_the_path_between("rate", "loose") == ["rate", "loose"]
+    # And from `Any`: a node returning `Any` feeds it, and runs unchecked.
+    assert built.what_is_the_path_between("anything", "takes") == ["anything", "takes"]
+    assert built.execute(["takes"]) == {"takes": 1}
     for value in (1, None):
         with pytest.raises(
             TypeError, match=r"^given: .*import what it names at run time"

@@ -41,9 +41,10 @@ change the public API; such changes are listed under **Changed** and **Removed**
   returns a different value (Q54).
 - `len(MemoryCache)`, the number of entries it holds.
 - `Builder.with_deep_type_checks()` checks every item of a `list`, `set`, `tuple[T, ...]` or other standard
-  collection, every key and value of a mapping, and nested collections' items, iteratively; an iterator is still never
-  read. `Builder.with_numeric_widening()` lets an `int` (not a `bool`) or a numpy floating scalar fit `float`, and a
-  numpy integer scalar fit `int`, without importing numpy. Both apply to inputs, overrides, extracted fields and
+  collection, every key and value of a mapping, and nested collections' items, iteratively; an iterator, or a value of
+  any class but a standard collection's, is never read in full. `Builder.with_numeric_widening()` lets an `int` (not a
+  `bool`) or a numpy integer or floating scalar fit `float`, and a numpy integer scalar fit `int`, without importing
+  numpy. Both apply to inputs, overrides, extracted fields and
   `validate`, not to edges, and survive pickling, copying and `build_async`. `fnloom.value_matches` takes `deep=` and
   `widen=` to answer the same way.
 - `fnloom.value_matches(declared, value)` and `fnloom.type_matches(produced, expected)`, the checks `execute` runs on
