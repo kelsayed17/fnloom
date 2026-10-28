@@ -19,6 +19,7 @@ from fnloom._decorators import (
 )
 from fnloom._extract import extract_columns, extract_fields
 from fnloom._fingerprint import fingerprint, register_fingerprint
+from fnloom._functions import NodeSpec, node
 from fnloom._stores import (
     MISSING,
     CacheStore,
@@ -54,6 +55,7 @@ __all__ = [
     "Format",
     "InputView",
     "MemoryCache",
+    "NodeSpec",
     "NodeView",
     "Param",
     "PreparedPlan",
@@ -68,6 +70,7 @@ __all__ = [
     "extract_columns",
     "extract_fields",
     "fingerprint",
+    "node",
     "parameterize",
     "register_fingerprint",
     "source",

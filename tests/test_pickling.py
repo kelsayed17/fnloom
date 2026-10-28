@@ -5,12 +5,13 @@ import pickle
 import sys
 import types
 from concurrent.futures import ProcessPoolExecutor
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
 import fnloom
 import picklable_config_nodes
+import picklable_functions
 import picklable_nodes
 from fnloom import Builder, DiskCache, Driver, MemoryCache, PreparedPlan, build
 
@@ -255,3 +256,119 @@ def test_override_opt_out_survives_pickling() -> None:
     plain = _round_trip(Builder().with_modules(picklable_nodes).build())
     with pytest.raises(ValueError, match="doubled: expected"):
         plain.execute(["total"], inputs=INPUTS, overrides={"doubled": 2.5})
+
+
+def _function_builder() -> Builder:
+    """A builder of functions alone, plain, decorated, a static method and specs."""
+    return (
+        Builder()
+        .with_functions(picklable_functions.doubled, picklable_functions.total)
+        .with_functions(
+            picklable_functions.Holder.offset,
+            fnloom.node(
+                picklable_functions.scaled,
+                name="tenfold",
+                bind={"value": fnloom.source("total"), "factor": fnloom.value(10)},
+            ),
+        )
+        .with_strict_overrides()
+    )
+
+
+def test_pickling_by_qualified_name() -> None:
+    """A builder of functions pickles them by module and qualified name, not code."""
+    builder = _function_builder()
+    data = pickle.dumps(builder)
+    # References, not code: the functions' names are in the pickle, their code is not.
+    assert b"picklable_functions" in data
+    assert picklable_functions.scaled.__code__.co_code not in data
+    for again in (_round_trip(builder), copy.deepcopy(builder)):
+        driver = again.build()
+        assert driver.modules == ()
+        assert driver.nodes["tenfold"].origin is picklable_functions.scaled
+        assert driver.nodes["offset"].origin is picklable_functions.Holder.offset
+        assert dict(driver.nodes["total"].tags) == {"kind": "sum"}
+        assert driver.execute(["tenfold", "offset"], inputs=INPUTS) == {
+            "tenfold": 70,
+            "offset": 8,
+        }
+        # The other settings came along.
+        with pytest.raises(ValueError, match="override of input 'a' refused"):
+            driver.execute(["total"], inputs={"b": 1}, overrides={"a": 1})
+    for driver in (
+        _round_trip(builder.build()),
+        copy.deepcopy(builder.build()),
+        copy.copy(builder.build()),
+    ):
+        assert driver.execute(["tenfold"], inputs=INPUTS) == {"tenfold": 70}
+    async_again = _round_trip(builder.build_async())
+    assert async_again.node_names() == builder.build().node_names()
+    # A spec pickles alone, as its parts.
+    spec = _round_trip(fnloom.node(picklable_functions.doubled, name="d"))
+    assert spec.fn is picklable_functions.doubled
+    assert spec.name == "d"
+    assert dict(spec.bind) == {}
+
+
+def test_a_local_function_is_refused_by_name() -> None:
+    """A function not importable by its qualified name is a `TypeError` naming it."""
+
+    def local(a: int) -> int:
+        return a
+
+    square = cast("Any", lambda a: a * a)
+    square.__annotations__ = {"a": int, "return": int}
+    builder = (
+        Builder()
+        .with_functions(picklable_functions.doubled, local)
+        .with_functions(fnloom.node(square, name="square"))
+    )
+    driver = builder.build()
+    expected = (
+        "cannot pickle: "
+        "function 'test_pickling.test_a_local_function_is_refused_by_name.<locals>"
+        ".<lambda>' is not importable by its qualified name, so it cannot be loaded "
+        "again; "
+        "function 'test_pickling.test_a_local_function_is_refused_by_name.<locals>"
+        ".local' is not importable by its qualified name, so it cannot be loaded again"
+    )
+    for target in (builder, driver):
+        with pytest.raises(TypeError) as raised:
+            pickle.dumps(target)
+        assert str(raised.value) == expected
+        with pytest.raises(TypeError, match="is not importable by its qualified name"):
+            copy.deepcopy(target)
+    with pytest.raises(TypeError, match=r"^cannot pickle: function .*\.local' is not"):
+        pickle.dumps(fnloom.node(local, name="x"))
+    # A module and a function together: both named, sorted.
+    handmade = types.ModuleType("pickling_handmade_functions")
+    exec("def f(a: int) -> int:\n    return a\n", handmade.__dict__)  # noqa: S102  # building a fixture module
+    with pytest.raises(TypeError) as both:
+        pickle.dumps(Builder().with_modules(handmade).with_functions(local))
+    assert str(both.value).startswith("cannot pickle: function ")
+    assert "; module 'pickling_handmade_functions' is not importable" in str(both.value)
+
+
+def test_a_function_shadowed_in_its_module_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A function whose qualified name now finds another object is refused."""
+    builder = Builder().with_functions(picklable_functions.doubled)
+    monkeypatch.setattr(picklable_functions, "doubled", lambda a: a)
+    with pytest.raises(
+        TypeError, match=r"'picklable_functions\.doubled' is not importable"
+    ):
+        pickle.dumps(builder)
+
+
+def _execute_tenfold(driver: Driver, inputs: dict[str, int]) -> dict[str, object]:
+    return driver.execute(["tenfold"], inputs=inputs)
+
+
+def test_a_driver_of_functions_runs_in_a_process_pool() -> None:
+    """Workers import the functions again by name and rebuild the driver."""
+    driver = _function_builder().build()
+    many = [{"a": n, "b": 1} for n in range(3)]
+    with ProcessPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(_execute_tenfold, [driver] * len(many), many))
+    assert results == [{"tenfold": (2 * n + 1) * 10} for n in range(3)]

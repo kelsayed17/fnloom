@@ -1,4 +1,4 @@
-"""Scans modules for node definitions: public functions defined in the module itself."""
+"""Scans for node definitions: a module's public functions, and lone functions."""
 
 import annotationlib
 import functools
@@ -12,11 +12,13 @@ from typing import TYPE_CHECKING, NamedTuple
 from fnloom import _config, _extract
 from fnloom._config import Condition, Found, redefinitions, resolve_variants
 from fnloom._decorators import _ATTRIBUTE, Source, Value, decorations
+from fnloom._functions import FunctionSource, NodeSpec
 from fnloom._types import read_aliases
 from fnloom._view import Param
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Set as AbstractSet
     from types import ModuleType
 
 # What evaluating an annotation raises when a name in it does not resolve.
@@ -237,11 +239,19 @@ def _check_kind(name: str, fn: Callable[..., object], *, awaits: bool) -> None:
 
 
 def _node_defs(
-    module: ModuleType, name: str, fn: Callable[..., object], *, awaits: bool
+    module: str,
+    name: str,
+    fn: Callable[..., object],
+    *,
+    awaits: bool,
+    bind: Mapping[str, Source | Value] | None = None,
 ) -> list[NodeDef]:
     """One node for a plain function; one per row for a parameterized one.
 
-    With `awaits`, as `build_async` scans, an `async def` is a node too (Q32).
+    `module` is the name of the module the nodes belong to. `bind`, from a
+    `fnloom.node` spec, makes `fn` one row named `name`; `node` has refused a
+    parameterized function or a variant. With `awaits`, as `build_async` scans,
+    an `async def` is a node too (Q32).
     """
     _check_kind(name, fn, awaits=awaits)
     annotations = annotationlib.get_annotations(
@@ -254,24 +264,23 @@ def _node_defs(
     if parameters is None:
         parameters = _signature_parameters(name, fn, annotations)
     recorded = decorations(fn)
+    rows = recorded.rows if bind is None else {name: bind}
     conditions: tuple[Condition, ...] = ()
     if recorded.config is not None:
         # A variant is named by `name=`, or by its function's name cut at `__`.
         name = _config.node_name(fn, recorded.config.name)
         conditions = recorded.config.conditions
-    if recorded.rows is None:
+    if rows is None:
         # A plain function is one node, of its own name, binding nothing, so each
         # parameter reads its own name and the payload is the function itself.
         params = _bind(parameters, {})
         returns = annotations["return"]
-        tags, module_name = recorded.tags, module.__name__
+        tags = recorded.tags
         if not conditions:
             # Positional and without `config`: the common case, kept cheapest.
-            node = NodeDef(name, params, tags, fn, fn, module_name, returns)
+            node = NodeDef(name, params, tags, fn, fn, module, returns)
         else:
-            node = NodeDef(
-                name, params, tags, fn, fn, module_name, returns, {}, conditions
-            )
+            node = NodeDef(name, params, tags, fn, fn, module, returns, {}, conditions)
         if recorded.extract is None:
             return [node]
         # Lowered after the variant is selected. These field nodes are placeholders,
@@ -279,7 +288,7 @@ def _node_defs(
         # from the resolved return, with their checks.
         return _extract.lower(node, recorded.extract, resolved=False)
     nodes: list[NodeDef] = []
-    for node_name, row in recorded.rows.items():
+    for node_name, row in rows.items():
         params = _bind(parameters, row)
         payload, renames = _payload(fn, params)
         nodes.append(
@@ -289,7 +298,7 @@ def _node_defs(
                 recorded.tags,
                 payload,
                 fn,
-                module.__name__,
+                module,
                 annotations["return"],
                 renames,
                 conditions,
@@ -400,7 +409,7 @@ def _found(module: ModuleType) -> ModuleFunctions:
             variant = decorations(value).config is not None
             left_out.append(LeftFunction(name, _node_name(value), why, variant))
             continue
-        functions.append((module, name, value))
+        functions.append((module.__name__, name, value))
         if not configured and _ATTRIBUTE in value.__dict__:
             configured = decorations(value).config is not None
     return ModuleFunctions(functions, configured, left_out)
@@ -436,17 +445,24 @@ def _skipped(module: ModuleType) -> str:
     return f"module {module.__name__!r} has no nodes: {', '.join(sorted(reasons))}"
 
 
-def _definition(node: NodeDef) -> str:
-    """How `node` was written: as a function, or as a row of a parameterized one."""
+def _definition(node: NodeDef, given: AbstractSet[int]) -> str:
+    """How `node` was written: as a function, or as a row of a parameterized one.
+
+    `given` holds the ids of the nodes made from functions given to
+    `with_functions`, which say so.
+    """
     function = getattr(node.origin, "__name__", node.name)
+    suffix = " given to with_functions" if id(node) in given else ""
     if (payload := _extract.extractor(node)) is not None:
-        return f"a {payload.noun} of function {function!r}"
+        return f"a {payload.noun} of function {function!r}{suffix}"
     if decorations(node.origin).rows is None:
-        return f"function {function!r}"
-    return f"a row of function {function!r}"
+        return f"function {function!r}{suffix}"
+    return f"a row of function {function!r}{suffix}"
 
 
-def _duplicate(first: NodeDef, second: NodeDef) -> str:
+def _duplicate(
+    first: NodeDef, second: NodeDef, given: AbstractSet[int] = frozenset()
+) -> str:
     if first.module != second.module:
         return (
             f"node {first.name!r} is defined in both "
@@ -454,7 +470,7 @@ def _duplicate(first: NodeDef, second: NodeDef) -> str:
         )
     return (
         f"node {first.name!r} is defined twice in {first.module!r}: "
-        f"by {_definition(first)} and by {_definition(second)}"
+        f"by {_definition(first, given)} and by {_definition(second, given)}"
     )
 
 
@@ -542,6 +558,7 @@ def collect(
     config: Mapping[str, object] = _NO_CONFIG,
     *,
     awaits: bool = False,
+    functions: Sequence[FunctionSource] = (),
 ) -> list[NodeDef]:
     """Returns the nodes of `modules`; `ValueError` on a malformed or duplicate one.
 
@@ -553,11 +570,26 @@ def collect(
     naming every such module.
 
     `config` selects among `@config.when*` variants (see `scan`), and `awaits`
-    accepts `async def` nodes, as `build_async` does.
+    accepts `async def` nodes, as `build_async` does. `functions` are the node
+    sources given to `with_functions`, after the modules' (Q72).
 
     Annotations are read without being evaluated; `resolve` evaluates them.
     """
-    return scan(modules, config, awaits=awaits).nodes
+    return scan(modules, config, awaits=awaits, functions=functions).nodes
+
+
+def _given(functions: Sequence[FunctionSource]) -> list[Found | NodeSpec]:
+    """The node sources given to `with_functions`, each once, in the order given.
+
+    A function is found under its own name, in its own module; a spec is kept
+    as it is. Functions and specs hash by identity, so a repeat is dropped.
+    """
+    return [
+        item
+        if isinstance(item, NodeSpec)
+        else (str(item.__module__), str(getattr(item, "__name__", "")), item)
+        for item in dict.fromkeys(functions)
+    ]
 
 
 def scan(
@@ -565,27 +597,56 @@ def scan(
     config: Mapping[str, object] = _NO_CONFIG,
     *,
     awaits: bool = False,
+    functions: Sequence[FunctionSource] = (),
 ) -> Scanned:
     """`collect`, with the reason each node that no variant gave is absent.
 
     Variants are selected first, one per node (`_config.select`), so a variant
     the config does not select is never lowered. A module none of whose
     variants is selected is not empty. Without a config-decorated function
-    there is nothing to select, and selection is skipped entirely.
+    there is nothing to select, and selection is skipped entirely. A function
+    given to `with_functions` takes part in selection as a module's does; a
+    `fnloom.node` spec is never a variant.
     """
     found, configured, left_out, variants = _functions(modules)
+    given = _given(functions)
+    entries: list[Found | NodeSpec] = [*found, *given]
     unmatched: dict[str, str] = {}
-    if configured:
+    if configured or any(
+        not isinstance(e, NodeSpec) and decorations(e[2]).config is not None
+        for e in given
+    ):
         if redefined := sorted(line for m in configured for line in redefinitions(m)):
             raise ValueError("; ".join(redefined))
-        selection = resolve_variants(found, config)
-        found, unmatched = selection.functions, selection.unmatched
+        selection = resolve_variants(
+            [e for e in entries if not isinstance(e, NodeSpec)], config
+        )
+        chosen = {id(e) for e in selection.functions}
+        entries = [e for e in entries if isinstance(e, NodeSpec) or id(e) in chosen]
+        unmatched = selection.unmatched
+    # The ids of the given sources, and of the nodes they make, for the clash lines.
+    sourced = {id(e) for e in given}
+    from_given: set[int] = set()
     seen: dict[str, NodeDef] = {}
     clashes: list[tuple[str, str]] = []
-    for module, name, fn in found:
-        for node in _node_defs(module, name, fn, awaits=awaits):
+    for entry in entries:
+        if isinstance(entry, NodeSpec):
+            fn = entry.fn
+            made = _node_defs(
+                str(fn.__module__),
+                entry.name,
+                fn,
+                awaits=awaits,
+                bind=entry.bind or None,
+            )
+        else:
+            made = _node_defs(*entry, awaits=awaits)
+        if sourced and id(entry) in sourced:
+            from_given.update(id(node) for node in made)
+        for node in made:
             if node.name in seen:
-                clashes.append((node.name, _duplicate(seen[node.name], node)))
+                clash = _duplicate(seen[node.name], node, from_given)
+                clashes.append((node.name, clash))
             else:
                 seen[node.name] = node
     if clashes:

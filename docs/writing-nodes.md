@@ -323,6 +323,94 @@ A few details:
 - Passing the same module twice adds its nodes once.
 - Defining the same name in two different modules is a `ValueError` naming both.
 
+## Graphs without modules
+
+`Builder.with_functions` builds from functions directly, with no module to scan (Q72). Each function makes the nodes it
+would make in a module, named by its `__name__`, and keeps its decorators, so `@tag`, `@parameterize`, `@config.when*`,
+`@extract_fields` and `@cache` all work:
+
+```python
+# file: scoring.py
+import fnloom
+
+
+def raw(points: int) -> int:
+    return points * 10
+
+
+@fnloom.tag(owner="games")
+def bonus(raw: int) -> int:
+    return raw + 5
+
+
+def _scaled(raw: int, factor: int) -> int:
+    return raw * factor
+```
+
+```python
+import sys
+
+import fnloom
+import scoring
+
+modules_before = set(sys.modules)
+driver = fnloom.Builder().with_functions(scoring.raw, scoring.bonus).build()
+driver.execute(["bonus"], inputs={"points": 2})
+# -> {'bonus': 25}
+driver.nodes["bonus"].module
+# -> 'scoring'
+driver.modules
+# -> ()
+set(sys.modules) == modules_before
+# -> True
+```
+
+Nothing is copied and no module is made: each node is the function itself, so its module, cache key and code version
+are the function's own, and the function in `final_vars` means its node. Hamilton's `create_temporary_module` copies
+the functions into a module it registers in `sys.modules`.
+
+**`fnloom.node(fn, *, name=None, bind=None)`** makes one node from a function, named and bound without decorating it.
+`bind` takes `source(...)` and `value(...)`, as a `@parameterize` row does, and is checked the same way. One function
+can make several nodes, each from its own `node(...)`, and a function given on purpose may have a private name:
+
+```python
+import fnloom
+import scoring
+
+driver = (
+    fnloom.Builder()
+    .with_functions(
+        scoring.raw,
+        fnloom.node(scoring._scaled, name="doubled", bind={"factor": fnloom.value(2)}),
+        fnloom.node(scoring._scaled, name="tripled", bind={"factor": fnloom.value(3)}),
+    )
+    .build()
+)
+driver.execute(["doubled", "tripled"], inputs={"points": 1})
+# -> {'doubled': 20, 'tripled': 30}
+```
+
+A lambda has no name a node can take, so it needs `name=`:
+
+```python
+import fnloom
+
+fnloom.Builder().with_functions(lambda points: points)
+# raises ValueError: function '<lambda>' has no name a node can take: give it one with fnloom.node(fn, name=...)
+```
+
+A few details:
+
+- `with_functions` is cumulative, like `with_modules`, and mixes with it: nodes are matched by name across both, and a
+  name defined twice, in a module and among the functions, is the usual duplicate error. The same function given twice
+  counts once.
+- Only a Python function is accepted. For a `functools.partial`, give the function with `bind=`; wrap a callable
+  instance in a `def`.
+- A function marked `@exclude` is refused rather than dropped, since you gave it on purpose. A module's `__all__` only
+  decides what that module's scan finds, so it doesn't apply.
+- A driver built this way pickles when each function is importable by its module and qualified name: defined at the
+  top of a module, or in a class there. A local function or a lambda is a `TypeError` naming it when pickled.
+
 ## One function, several nodes
 
 `@parameterize` turns one function into several nodes, one per row. Each keyword names a node, and its mapping binds

@@ -246,8 +246,9 @@ def _config_decorator[F: Callable[..., object]](
     return apply
 
 
-# A function found in a module: the module, its attribute name, and the function.
-type Found = tuple[ModuleType, str, Callable[..., object]]
+# A function found in a module or given to `with_functions`: its module's name, the
+# name it was found under (its attribute name, or its own name), and the function.
+type Found = tuple[str, str, Callable[..., object]]
 
 
 @dataclass(frozen=True, slots=True)

@@ -18,6 +18,16 @@ from fnloom._caching import Cache, CacheOutcome, CacheRun
 from fnloom._decorators import Source
 from fnloom._defaults import default_problems
 from fnloom._extract import is_generated
+from fnloom._functions import (
+    FunctionReference,
+    FunctionSource,
+    NodeSpec,
+    checked_functions,
+    from_references,
+    function_of,
+    references,
+    unimportable,
+)
 from fnloom._requests import ABSENT, requested, suggest
 from fnloom._requests import output_names as _requested_names
 from fnloom._scan import LeftOut, NodeDef, core_inputs, resolve, scan
@@ -1217,16 +1227,14 @@ def _checked_modules(modules: Sequence[object]) -> tuple[ModuleType, ...]:
     return tuple(checked)
 
 
-def _importable_name(module: ModuleType) -> str:
-    """`module`'s name, which imports it; `TypeError` when it does not."""
+def _unimportable_module(module: ModuleType) -> str | None:
+    """Why `module` cannot be imported again by its name, or `None` when it can."""
     name = module.__name__
-    if sys.modules.get(name) is not module:
-        msg = (
-            f"cannot pickle: module {name!r} is not importable by its name, "
-            "so it cannot be loaded again"
-        )
-        raise TypeError(msg)
-    return name
+    if sys.modules.get(name) is module:
+        return None
+    return (
+        f"module {name!r} is not importable by its name, so it cannot be loaded again"
+    )
 
 
 def _builder_of(
@@ -1234,10 +1242,17 @@ def _builder_of(
     settings: _Settings,
     store: CacheStore | None,
     config: Mapping[str, object] | None = None,
+    functions: tuple[FunctionReference, ...] = (),
 ) -> Builder:
-    """A pickled builder, its modules imported again by name."""
+    """A pickled builder, its modules imported again by name, its functions too."""
     modules = tuple(importlib.import_module(name) for name in names)
-    return Builder(modules, store=store, config=config, **settings)
+    return Builder(
+        modules,
+        store=store,
+        config=config,
+        functions=from_references(functions),
+        **settings,
+    )
 
 
 class _Changes(TypedDict, total=False):
@@ -1259,16 +1274,19 @@ class _Settings(TypedDict):
 
 
 class Builder:
-    """Accumulates modules, then builds a `Driver`; methods return new builders.
+    """Accumulates modules and functions, then builds a `Driver`.
 
-    A builder pickles as the names of its modules, which must import them, its
-    type-check setting, its config and its store, which must pickle too.
+    Its methods return new builders. A builder pickles as the names of its
+    modules, which must import them, the module and qualified name of each
+    function `with_functions` gave it, which must find it again, its settings,
+    its config and its store, which must pickle too.
     """
 
     def __init__(  # noqa: PLR0913  # keyword-only switches, one per builder setting
         self,
         modules: tuple[ModuleType, ...] = (),
         *,
+        functions: Sequence[FunctionSource] = (),
         check_inputs: bool = True,
         check_overrides: bool = True,
         strict_overrides: bool = False,
@@ -1278,14 +1296,17 @@ class Builder:
     ) -> None:
         """Starts with the given modules (none by default), checking input types.
 
-        `store`, when given, caches the results of the driver's runs in it.
+        `functions` are the node sources of `with_functions`. `store`, when
+        given, caches the results of the driver's runs in it.
         `config`, copied, selects `@config.when*` variants (see `with_config`).
         The other settings are those of `without_input_type_checks`,
         `without_override_type_checks`, `with_strict_overrides` and
         `with_declared_inputs`. `TypeError` when an item of `modules` is not a
-        module, or of `declared_inputs` is not a `str`.
+        module, or of `declared_inputs` is not a `str`; see `with_functions` for
+        the errors `functions` raises.
         """
         self._modules = _checked_modules(modules)
+        self._functions = checked_functions(functions)
         self._check_inputs = check_inputs
         self._check_overrides = check_overrides
         self._strict_overrides = strict_overrides
@@ -1301,11 +1322,34 @@ class Builder:
         self,
     ) -> tuple[
         Callable[..., Builder],
-        tuple[tuple[str, ...], _Settings, CacheStore | None, dict[str, object]],
+        tuple[
+            tuple[str, ...],
+            _Settings,
+            CacheStore | None,
+            dict[str, object],
+            tuple[FunctionReference, ...],
+        ],
     ]:
-        """The modules' names and the settings, imported again on load."""
-        names = tuple(_importable_name(module) for module in self._modules)
-        return _builder_of, (names, self._settings(), self._store, self._config)
+        """The modules' names, the functions' references and the settings.
+
+        Imported again on load. `TypeError` naming every module and function that
+        would not be found again, sorted.
+        """
+        found = [
+            *(_unimportable_module(module) for module in self._modules),
+            *(unimportable(function_of(item)) for item in self._functions),
+        ]
+        if problems := sorted({problem for problem in found if problem is not None}):
+            msg = f"cannot pickle: {'; '.join(problems)}"
+            raise TypeError(msg)
+        names = tuple(module.__name__ for module in self._modules)
+        return _builder_of, (
+            names,
+            self._settings(),
+            self._store,
+            self._config,
+            references(self._functions),
+        )
 
     def _settings(self) -> _Settings:
         """This builder's switches, which `_builder_of` makes a builder from."""
@@ -1320,17 +1364,26 @@ class Builder:
         self,
         modules: tuple[ModuleType, ...] | None = None,
         *,
+        functions: tuple[FunctionSource, ...] | None = None,
         store: CacheStore | None = None,
         config: Mapping[str, object] | None = None,
         **settings: Unpack[_Changes],
     ) -> Builder:
-        """A new builder: this one's settings, each given one replaced."""
-        return Builder(
+        """A new builder: this one's settings, each given one replaced.
+
+        `functions`, when given, are already checked, as this builder's are, so
+        they are set rather than checked again: adding functions one call at a
+        time stays linear in checks.
+        """
+        built = Builder(
             self._modules if modules is None else modules,
             store=self._store if store is None else store,
             config=self._config if config is None else config,
             **{**self._settings(), **settings},
         )
+        # Already checked, by this builder or `with_functions`.
+        built._functions = self._functions if functions is None else functions
+        return built
 
     def with_modules(self, *modules: ModuleType) -> Builder:
         """Returns a new builder with `modules` appended to this one's.
@@ -1338,6 +1391,25 @@ class Builder:
         `TypeError` when an item is not a module, such as a function.
         """
         return self._with((*self._modules, *modules))
+
+    def with_functions(self, *items: Callable[..., object] | NodeSpec) -> Builder:
+        """Returns a new builder with `items` appended to this one's functions (Q72).
+
+        Each item is a function, plain or decorated, which makes the nodes it would
+        make in a module, named by its `__name__`, or a `fnloom.node(...)` spec.
+        Nothing is copied and no module is made or registered: a node's module is
+        its function's own `__module__`, and `Driver.modules` lists only modules.
+        Cumulative and ordered, after the modules; the same function or spec given
+        twice counts once. A node name a module or another item also defines is
+        the build's usual duplicate error.
+
+        Raises one error naming every item that is refused, sorted: a `TypeError`
+        when some item is no Python function or spec (a module, a class, a
+        `functools.partial`, a callable instance), else a `ValueError` for a lambda
+        or other function whose name is no identifier (give it `fnloom.node(fn,
+        name=...)`) and for a function marked `@exclude`.
+        """
+        return self._with(functions=(*self._functions, *checked_functions(items)))
 
     def with_config(self, config: Mapping[str, object]) -> Builder:
         """Returns a new builder with `config` merged into a copy of this one's.
@@ -1461,7 +1533,9 @@ class Builder:
         `__all__` left out. With `awaits`, an
         `async def` is a node too.
         """
-        scanned = scan(self._modules, self._config, awaits=awaits)
+        scanned = scan(
+            self._modules, self._config, awaits=awaits, functions=self._functions
+        )
         nodes = resolve(scanned.nodes)
         unmatched = scanned.unmatched
         if unmatched:

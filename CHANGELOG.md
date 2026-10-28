@@ -11,6 +11,10 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Added
 
+- `Builder.with_functions(*items)` builds from functions, plain or decorated, without a module: nothing is copied and
+  nothing is registered in `sys.modules`. `fnloom.node(fn, *, name=None, bind=None)` makes one node from a function,
+  named and bound with `source()` and `value()` without decorating it, and returns a `fnloom.NodeSpec`. A lambda needs
+  `name=`. Builders and drivers of functions pickle them by module and qualified name (Q72).
 - `Driver.inputs()` and `outputs()`, `Driver.modules` and `Driver.what_is_the_path_between(a, b)`, on `AsyncDriver` too,
   with `fnloom.InputView`. The path includes both ends and is in topological order, ties broken by name, on every hash
   seed; its error names every unknown node (Q70). An unsupplied input requested as an output stays a `ValueError`

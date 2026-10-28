@@ -1,8 +1,11 @@
-"""Authoring: `@exclude` and `__all__` decide which functions are nodes (Q73)."""
+"""Authoring: which functions are nodes (Q73), and graphs from functions (Q72)."""
 
+import asyncio
 import copy
+import functools
 import pickle
-from typing import TYPE_CHECKING, Any, cast
+import sys
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import pytest
 
@@ -725,3 +728,375 @@ def test_a_function_both_excluded_and_unlisted_gives_both_reasons_when_empty() -
     assert "'both' is marked @exclude and not listed in its __all__" in str(
         raised.value
     )
+
+
+# Graphs from functions (Q72).
+
+_SOURCES = """
+import fnloom
+
+
+def base(x: int) -> int:
+    return x + 1
+
+
+@fnloom.tag(owner="data")
+def doubled(base: int) -> int:
+    \"\"\"Twice the base.\"\"\"
+    return base * 2
+
+
+@fnloom.parameterize(low={"limit": fnloom.value(1)}, high={"limit": fnloom.value(9)})
+def above(base: int, limit: int) -> bool:
+    return base > limit
+
+
+@fnloom.config.when(region="eu")
+def price__eu(base: int) -> float:
+    return base * 1.2
+
+
+@fnloom.config.when(region="us")
+def price__us(base: int) -> float:
+    return base * 1.0
+
+
+def _private(base: int) -> int:
+    return -base
+"""
+
+
+def test_with_functions_builds_without_a_module() -> None:
+    """Functions alone build a graph; nothing is copied or registered in sys.modules."""
+    module = make_module("auth_functions_plain", _SOURCES)
+    before = dict(sys.modules)
+    driver = fnloom.Builder().with_functions(module.base, module.doubled).build()
+    assert driver.node_names() == ["base", "doubled", "x"]
+    assert driver.execute(["doubled"], inputs={"x": 2}) == {"doubled": 6}
+    # No module made, none registered, and nothing listed as a module.
+    assert sys.modules == before
+    assert driver.modules == ()
+    # The node is the function itself, in its own module.
+    view = driver.nodes["doubled"]
+    assert view.origin is module.doubled
+    assert view.module == "auth_functions_plain"
+    assert view.doc == "Twice the base."
+    # A function given on purpose is a node even when private, unlike in a module.
+    private = fnloom.Builder().with_functions(module.base, module._private).build()  # noqa: SLF001  # a private function, given on purpose
+    assert private.execute(["_private"], inputs={"x": 1}) == {"_private": -2}
+    # Cumulative and ordered, each function once; a local function works too.
+
+    def tripled(doubled: int) -> int:
+        return doubled * 3
+
+    builder = fnloom.Builder().with_functions(module.base, module.base)
+    built = builder.with_functions(module.doubled).with_functions(tripled).build()
+    assert built.execute(["tripled"], inputs={"x": 0}) == {"tripled": 6}
+    assert built.nodes["tripled"].module == __name__
+    # A function in `final_vars` means its node (Q30).
+    assert built.execute([tripled], inputs={"x": 0}) == {"tripled": 6}
+
+
+def test_decorated_functions_keep_their_decorations() -> None:
+    """Tags, rows, config variants, extracted fields and async work without a module."""
+    module = make_module("auth_functions_decorated", _SOURCES)
+    driver = (
+        fnloom.Builder()
+        .with_config({"region": "eu"})
+        .with_functions(
+            module.base,
+            module.doubled,
+            module.above,
+            module.price__eu,
+            module.price__us,
+        )
+        .build()
+    )
+    assert driver.node_names() == ["base", "doubled", "high", "low", "price", "x"]
+    assert dict(driver.nodes["doubled"].tags) == {"owner": "data"}
+    assert driver.execute(["low", "high", "price"], inputs={"x": 2}) == {
+        "low": True,
+        "high": False,
+        "price": pytest.approx(3.6),
+    }
+    us = (
+        fnloom.Builder()
+        .with_config({"region": "us"})
+        .with_functions(module.base, module.price__eu, module.price__us)
+        .build()
+    )
+    assert us.execute(["price"], inputs={"x": 2}) == {"price": 3.0}
+    # A variant given alone, that the config does not select, gives no node.
+
+    def reader(price: float) -> float:
+        return price
+
+    unselected = (
+        fnloom.Builder()
+        .with_config({"region": "us"})
+        .with_functions(module.base, module.price__eu, reader)
+    )
+    with pytest.raises(ValueError, match="no variant of 'price' matches"):
+        unselected.build()
+
+    class Pair(TypedDict):
+        left: int
+        right: int
+
+    @fnloom.extract_fields()
+    def split(x: int) -> Pair:
+        return {"left": x, "right": -x}
+
+    fields = fnloom.Builder().with_functions(split).build()
+    assert fields.execute(["left", "right"], inputs={"x": 4}) == {
+        "left": 4,
+        "right": -4,
+    }
+
+    async def fetched(x: int) -> int:
+        await asyncio.sleep(0)
+        return x * 10
+
+    with pytest.raises(ValueError, match="build it with build_async"):
+        fnloom.Builder().with_functions(fetched).build()
+    driven = fnloom.Builder().with_functions(fetched, module.base).build_async()
+    assert driven.modules == ()
+    result = asyncio.run(driven.execute(["fetched", "base"], inputs={"x": 1}))
+    assert result == {"fetched": 10, "base": 2}
+
+
+def test_node_names_and_binds_a_callable() -> None:
+    """`fnloom.node` names one node and binds it, as a `@parameterize` row does."""
+    module = make_module("auth_functions_node", _SOURCES)
+
+    def scaled(value: int, factor: int = 2) -> int:
+        return value * factor
+
+    spec = fnloom.node(
+        scaled,
+        name="big",
+        bind={"value": fnloom.source("x"), "factor": fnloom.value(10)},
+    )
+    assert isinstance(spec, fnloom.NodeSpec)
+    assert spec.fn is scaled
+    assert spec.name == "big"
+    assert dict(spec.bind) == {"value": fnloom.source("x"), "factor": fnloom.value(10)}
+    with pytest.raises(TypeError):
+        spec.bind["value"] = fnloom.value(1)  # ty: ignore[invalid-assignment]  # read-only on purpose
+    small = fnloom.node(scaled, name="small", bind={"value": fnloom.source("base")})
+    driver = fnloom.Builder().with_functions(module.base, spec, small, scaled).build()
+    assert driver.execute(["big", "small"], inputs={"x": 3}) == {"big": 30, "small": 8}
+    # Unbound `value` of the plain `scaled` is an input; its `factor` keeps its default.
+    assert driver.execute(["scaled"], inputs={"x": 0, "value": 5}) == {"scaled": 10}
+    assert driver.nodes["big"].origin is scaled
+    # Without a name, the function's own; the function is never changed.
+    assert fnloom.node(scaled).name == "scaled"
+    assert not hasattr(scaled, "__fnloom__")
+    # Its decorations apply: `doubled`'s tag.
+    tagged = fnloom.Builder().with_functions(
+        module.base, fnloom.node(module.doubled, name="twice")
+    )
+    assert dict(tagged.build().nodes["twice"].tags) == {"owner": "data"}
+    # The checks `@parameterize` makes, every culprit in one message, sorted.
+    with pytest.raises(
+        TypeError,
+        match=(
+            r"^expected source\(\.\.\.\) or value\(\.\.\.\) for: "
+            r"parameter 'factor' \(int\), parameter 'value' \(str\)$"
+        ),
+    ):
+        fnloom.node(scaled, bind=cast("Any", {"value": "x", "factor": 3}))
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^the function does not have the parameters named by: "
+            r"parameter 'nope', parameter 'zz'$"
+        ),
+    ):
+        fnloom.node(scaled, bind={"zz": fnloom.value(1), "nope": fnloom.source("a")})
+    with pytest.raises(TypeError, match=r"^bind must be a mapping, got list$"):
+        fnloom.node(scaled, bind=cast("Any", [("value", fnloom.value(1))]))
+    with pytest.raises(TypeError, match=r"^node name must be a str, got int$"):
+        fnloom.node(scaled, name=cast("Any", 3))
+    with pytest.raises(ValueError, match=r"^node name must not be empty$"):
+        fnloom.node(scaled, name="")
+    # One node: a parameterized function or a config variant is given as it is.
+    with pytest.raises(ValueError, match=r"^node\(\) makes one node, but function"):
+        fnloom.node(module.above, name="x")
+    with pytest.raises(ValueError, match=r"^node\(\) names its node, but function"):
+        fnloom.node(module.price__eu)
+    # A partial and a callable instance are refused, with what to write instead.
+    with pytest.raises(TypeError, match=r"functools\.partial .* bind=") as partial:
+        fnloom.node(cast("Any", functools.partial(scaled, factor=3)), name="p")
+    assert "auth_functions_node" not in str(partial.value)
+
+    class Scaler:
+        def __call__(self, value: int) -> int:
+            return value
+
+    with pytest.raises(
+        TypeError, match=r"^a callable .*Scaler is not a function: wrap it in a def$"
+    ):
+        fnloom.node(cast("Any", Scaler()), name="s")
+    with pytest.raises(TypeError, match=r"^class .* is not a function"):
+        fnloom.node(cast("Any", Scaler), name="s")
+    with pytest.raises(TypeError, match=r"given to with_functions, not to node\(\)"):
+        fnloom.node(cast("Any", spec))
+
+
+def test_a_lambda_needs_a_name() -> None:
+    """A lambda is refused without `name=`, and named with it."""
+    with pytest.raises(
+        ValueError,
+        match=r"^function '.*<lambda>' has no name a node can take: give it one with",
+    ):
+        fnloom.Builder().with_functions(lambda x: x)
+    with pytest.raises(ValueError, match=r"has no name a node can take"):
+        fnloom.node(lambda x: x)
+    square = cast("Any", lambda x: x * x)
+    square.__annotations__ = {"x": int, "return": int}
+    driver = fnloom.Builder().with_functions(fnloom.node(square, name="square")).build()
+    assert driver.execute(["square"], inputs={"x": 3}) == {"square": 9}
+
+    def plain(x: int) -> int:
+        return x
+
+    # Every refused item in one message, sorted; a TypeError when one is no function.
+    with pytest.raises(ValueError, match=r"has no name") as named:
+        fnloom.Builder().with_functions(plain, lambda: 1, fnloom.exclude(lambda: 2))
+    assert len(str(named.value).split("; ")) == len(["no name", "marked @exclude"])
+    assert "marked @exclude" in str(named.value)
+    with pytest.raises(TypeError) as mixed:
+        fnloom.Builder().with_functions(cast("Any", 3), lambda: 1, cast("Any", sys))
+    lines = str(mixed.value).split("; ")
+    assert lines == sorted(lines)
+    assert len(lines) == len(["3", "the lambda", "sys"])
+    assert "expected a function or fnloom.node(...), got int" in lines
+    assert "module 'sys' is not a function: give it to with_modules" in lines
+
+
+def test_an_excluded_function_given_explicitly_is_refused() -> None:
+    """`@exclude` on a function given to `with_functions` is an error, not a no-op."""
+
+    @fnloom.exclude
+    def helper(x: int) -> int:
+        return x
+
+    with pytest.raises(ValueError, match=r"^function '.*helper' is marked @exclude"):
+        fnloom.Builder().with_functions(helper)
+    with pytest.raises(ValueError, match=r"marked @exclude"):
+        fnloom.node(helper, name="h")
+    # A module's `__all__` does not govern a function given alone.
+    module = make_module(
+        "auth_functions_unlisted",
+        """
+        __all__ = ["listed"]
+
+
+        def listed(x: int) -> int:
+            return x
+
+
+        def unlisted(x: int) -> int:
+            return x + 1
+        """,
+    )
+    driver = fnloom.Builder().with_modules(module).with_functions(module.unlisted)
+    assert driver.build().node_names() == ["listed", "unlisted", "x"]
+
+
+def test_functions_and_modules_mix_and_clash_by_name() -> None:
+    """Modules and functions mix; one node name twice is the usual duplicate error."""
+    module = make_module("auth_functions_mix", _SOURCES)
+    other = make_module(
+        "auth_functions_other",
+        """
+        def doubled(x: int) -> int:
+            return x * 2
+
+
+        def tripled(doubled: int) -> int:
+            return doubled * 3
+        """,
+    )
+    mixed = fnloom.Builder().with_modules(other).with_functions(module.base).build()
+    assert mixed.modules == (other,)
+    assert mixed.execute(["tripled", "base"], inputs={"x": 1}) == {
+        "tripled": 6,
+        "base": 2,
+    }
+    # Same name, two definitions, in two modules.
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^node 'doubled' is defined in both "
+            r"'auth_functions_other' and 'auth_functions_mix'$"
+        ),
+    ):
+        fnloom.Builder().with_modules(other).with_functions(module.doubled).build()
+    # The same function, in its module and given again: two definitions too.
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^node 'tripled' is defined twice in 'auth_functions_other': by function "
+            r"'tripled' and by function 'tripled' given to with_functions$"
+        ),
+    ):
+        fnloom.Builder().with_modules(other).with_functions(other.tripled).build()
+    # Two specs of one name, every clash listed, sorted.
+    with pytest.raises(ValueError, match=r"^node 'b2' is defined twice") as twice:
+        (
+            fnloom.Builder()
+            .with_functions(
+                module.base,
+                fnloom.node(module.base, name="b2"),
+                fnloom.node(module.doubled, name="b2"),
+                fnloom.node(module.doubled, name="base"),
+            )
+            .build()
+        )
+    assert str(twice.value) == (
+        "node 'b2' is defined twice in 'auth_functions_mix': by function 'base' "
+        "given to with_functions and by function 'doubled' given to with_functions; "
+        "node 'base' is defined twice in 'auth_functions_mix': by function 'base' "
+        "given to with_functions and by function 'doubled' given to with_functions"
+    )
+    # One spec given twice counts once.
+    spec = fnloom.node(module.doubled, name="d")
+    once = fnloom.Builder().with_functions(module.base, spec, spec).build()
+    assert once.node_names() == ["base", "d", "x"]
+
+
+def test_cache_keys_use_the_function_module() -> None:
+    """A function's cache key is its own: the same whether given alone or in its module.
+
+    A copy, as `create_temporary_module` makes, belongs to another module and
+    misses.
+    """
+    module = make_module(
+        "auth_functions_cache",
+        """
+        def base(x: int) -> int:
+            return x + 1
+        """,
+    )
+    store = fnloom.MemoryCache()
+    fnloom.Builder().with_modules(module).with_cache(store).build().execute(
+        ["base"], inputs={"x": 1}
+    )
+    alone = fnloom.Builder().with_functions(module.base).with_cache(store).build()
+    statuses = alone.explain_cache(["base"], inputs={"x": 1})
+    assert statuses["base"].status == "hit"
+    original = module.base
+    copied = type(original)(
+        original.__code__,
+        original.__globals__,
+        original.__name__,
+        original.__defaults__,
+        original.__closure__,
+    )
+    copied.__annotations__ = dict(original.__annotations__)
+    copied.__module__ = "temporary_module_copy"
+    elsewhere = fnloom.Builder().with_functions(copied).with_cache(store).build()
+    assert elsewhere.nodes["base"].module == "temporary_module_copy"
+    assert elsewhere.explain_cache(["base"], inputs={"x": 1})["base"].status == "miss"
