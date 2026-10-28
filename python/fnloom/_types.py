@@ -325,11 +325,16 @@ class _Frame:
 
     `descents` counts the steps into an item between the first question and this
     one, so a repeated question tells whether the value changed on the way.
+    `low` is the lowest stack index of an open question its answer has consulted
+    so far: its own index while it consulted none. `asked` is the question's type
+    and value, kept alive while their ids key the walk's answers.
     """
 
     group: _Group
     pair: _Pair
     descents: int
+    low: int
+    asked: tuple[object, object]
     next: int = 0
 
 
@@ -345,16 +350,63 @@ def _pair(declared: object, value: object) -> _Pair:
     return (id(declared), value if type(value) is str else id(value))
 
 
-WALK_BUDGET = 1_000_000
-"""How many type steps one check may take before it gives up with a `TypeError`.
+WALK_BUDGET = 10_000
+"""How many groups may be open about one value at once before a check gives up.
 
-A type step opens a group about a value already being asked about: a union's or
-an alias's members about the same value, or an item that is a value still open
-further up, as in a cyclic value. A step into a new item of the value is never
-counted, so a value of any size fits, however many items deep checks read. Only a
-cycle the walk cannot see by its keys, such as a type made afresh on each reading,
-takes steps without end, and it ends here.
+A legitimate value reaches only its type's nesting there: a union's member about
+the same value, an alias's value, a cyclic value's item met again. A value of any
+size or depth stays far below it, since each new item is a new value. A cycle the
+walk cannot see by its keys, such as a type made afresh on each reading, piles
+groups onto one value without end, and ends here with a `TypeError`.
 """
+
+_SHOWN = 200
+"""How many characters of a type an error shows; a longer one ends in `...`."""
+
+
+def _origin_name(origin: object) -> str:
+    """How a generic's origin is written: `list`, `collections.abc.Sequence`, ..."""
+    name = getattr(origin, "__qualname__", None) or getattr(origin, "__name__", None)
+    if not isinstance(name, str):
+        return repr(origin)
+    module = getattr(origin, "__module__", "builtins")
+    if isinstance(origin, typing.TypeAliasType) or module == "builtins":
+        return name
+    return f"{module}.{name}"
+
+
+def _shown(declared: object) -> str:
+    """`repr(declared)`, cut to `_SHOWN` characters, ending in `...` when cut.
+
+    A type that shares its parts (`T = tuple[T1, T1]`, nested) has a `repr`
+    exponential in its depth, so the text is written part by part, with a stack,
+    and stops once it is long enough; a short type gets its own `repr`.
+    """
+    parts: list[str] = []
+    size = 0
+    pending: list[object] = [declared]
+    while pending and size <= _SHOWN:
+        current = pending.pop()
+        if isinstance(current, str):
+            text = current
+        elif not (args := typing.get_args(current)) or isinstance(current, type):
+            text = repr(current)
+        else:
+            joined: list[object] = []
+            for arg in args:
+                joined.extend((", ", arg))
+            if _is_union(current):
+                joined = [" | " if part == ", " else part for part in joined[1:]]
+                text = ""
+            else:
+                text = f"{_origin_name(typing.get_origin(current))}["
+                joined = [*joined[1:], "]"]
+            pending.extend(reversed(joined))
+        parts.append(text)
+        size += len(text)
+    if not pending and size <= _SHOWN:
+        return repr(declared)
+    return "".join(parts)[: _SHOWN - 3] + "..."
 
 
 type _Expanded = bool | _Group
@@ -454,41 +506,56 @@ type _Expand = collections.abc.Callable[[object, object], _Expanded]
 """One rule set's answer to a question, or the group of questions it depends on."""
 
 
-class _Steps:
-    """The walk's type steps, counted against its budget (see `WALK_BUDGET`).
+class _Open:
+    """How many groups are open about each value, against the walk's budget.
 
-    It keeps how many open groups ask about each value, keyed as a pair's value
-    is: a group opened about a value already open, or by a group that does not
-    step into items, is a type step.
+    Keyed as a pair's value is. Past `budget` groups about one value, a cycle no
+    key can see (see `WALK_BUDGET`), it raises `TypeError`.
     """
 
-    __slots__ = ("_budget", "_declared", "_open", "_taken")
+    __slots__ = ("_budget", "_declared", "_held")
 
     def __init__(self, declared: object, budget: int) -> None:
         self._declared = declared
         self._budget = budget
-        self._open: dict[int | str, int] = {}
-        self._taken = 0
+        self._held: dict[int | str, int] = {}
 
-    def open(self, key: int | str, *, descends: bool) -> None:
+    def open(self, key: int | str) -> None:
         """Counts a group opened about value `key`; `TypeError` past the budget."""
-        held = self._open.get(key, 0)
-        if not descends or held:
-            self._taken += 1
-            if self._taken > self._budget:
-                msg = (
-                    f"value too cyclic to check against {self._declared!r}: "
-                    f"more than {self._budget:,} type steps"
-                )
-                raise TypeError(msg)
-        self._open[key] = held + 1
+        held = self._held.get(key, 0) + 1
+        if held > self._budget:
+            msg = (
+                f"value too cyclic to check against {_shown(self._declared)}: "
+                f"more than {self._budget:,} groups open about one value"
+            )
+            raise TypeError(msg)
+        self._held[key] = held
 
     def close(self, key: int | str) -> None:
         """Forgets one group about value `key`, now answered."""
-        if (held := self._open[key] - 1) == 0:
-            del self._open[key]
+        if (held := self._held[key] - 1) == 0:
+            del self._held[key]
         else:
-            self._open[key] = held
+            self._held[key] = held
+
+
+def _keep(
+    frame: _Frame,
+    answer: bool,  # noqa: FBT001  # the closed frame's answer
+    stack: list[_Frame],
+    answered: dict[_Pair, tuple[bool, object, object]],
+) -> None:
+    """Keeps a closed frame's answer, or hands its lowlink to the frame below.
+
+    It is kept when it consulted nothing still open (its lowlink is not below
+    its own index, now `len(stack)`): it then holds whenever asked again. Only a
+    group that read items is kept: a union about the same value is cheap to ask
+    again, and keeping it too would double the memory.
+    """
+    if frame.low < len(stack):
+        stack[-1].low = min(stack[-1].low, frame.low)
+    elif frame.group.descends:
+        answered[frame.pair] = (answer, *frame.asked)
 
 
 def _walk(  # noqa: C901  # one loop, its branches the walk's states
@@ -513,20 +580,29 @@ def _walk(  # noqa: C901  # one loop, its branches the walk's states
     - **A string**, whose first item is a string again: it does not fit, as a
       recursive alias never ends in one.
 
-    Past `budget` type steps (see `WALK_BUDGET`), a cycle no key can see (a type
-    made afresh on each reading), it raises `TypeError` naming the type. A value
-    that does not fit because an `Unresolved` type was asked about raises
-    `UnresolvedError` (Q81).
+    A question that read items, answered once, is not asked again in the same
+    walk, so a value that shares its parts (`l = [l2, l2]`, nested) is read once
+    per part, not once per path. An answer is kept only when it consulted no
+    question still open below its own (the lowest such index, its "lowlink", is
+    not below it): one that assumed an open question fits is never reused once
+    that question is closed.
+
+    Past `budget` groups open about one value (see `WALK_BUDGET`), a cycle no key
+    can see, it raises `TypeError` naming the type. A value that does not fit
+    because an `Unresolved` type was asked about raises `UnresolvedError` (Q81).
     """
     answer = expand(declared, value)
     if isinstance(answer, bool):
         if not answer and type(declared) is Unresolved:
             raise UnresolvedError(declared)
         return answer
-    stack = [_Frame(answer, _pair(declared, value), 0)]
-    open_pairs = {stack[0].pair: 0}
-    steps = _Steps(declared, budget)
-    steps.open(stack[0].pair[1], descends=True)
+    stack = [_Frame(answer, _pair(declared, value), 0, 0, (declared, value))]
+    # Each open question's descents and stack index.
+    open_pairs = {stack[0].pair: (0, 0)}
+    # Each closed question's answer, with its type and value kept alive.
+    answered: dict[_Pair, tuple[bool, object, object]] = {}
+    held = _Open(declared, budget)
+    held.open(stack[0].pair[1])
     finished: bool | None = None
     unresolved: Unresolved | None = None
     while True:
@@ -544,7 +620,11 @@ def _walk(  # noqa: C901  # one loop, its branches the walk's states
             pair = _pair(question, item)
             descents = frame.descents + group.descends
             if (before := open_pairs.get(pair)) is not None:
-                finished = descents > before and type(item) is not str
+                frame.low = min(frame.low, before[1])
+                finished = descents > before[0] and type(item) is not str
+                continue
+            if (known := answered.get(pair)) is not None:
+                finished = known[0]
                 continue
             expanded = expand(question, item)
             if isinstance(expanded, bool):
@@ -552,18 +632,19 @@ def _walk(  # noqa: C901  # one loop, its branches the walk's states
                     unresolved = question
                 finished = expanded
                 continue
-            steps.open(pair[1], descends=group.descends)
-            stack.append(_Frame(expanded, pair, descents))
-            open_pairs[pair] = descents
+            held.open(pair[1])
+            open_pairs[pair] = (descents, len(stack))
+            stack.append(_Frame(expanded, pair, descents, len(stack), (question, item)))
             finished = None
             continue
         stack.pop()
         del open_pairs[frame.pair]
-        steps.close(frame.pair[1])
+        held.close(frame.pair[1])
         if not stack:
             if not answer and unresolved is not None:
                 raise UnresolvedError(unresolved)
             return answer
+        _keep(frame, answer, stack, answered)
         finished = answer
 
 
@@ -846,7 +927,7 @@ def value_matches(
     and `Builder.with_numeric_widening()`: every item of a standard collection is
     checked, nested ones too, and an `int` or numpy integer or floating scalar
     fits `float`, and a numpy integer scalar `int`. A cycle no check can see,
-    past `WALK_BUDGET` type steps, raises `TypeError`.
+    past `WALK_BUDGET` groups open about one value, raises `TypeError`.
     """
     if not deep and not widen:
         return _fits(declared, value)

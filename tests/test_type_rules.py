@@ -6,6 +6,7 @@ import copy
 import dataclasses
 import pickle
 import re
+import time
 import types
 import typing
 from pathlib import Path
@@ -796,23 +797,110 @@ def test_deep_checks_never_read_an_iterator() -> None:
     assert list(generated) == [1, 2]
 
 
-def test_deep_checks_of_a_large_value_take_no_type_steps() -> None:
-    """Steps into new items are never counted: a value of any size fits the budget."""
+type _Tree = list[_Tree] | int
+
+
+def test_a_large_value_stays_under_the_open_group_cap() -> None:
+    """Groups open about one value reach only the type's nesting, whatever the size."""
     size = 1_000
     values: list[tuple[object, object]] = [
         (list[int], list(range(size))),
         (list[tuple[int, str]], [(n, "s") for n in range(size)]),
         (list[list[list[int]]], [[[n]] for n in range(size)]),
-        (list[list[int] | None], [[1]] * size),
+        (list[list[int] | None], [[n] for n in range(size)]),
+        (list[list[list[int]] | None], [[[n]] for n in range(size)]),
+        (_Tree, [[n] for n in range(size)]),
         (list[tuple[int, list[int]]], [(n, [n]) for n in range(size)]),
-        (list[dict[str, list[float]]], [{"a": [1.5]}] * size),
+        (list[dict[str, list[float]]], [{"a": [1.5]} for _ in range(size)]),
     ]
     expand = _types._expander(_types.Rules(deep=True))  # noqa: SLF001  # the walk's own expansion
-    walk = _types._walk  # noqa: SLF001  # with a budget of its own
+    walk = _types._walk  # noqa: SLF001  # with a cap of its own
     for declared, value in values:
-        # A budget of 10 type steps, for 1,000 items each opening a group.
-        assert walk(declared, value, expand, 10) is True, declared
+        # At most 3 groups open about one value, for 1,000 items of nested types.
+        assert walk(declared, value, expand, 3) is True, declared
     assert fnloom.value_matches(list[int], [*range(size), "s"], deep=True) is False
+
+
+type _Y = list[_T]
+type _T = list[_Y]
+type _L = list[_L]
+type _Pairs = tuple[_Pairs, _Pairs] | None
+
+
+def test_an_answer_resting_on_an_open_question_is_not_reused() -> None:
+    """Only an answer that consulted nothing still open is kept (its lowlink rule).
+
+    `(_T, w)` is first met while `(_Y, v)` is open, and fits by assuming it does;
+    reused later, outside that cycle, it would wrongly let the second member pass.
+    """
+    v: list[object] = []
+    w = [v]
+    v.extend([w, "s"])
+    declared = tuple[_Y, object] | tuple[object, _T]
+    assert fnloom.value_matches(_T, w, deep=True) is False
+    assert fnloom.value_matches(declared, (v, w), deep=True) is False
+    cyclic: list[object] = []
+    cyclic.append(cyclic)
+    assert fnloom.value_matches(_L, cyclic, deep=True) is True
+
+
+def _subscripted(generic: Any, *args: object) -> object:  # noqa: ANN401  # any generic
+    """`generic[args]`, built at run time, typed only as an object."""
+    return generic[args if len(args) > 1 else args[0]]
+
+
+def _dag_list(depth: int, leaf: object) -> object:
+    value: object = leaf
+    for _ in range(depth):
+        value = [value, value]
+    return value
+
+
+def _dag_tuple(depth: int, leaf: object) -> object:
+    value: object = leaf
+    for _ in range(depth):
+        value = (value, value)
+    return value
+
+
+def test_a_value_sharing_its_parts_is_read_once_per_part() -> None:
+    """A DAG of depth 60 has 2**60 paths; each shared part is answered once."""
+    start = time.perf_counter()
+    assert fnloom.value_matches(_L, _dag_list(60, []), deep=True) is True
+    assert fnloom.value_matches(_Pairs, _dag_tuple(60, None)) is True
+    assert fnloom.value_matches(_Pairs, _dag_tuple(60, None), deep=True) is True
+    nested_type: object = int
+    for _ in range(60):
+        nested_type = _subscripted(tuple, nested_type, nested_type)
+    assert fnloom.value_matches(nested_type, _dag_tuple(60, 1)) is True
+    listed: object = int
+    for _ in range(60):
+        listed = _subscripted(list, listed)
+    assert fnloom.value_matches(listed, _dag_list(60, 1), deep=True) is True
+    assert time.perf_counter() - start < 1
+    assert fnloom.value_matches(_L, _dag_list(1_000, []), deep=True) is True
+    # A bad leaf deep inside is still found, through every shared part.
+    assert fnloom.value_matches(listed, _dag_list(60, "s"), deep=True) is False
+    assert fnloom.value_matches(_Pairs, _dag_tuple(60, 1)) is False
+    bad = [_dag_list(30, []), _dag_list(29, [[1]])]
+    assert fnloom.value_matches(_L, bad, deep=True) is False
+
+
+def test_an_error_shows_a_long_type_cut_short() -> None:
+    """The over-budget message shows at most 200 characters of the type."""
+    itself: list[object] = []
+    itself.append(itself)
+    fresh = _GenericSeq[Annotated[int, _Meta(1)]]
+    long_type: object = fresh
+    for _ in range(30):
+        long_type = _subscripted(
+            typing.Union, _subscripted(tuple, long_type, long_type), long_type
+        )
+    with pytest.raises(TypeError) as raised:
+        _types._walk(long_type, itself, budget=100)  # noqa: SLF001  # a small budget, for speed
+    shown = str(raised.value).split(": more than", 1)[0]
+    assert shown.endswith("...")
+    assert len(shown) == len("value too cyclic to check against ") + 200
 
 
 type _FreshUnion[T] = _FreshUnion[Annotated[T, _Meta(1)]] | str  # ty: ignore[cyclic-type-alias-definition]  # the cycle is the point

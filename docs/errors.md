@@ -123,10 +123,11 @@ it names at run time, not only under TYPE_CHECKING`. An extracted field names it
 
 Build with `Builder.without_input_type_checks()` to skip these (see [Type checks](running.md#type-checks)). With
 `Builder.with_deep_type_checks()`, a collection's items are checked too, and with `Builder.with_numeric_widening()`
-an `int` fits `float` (see [Deep checks and numeric widening](running.md#deep-checks-and-numeric-widening)). A value
-of any size fits the checks' budget, which counts only steps through types about a value already being checked. Only a
-cycle no check can see, such as a type made afresh on each reading, runs past it, and raises
-`TypeError: value too cyclic to check against ...`.
+an `int` fits `float` (see [Deep checks and numeric widening](running.md#deep-checks-and-numeric-widening)). A check
+gives up when more than 10,000 of its questions are open about one value at once, which a value of any size or depth
+never reaches: only the type's nesting is open about one value. Only a cycle no check can see, such as a type made
+afresh on each reading, piles questions onto one value, and raises
+`TypeError: value too cyclic to check against ...`, the type cut to 200 characters.
 
 ## When you run a prepared plan
 
