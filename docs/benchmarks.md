@@ -95,7 +95,7 @@ general path.
 
 Hamilton builds the 1,000- and 10,000-node chains, the 10,000-node layered graph and the 1,000- and 10,000-row `rows`
 graphs, then raises `RecursionError` on the first `execute`: its graph walk recurses once per level of depth. fnloom
-runs all 20 cases, with checks on and off, and every answer it gives is checked against the shape's closed form.
+runs all 24 cases, with checks on and off, and every answer it gives is checked against the shape's closed form.
 
 ### Build: re-measured
 

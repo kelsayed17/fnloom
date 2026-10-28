@@ -335,6 +335,7 @@ DELIBERATE: dict[tuple[str, str], str] = {
     ("int | None", "object"): "Q40",
     ("Optional[int]", "object"): "Q40",
     ("int | str", "object"): "Q40",
+    ("type[int] | None", "object"): "Q40",
     ("Annotated[int, 'm']", "True"): "Q41",
     **dict.fromkeys(((p, "Protocol") for p in _PROTOCOL_PRODUCERS), "Q42"),
     **dict.fromkeys(((d, "None") for d in _REFUSING_NONE), "Q79"),

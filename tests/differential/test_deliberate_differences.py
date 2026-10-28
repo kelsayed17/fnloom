@@ -522,6 +522,7 @@ def test_q40_union_producer_feeds_object() -> None:
         ("int | None", "object"),
         ("Optional[int]", "object"),
         ("int | str", "object"),
+        ("type[int] | None", "object"),
     ]
     for produced, required in edges:
         assert hamilton_type(produced, required) is False, produced
@@ -3229,7 +3230,14 @@ def test_q79_none_passes_only_types_that_admit_it() -> None:
     module = make_module(
         "differential_q79",
         """
+from typing import Literal, TypeVar
+
+RAN: list[str] = []
+Bound = TypeVar("Bound", bound=int | None)
+Either = TypeVar("Either", int, None)
+
 def plain(x: int) -> object:
+    RAN.append("plain")
     return x
 
 def optional(y: int | None) -> object:
@@ -3237,16 +3245,34 @@ def optional(y: int | None) -> object:
 
 def nothing(z: None) -> object:
     return z
+
+def literal(w: Literal[None]) -> object:
+    return w
+
+def bound(b: Bound) -> object:
+    return b
+
+def constrained(c: Either) -> object:
+    return c
 """,
     )
     assert run_hamilton([module], ["plain"], {"x": None}) == Outcome(
         {"plain": None}, None
     )
+    assert module.RAN == ["plain"]
+    module.RAN.clear()
     assert run_fnloom([module], ["plain"], {"x": None}) == Outcome(None, "ValueError")
-    for output, name in (("optional", "y"), ("nothing", "z")):
+    assert module.RAN == []
+    for output, name in (
+        ("optional", "y"),
+        ("nothing", "z"),
+        ("literal", "w"),
+        ("bound", "b"),
+        ("constrained", "c"),
+    ):
         expected = Outcome({output: None}, None)
-        assert run_hamilton([module], [output], {name: None}) == expected
-        assert run_fnloom([module], [output], {name: None}) == expected
+        assert run_hamilton([module], [output], {name: None}) == expected, output
+        assert run_fnloom([module], [output], {name: None}) == expected, output
 
 
 @pytest.mark.deliberate("Q80")

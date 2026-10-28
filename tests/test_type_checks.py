@@ -163,11 +163,9 @@ def test_checks_are_compiled_once_per_plan(monkeypatch: pytest.MonkeyPatch) -> N
         prepared.append(declared)
         return real_check_of(declared)
 
-    def spy_fits(
-        declared: object, value: object, asked: tuple[tuple[object, str], ...] = ()
-    ) -> bool:
+    def spy_fits(declared: object, value: object) -> bool:
         walked.append((declared, value))
-        return real_fits(declared, value, asked)
+        return real_fits(declared, value)
 
     monkeypatch.setattr(_types, "check_of", spy_check_of)
     monkeypatch.setattr(_types, "_fits", spy_fits)
@@ -190,7 +188,7 @@ def test_checks_are_compiled_once_per_plan(monkeypatch: pytest.MonkeyPatch) -> N
         assert plan.run(inputs={"a": value}) == {"c": 1}
     assert walked == []
     assert plan.run(inputs={"a": (1,)}) == {"c": 1}
-    assert walked == [(list[int], (1,)), (int, 1)]
+    assert walked == [(list[int], (1,))]
     assert prepared == [int, int, list[int]]
     unchecked = (
         Builder()

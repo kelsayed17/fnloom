@@ -107,9 +107,9 @@ driver.execute(["label"], overrides={"total": "ten"})
 # raises ValueError: total: expected float, got str
 ```
 
-`None` is a mismatch too, unless the type admits it: `Optional[T]`, `T | None`, `object`, `Any` or a free `TypeVar`
-(Q79). Annotate the parameter `float | None` to accept it. A fixed-length tuple is checked by length and by item, so
-`(1,)` for `tuple[int, str]` is refused (Q80):
+`None` is a mismatch too, unless the type admits it: `Optional[T]`, `T | None`, `object`, `Any`, `Literal[None]`, or
+a `TypeVar` that is free or whose bound or a constraint admits it (Q79). Annotate the parameter `float | None` to
+accept it. A fixed-length tuple is checked by length and by item, so `(1,)` for `tuple[int, str]` is refused (Q80):
 
 ```python
 driver.execute(["label"], inputs={"price": None, "quantity": 2})

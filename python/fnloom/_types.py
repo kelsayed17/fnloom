@@ -7,6 +7,7 @@ matrix are unsupported: they get an answer, but no promise of Hamilton's.
 
 import abc
 import collections.abc
+import dataclasses
 import functools
 import types
 import typing
@@ -25,7 +26,7 @@ _BY_KIND: frozenset[type] = frozenset(
 )
 
 
-def _alias_value(annotation: object) -> object | None:
+def _alias_value(annotation: object) -> object | None:  # noqa: PLR0911  # one return per form
     """What a PEP 695 alias names (Q44), or `None` when `annotation` is no alias.
 
     `type Price = float` names `float`. A subscripted generic alias, `Pair[int]`
@@ -48,7 +49,21 @@ def _alias_value(annotation: object) -> object | None:
         return args[params.index(aliased)]
     if getattr(aliased, "__parameters__", None) != params:
         return None
-    return aliased[args]
+    try:
+        return _substituted(aliased, args)
+    except TypeError:
+        # An unhashable argument: substituted afresh on each reading.
+        return aliased[args]
+
+
+@functools.lru_cache(maxsize=256)
+def _substituted(aliased: object, args: tuple[object, ...]) -> object:
+    """`aliased[args]`, the same object on every reading of one generic alias.
+
+    The value walk tells a cycle by the identity of the type it asks about, so a
+    recursive generic alias (`type S[T] = Sequence[S[T]]`) must read as one object.
+    """
+    return typing.cast("typing.Any", aliased)[args]
 
 
 def _strip(annotation: object) -> object:
@@ -119,54 +134,6 @@ def _element_args(annotation: object) -> tuple[object, ...]:
     return args
 
 
-# The (element type, string) questions already being asked in one check. A
-# string's first item is a string, so under a recursive alias (`type Tree =
-# list[Tree]`) the same question comes round again; it is answered `False`.
-type _Asked = tuple[tuple[object, str], ...]
-
-
-def _first_fits(element: object, value: object, asked: _Asked) -> bool:
-    """Whether the first item of the collection `value` fits `element`.
-
-    An empty collection always fits.
-    """
-    for item in typing.cast("collections.abc.Iterable[object]", value):
-        if isinstance(item, str):
-            if (element, item) in asked:
-                return False
-            asked = (*asked, (element, item))
-        return _fits(element, item, asked)
-    return True
-
-
-def _fits_generic(  # noqa: PLR0911  # one return per form
-    declared: object, origin: object, value: object, asked: _Asked
-) -> bool:
-    """A parameterized collection: its kind, then at most its first element.
-
-    Only a sequence or an iterable has its first element checked; another
-    abstract collection, or a callable, is checked by its kind alone (Q45).
-    """
-    if origin is tuple:
-        if not isinstance(value, tuple):
-            return False
-        if (items := _fixed_items(declared)) is not None:
-            return _tuple_fits(items, typing.cast("tuple[object, ...]", value), asked)
-    if type(value) is origin:
-        return True
-    if isinstance(value, collections.abc.Iterator):
-        # Never look inside an iterator: reading its first item would consume it,
-        # so it is checked by its kind alone (Q43).
-        return isinstance(origin, type) and isinstance(value, origin)
-    for group in (_SEQUENCES, _ITERABLES):
-        if origin in group:
-            if not isinstance(value, group):
-                return False
-            args = _element_args(declared)
-            return not args or _first_fits(args[0], value, asked)
-    return origin in _BY_KIND and isinstance(value, typing.cast("type", origin))
-
-
 def _fixed_items(declared: object) -> tuple[object, ...] | None:
     """The item types of a fixed-length tuple type, or `None` for any other tuple type.
 
@@ -185,60 +152,112 @@ def _fixed_items(declared: object) -> tuple[object, ...] | None:
     return items
 
 
-def _tuple_fits(
-    items: tuple[object, ...], value: tuple[object, ...], asked: _Asked
-) -> bool:
-    """Whether the tuple `value` has as many items as `items`, each fitting its type.
+# --- The value walk -------------------------------------------------------------
+#
+# Whether a value fits a type is a tree of questions: a union asks whether any
+# member fits the value (an OR-group), a fixed tuple whether every item fits its
+# type (an AND-group), a sequence whether its first item fits the element type (an
+# AND-group of one). `_expand` answers one question, or turns it into the group of
+# questions it depends on; `_walk` evaluates the tree with a stack of its own,
+# never by recursion, so no value is too deep and no annotation too nested.
 
-    A nested fixed tuple is walked with a stack, not by recursion, so tuples nested
-    deeper than the recursion limit are checked; each other item by `_fits`, whose
-    recursion follows the structure of the item's annotation.
-    """
-    pending = [(items, value)]
-    while pending:
-        items, value = pending.pop()
-        if len(value) != len(items):
-            return False
-        for declared, item in zip(items, value, strict=True):
-            inner = _strip(declared)
-            if typing.get_origin(inner) is tuple and (
-                (fixed := _fixed_items(inner)) is not None
-            ):
-                if not isinstance(item, tuple):
-                    return False
-                pending.append((fixed, typing.cast("tuple[object, ...]", item)))
-            elif not _fits(declared, item, asked):
-                return False
+
+@dataclasses.dataclass(slots=True)
+class _Group:
+    """The questions one question depends on: any of them (`any_`), or all of them."""
+
+    any_: bool
+    questions: list[tuple[object, object]]
+
+
+@dataclasses.dataclass(slots=True)
+class _Frame:
+    """A group being evaluated: its next question, and its own pair while it is open."""
+
+    group: _Group
+    pair: tuple[int, int]
+    next: int = 0
+
+
+type _Expanded = bool | _Group
+
+
+def _first_item(element: object, value: object) -> _Expanded:
+    """The question about the first item of the collection `value`; `True` if empty."""
+    for item in typing.cast("collections.abc.Iterable[object]", value):
+        return _Group(any_=False, questions=[(element, item)])
     return True
 
 
-def _admits_none(typevar: TypeVar) -> bool:
-    """Whether `None` fits `typevar`: free, or its bound or a constraint admits it."""
+def _expand_generic(  # noqa: PLR0911  # one return per form
+    declared: object, origin: object, value: object
+) -> _Expanded:
+    """A parameterized collection: its kind, then at most its items' questions.
+
+    A fixed-length tuple asks about each item (Q80); otherwise only a sequence or
+    an iterable asks about its first item, and another abstract collection or a
+    callable is checked by its kind alone (Q45).
+    """
+    if origin is tuple:
+        if not isinstance(value, tuple):
+            return False
+        if (items := _fixed_items(declared)) is not None:
+            if len(value) != len(items):
+                return False
+            return _Group(any_=False, questions=list(zip(items, value, strict=True)))
+    if type(value) is origin:
+        return True
+    if isinstance(value, collections.abc.Iterator):
+        # Never look inside an iterator: reading its first item would consume it,
+        # so it is checked by its kind alone (Q43).
+        return isinstance(origin, type) and isinstance(value, origin)
+    for group in (_SEQUENCES, _ITERABLES):
+        if origin in group:
+            if not isinstance(value, group):
+                return False
+            args = _element_args(declared)
+            return not args or _first_item(args[0], value)
+    return origin in _BY_KIND and isinstance(value, typing.cast("type", origin))
+
+
+def _expand_typevar(typevar: TypeVar, value: object) -> _Expanded:
+    """Whether `value` fits `typevar`, or the questions that decide it for `None`.
+
+    Any value but `None` fits, as in Hamilton; `None` fits a free `TypeVar`, or one
+    whose bound, or one of whose constraints, admits it (Q79).
+    """
+    if value is not None:
+        return True
     if constraints := typevar.__constraints__:
-        return any(_fits(c, None) for c in constraints)
+        return _Group(any_=True, questions=[(c, None) for c in constraints])
     bound = typevar.__bound__
-    return bound is None or _fits(bound, None)
+    return bound is None or _Group(any_=False, questions=[(bound, None)])
 
 
-def _fits(declared: object, value: object, asked: _Asked = ()) -> bool:  # noqa: PLR0911  # one return per form
+def _expand(declared: object, value: object) -> _Expanded:  # noqa: PLR0911  # one return per form
+    """The answer to whether `value` fits `declared`, or the questions it depends on.
+
+    This is the one place the shallow rules live: `_walk` only evaluates them.
+    """
     declared = _strip(declared)
     if declared is Any:
         return True
     if isinstance(declared, TypeVar):
-        # Any value but `None` fits, as in Hamilton; `None` only if the bound allows it.
-        return value is not None or _admits_none(declared)
+        return _expand_typevar(declared, value)
     if declared is None:
         # `None` written as a type, as `get_type_hints` would read it: `NoneType`.
         return value is None
     if isinstance(declared, NewType):
-        return _fits(declared.__supertype__, value, asked)
+        return _Group(any_=False, questions=[(declared.__supertype__, value)])
     if _is_union(declared):
-        return any(_fits(member, value, asked) for member in typing.get_args(declared))
+        return _Group(
+            any_=True, questions=[(m, value) for m in typing.get_args(declared)]
+        )
     origin = typing.get_origin(declared)
     if origin is Literal:
         return value in typing.get_args(declared)
     if origin is not None:
-        return _fits_generic(declared, origin, value, asked)
+        return _expand_generic(declared, origin, value)
     if not isinstance(declared, type):
         return False
     try:
@@ -247,6 +266,62 @@ def _fits(declared: object, value: object, asked: _Asked = ()) -> bool:  # noqa:
         # A `TypedDict` is checked by its kind, any `dict`, its keys unread (Q61);
         # a protocol that is not runtime-checkable is no match (Q42).
         return typing.is_typeddict(declared) and isinstance(value, dict)
+
+
+def _walk(
+    declared: object,
+    value: object,
+    expand: collections.abc.Callable[[object, object], _Expanded] = _expand,
+) -> bool:
+    """Whether `value` fits `declared`, by the rules of `expand`, with no recursion.
+
+    `expand` answers one (type, value) question or names the group it depends on;
+    this evaluates the groups depth first with an explicit stack, stopping a group
+    as soon as its answer is known. A question already open further up the stack,
+    the same type object about the same value object, is a cycle in the value or a
+    recursive alias: it fits, so a cyclic value ends, except that a string, whose
+    first item is a string again, does not fit (a recursive alias never ends in one).
+    """
+    answer = expand(declared, value)
+    if isinstance(answer, bool):
+        return answer
+    stack = [_Frame(answer, (id(declared), id(value)))]
+    open_pairs = {stack[0].pair}
+    finished: bool | None = None
+    while True:
+        frame = stack[-1]
+        group = frame.group
+        if finished is not None and finished is group.any_:
+            # An OR-group with a fitting question, or an AND-group with a failing one.
+            answer = finished
+        elif frame.next == len(group.questions):
+            # Every question asked: an OR-group found none fit, an AND-group all.
+            answer = not group.any_
+        else:
+            question, item = group.questions[frame.next]
+            frame.next += 1
+            pair = (id(question), id(item))
+            if pair in open_pairs:
+                finished = not isinstance(item, str)
+                continue
+            expanded = expand(question, item)
+            if isinstance(expanded, bool):
+                finished = expanded
+                continue
+            stack.append(_Frame(expanded, pair))
+            open_pairs.add(pair)
+            finished = None
+            continue
+        stack.pop()
+        open_pairs.discard(frame.pair)
+        if not stack:
+            return answer
+        finished = answer
+
+
+def _fits(declared: object, value: object) -> bool:
+    """Whether `value` fits `declared`: the shallow walk every check uses."""
+    return _walk(declared, value)
 
 
 def value_matches(declared: object, value: object) -> bool:
@@ -370,8 +445,10 @@ def check_of(declared: object) -> tuple[Classes | None, Matcher]:
     origin = typing.get_origin(declared)
     if origin is tuple and (items := _fixed_items(declared)) is not None:
         return None, _tuple_matcher(items)
-    if isinstance(origin, type):
-        # The general walk's first answer for a generic: its exact class fits.
+    if isinstance(origin, type) and not _is_union(declared):
+        # The general walk's first answer for a generic: its exact class fits. Not
+        # for a union, whose origin `types.UnionType` is a class too: a value of
+        # it, such as `int | str`, is no member of the union.
         exact = origin
 
         def matches(value: object) -> bool:

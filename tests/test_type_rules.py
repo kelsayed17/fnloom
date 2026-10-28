@@ -255,6 +255,50 @@ def test_nested_tuples_are_checked_without_recursion() -> None:
     assert fnloom.value_matches(annotation, wrong) is False
 
 
+type _Rec = tuple[int, _Rec | None]
+type _RecSeq = tuple[int, collections.abc.Sequence[_RecSeq]]
+type _Seq = collections.abc.Sequence[_Seq]
+type _GenericSeq[T] = collections.abc.Sequence[_GenericSeq[T]]
+
+
+def _chain(depth: int, leaf: object) -> object:
+    value: object = (1, leaf)
+    for _ in range(depth):
+        value = (1, value)
+    return value
+
+
+def test_a_value_deeper_than_the_recursion_limit_is_walked() -> None:
+    """A recursive alias's value 10,000 levels deep fits, and a bad leaf fails."""
+    good, bad = _chain(10_000, None), _chain(10_000, "s")
+    _, prepared = _types.check_of(_Rec)
+    assert fnloom.value_matches(_Rec, good) is True
+    assert prepared(good) is True
+    assert fnloom.value_matches(_Rec, bad) is False
+    assert prepared(bad) is False
+    driver = _with_input(_Rec)
+    assert driver.validate(["reads"], inputs={"x": good}) == []
+    assert driver.execute(["reads"], inputs={"x": good}) == {"reads": good}
+    with pytest.raises(ValueError, match=r"^x: expected "):
+        driver.execute(["reads"], inputs={"x": bad})
+
+
+def test_a_cyclic_value_ends() -> None:
+    """A value that contains itself fits a recursive alias, without recursing."""
+    items: list[object] = []
+    looped = (1, items)
+    items.append(looped)
+    assert fnloom.value_matches(_RecSeq, looped) is True
+    assert _types.check_of(_RecSeq)[1](looped) is True
+    itself: list[object] = []
+    itself.append(itself)
+    assert fnloom.value_matches(_Seq, itself) is True
+    assert fnloom.value_matches(_Seq, ("s",)) is False
+    assert fnloom.value_matches(_Seq, "ab") is False
+    # A generic alias reads as one object each time, so its cycle is seen too.
+    assert fnloom.value_matches(_GenericSeq[int], itself) is True
+
+
 def test_fixed_tuple_inputs_are_checked_by_the_driver() -> None:
     """A wrong-length or wrong-item tuple input is a mismatch; a right one runs."""
     module = make_module(
@@ -324,6 +368,12 @@ PREPARED_CASES: list[tuple[object, object]] = [
     (collections.abc.Sequence[int], ("s",)),
     (int | None, 1),
     (int | None, "s"),
+    # A union object as a value: no union takes it as one of its own class.
+    (type[int] | None, int | str),
+    (type[int] | None, int),
+    (type[int], int | str),
+    (list[int] | None, int | str),
+    (int | list[int], int | str),
 ]
 
 
