@@ -877,3 +877,32 @@ def test_async_driver_computes_the_same_values() -> None:
         builder = fnloom.Builder().with_modules(module)
         driver = builder.build_async(sync_nodes=sync_nodes)
         assert asyncio.run(runs(driver)) == expected
+
+
+@pytest.mark.parametrize(
+    ("outputs", "inputs", "overrides"),
+    [
+        (["c"], {"a": 1}, {"a": 5}),
+        (["c"], {}, {"a": 5}),
+        (["a"], {}, {"a": 5}),
+        (["c"], {}, {"b": 10}),
+        (["c"], {}, {"c": 7}),
+    ],
+)
+def test_strict_overrides_behave_as_hamilton(
+    outputs: list[str], inputs: dict[str, object], overrides: dict[str, object]
+) -> None:
+    """With strict overrides, an unsupplied overridden input is refused as in Hamilton.
+
+    Hamilton's rule (H5.5): an override only prunes below the overridden node, so
+    an input is refused when a node the plan computes needs it and it is not supplied.
+    """
+    module = load_fixture("chain")
+    hamilton = run_hamilton([module], outputs, inputs, overrides)
+    strict = fnloom.Builder().with_modules(module).with_strict_overrides().build()
+    try:
+        values = strict.execute(outputs, inputs=inputs, overrides=overrides)
+        outcome = Outcome(dict(values), None)
+    except Exception as error:  # noqa: BLE001  # the exception class is the thing being compared
+        outcome = Outcome(None, type(error).__name__)
+    assert outcome == hamilton

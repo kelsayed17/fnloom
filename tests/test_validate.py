@@ -533,3 +533,181 @@ def test_an_input_or_override_named_like_an_unmatched_variant_is_unknown() -> No
         ["variants"], inputs={"x": "s", "variant": 1}, overrides={"variant": 1}
     )
     assert combined == sorted(expected)
+
+
+STRICT = """
+def a(x: int) -> int:
+    return x + 1
+
+
+def b(a: int, y: int = 2) -> int:
+    return a + y
+
+
+def c(x: int, z: int) -> int:
+    return x + z
+
+
+def d(b: int) -> int:
+    return b
+"""
+
+
+def _strict() -> tuple[fnloom.Driver, fnloom.Driver]:
+    builder = fnloom.Builder().with_modules(make_module("val_strict", STRICT))
+    return builder.build(), builder.with_strict_overrides().build()
+
+
+def test_strict_overrides_refuse_an_unsupplied_input() -> None:
+    """An override of an unsupplied input is refused, as Hamilton does (Q75)."""
+    default, strict = _strict()
+    # The default is Q7's pass-through.
+    assert default.execute(["a"], overrides={"x": 10}) == {"a": 11}
+    with pytest.raises(ValueError, match=r"^override of input 'x' refused") as info:
+        strict.execute(["a"], overrides={"x": 10})
+    assert "needed by 'a'" in str(info.value)
+    # Every culprit, sorted, in one message, naming the nodes that need it.
+    with pytest.raises(ValueError, match=r".") as many:
+        strict.execute(["c"], overrides={"z": 1, "x": 2})
+    lines = str(many.value).splitlines()
+    assert [line.split("'")[1] for line in lines] == ["x", "z"]
+    assert "needed by 'c'" in lines[0]
+    # The same line from `validate`, and the request is fine once supplied.
+    assert strict.validate(["a"], overrides={"x": 10}) == [str(info.value)]
+    assert strict.execute(["a"], inputs={"x": 1}, overrides={"x": 10}) == {"a": 11}
+    # An output that is the input itself, or a consumer overridden, needs nothing.
+    assert strict.execute(["x"], overrides={"x": 10}) == {"x": 10}
+    assert strict.execute(["d"], overrides={"b": 5}) == {"d": 5}
+    # An optional input is not required, so overriding it alone is fine.
+    assert strict.execute(["b"], inputs={"x": 1}, overrides={"y": 5}) == {"b": 7}
+
+
+def test_strict_overrides_are_settled_per_plan_not_per_run() -> None:
+    """The refusal comes from `prepare`; a prepared plan's run is unchanged."""
+    _, strict = _strict()
+    with pytest.raises(ValueError, match="refused"):
+        strict.prepare(["a"], overrides={"x": 1})
+    plan = strict.prepare(["a"], inputs={"x": 1}, overrides={"x": 1})
+    assert plan.run(inputs={"x": 2}, overrides={"x": 3}) == {"a": 4}
+
+
+def test_strict_overrides_hold_for_the_async_driver() -> None:
+    """`build_async` carries the setting."""
+    builder = fnloom.Builder().with_modules(make_module("val_strict_a", STRICT))
+    driver = builder.with_strict_overrides().build_async()
+    with pytest.raises(ValueError, match="refused"):
+        asyncio.run(driver.execute(["a"], overrides={"x": 1}))
+    assert driver.validate(["a"], overrides={"x": 1})
+
+
+TYPOS = """
+import fnloom
+
+
+def profit(revenu: int, cost: int = 3) -> int:
+    return revenu - cost
+
+
+@fnloom.parameterize(pp={"v": fnloom.source("revnue")})
+def parameterized(v: int) -> int:
+    return v
+
+
+def revenue() -> int:
+    return 5
+"""
+
+
+def test_declared_inputs_refuse_an_undeclared_input_naming_the_closest() -> None:
+    """Every undeclared input fails the build, in one sorted message (Q75)."""
+    module = make_module("val_declared", TYPOS)
+    builder = fnloom.Builder().with_modules(module)
+    assert builder.build().inputs().keys() == {"cost", "revenu", "revnue"}
+    with pytest.raises(ValueError, match=r".") as info:
+        builder.with_declared_inputs("cost", "zzz").build()
+    lines = str(info.value).splitlines()
+    assert lines == [
+        "declared name 'zzz' is not an input of the graph",
+        "undeclared input 'revenu' (did you mean 'revenue'?)",
+        "undeclared input 'revnue' (did you mean 'revenue'?)",
+    ]
+    with pytest.raises(ValueError, match="undeclared input"):
+        builder.with_declared_inputs("cost", "zzz").build_async()
+
+
+def test_a_misspelled_source_fails_the_build_when_declared() -> None:
+    """A `source("revnue")` typo is an input like any other, so declaring catches it."""
+    module = make_module("val_declared_source", TYPOS)
+    declared = (
+        fnloom.Builder().with_modules(module).with_declared_inputs("revenu", "cost")
+    )
+    with pytest.raises(ValueError, match=r"undeclared input 'revnue' \(did you mean"):
+        declared.build()
+    ok = declared.with_declared_inputs("revnue").with_declared_inputs("revenu", "cost")
+    assert ok.build().execute(["revenue"]) == {"revenue": 5}
+
+
+def test_declaring_a_non_input_fails() -> None:
+    """A declared name that is a node, or nothing, fails with a suggestion."""
+    module = make_module("val_declared_non", TYPOS)
+    builder = fnloom.Builder().with_modules(module)
+    declared = builder.with_declared_inputs(
+        "cost", "revenu", "revnue", "revenue", "prfit"
+    )
+    with pytest.raises(ValueError, match=r".") as info:
+        declared.build()
+    assert str(info.value).splitlines() == [
+        "declared name 'prfit' is not an input of the graph (did you mean 'profit'?)",
+        "declared name 'revenue' is not an input of the graph (did you mean 'revnue'?)",
+    ]
+    with pytest.raises(TypeError, match="must be str, got: int"):
+        builder.with_declared_inputs(cast("Any", 3))
+
+
+def test_the_new_settings_leave_defaults_and_builders_alone() -> None:
+    """Each method returns a new builder; the original keeps its defaults."""
+    builder = fnloom.Builder().with_modules(make_module("val_settings", STRICT))
+    for changed in (
+        builder.with_strict_overrides(),
+        builder.with_declared_inputs("x"),
+        builder.without_override_type_checks(),
+    ):
+        assert changed is not builder
+    assert builder.build().execute(["a"], overrides={"x": 1}) == {"a": 2}
+    assert builder.build().inputs().keys() == {"x", "y", "z"}
+
+
+TYPED = """
+def doubled(x: int) -> int:
+    return x * 2
+
+
+def user(doubled: int) -> int:
+    return doubled
+"""
+
+
+def test_override_checks_can_be_skipped_alone() -> None:
+    """Input checks stay on; an override of another type, such as nan, runs."""
+    module = make_module("val_override_checks", TYPED)
+    builder = fnloom.Builder().with_modules(module)
+    nan = float("nan")
+    with pytest.raises(ValueError, match="doubled: expected int, got float"):
+        builder.build().execute(["user"], overrides={"doubled": nan})
+    lenient = builder.without_override_type_checks()
+    driver = lenient.build()
+    assert str(driver.execute(["user"], overrides={"doubled": nan})["user"]) == "nan"
+    with pytest.raises(ValueError, match="x: expected int, got str"):
+        driver.execute(["user"], inputs={"x": "s"})
+    assert driver.validate(["user"], overrides={"doubled": nan}) == []
+    assert driver.validate(["user"], inputs={"x": "s"}) == ["x: expected int, got str"]
+    prepared = driver.prepare(["user"], overrides={"doubled": nan})
+    assert str(prepared.run(overrides={"doubled": nan})["user"]) == "nan"
+    asynchronous = lenient.build_async()
+    result = asyncio.run(asynchronous.execute(["user"], overrides={"doubled": nan}))
+    assert str(result["user"]) == "nan"
+    with pytest.raises(ValueError, match="x: expected int, got str"):
+        asyncio.run(asynchronous.execute(["user"], inputs={"x": "s"}))
+    # Skipping the input checks as well still skips both, as before.
+    both = builder.without_input_type_checks().build()
+    assert both.execute(["user"], inputs={"x": "s"}) == {"user": "ss"}

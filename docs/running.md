@@ -67,6 +67,44 @@ driver.execute(["label"], overrides={"total": 100.0})
 An override can name any node, whether a function or an input. It wins over a supplied input of the same name, and
 it fills in for a required input you didn't supply.
 
+### Strict overrides
+
+Hamilton refuses an override of an input that you haven't also supplied, because it only cuts off what is upstream of
+an overridden node. To get that rule, build with `with_strict_overrides()`. The refusal names every such input,
+sorted, with the nodes that need it. It is settled when the request is prepared, never on a run of a prepared plan:
+
+```python
+strict = fnloom.Builder().with_modules(pricing).with_strict_overrides().build()
+strict.execute(
+    ["total"], inputs={"price": 2.0, "quantity": 3}, overrides={"price": 5.0}
+)
+# -> {'total': 15.0}
+strict.execute(["total"], inputs={"quantity": 3}, overrides={"price": 5.0})
+# raises ValueError: override of input 'price' refused: not supplied, though needed by 'total' (supply it in inputs= too; strict overrides are on)
+```
+
+An input that no node the request computes needs, such as an output asked for itself, is never refused. `validate`
+reports it as a line too.
+
+### Declared inputs
+
+`with_declared_inputs(*names)` makes the build fail for any input of the graph that you haven't declared, and for any
+declared name that isn't an input. A misspelled parameter, or a misspelled `source("...")`, is otherwise a new input
+that nothing supplies. Each culprit gets the closest node or declared name, and every one is listed in one sorted
+message. Calling it again adds names:
+
+```python
+declared = (
+    fnloom.Builder().with_modules(pricing).with_declared_inputs("price", "quantty")
+)
+try:
+    declared.build()
+except ValueError as error:
+    lines = str(error).splitlines()
+lines
+# -> ["declared name 'quantty' is not an input of the graph (did you mean 'quantity'?)", "undeclared input 'currency'", "undeclared input 'discount' (did you mean 'discounted'?)", "undeclared input 'quantity' (did you mean 'quantty'?)"]
+```
+
 ## Prepared plans
 
 Each `execute` call compiles a plan for its request: which nodes run, in what order, and when each value can be
@@ -225,8 +263,17 @@ lenient.execute(["total"], inputs={"price": 2, "quantity": 4})
 # -> {'total': 8}
 ```
 
-The opt-out turns off only the input and override checks. Edge checks stay on: they cost nothing per run, and a graph
-whose edges disagree is a bug whatever you supply.
+To skip only the override checks, build with `Builder.without_override_type_checks()`. Input checks stay on, so an
+override of another type, such as `float("nan")` for an `int` node, runs while a badly typed input is still refused:
+
+```python
+sentinel = fnloom.Builder().with_modules(pricing).without_override_type_checks().build()
+sentinel.execute(["label"], overrides={"total": float("nan")})["label"]
+# -> 'nan EUR'
+```
+
+The `without_input_type_checks()` opt-out turns off both the input and override checks. Edge checks stay on: they
+cost nothing per run, and a graph whose edges disagree is a bug whatever you supply.
 
 ## Execution order
 
@@ -331,8 +378,9 @@ The view is made once, when the graph is built, and annotations are evaluated th
 
 A driver pickles, and copies with `copy.deepcopy`, so you can hand it to a `concurrent.futures.ProcessPoolExecutor`
 or any other tool that pickles its arguments. It is pickled as the recipe it was built from: the names of its
-modules, whether it checks input types, its config, and its cache store. Loading it imports those modules by name
-and builds the driver again, so its compiled plans don't travel; each process compiles its own.
+modules, its type-check, strict-override and declared-input settings, its config, and its cache store. Loading it
+imports those modules by name and builds the driver again, so its compiled plans don't travel; each process compiles
+its own.
 
 ```python
 import pickle

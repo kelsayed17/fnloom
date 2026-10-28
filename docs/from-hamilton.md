@@ -69,7 +69,7 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | A misspelled input or override | Ignored | `ValueError` naming it (Q4, Q5) |
 | `final_vars="total"` | One output per character | `TypeError` (Q6) |
 | A function in `final_vars` | Its `__name__`, even when no node has that name, and a forged function is accepted | The node it makes, matched by the function itself. A `@parameterize` function is a `TypeError` listing its rows; a function no node comes from is a `ValueError` (Q30) |
-| Overriding an input | Only when it's also supplied | Any node. It beats or replaces the input (Q7) |
+| Overriding an input | Only when it's also supplied | Any node. It beats or replaces the input (Q7) ; `with_strict_overrides()` restores Hamilton's rule, and `with_declared_inputs(...)` turns a misspelled parameter into a build error (Q75) |
 | `what_is_upstream_of` | `HamiltonNode` objects | Sorted names, including the ones you named (Q28) |
 | Reusing a request | Re-planned on every call | `prepare(...)` returns a plan to run again (Q3) |
 | `validate_execution(final_vars, overrides, inputs)` | Returns `None` or raises one kind of problem; refuses a function in `final_vars`; a missing input names every consumer in the graph | `validate(final_vars, *, inputs, overrides)` returns every problem, one sorted line each, and names only the consumers the request needs; unknown names get a `did you mean` suggestion (Q71) |

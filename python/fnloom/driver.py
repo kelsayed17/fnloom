@@ -11,7 +11,7 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from types import MappingProxyType, ModuleType
-from typing import Any, Literal, Protocol, override
+from typing import Any, Literal, Protocol, TypedDict, Unpack, override
 
 from fnloom import _async, _core, _types
 from fnloom._caching import Cache, CacheOutcome, CacheRun
@@ -325,18 +325,23 @@ class Driver:
     pickle.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913  # keyword-only switches, one per builder setting
         self,
         graph: _GraphLike,
         nodes: Mapping[str, NodeView] | None = None,
         *,
         check_inputs: bool = True,
+        check_overrides: bool = True,
+        strict_overrides: bool = False,
         cache: Cache | None = None,
         config: Mapping[str, object] | None = None,
     ) -> None:
         """Wraps a native graph; `Builder` is the way to make one from modules.
 
         `config` is the config the graph was built with, kept read-only.
+        `check_overrides` is whether overrides are type checked too (it has no
+        effect without `check_inputs`), and `strict_overrides` refuses an override
+        of an input that is not supplied (Q75).
         """
         self._graph = graph
         # The modules it was built from, each once: `Builder` sets them.
@@ -345,6 +350,8 @@ class Driver:
         self._inputs: Mapping[str, InputView] | None = None
         self._outputs: list[str] | None = None
         self._check_inputs = check_inputs
+        self._check_overrides = check_overrides
+        self._strict_overrides = strict_overrides
         self._cache = cache
         self._config = (
             config
@@ -386,6 +393,8 @@ class Driver:
             self._graph,
             self._nodes,
             check_inputs=self._check_inputs,
+            check_overrides=self._check_overrides,
+            strict_overrides=self._strict_overrides,
             cache=self._cache,
             config=self._config,
         )
@@ -465,6 +474,10 @@ class Driver:
             if msg == str(error):
                 raise
             raise ValueError(msg) from None
+        if self._strict_overrides and (
+            refused := self._unsupplied_overrides(plan, input_names, override_names)
+        ):
+            raise ValueError(_strict(refused))
         checks = self._checks(plan, override_names) if self._check_inputs else ((), ())
         runnable: _Runnable = plan
         if self._cache is not None:
@@ -483,7 +496,37 @@ class Driver:
         Only an input a step reads is checked, as Hamilton; every override is.
         """
         read = sorted(node for node, action in plan.steps() if action == "use_input")
-        return self._declared(read), self._declared(sorted(override_names))
+        overrides = override_names if self._check_overrides else ()
+        return self._declared(read), self._declared(sorted(overrides))
+
+    def _unsupplied_overrides(
+        self,
+        plan: _core.Plan,
+        input_names: AbstractSet[str],
+        override_names: AbstractSet[str],
+    ) -> dict[str, list[str]]:
+        """Each overridden input the request does not supply, with who needs it (Q75).
+
+        Hamilton's rule: an override never supplies an input, so one naming an
+        input is refused when a node the plan computes requires that input and it
+        is not in `input_names`. An input nothing computed requires, such as an
+        output itself, is not refused.
+        """
+        functions = self._nodes.functions
+        candidates = {
+            n for n in override_names if n in self._nodes and n not in functions
+        } - input_names
+        if not candidates:
+            return {}
+        readers: dict[str, list[str]] = {}
+        for node, action in plan.steps():
+            view = functions.get(node)
+            if action != "compute" or view is None:
+                continue
+            for name, needed in core_inputs(view.params):
+                if needed and name in candidates:
+                    readers.setdefault(name, []).append(node)
+        return {name: sorted(readers[name]) for name in sorted(readers)}
 
     def _declared(self, names: list[str]) -> tuple[_Check, ...]:
         """Each of `names` with its node's type; a name with no view goes unchecked."""
@@ -625,6 +668,9 @@ class Driver:
             lines.append(line)
             if (hint := _config_hint(line, self._config)) is not None:
                 lines.append(hint)
+        if plan is not None and self._strict_overrides:
+            refused = self._unsupplied_overrides(plan, input_names, overridden)
+            lines += _strict(refused).splitlines() if refused else []
         if self._check_inputs and plan is not None:
             read = sorted(
                 node
@@ -632,9 +678,10 @@ class Driver:
                 if action == "use_input" and node in supplied
             )
             lines += _mismatches(self._declared(read), inputs or _NO_VALUES)
-            lines += _mismatches(
-                self._declared(sorted(overridden)), overrides or _NO_VALUES
-            )
+            if self._check_overrides:
+                lines += _mismatches(
+                    self._declared(sorted(overridden)), overrides or _NO_VALUES
+                )
         return sorted(lines)
 
     def _missing_line(
@@ -1018,6 +1065,16 @@ def _missing(entries: Sequence[tuple[str, str]], candidates: Sequence[str]) -> s
     return _MISSING + listed
 
 
+def _strict(refused: Mapping[str, Sequence[str]]) -> str:
+    """The strict-overrides error: a line per overridden input not supplied (Q75)."""
+    return "\n".join(
+        f"override of input '{name}' refused: not supplied, though needed by "
+        f"{', '.join(f"'{c}'" for c in refused[name])} "
+        "(supply it in inputs= too; strict overrides are on)"
+        for name in sorted(refused)
+    )
+
+
 def _config_hint(message: str, config: Mapping[str, object]) -> str | None:
     """A line for a missing-input error naming config keys, or `None` (Q56).
 
@@ -1052,6 +1109,41 @@ def _checked_config(config: object) -> dict[str, object]:
         msg = f"config keys must be str, got: {', '.join(not_str)}"
         raise TypeError(msg)
     return {str(k): v for k, v in given.items()}
+
+
+def _checked_names(names: Sequence[object]) -> tuple[str, ...]:
+    """`names` once each, sorted; `TypeError` naming every item that is no `str`."""
+    strings = {n for n in names if isinstance(n, str)}
+    if bad := sorted({type(n).__name__ for n in names if not isinstance(n, str)}):
+        msg = f"declared input names must be str, got: {', '.join(bad)}"
+        raise TypeError(msg)
+    return tuple(sorted(strings))
+
+
+def _undeclared(views: NodeViews, declared: Sequence[str]) -> list[str]:
+    """A line for each input not declared and each declared name no input is (Q75).
+
+    Each name gains the closest node or declared name. Sorted.
+    """
+    functions = views.functions
+    needed = {
+        name
+        for view in functions.values()
+        for name, _ in core_inputs(view.params)
+        if name not in functions
+    }
+    candidates = [*views, *declared]
+    lines = [
+        f"undeclared input '{name}'{suggest(name, candidates)}"
+        for name in sorted(needed.difference(declared))
+    ]
+    lines += [
+        f"declared name '{name}' is not an input of the graph"
+        f"{suggest(name, candidates)}"
+        for name in declared
+        if name not in needed
+    ]
+    return sorted(lines)
 
 
 def _unmatched_edges(nodes: Sequence[NodeDef], unmatched: Mapping[str, str]) -> str:
@@ -1114,13 +1206,31 @@ def _importable_name(module: ModuleType) -> str:
 
 def _builder_of(
     names: tuple[str, ...],
-    check_inputs: bool,  # noqa: FBT001  # pickle passes arguments positionally
+    settings: _Settings,
     store: CacheStore | None,
     config: Mapping[str, object] | None = None,
 ) -> Builder:
     """A pickled builder, its modules imported again by name."""
     modules = tuple(importlib.import_module(name) for name in names)
-    return Builder(modules, check_inputs=check_inputs, store=store, config=config)
+    return Builder(modules, store=store, config=config, **settings)
+
+
+class _Changes(TypedDict, total=False):
+    """The switches a `Builder._with` call replaces."""
+
+    check_inputs: bool
+    check_overrides: bool
+    strict_overrides: bool
+    declared_inputs: tuple[str, ...]
+
+
+class _Settings(TypedDict):
+    """A builder's switches, which pickling and copying carry as one value."""
+
+    check_inputs: bool
+    check_overrides: bool
+    strict_overrides: bool
+    declared_inputs: tuple[str, ...]
 
 
 class Builder:
@@ -1130,11 +1240,14 @@ class Builder:
     type-check setting, its config and its store, which must pickle too.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913  # keyword-only switches, one per builder setting
         self,
         modules: tuple[ModuleType, ...] = (),
         *,
         check_inputs: bool = True,
+        check_overrides: bool = True,
+        strict_overrides: bool = False,
+        declared_inputs: Sequence[str] = (),
         store: CacheStore | None = None,
         config: Mapping[str, object] | None = None,
     ) -> None:
@@ -1142,10 +1255,16 @@ class Builder:
 
         `store`, when given, caches the results of the driver's runs in it.
         `config`, copied, selects `@config.when*` variants (see `with_config`).
-        `TypeError` when an item of `modules` is not a module.
+        The other settings are those of `without_input_type_checks`,
+        `without_override_type_checks`, `with_strict_overrides` and
+        `with_declared_inputs`. `TypeError` when an item of `modules` is not a
+        module, or of `declared_inputs` is not a `str`.
         """
         self._modules = _checked_modules(modules)
         self._check_inputs = check_inputs
+        self._check_overrides = check_overrides
+        self._strict_overrides = strict_overrides
+        self._declared_inputs = _checked_names(declared_inputs)
         self._store = store
         # Never changed once made: `with_config` makes a new dict.
         self._config: dict[str, object] = (
@@ -1157,26 +1276,35 @@ class Builder:
         self,
     ) -> tuple[
         Callable[..., Builder],
-        tuple[tuple[str, ...], bool, CacheStore | None, dict[str, object]],
+        tuple[tuple[str, ...], _Settings, CacheStore | None, dict[str, object]],
     ]:
         """The modules' names and the settings, imported again on load."""
         names = tuple(_importable_name(module) for module in self._modules)
-        return _builder_of, (names, self._check_inputs, self._store, self._config)
+        return _builder_of, (names, self._settings(), self._store, self._config)
+
+    def _settings(self) -> _Settings:
+        """This builder's switches, which `_builder_of` makes a builder from."""
+        return {
+            "check_inputs": self._check_inputs,
+            "check_overrides": self._check_overrides,
+            "strict_overrides": self._strict_overrides,
+            "declared_inputs": self._declared_inputs,
+        }
 
     def _with(
         self,
         modules: tuple[ModuleType, ...] | None = None,
         *,
-        check_inputs: bool | None = None,
         store: CacheStore | None = None,
         config: Mapping[str, object] | None = None,
+        **settings: Unpack[_Changes],
     ) -> Builder:
         """A new builder: this one's settings, each given one replaced."""
         return Builder(
             self._modules if modules is None else modules,
-            check_inputs=self._check_inputs if check_inputs is None else check_inputs,
             store=self._store if store is None else store,
             config=self._config if config is None else config,
+            **{**self._settings(), **settings},
         )
 
     def with_modules(self, *modules: ModuleType) -> Builder:
@@ -1200,8 +1328,38 @@ class Builder:
         """Returns a new builder whose driver skips input and override type checks.
 
         Edge checks, between a node and the parameters it feeds, stay on (Q10).
+        To skip only the override checks, use `without_override_type_checks`.
         """
         return self._with(check_inputs=False)
+
+    def without_override_type_checks(self) -> Builder:
+        """Returns a new builder whose driver skips override type checks only (Q22).
+
+        Input checks stay on, and so do edge checks. For overriding a node with a
+        value of another type, such as `nan` for an `int` node, while still
+        refusing a badly typed input.
+        """
+        return self._with(check_overrides=False)
+
+    def with_strict_overrides(self) -> Builder:
+        """Returns a new builder whose driver refuses an unsupplied overridden input.
+
+        An override naming an input is refused, as Hamilton refuses it, unless the
+        input is supplied in `inputs` too and some node the request plans needs it
+        (Q75). Settled when a request shape is prepared, never per run. The default
+        stays Q7's pass-through.
+        """
+        return self._with(strict_overrides=True)
+
+    def with_declared_inputs(self, *names: str) -> Builder:
+        """Returns a new builder that must declare every input of its graph (Q75).
+
+        Cumulative: names given again are added. Building fails, with one sorted
+        `ValueError`, for an input of the graph not declared, and for a declared
+        name that is no input, each naming the closest node or declared name. A
+        misspelled parameter or `source(...)` is therefore a build error.
+        """
+        return self._with(declared_inputs=(*self._declared_inputs, *names))
 
     def with_cache(self, store: CacheStore) -> Builder:
         """Returns a new builder whose driver caches every node's result in `store`.
@@ -1292,6 +1450,10 @@ class Builder:
         graph = _graph_of(nodes)
         if mismatches := _edge_mismatches(views.functions):
             raise ValueError("\n".join(mismatches))
+        if self._declared_inputs and (
+            refused := _undeclared(views, self._declared_inputs)
+        ):
+            raise ValueError("\n".join(refused))
         return nodes, views, graph, unmatched
 
     def _driver(
@@ -1306,6 +1468,8 @@ class Builder:
             graph,
             views,
             check_inputs=self._check_inputs,
+            check_overrides=self._check_overrides,
+            strict_overrides=self._strict_overrides,
             cache=cache,
             config=MappingProxyType(self._config),
         )

@@ -21,6 +21,11 @@ change the public API; such changes are listed under **Changed** and **Removed**
   config variant gave, and functions in `final_vars` no node comes from. Every unknown name in an error now ends in
   `(did you mean 'x'?)` when a node is close to it; in `validate`, a missing input also names the closest supplied
   name that is no node of the graph (Q71).
+- `Builder.with_strict_overrides()` refuses an override of an input that isn't also supplied, as Hamilton does, and
+  `Builder.with_declared_inputs(*names)` fails the build for any input of the graph not declared and any declared name
+  that is no input, each naming the closest node (Q75). Both are off by default. `Builder.without_override_type_checks()`
+  skips only the override type checks, keeping input checks on, for overriding a node with a value of another type
+  such as `nan` (Q22). All three survive pickling, copying and `build_async`.
 - `@cache(format=...)` picks how `DiskCache` writes a node's result: a `fnloom.Format` (a name with a `dumps` and
   `loads` pair) or the name of one the store knows. `"pickle"` and `"json"` are built in, and
   `DiskCache(formats=...)` adds more. A name the store does not know is refused when the driver is built (Q55). The

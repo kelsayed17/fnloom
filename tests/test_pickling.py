@@ -212,3 +212,46 @@ def test_a_pickled_disk_cache_keeps_its_formats(tmp_path: Path) -> None:
     again = _round_trip(store)
     assert again.formats == store.formats
     assert again.get(b"\x01" * 32, format=again.formats["text"]) == "hello"
+
+
+def test_settings_survive_pickling() -> None:
+    """Strict overrides, declared inputs and the override opt-out are carried."""
+    builder = (
+        Builder()
+        .with_modules(picklable_nodes)
+        .with_strict_overrides()
+        .with_declared_inputs("a")
+        .with_declared_inputs("b")
+    )
+    for again in (_round_trip(builder), copy.deepcopy(builder)):
+        driver = again.build()
+        with pytest.raises(ValueError, match="override of input 'a' refused"):
+            driver.execute(["total"], inputs={"b": 1}, overrides={"a": 1})
+        undeclared = again.with_declared_inputs("zzz")
+        with pytest.raises(ValueError, match="declared name 'zzz'"):
+            undeclared.build()
+    # The built drivers carry them too, through a driver's own pickling and copy.
+    for driver in (_round_trip(builder.build()), copy.deepcopy(builder.build())):
+        with pytest.raises(ValueError, match="override of input 'a' refused"):
+            driver.execute(["total"], inputs={"b": 1}, overrides={"a": 1})
+    async_again = _round_trip(builder.build_async())
+    with pytest.raises(ValueError, match="refused"):
+        async_again.prepare(["total"], inputs={"b": 1}, overrides={"a": 1})
+    assert copy.copy(builder.build()).validate(
+        ["total"], inputs={"b": 1}, overrides={"a": 1}
+    )
+
+
+def test_override_opt_out_survives_pickling() -> None:
+    """`without_override_type_checks` is kept by a pickled builder and driver."""
+    builder = Builder().with_modules(picklable_nodes).without_override_type_checks()
+    for again in (_round_trip(builder), copy.deepcopy(builder)):
+        driver = again.build()
+        assert driver.execute(["total"], inputs=INPUTS, overrides={"doubled": 2.5})
+        with pytest.raises(ValueError, match="a: expected int, got str"):
+            driver.execute(["total"], inputs={"a": "s", "b": 1})
+    loaded = _round_trip(builder.build())
+    assert loaded.execute(["total"], inputs=INPUTS, overrides={"doubled": 2.5})
+    plain = _round_trip(Builder().with_modules(picklable_nodes).build())
+    with pytest.raises(ValueError, match="doubled: expected"):
+        plain.execute(["total"], inputs=INPUTS, overrides={"doubled": 2.5})

@@ -2532,6 +2532,46 @@ def test_q71_validate() -> None:
     assert built.validate([module.a], inputs={"x": 1}) == []
 
 
+_Q75_SOURCE = """
+def a(x: int) -> int:
+    return x + 1
+
+
+def profit(revenu: int, cost: int = 3) -> int:
+    return revenu - cost
+
+
+def revenue() -> int:
+    return 5
+"""
+
+
+@pytest.mark.deliberate("Q75")
+def test_q75_strict_overrides_and_declared_inputs() -> None:
+    """Hamilton refuses an unsupplied overridden input, and builds a misspelled one."""
+    module = make_module("differential_q75", _Q75_SOURCE)
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    plain = fnloom.Builder().with_modules(module)
+    # An override of an unsupplied input: Hamilton refuses, fnloom's default does not.
+    with pytest.raises(ValueError, match="Required input x not provided"):
+        hamilton.execute(["a"], overrides={"x": 10})
+    assert plain.build().execute(["a"], overrides={"x": 10}) == {"a": 11}
+    # Opt in, and fnloom refuses too; supplied as well, both run.
+    strict = plain.with_strict_overrides().build()
+    with pytest.raises(ValueError, match="override of input 'x' refused"):
+        strict.execute(["a"], overrides={"x": 10})
+    assert hamilton.execute(["a"], inputs={"x": 1}, overrides={"x": 10}) == {"a": 11}
+    assert strict.execute(["a"], inputs={"x": 1}, overrides={"x": 10}) == {"a": 11}
+    # A misspelled parameter builds in Hamilton and is an input nothing supplies.
+    assert "revenu" in {v.name for v in hamilton.list_available_variables()}
+    declared = plain.with_declared_inputs("cost", "x")
+    with pytest.raises(ValueError, match=r"undeclared input 'revenu' \(did you mean"):
+        declared.build()
+    assert declared.with_declared_inputs("revenu").build().execute(
+        ["a"], inputs={"x": 1}
+    ) == {"a": 2}
+
+
 @pytest.mark.deliberate("Q78")
 @pytest.mark.parametrize("fixture", ["chain", "optional"])
 def test_q78_unsupplied_input_as_an_output(fixture: str) -> None:
