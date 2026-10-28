@@ -90,6 +90,35 @@ they differ.
     `execute` keeps the 128 most recently used plans, keyed by the outputs and the input and override names. Repeated
     calls of the same shape skip compiling, so `prepare` mostly saves you the cache lookup.
 
+## Validate
+
+`validate` checks a request the way `execute` would, but runs nothing. It returns every problem as one line, sorted,
+and an empty list when the request would run:
+
+```python
+driver.validate(["label"], inputs={"price": 1.5, "quantity": 2})
+# -> []
+driver.validate(
+    ["labl", "total"], inputs={"price": "cheap", "quantity": 2, "quantty": 3}
+)
+# -> ["price: expected float, got str", "unknown inputs: 'quantty' (did you mean 'quantity'?)", "unknown outputs: 'labl' (did you mean 'label'?)"]
+driver.validate(["total"], inputs={"price": 1.5, "quantty": 3})
+# -> ["missing inputs: 'quantity' (needed by 'total') (did you mean 'quantty'?)", "unknown inputs: 'quantty' (did you mean 'quantity'?)"]
+```
+
+Each line is the line `execute` raises for that problem on its own, so `validate` reports what `execute` would, all
+at once instead of one kind at a time. It covers unknown outputs, inputs and overrides; missing inputs; the types of
+input and override values; and outputs no `@config.when*` variant gave. A missing input names only the nodes this
+request needs it for. A malformed request still raises, as `prepare` does:
+
+```python
+driver.validate("label")
+# raises TypeError: final_vars must be a sequence of names, not a single str
+```
+
+`prepare` only reads the names of the inputs, so it accepts values that `validate` reports; the checks run when the
+plan runs. `AsyncDriver.validate` is the same method, and isn't a coroutine.
+
 ## Type checks
 
 fnloom checks types at two points, against your annotations:

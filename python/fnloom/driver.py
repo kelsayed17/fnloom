@@ -18,6 +18,7 @@ from fnloom._caching import Cache, CacheOutcome, CacheRun
 from fnloom._decorators import Source
 from fnloom._extract import is_generated
 from fnloom._requests import output_names as _requested_names
+from fnloom._requests import suggest
 from fnloom._scan import NodeDef, core_inputs, resolve, scan
 from fnloom._stores import CacheStore
 from fnloom._view import (
@@ -453,17 +454,16 @@ class Driver:
             if unknown := sorted(
                 {n for n in outputs if n not in self._unmatched and n not in known}
             ):
-                lines.append(f"unknown outputs: {', '.join(map(repr, unknown))}")
+                lines.append(_unknown("outputs", unknown, self._graph.node_names()))
             raise ValueError("\n".join(lines))
         try:
             plan = self._graph.prepare(
                 list(outputs), sorted(input_names), sorted(override_names)
             )
         except ValueError as error:
-            hint = _config_hint(str(error), self._config)
-            if hint is None:
+            msg = "\n".join(self._explained(str(error), input_names))
+            if msg == str(error):
                 raise
-            msg = f"{error}\n{hint}"
             raise ValueError(msg) from None
         checks = self._checks(plan, override_names) if self._check_inputs else ((), ())
         runnable: _Runnable = plan
@@ -494,6 +494,100 @@ class Driver:
             if n in self._nodes
             for declared in (self._nodes.type_of(n),)
         )
+
+    def _explained(self, message: str, input_names: AbstractSet[str]) -> list[str]:
+        """The lines of the core's error `message`, each name with its suggestion.
+
+        The core names unknown outputs, inputs or overrides, or missing inputs, in
+        its own format, which is kept: each unknown name gains the closest node
+        (Q71), and each missing input the closest supplied name that matched
+        nothing, followed by a line for any that is a config key (Q56).
+        """
+        for kind in ("outputs", "inputs", "overrides"):
+            prefix = f"unknown {kind}: "
+            if message.startswith(prefix):
+                # The core quotes each name as `'name'`, joined by `, `.
+                names = message.removeprefix(prefix)[1:-1].split("', '")
+                return [_unknown(kind, names, self._graph.node_names())]
+        if not message.startswith(_MISSING):
+            return [message]
+        line = _missing(message, self._not_inputs(input_names))
+        hint = _config_hint(line, self._config)
+        return [line] if hint is None else [line, hint]
+
+    def _not_inputs(self, names: AbstractSet[str]) -> list[str]:
+        """Those of `names` that are no input of the graph, sorted."""
+        functions = self._nodes.functions
+        return sorted(n for n in names if n not in self._nodes or n in functions)
+
+    def validate(
+        self,
+        final_vars: Sequence[str | Callable[..., object]],
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+    ) -> list[str]:
+        """Every problem `execute` would raise for this request, one line each (Q71).
+
+        Runs nothing, and keeps no plan. The lines are sorted, and empty when the
+        request is valid; each is the line `execute` raises for that problem on
+        its own. They cover unknown outputs, inputs and overrides; missing inputs,
+        naming only the consumers this request plans; the types of the input and
+        override values (unless the driver was built without input type checks);
+        and outputs no `@config.when*` variant gave. A malformed request raises,
+        as `prepare` does: `TypeError` for a bare `str` or a non-mapping, and the
+        errors of a function in `final_vars` (Q30).
+        """
+        for kind, values in (("inputs", inputs), ("overrides", overrides)):
+            if values is not None and not isinstance(values, Mapping):
+                msg = (
+                    f"{kind} must be a mapping of names to values, "
+                    f"got {type(values).__name__}"
+                )
+                raise TypeError(msg)
+        outputs, input_names, override_names = _Request.check(
+            final_vars, self._nodes, inputs, overrides
+        )
+        nodes = self._graph.node_names()
+        known = frozenset(nodes)
+        wanted = list(dict.fromkeys(outputs))
+        absent = sorted(set(wanted) & self._unmatched.keys())
+        lines = [self._unmatched[n] for n in absent]
+        unknown_inputs = self._not_inputs(input_names)
+        unknown = {
+            "outputs": sorted(
+                {n for n in wanted if n not in known and n not in self._unmatched}
+            ),
+            "inputs": unknown_inputs,
+            "overrides": sorted(override_names - known),
+        }
+        lines += [
+            _unknown(kind, names, nodes) for kind, names in unknown.items() if names
+        ]
+        planned = [n for n in wanted if n in known]
+        supplied = input_names.difference(unknown_inputs)
+        overridden = override_names & known
+        try:
+            plan = self._graph.prepare(planned, sorted(supplied), sorted(overridden))
+        except ValueError as error:
+            line = _missing(str(error), unknown_inputs)
+            lines.append(line)
+            if (hint := _config_hint(line, self._config)) is not None:
+                lines.append(hint)
+            # Planned again with the missing inputs supplied, to find what is read.
+            every = supplied | _missing_names(str(error))
+            plan = self._graph.prepare(planned, sorted(every), sorted(overridden))
+        if self._check_inputs:
+            read = sorted(
+                node
+                for node, action in plan.steps()
+                if action == "use_input" and node in supplied
+            )
+            lines += _mismatches(self._declared(read), inputs or _NO_VALUES)
+            lines += _mismatches(
+                self._declared(sorted(overridden)), overrides or _NO_VALUES
+            )
+        return sorted(lines)
 
     def execute(
         self,
@@ -777,6 +871,19 @@ class AsyncDriver:
             prepared._async = plan  # noqa: SLF001  # this driver's own plan
         return plan
 
+    def validate(
+        self,
+        final_vars: Sequence[str | Callable[..., object]],
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+    ) -> list[str]:
+        """Every problem of this request, sorted; see `Driver.validate` (Q71).
+
+        Synchronous: it runs nothing, so there is nothing to await.
+        """
+        return self._driver.validate(final_vars, inputs=inputs, overrides=overrides)
+
     async def execute(
         self,
         final_vars: Sequence[str | Callable[..., object]],
@@ -821,13 +928,52 @@ def _prepare_async_again(driver: AsyncDriver, key: _PlanKey) -> AsyncPreparedPla
     )
 
 
+# How the core's missing-input error starts.
+_MISSING = "missing inputs: "
+
+
+def _unknown(kind: str, names: Sequence[str], candidates: Sequence[str]) -> str:
+    """The core's `unknown <kind>: 'a', 'b'` line, each name with its suggestion."""
+    listed = ", ".join(f"'{name}'{suggest(name, candidates)}" for name in names)
+    return f"unknown {kind}: {listed}"
+
+
+def _missing_entries(message: str) -> list[str]:
+    """The entries of the core's missing-input `message`: `'x' (needed by 'a')`.
+
+    The core joins them with `; `, and a consumer list with `, `.
+    """
+    return message.removeprefix(_MISSING).split("; ")
+
+
+def _missing_names(message: str) -> frozenset[str]:
+    """The inputs the core's missing-input `message` names."""
+    return frozenset(
+        entry[1 : entry.index("' (")] for entry in _missing_entries(message)
+    )
+
+
+def _missing(message: str, unmatched: Sequence[str]) -> str:
+    """The core's missing-input `message`, each input with its suggestion (Q71).
+
+    The candidates are the `unmatched` supplied names: those that are no input.
+    """
+    if not unmatched:
+        return message
+    entries = [
+        entry + suggest(entry[1 : entry.index("' (")], unmatched)
+        for entry in _missing_entries(message)
+    ]
+    return _MISSING + "; ".join(entries)
+
+
 def _config_hint(message: str, config: Mapping[str, object]) -> str | None:
     """A line for a missing-input error naming config keys, or `None` (Q56).
 
     A missing input is listed as `'name' (`, which no other part of the message
     is: a consumer is followed by `,` or `)`.
     """
-    if not config or not message.startswith("missing inputs: "):
+    if not config or not message.startswith(_MISSING):
         return None
     keys = [key for key in sorted(config) if f"'{key}' (" in message]
     if not keys:

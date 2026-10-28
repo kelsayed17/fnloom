@@ -2471,6 +2471,64 @@ def test_q70_inspection() -> None:
     assert fnloom.Builder().with_modules(module, module).build().modules == (module,)
 
 
+_Q71_SOURCE = """
+def a(x: int) -> int:
+    return x + 1
+
+
+def c(x: int) -> int:
+    return x * 2
+
+
+def profit(revenue: int, cost: int = 3) -> int:
+    return revenue - cost
+"""
+
+
+@pytest.mark.deliberate("Q71")
+def test_q71_validate() -> None:
+    """Hamilton raises one kind of problem at a time; fnloom returns every line."""
+    module = make_module("differential_q71", _Q71_SOURCE)
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    built = fnloom.build(module)
+    # Hamilton takes `overrides` before `inputs`, positionally; fnloom's are keywords.
+    assert list(inspect.signature(hamilton.validate_execution).parameters) == [
+        "final_vars",
+        "overrides",
+        "inputs",
+    ]
+    keywords = inspect.signature(built.validate).parameters
+    assert [keywords[n].kind for n in ("inputs", "overrides")] == [
+        inspect.Parameter.KEYWORD_ONLY
+    ] * 2
+    # A missing input: Hamilton names every consumer and raises; fnloom names `a`.
+    with pytest.raises(ValueError, match=r"for nodes: \['a', 'c'\]\.$"):
+        hamilton.validate_execution(["a"])
+    assert built.validate(["a"]) == ["missing inputs: 'x' (needed by 'a')"]
+    # A misspelled input key: ignored by Hamilton, with no suggestion anywhere.
+    with pytest.raises(ValueError, match="Required input revenue") as caught:
+        hamilton.validate_execution(["profit"], inputs={"revenu": 1})
+    assert "revenu " not in str(caught.value)
+    assert "mean" not in str(caught.value)
+    assert built.validate(["profit"], inputs={"revenu": 1}) == [
+        "missing inputs: 'revenue' (needed by 'profit') (did you mean 'revenu'?)",
+        "unknown inputs: 'revenu' (did you mean 'revenue'?)",
+    ]
+    # An unknown output hides the input's wrong type in Hamilton; fnloom lists both.
+    with pytest.raises(ValueError, match=r"^Unknown nodes \[prfit\]") as unknown:
+        hamilton.validate_execution(["a", "prfit"], inputs={"x": "s"})
+    assert "mismatch" not in str(unknown.value)
+    assert built.validate(["a", "prfit"], inputs={"x": "s"}) == [
+        "unknown outputs: 'prfit' (did you mean 'profit'?)",
+        "x: expected int, got str",
+    ]
+    # A function `execute` accepts: Hamilton's validation refuses it, fnloom's reads it.
+    assert hamilton.execute([module.a], inputs={"x": 1}) == {"a": 2}
+    with pytest.raises(TypeError, match="expected str instance, function found"):
+        hamilton.validate_execution([module.a], inputs={"x": 1})
+    assert built.validate([module.a], inputs={"x": 1}) == []
+
+
 @pytest.mark.deliberate("Q78")
 @pytest.mark.parametrize("fixture", ["chain", "optional"])
 def test_q78_unsupplied_input_as_an_output(fixture: str) -> None:

@@ -1,4 +1,4 @@
-"""Validation and requests: functions in `final_vars` (Q30)."""
+"""Validation and requests: functions in `final_vars` (Q30), and `validate` (Q71)."""
 
 import asyncio
 import threading
@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any, cast
 import pytest
 
 import fnloom
+from fnloom._requests import suggest
 from fnloom._view import NodeViews
 from helpers import make_module
 
@@ -241,3 +242,178 @@ def test_a_view_mapping_without_the_generated_set_still_skips_fields() -> None:
     owned = bare.owners[id(module.produced)]
     assert owned == ("produced",)
     assert bare.owners == views.owners
+
+
+PRICED = """
+import fnloom
+
+calls: list[str] = []
+
+
+def profit(revenue: int, cost: int) -> int:
+    calls.append("profit")
+    return revenue - cost
+
+
+def margin(profit: int, revenue: int, scale: float) -> float:
+    calls.append("margin")
+    return profit / revenue * scale
+
+
+def report(revenue: int) -> str:
+    calls.append("report")
+    return str(revenue)
+
+
+@fnloom.config.when(region="eu")
+def tax__eu(profit: int) -> float:
+    calls.append("tax")
+    return profit * 0.2
+"""
+
+# A request with no problem, and the values it is run with.
+GOOD: dict[str, object] = {"revenue": 10, "cost": 4, "scale": 1.0}
+
+
+def _priced(name: str) -> tuple[ModuleType, fnloom.Driver]:
+    module = make_module(name, PRICED)
+    return module, fnloom.Builder().with_config({"region": "us"}).with_modules(
+        module
+    ).build()
+
+
+def test_validate_returns_every_problem_sorted() -> None:
+    """Every problem of a request, one line each, sorted (Q71)."""
+    _, driver = _priced("val_every")
+    lines = driver.validate(
+        ["margin", "profitt", "tax"],
+        inputs={"revenu": 1, "cost": "s", "scale": 1.0},
+        overrides={"scale": "big"},
+    )
+    with pytest.raises(ValueError, match="region") as unmatched:
+        driver.execute(["tax"], inputs=GOOD)
+    assert str(unmatched.value).startswith("no variant of 'tax'")
+    assert lines == sorted(
+        [
+            "cost: expected int, got str",
+            (
+                "missing inputs: 'revenue' (needed by 'margin', 'profit') "
+                "(did you mean 'revenu'?)"
+            ),
+            str(unmatched.value),
+            "scale: expected float, got str",
+            "unknown inputs: 'revenu' (did you mean 'revenue'?)",
+            "unknown outputs: 'profitt' (did you mean 'profit'?)",
+        ]
+    )
+
+
+def test_validate_on_a_valid_request_is_empty() -> None:
+    """A request `execute` would run gives no lines, on both drivers."""
+    module, driver = _priced("val_empty")
+    assert driver.validate(["margin", "report"], inputs=GOOD) == []
+    overridden = driver.validate([module.margin], inputs=GOOD, overrides={"profit": 3})
+    assert overridden == []
+    built = fnloom.Builder().with_config({"region": "us"}).with_modules(module)
+    async_driver = built.build_async()
+    assert async_driver.validate(["margin"], inputs=GOOD) == []
+    assert async_driver.validate(["margin"], inputs={"cost": 1, "scale": 1.0}) == [
+        "missing inputs: 'revenue' (needed by 'margin', 'profit')"
+    ]
+
+
+def test_validate_runs_nothing() -> None:
+    """Values `prepare` accepts but the checks refuse: lines, and no run (Focus 5)."""
+    module, driver = _priced("val_runs")
+    bad = {"revenue": "ten", "cost": 4, "scale": 1}
+    assert driver.validate(["margin"], inputs=bad) == [
+        "revenue: expected int, got str",
+        "scale: expected float, got int",
+    ]
+    assert driver.validate(["margin"], inputs=GOOD) == []
+    assert module.calls == []
+    # `prepare` only reads the names: the values are checked when the plan runs.
+    plan = driver.prepare(["margin"], inputs=bad)
+    assert module.calls == []
+    with pytest.raises(ValueError, match="revenue: expected int, got str"):
+        plan.run(inputs=bad)
+    assert module.calls == []
+
+
+def test_validate_refuses_a_malformed_request() -> None:
+    """A bare `str` or a non-mapping raises, as `prepare` does."""
+    _, driver = _priced("val_malformed")
+    with pytest.raises(TypeError, match="not a single str"):
+        driver.validate("margin")
+    with pytest.raises(TypeError, match="inputs must be a mapping"):
+        driver.validate(["margin"], inputs=["revenue"])  # ty: ignore[invalid-argument-type]  # the refusal is the point
+    with pytest.raises(TypeError, match="overrides must be a mapping"):
+        driver.validate(["margin"], overrides=5)  # ty: ignore[invalid-argument-type]  # the refusal is the point
+
+
+def test_missing_lines_name_only_requested_consumers() -> None:
+    """`report` reads `revenue` too, but is not requested, so it is not named."""
+    _, driver = _priced("val_consumers")
+    line = "missing inputs: 'revenue' (needed by 'profit')"
+    assert driver.validate(["profit"], inputs={"cost": 1}) == [line]
+    with pytest.raises(ValueError, match=r"^missing inputs: .*\)$") as info:
+        driver.execute(["profit"], inputs={"cost": 1})
+    assert str(info.value) == line
+
+
+def test_errors_suggest_close_names() -> None:
+    """Each unknown name gets the closest node within cutoff 0.8, and none below."""
+    _, driver = _priced("val_suggest")
+    with pytest.raises(ValueError, match=r"^unknown outputs: ") as outputs:
+        driver.execute(["margn", "zzz"], inputs=GOOD)
+    assert str(outputs.value) == (
+        "unknown outputs: 'margn' (did you mean 'margin'?), 'zzz'"
+    )
+    with pytest.raises(ValueError, match=r"^unknown inputs: ") as inputs:
+        driver.execute(["report"], inputs={"revenue": 1, "reveneu": 2})
+    assert str(inputs.value) == "unknown inputs: 'reveneu' (did you mean 'revenue'?)"
+    with pytest.raises(ValueError, match=r"^unknown overrides: ") as overrides:
+        driver.execute(["report"], inputs={"revenue": 1}, overrides={"profi": 2})
+    assert str(overrides.value) == (
+        "unknown overrides: 'profi' (did you mean 'profit'?)"
+    )
+    # A computed node supplied as an input is never suggested to itself.
+    with pytest.raises(ValueError, match=r"^unknown inputs: 'profit'$"):
+        driver.execute(["margin"], inputs={**GOOD, "profit": 1})
+    assert suggest("revenu", ["cost", "revenue"]) == " (did you mean 'revenue'?)"
+    assert suggest("xyz", ["cost", "revenue"]) == ""
+    assert suggest("revenue", ["revenue"]) == ""
+    # Ties go the same way whatever the candidates' order.
+    tied = " (did you mean 'abcdx'?)"
+    assert suggest("abcde", ["abcdf", "abcdx"]) == suggest("abcde", ["abcdx", "abcdf"])
+    assert suggest("abcde", ["abcdf", "abcdx"]) == tied
+
+
+def test_validate_matches_execute_messages() -> None:
+    """Each line is the line `execute` raises for the same problem on its own."""
+    _, driver = _priced("val_same")
+    lone: list[tuple[list[str], dict[str, object], dict[str, object]]] = [
+        (["margn"], GOOD, {}),
+        (["tax"], GOOD, {}),
+        (["margin"], {**GOOD, "revenu": 1}, {}),
+        (["margin"], GOOD, {"scal": 1.0}),
+        (["margin"], {"cost": 1, "scale": 1.0}, {}),
+        (["revenue"], {}, {}),
+        (["margin"], {**GOOD, "cost": "s"}, {}),
+        (["margin"], GOOD, {"profit": "p"}),
+    ]
+    for final_vars, inputs, overrides in lone:
+        with pytest.raises(ValueError, match=r".") as info:
+            driver.execute(final_vars, inputs=inputs, overrides=overrides)
+        lines = driver.validate(final_vars, inputs=inputs, overrides=overrides)
+        assert lines == [str(info.value)], final_vars
+    # A config key named as a missing input: the hint is a line of its own, as in
+    # the message.
+    keyed = make_module(
+        "val_same_keyed", "def taxed(region: str) -> str:\n    return region\n"
+    )
+    configured = fnloom.Builder().with_config({"region": "us"}).with_modules(keyed)
+    built = configured.build()
+    with pytest.raises(ValueError, match="config key") as hinted:
+        built.execute(["taxed"])
+    assert built.validate(["taxed"]) == sorted(str(hinted.value).split("\n"))

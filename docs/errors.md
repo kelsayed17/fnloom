@@ -62,12 +62,18 @@ driver.execute(["nope"])
 driver.execute(["label"], inputs={"price": 1.0, "quantity": 2, "typo": 3})
 # raises ValueError: unknown inputs: 'typo'
 driver.execute(["label"], overrides={"tota": 5.0})
-# raises ValueError: unknown overrides: 'tota'
+# raises ValueError: unknown overrides: 'tota' (did you mean 'total'?)
 driver.execute(["label"], inputs={"price": 1.0})
 # raises ValueError: missing inputs: 'quantity' (needed by 'total')
 driver.execute(["total", "price"])
 # raises ValueError: missing inputs: 'price' (requested as an output, needed by 'total'); 'quantity' (needed by 'total')
 ```
+
+An unknown name is followed by `(did you mean 'x'?)`, after a space, when a node is close to it: the closest one that
+`difflib.get_close_matches` finds at cutoff 0.8, as for `'tota'` above. A missing input gets the same suggestion from
+the supplied names that matched no input, so a misspelled key and the input it was meant for point at each other.
+`execute` raises unknown inputs before missing ones, so you see the second in [`validate`](running.md#validate), which
+lists every problem at once (Q71).
 
 A node that no config variant gave, requested as an output, raises the build's reason: `ValueError: no variant of
 'foo' matches the config ...`. A missing input named like a config key gets a second line, since config is never

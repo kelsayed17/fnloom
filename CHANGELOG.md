@@ -15,6 +15,11 @@ change the public API; such changes are listed under **Changed** and **Removed**
   with `fnloom.InputView`. The path includes both ends and is in topological order, ties broken by name, on every hash
   seed; its error names every unknown node (Q70). An unsupplied input requested as an output stays a `ValueError`
   (Q78).
+- `Driver.validate(final_vars, *, inputs=None, overrides=None)`, on `AsyncDriver` too (not a coroutine), returns every
+  problem `execute` would raise for a request, one sorted line each, and runs nothing: unknown outputs, inputs and
+  overrides, missing inputs (naming only the consumers the request needs), input and override types, and outputs no
+  config variant gave. Every unknown name in an error now ends in `(did you mean 'x'?)` when a node is close to it,
+  and a missing input names the closest supplied name that matched no input (Q71).
 - `@cache(format=...)` picks how `DiskCache` writes a node's result: a `fnloom.Format` (a name with a `dumps` and
   `loads` pair) or the name of one the store knows. `"pickle"` and `"json"` are built in, and
   `DiskCache(formats=...)` adds more. A name the store does not know is refused when the driver is built (Q55). The

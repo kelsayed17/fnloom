@@ -1,9 +1,10 @@
-"""Normalising a request's `final_vars` to node names."""
+"""Normalising a request's `final_vars` to node names, and naming close names."""
 
+import difflib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
 
     from fnloom._view import NodeViews
 
@@ -101,3 +102,15 @@ def _why_absent(fn: Callable[..., object], views: NodeViews) -> str:
         "module, an unselected @config variant, or one the driver was not built "
         "from): pass a node name"
     )
+
+
+def suggest(name: str, candidates: Iterable[str]) -> str:
+    """`" (did you mean 'x'?)"` for the closest candidate to `name`, or `""` (Q71).
+
+    The closest is `difflib.get_close_matches` at cutoff 0.8; a tie goes to the
+    greater name, whatever the candidates' order. A name never suggests itself.
+    Only error paths call this, so a run pays nothing for it.
+    """
+    others = [candidate for candidate in candidates if candidate != name]
+    found = difflib.get_close_matches(name, others, n=1, cutoff=0.8)
+    return f" (did you mean '{found[0]}'?)" if found else ""
