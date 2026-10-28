@@ -348,6 +348,7 @@ def test_public_api_is_exported() -> None:
         "CacheWarning",
         "DiskCache",
         "Driver",
+        "Format",
         "MISSING",
         "MemoryCache",
         "NodeView",

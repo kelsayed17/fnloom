@@ -133,33 +133,39 @@ the timed runs, while Hamilton's include the planning each `execute` does. Hamil
 
 | shape | n | runtime | uncached | memory | disk |
 | --- | ---: | --- | --- | --- | --- |
-| chain | 200 | fnloom | 0.039 / 0.032 | 0.231 / 0.045 | 47.7 / 0.094 |
-| chain | 200 | Hamilton | 0.675 / 0.583 | 23.7 / 22.2 | 120.9 / 33.2 |
-| layered | 1,000 | fnloom | 0.256 / 0.219 | 1.304 / 0.293 | 221.9 / 0.661 |
-| layered | 1,000 | Hamilton | 4.644 / 4.264 | 149.7 / 134.3 | 655.2 / 184.2 |
+| chain | 200 | fnloom | 0.031 / 0.028 | 0.070 / 0.019 | 42.5 / 0.075 |
+| chain | 200 | Hamilton | 0.564 / 0.506 | 14.8 / 13.8 | 93.4 / 21.8 |
+| layered | 1,000 | fnloom | 0.203 / 0.191 | 0.376 / 0.082 | 192.8 / 0.485 |
+| layered | 1,000 | Hamilton | 3.612 / 3.541 | 95.3 / 88.0 | 495.8 / 127.3 |
 
-Measured on the machine and build above, on 2026-10-27. A warm fnloom run is 280 to 490 times faster than Hamilton's
-on the same kind of store, and 6 to 15 times faster than Hamilton's uncached run. Hamilton's warm runs cost more than
-its uncached ones, 31 to 38 times as much in memory, as the caching design found (Q16).
+Measured on the machine and build above, on 2026-10-28. A warm fnloom run is 260 to 1,070 times faster than
+Hamilton's on the same kind of store, and 7 to 43 times faster than Hamilton's uncached run. A warm fnloom run on
+`MemoryCache` is faster than an uncached fnloom run: it loads the outputs and runs nothing. Hamilton's warm runs cost
+more than its uncached ones, 25 to 27 times as much in memory, as the caching design found (Q16).
 
 The targets of the caching design (§8), with fnloom's figures:
 
 | target | chain 200 | layered 1,000 | verdict |
 | --- | --- | --- | --- |
-| A memory hit costs at most 1 µs of overhead per node (warm run / n) | 0.22 µs | 0.29 µs | met |
-| A warm run costs at most about twice an uncached one (warm / uncached steady) | 1.41× | 1.34× | met |
-| A cold run costs at most 1.5 times an uncached one, with `MemoryCache` (cold / uncached first) | 5.9× | 5.1× | **missed** |
+| A memory hit costs at most 1 µs of overhead per node (warm run / n) | 0.10 µs | 0.08 µs | met |
+| A warm run costs at most about twice an uncached one (warm / uncached steady) | 0.67× | 0.43× | met |
+| A cold run costs at most 1.5 times an uncached one, with `MemoryCache` (cold / uncached first) | 2.24× | 1.86× | **missed** |
 | A requested output that hits loads one entry | 1 entry | 10 entries, one per output | met |
 
-**The cold target is missed.** A cold run pays about 1 µs per node over an uncached one: the node's key, its lookup on
-the walk back from the outputs, and the call that stores its result as it finishes. An uncached trivial node costs
-about 0.16 µs, so 1.5 times would leave 0.08 µs per node, less than hashing one key. The cost is per node, not per
-byte, so on nodes doing real work it is a fixed microsecond each. Moving the memory store and the store calls into
-Rust would cut it; the target as written, on trivial nodes, may need restating. It is tracked in
-[#10](https://github.com/kelsayed17/fnloom/issues/10).
+**The cold target is missed, by less.** It was 5.99× and 5.45× on the same day before
+[#10](https://github.com/kelsayed17/fnloom/issues/10). A cold run now pays about 0.19 µs per node over an uncached
+one, where an uncached trivial node costs about 0.16 µs. Most of that is the key, one BLAKE3 compression per 64 bytes
+read, about 75 ns, which alone is half of a trivial node. The rest is a lookup and a store in the native memory store.
+The cost is per node, not per byte, so on nodes doing real work it is a fixed fraction of a microsecond each.
 
-Each key is hashed with one BLAKE3 call over its framed parts, rather than a streaming hasher fed a part at a time,
-which gives the same digests.
+What closed most of the gap:
+
+- **The walk and the memory store are native.** A plain `MemoryCache` keeps its entries in the extension. The walk
+  back from the outputs looks keys up there, and the run stores each result as its node succeeds, with no call into
+  Python per node. A subclass of `MemoryCache`, or any other store, takes the Python path.
+- **A key is one BLAKE3 block where it can be.** A key is BLAKE3 keyed by the node's static part, over the 32-byte
+  versions of what the node reads. The parameter names and `value()` constants that used to be framed into every key
+  are hashed once, at build, into the static part, so a node reading one value hashes 32 bytes.
 
 ## Why fan-in is fast
 

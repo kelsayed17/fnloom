@@ -29,10 +29,12 @@ import time
 import warnings
 import zlib
 
-# Imported for real: `DiskCache`'s signature annotates with it, and
+# Imported for real: `DiskCache`'s signature annotates with these, and
 # `inspect.signature` resolves that at run time.
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
+from types import MappingProxyType
 from typing import Final, Protocol, override
 
 from fnloom import _core
@@ -43,6 +45,7 @@ __all__ = [
     "CacheStore",
     "CacheWarning",
     "DiskCache",
+    "Format",
     "MemoryCache",
     "Missing",
 ]
@@ -65,6 +68,90 @@ MISSING: Final = Missing.MISSING
 
 class CacheWarning(UserWarning):
     """A cache store failed to read or write an entry; the run went on without it."""
+
+
+@dataclass(frozen=True, slots=True)
+class Format:
+    """How a `DiskCache` turns one node's results into bytes and back.
+
+    A node picks one with `@cache(format=...)`, by this object or by its name. The
+    name is recorded in every entry written with it: an entry written under another
+    name is a miss, so give a new name whenever `dumps` or `loads` changes.
+
+    Attributes:
+        name: Names the pair, in entries and in `@cache(format="name")`.
+        dumps: Turns a value into bytes; raising skips the write, with a warning.
+        loads: Turns those bytes back into an equal value.
+    """
+
+    name: str
+    dumps: Callable[[object], bytes]
+    loads: Callable[[bytes], object]
+
+    def __post_init__(self) -> None:
+        """Checks the name and the pair."""
+        given: object = self.name
+        if not isinstance(given, str) or not given:
+            msg = f"a format's name must be a non-empty str, not {given!r}"
+            raise TypeError(msg)
+        if not callable(self.dumps) or not callable(self.loads):
+            msg = f"format {given!r} needs callable dumps and loads"
+            raise TypeError(msg)
+
+
+# JSON values that load back as the same types, compared exactly: a subclass, such as
+# `bool` for `int` or an enum for `str`, is a different value.
+_JSON_EXACT = (dict, list, str, int, float, bool, type(None))
+
+
+def _json_dumps(value: object) -> bytes:
+    """`value` as JSON, refusing anything that would load back as something else.
+
+    A tuple would load as a list, a key that is not a `str` as one, and a subclass as
+    its base type, so a hit would return a different value than the node computed.
+    NaN and the infinities are refused too, being no JSON at all, as is a container
+    holding itself.
+    """
+    # First, so that the walk below never meets a cycle.
+    data = json.dumps(value, ensure_ascii=False, allow_nan=False).encode()
+    stack: list[tuple[object, str]] = [(value, "")]
+    while stack:
+        item, path = stack.pop()
+        if type(item) not in _JSON_EXACT:
+            where = f" at {path}" if path else ""
+            msg = f"json cannot store a {type(item).__qualname__}{where} exactly"
+            raise TypeError(msg)
+        if type(item) is dict:
+            for key, nested in item.items():
+                if type(key) is not str:
+                    msg = f"json cannot store the {type(key).__qualname__} key {key!r}"
+                    raise TypeError(msg + (f" at {path}" if path else ""))
+                stack.append((nested, f"{path}[{key!r}]"))
+        elif type(item) is list:
+            stack.extend(
+                (nested, f"{path}[{index}]") for index, nested in enumerate(item)
+            )
+    return data
+
+
+def _json_loads(data: bytes) -> object:
+    """The value `_json_dumps` wrote."""
+    return json.loads(data)
+
+
+PICKLE: Final = Format("pickle", pickle.dumps, pickle.loads)
+"""Any value pickle can store; the default."""
+
+JSON: Final = Format("json", _json_dumps, _json_loads)
+"""Dicts with `str` keys, lists, `str`, `int`, finite `float`, `bool` and `None`.
+
+Each of exactly that type.
+A value that would load back as anything else, such as a tuple, is not stored: the
+write is skipped with a `CacheWarning`, and the node runs again next time.
+"""
+
+# The formats every `DiskCache` knows by name.
+_BUILT_IN = MappingProxyType({f.name: f for f in (PICKLE, JSON)})
 
 
 class CacheStore(Protocol):
@@ -99,12 +186,17 @@ def _warn(message: str, depth: int = 1) -> None:
     warnings.warn(message, CacheWarning, stacklevel=depth + 2)
 
 
+# The package's directory, whose frames a warning raised during a run skips.
+_PACKAGE = str(Path(__file__).parent)
+
+
 class MemoryCache:
     """Results held in memory, least recently used evicted first.
 
     A hit returns the stored object itself, not a copy, so a cached node must not
     mutate its arguments: a change would reach every later run that hits. The entries
-    live in the native extension, which a cached run reads and writes directly.
+    live in the native extension, which a cached run reads and writes directly. Values
+    are never serialized, so a node's `@cache(format=...)` does not apply here.
 
     Pickled or copied, the store comes back empty, with the same bounds: its entries
     belong to its process, so a driver sent to a worker process starts a cache of
@@ -166,8 +258,13 @@ def _size(value: object) -> int | None:
     try:
         return sys.getsizeof(value)
     except Exception as error:  # noqa: BLE001  # any failure skips the write
-        # Up: `_size`, `MemoryCache.put` (the binding adds no frame), its caller.
-        _warn(f"cannot size a {type(value).__qualname__} to cache it: {error}", 2)
+        # Called by `MemoryCache.put`, or by the binding during a run: either way,
+        # reported at the first frame outside fnloom.
+        warnings.warn(
+            f"cannot size a {type(value).__qualname__} to cache it: {error}",
+            CacheWarning,
+            skip_file_prefixes=(_PACKAGE,),
+        )
         return None
 
 
@@ -260,9 +357,12 @@ class DiskCache:
         serializer: The name of the `dumps`/`loads` pair, recorded in every entry.
             Entries written under another name are misses, so give a new name
             whenever the pair changes.
+        formats: More `Format`s that `@cache(format="name")` can name, besides the
+            built-in `"pickle"` and `"json"`. A node naming a format the store does
+            not know is refused when the driver is built.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913  # the directory, its bound, and how it serializes
         self,
         path: str | os.PathLike[str],
         *,
@@ -270,6 +370,7 @@ class DiskCache:
         dumps: Callable[[object], bytes] = pickle.dumps,
         loads: Callable[[bytes], object] = pickle.loads,
         serializer: str = "pickle",
+        formats: Iterable[Format] = (),
     ) -> None:
         """Opens the store at `path`, pruning it to `max_bytes` if given.
 
@@ -279,7 +380,11 @@ class DiskCache:
         Raises:
             ValueError: `max_bytes` is negative, or `path` holds a NUL byte.
             TypeError: `serializer` is not a non-empty `str`: it names the pair, it
-                is not a module (pass `dumps` and `loads` for that).
+                is not a module (pass `dumps` and `loads` for that); or `formats`
+                holds something other than a `Format`.
+            ValueError: Two formats, or a format and the default pair, share a name
+                but not their `dumps` and `loads`. The default pair takes the place
+                of a built-in format of its name.
         """
         if max_bytes is not None and max_bytes < 0:
             msg = f"max_bytes must be at least 0 or None, not {max_bytes}"
@@ -297,9 +402,9 @@ class DiskCache:
         self._root = self._path / _LAYOUT
         _warn_if_shared(self._path)
         self._max_bytes = max_bytes
-        self._dumps = dumps
-        self._loads = loads
-        self._serializer = serializer
+        self._default = Format(serializer, dumps, loads)
+        self._given = tuple(formats)
+        self._formats = _formats(self._default, self._given)
         self._writes = 0
         self._lock = threading.Lock()
         if max_bytes is not None:
@@ -308,12 +413,14 @@ class DiskCache:
     @override
     def __reduce__(self) -> tuple[Callable[..., DiskCache], tuple[object, ...]]:
         """The store reopened at its directory with its arguments; see the class."""
+        default = self._default
         return _reopen, (
             self._path,
             self._max_bytes,
-            self._dumps,
-            self._loads,
-            self._serializer,
+            default.dumps,
+            default.loads,
+            default.name,
+            self._given,
         )
 
     @property
@@ -321,17 +428,26 @@ class DiskCache:
         """The store's directory."""
         return self._path
 
+    @property
+    def formats(self) -> Mapping[str, Format]:
+        """The formats `@cache(format="name")` can name, by name."""
+        return self._formats
+
     def _file(self, key: bytes) -> Path:
         """Where `key`'s entry lives."""
         name = key.hex()
         return self._root / name[:2] / name
 
-    def get(self, key: bytes) -> object:
+    def get(self, key: bytes, format: Format | None = None) -> object:  # noqa: A002  # the name `@cache` gives it
         """The value stored under `key`, or `MISSING`.
 
-        An entry written by another Python, serializer or library version is a
-        quiet miss, left for the next `put` to replace. An entry that cannot be read
-        back is a miss too: it is removed, with a warning.
+        An entry written by another Python, format or library version is a quiet
+        miss, left for the next `put` to replace. An entry that cannot be read back
+        is a miss too: it is removed, with a warning.
+
+        Args:
+            key: The entry's key.
+            format: How the entry was written; None for the store's default pair.
         """
         path = self._file(key)
         try:
@@ -344,7 +460,7 @@ class DiskCache:
             _warn(f"cannot read cache entry {path}: {error}")
             return MISSING
         try:
-            value = self._decode(data)
+            value = self._decode(data, format or self._default)
         except _OtherVersionError:
             return MISSING
         except Exception as error:  # noqa: BLE001  # any failure to load is a miss
@@ -356,14 +472,19 @@ class DiskCache:
             os.utime(path)
         return value
 
-    def put(self, key: bytes, value: object) -> None:
+    def put(self, key: bytes, value: object, format: Format | None = None) -> None:  # noqa: A002  # as in `get`
         """Stores `value` under `key`, replacing any entry there.
 
         A value that cannot be serialized, or a directory that cannot be written,
         skips the write with a warning.
+
+        Args:
+            key: The entry's key.
+            value: What to store.
+            format: How to write it; None for the store's default pair.
         """
         try:
-            data = self._encode(value)
+            data = self._encode(value, format or self._default)
         except Exception as error:  # noqa: BLE001  # any failure skips the write
             kind = type(value).__qualname__
             _warn(f"cannot serialize a value of type {kind!r} to cache it: {error}")
@@ -479,13 +600,15 @@ class DiskCache:
         except OSError as error:
             _warn(f"cannot remove cache file {path}: {error}", depth=2)
 
-    def _encode(self, value: object) -> bytes:
-        """An entry's bytes for `value`."""
-        payload = self._dumps(value)
-        header = json.dumps(self._header(_libraries(value))).encode()
+    @staticmethod
+    def _encode(value: object, format: Format) -> bytes:  # noqa: A002  # as in `get`
+        """An entry's bytes for `value`, written with `format`."""
+        payload = format.dumps(value)
+        header = json.dumps(_header(format, _libraries(value))).encode()
         return _pack(header, payload)
 
-    def _decode(self, data: bytes) -> object:
+    @staticmethod
+    def _decode(data: bytes, format: Format) -> object:  # noqa: A002  # as in `get`
         """The value in an entry's bytes, checking its header against this process."""
         encoded, payload = _unpack(data)
         header = json.loads(encoded)
@@ -496,20 +619,34 @@ class DiskCache:
         ):
             msg = "the entry's header is malformed"
             raise _CorruptEntryError(msg)
-        expected = self._header(
-            {str(name): distribution_version(str(name)) for name in libraries}
+        expected = _header(
+            format, {str(name): distribution_version(str(name)) for name in libraries}
         )
         if header != expected:
             raise _OtherVersionError
-        return self._loads(payload)
+        return format.loads(payload)
 
-    def _header(self, libraries: dict[str, str | None]) -> dict[str, object]:
-        """The header this process writes for a value of these libraries."""
-        return {
-            "serializer": self._serializer,
-            "python": sys.version,
-            "libraries": libraries,
-        }
+
+def _header(format: Format, libraries: dict[str, str | None]) -> dict[str, object]:  # noqa: A002  # as in `DiskCache.get`
+    """The header this process writes for a value of these libraries."""
+    return {"serializer": format.name, "python": sys.version, "libraries": libraries}
+
+
+def _formats(default: Format, given: Iterable[Format]) -> Mapping[str, Format]:
+    """The built-in formats, the default pair and `given`, by name.
+
+    The default pair takes its own name, in place of a built-in format of that name:
+    entries it writes carry that name, so a node naming it reads them back.
+    """
+    formats = {**_BUILT_IN, default.name: default}
+    for item in given:
+        if not isinstance(item, Format):
+            msg = f"formats must be Format objects, not {type(item).__qualname__}"
+            raise TypeError(msg)
+        if formats.setdefault(item.name, item) != item:
+            msg = f"two formats are named {item.name!r}"
+            raise ValueError(msg)
+    return MappingProxyType(formats)
 
 
 # The mode of the directories a store makes: its owner's alone.
@@ -555,8 +692,17 @@ def _reopen(
     dumps: Callable[[object], bytes],
     loads: Callable[[bytes], object],
     serializer: str,
+    formats: tuple[Format, ...] = (),
 ) -> DiskCache:
-    """Opens a `DiskCache` from the arguments a pickled one was made with."""
+    """Opens a `DiskCache` from the arguments a pickled one was made with.
+
+    `formats` defaults to none, so a store pickled before formats existed loads.
+    """
     return DiskCache(
-        path, max_bytes=max_bytes, dumps=dumps, loads=loads, serializer=serializer
+        path,
+        max_bytes=max_bytes,
+        dumps=dumps,
+        loads=loads,
+        serializer=serializer,
+        formats=formats,
     )

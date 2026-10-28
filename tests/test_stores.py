@@ -1,5 +1,6 @@
 """Tests for the cache stores: in memory and on disk, and how each fails safe."""
 
+import enum
 import gc
 import json
 import os
@@ -18,8 +19,8 @@ from typing import override
 import pytest
 
 import fnloom
-from fnloom import MISSING, CacheStore, CacheWarning, DiskCache, MemoryCache
-from fnloom._stores import _pack, _unpack
+from fnloom import MISSING, CacheStore, CacheWarning, DiskCache, Format, MemoryCache
+from fnloom._stores import JSON, PICKLE, _pack, _unpack
 
 THREADS = 8
 KEYS_PER_THREAD = 10_000
@@ -224,6 +225,78 @@ def test_memory_is_thread_safe() -> None:
     for thread in range(THREADS):
         for n in range(KEYS_PER_THREAD):
             assert store.get(_key(thread * KEYS_PER_THREAD + n)) == (thread, n)
+
+
+def test_format_checks_its_name_and_pair() -> None:
+    """A format is named by a non-empty str and holds two callables."""
+    for bad in ("", None):
+        with pytest.raises(TypeError, match="non-empty str"):
+            Format(bad, _identity, _identity_loads)  # ty: ignore[invalid-argument-type]
+    with pytest.raises(TypeError, match="callable"):
+        Format("mine", _identity, None)  # ty: ignore[invalid-argument-type]
+
+
+def test_json_stores_only_what_loads_back_exactly() -> None:
+    """JSON writes plain JSON values, and refuses whatever would load back changed."""
+    value = {"a": [1, 2.5, "three", None, True], "b": {"c": []}}
+    data = JSON.dumps(value)
+    assert json.loads(data) == value
+    assert JSON.loads(data) == value
+
+    class Kind(enum.IntEnum):
+        ONE = 1
+
+    refused = [
+        ((1, 2), "a tuple"),
+        ({"a": [1, (2,)]}, r"tuple at \['a'\]\[1\]"),
+        ({1: "a"}, "int key 1"),
+        ({"a": Kind.ONE}, r"Kind at \['a'\]"),
+        ({1, 2}, "set is not JSON serializable"),
+    ]
+    looped: list[object] = [1]
+    looped.append(looped)
+    for nan_or_loop, match in (
+        ([float("nan")], "Out of range float"),
+        (looped, "Circular reference"),
+    ):
+        with pytest.raises(ValueError, match=match):
+            JSON.dumps(nan_or_loop)
+    for bad, match in refused:
+        with pytest.raises(TypeError, match=match):
+            JSON.dumps(bad)
+
+
+def test_disk_writes_and_reads_each_format_by_its_name(tmp_path: Path) -> None:
+    """An entry carries its format's name; read with another format it is a miss."""
+    store = DiskCache(tmp_path)
+    store.put(_key(1), {"a": [1, 2]}, format=JSON)
+    data = _entry(tmp_path, _key(1)).read_bytes()
+    header, payload = _unpack(data)
+    assert json.loads(header)["serializer"] == "json"
+    assert json.loads(payload) == {"a": [1, 2]}
+    assert store.get(_key(1), format=JSON) == {"a": [1, 2]}
+    assert store.get(_key(1)) is MISSING
+    assert store.get(_key(1), format=PICKLE) is MISSING
+    with pytest.warns(CacheWarning, match="json cannot store a tuple"):
+        store.put(_key(2), (1, 2), format=JSON)
+    assert store.get(_key(2), format=JSON) is MISSING
+
+
+def test_disk_knows_the_built_in_the_default_and_the_given_formats(
+    tmp_path: Path,
+) -> None:
+    """`formats` holds pickle, json, the default pair under its name, and the rest."""
+    mine = Format("mine", _identity, _identity_loads)
+    store = DiskCache(tmp_path, formats=[mine])
+    assert dict(store.formats) == {"pickle": PICKLE, "json": JSON, "mine": mine}
+    raw = DiskCache(tmp_path, dumps=_identity, loads=_identity_loads)
+    assert raw.formats["pickle"] == Format("pickle", _identity, _identity_loads)
+    with pytest.raises(ValueError, match="two formats are named 'json'"):
+        DiskCache(tmp_path, formats=[Format("json", _identity, _identity_loads)])
+    with pytest.raises(ValueError, match="two formats are named 'mine'"):
+        DiskCache(tmp_path, formats=[mine, Format("mine", _identity, _identity)])
+    with pytest.raises(TypeError, match="Format objects, not str"):
+        DiskCache(tmp_path, formats=["json"])  # ty: ignore[invalid-argument-type]
 
 
 def test_disk_round_trip_and_layout(tmp_path: Path) -> None:
@@ -580,7 +653,7 @@ def test_disk_keeps_an_entry_rewritten_while_a_bad_one_was_read(
     writer = DiskCache(tmp_path, dumps=_identity, loads=_identity_loads, serializer="b")
     store.put(_key(1), b"old")
 
-    def decode_then_rewrite(data: bytes) -> object:
+    def decode_then_rewrite(data: bytes, _format: Format) -> object:
         # Another process replaces the entry after this one read it, before it
         # finds what it read unreadable.
         writer.put(_key(1), b"new")

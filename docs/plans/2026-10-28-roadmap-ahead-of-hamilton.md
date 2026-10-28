@@ -44,7 +44,7 @@ and the design's change log takes a row when the item is approved.
 | `@pipe_input`, `@pipe_output`, `@mutate`, `@step` | Plan 8 ("step injection") |
 | `@inject`, `@resolve` | Plan 8 ("dependency injection by config") |
 | `@subdag`, `@does`, `@schema`, `@dataloader`, `@datasaver`, `@load_from`, `@save_to` | Plan 9 decides each. Default: not planned, with a register row naming the fnloom way to get the same result |
-| `@cache(format=...)`, per-format result stores | Plan 4 follow-up. Today `DiskCache` takes one `dumps`/`loads` pair |
+| `@cache(format=...)`, per-format result stores | Done in the Plan 4 follow-up: `fnloom.Format`, `"pickle"` and `"json"` built in, more through `DiskCache(formats=...)`; resolved at build (Q55), and `json` stores only what loads back exactly (Q54) |
 
 ### Execution
 
@@ -67,7 +67,7 @@ and the design's change log takes a row when the item is approved.
 
 | Item | Plan |
 |---|---|
-| A cold run with `MemoryCache` costs 5–6× an uncached run, against a target of 1.5× (issue #10) | Plan 4 follow-up, before Plan 5 |
+| A cold run with `MemoryCache` costs 5–6× an uncached run, against a target of 1.5× (issue #10) | Plan 4 follow-up: now 2.2× and 1.9×, with the walk and the memory store native. The target needs restating for trivial nodes: one BLAKE3 block costs half an uncached trivial node |
 
 ### Public helpers fnloom keeps private
 

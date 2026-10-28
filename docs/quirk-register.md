@@ -18,7 +18,7 @@ workload.
 - **DEFER**: to be decided later.
 
 **Evidence.** The behaviours below were first reported by an earlier investigation (2026-10-22) against Hamilton 1.90.0
-and partly confirmed by reading its source. Rows Q4, Q5, Q6, Q7, Q10, Q16, Q22, Q25 to Q48 and Q50 to Q53 have
+and partly confirmed by reading its source. Rows Q4, Q5, Q6, Q7, Q10, Q16, Q22, Q25 to Q48 and Q50 to Q55 have
 differential tests in `tests/differential/test_deliberate_differences.py`, each marked `deliberate("<id>")`, that
 assert Hamilton's behaviour and fnloom's side by side; Q3 and Q23 are covered by fnloom-only tests
 (`tests/test_driver.py`, `tests/test_binding.py` and the executor's unit tests), and Q49, a KEEP row, by
@@ -77,6 +77,8 @@ it is relied on. Source line numbers are deliberately omitted.
 | Q51 | F12: a truncated or corrupt stored result fails the run with the unpickling error. | FIX | Entries are written atomically, and any entry that cannot be read is a miss: it is removed with a `CacheWarning` and the node recomputes. |
 | Q52 | Something that is not a module, such as a function, passed to `Builder.with_modules` builds an empty graph, without error: the mistake surfaces at `execute` as an unknown output. | REFUSE | `build`, `Builder.with_modules` and the `Builder` constructor raise `TypeError: expected a module, got function 'f'`, naming the first item that is not a module (any `types.ModuleType` is one). |
 | Q53 | A module that contributes no node builds an empty part of the graph, without error: a package whose `__init__` only re-exports functions defined in its submodules, a module of private helpers, or a hand-built `types.ModuleType` whose functions' `__module__` names another module. The user finds out at `execute`, as an unknown output (Hamilton issue #1281). | REFUSE | Build raises one `ValueError` naming every such module and each function it holds with why it is not a node: `'f' is defined in 'pkg.impl'` (a re-export, a node of the module that defines it) or `'_g' is private`; a module with no functions at all says so. Building from no modules at all is still an empty driver. |
+| Q54 | `@cache(format="json")` stores a dict through a JSON saver that loads a tuple inside it back as a list, so the first hit returns a different value than the node computed, with no warning. | FIX | The built-in `json` format refuses any value that would not load back as the same types: a tuple, a set, a key that is not a `str`, a subclass such as an enum. The write is skipped with a `CacheWarning`, and the node runs again. |
+| Q55 | `@cache(format=...)` naming a format no data adapter registers runs the node, then fails the run with `KeyError`, on every run. | REFUSE | Formats are resolved against the store when the driver is built. An unknown name, a `Format` unlike the store's of the same name, or a store that takes no formats is a `ValueError` naming each node. A `MemoryCache` holds values, never bytes, so it takes any format and ignores it. fnloom has no dependencies, so only `pickle` and `json` are built in: Hamilton's pandas-backed names such as `parquet` and `csv` are given as a `fnloom.Format`, or added to the store with `DiskCache(formats=...)`. |
 
 ## Not yet decided
 

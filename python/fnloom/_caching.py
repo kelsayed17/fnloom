@@ -17,6 +17,7 @@ run as without the cache, and nothing is stored for that node.
 
 import threading
 import warnings
+from collections import abc
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
 
@@ -25,7 +26,7 @@ from fnloom._codeversion import UncacheableError, code_version
 from fnloom._decorators import CacheBehavior, CachePolicy, Source, decorations
 from fnloom._fingerprint import fingerprint, forget_class_versions
 from fnloom._scan import core_inputs
-from fnloom._stores import MISSING, CacheStore, CacheWarning, MemoryCache
+from fnloom._stores import MISSING, CacheStore, CacheWarning, Format, MemoryCache
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -175,6 +176,47 @@ def _node_key(
     return NodeKey(static, reason, policy.behavior, tuple(params))
 
 
+def _formats(store: CacheStore, nodes: Sequence[NodeDef]) -> dict[str, Format]:
+    """Each node's format, resolved against `store`, every unknown one listed at once.
+
+    A `MemoryCache` holds values, never bytes, so it takes any format and ignores it.
+    Another store takes formats when it has a `formats` mapping, as `DiskCache` does.
+    """
+    formats_of: object = getattr(store, "formats", None)
+    known = formats_of if isinstance(formats_of, abc.Mapping) else None
+    formats: dict[str, Format] = {}
+    problems: list[str] = []
+    for node in nodes:
+        policy = decorations(node.origin).cache
+        wanted = None if policy is None else policy.format
+        if wanted is None or isinstance(store, MemoryCache):
+            continue
+        name = wanted.name if isinstance(wanted, Format) else wanted
+        if known is None:
+            problems.append(
+                f"node {node.name!r} names cache format {name!r}, but "
+                f"{type(store).__qualname__} takes no formats"
+            )
+        elif isinstance(wanted, Format):
+            if known.get(name, wanted) != wanted:
+                problems.append(
+                    f"node {node.name!r} names a cache format {name!r} unlike the "
+                    "store's format of that name"
+                )
+            formats[node.name] = wanted
+        elif (found := known.get(name)) is None:
+            listed = ", ".join(repr(n) for n in sorted(known))
+            problems.append(
+                f"node {node.name!r} names cache format {name!r}, which the store "
+                f"does not know (it knows {listed})"
+            )
+        else:
+            formats[node.name] = found
+    if problems:
+        raise ValueError("; ".join(sorted(problems)))
+    return formats
+
+
 def _qualname(node: NodeDef) -> str:
     """The qualified name of `node`'s function."""
     qualname = getattr(node.origin, "__qualname__", None)
@@ -194,19 +236,26 @@ class Cache:
         store: Where results are kept.
         keys: Each node's `NodeKey`, by name.
         sources: The distinct nodes and inputs each node reads, by name.
+        formats: The `Format` of each node that names one, by name.
     """
 
     store: CacheStore
     keys: Mapping[str, NodeKey]
     sources: Mapping[str, tuple[str, ...]]
+    formats: Mapping[str, Format]
 
     @classmethod
     def of(cls, store: CacheStore, nodes: Sequence[NodeDef]) -> Cache:
-        """The cache over `store` for the built `nodes`."""
+        """The cache over `store` for the built `nodes`.
+
+        Raises:
+            ValueError: A node's `@cache(format=...)` names a format the store does
+                not know, or the store takes no formats.
+        """
         # Classes may have been edited since the last build: read them again.
         forget_class_versions()
         sources = {n.name: tuple(s for s, _ in core_inputs(n.params)) for n in nodes}
-        return cls(store, node_keys(nodes), sources)
+        return cls(store, node_keys(nodes), sources, _formats(store, nodes))
 
 
 class _Preparer(Protocol):
@@ -252,6 +301,7 @@ class CacheRun:
     ) -> None:
         """Holds the request's plan, compiled with no hits, and its key plan."""
         self._store = cache.store
+        self._formats = cache.formats
         self._graph = graph
         self._plan = plan
         self._outputs = list(outputs)
@@ -501,6 +551,8 @@ class CacheRun:
     def _get(self, key: bytes, name: str, warned: set[str]) -> object:
         """The store's value for `key`; `MISSING` when the store raises."""
         try:
+            if (format_ := self._formats.get(name)) is not None:
+                return self._store.get(key, format=format_)  # ty: ignore[unknown-argument]  # checked at build: the store takes formats
             return self._store.get(key)
         except Exception as error:  # noqa: BLE001  # a store error is a miss
             _warn_once(
@@ -517,6 +569,7 @@ class CacheRun:
         """What stores each computed value as its node succeeds, and records it."""
         store = self._store
         behaviors = self._behaviors
+        formats = self._formats
 
         def on_value(name: str, value: object) -> None:
             if values is not None:
@@ -527,7 +580,10 @@ class CacheRun:
             if key is None or behaviors[name] != "default":
                 return
             try:
-                store.put(key, value)
+                if (format_ := formats.get(name)) is not None:
+                    store.put(key, value, format=format_)  # ty: ignore[unknown-argument]  # as in `_get`
+                else:
+                    store.put(key, value)
             except Exception as error:  # noqa: BLE001  # a store error skips the write
                 _warn_once(
                     warned, name, f"cannot store node {name!r} in the cache: {error!r}"
