@@ -37,6 +37,19 @@ driver.execute(["label", "total"], inputs={"price": 2.5, "quantity": 4})
 # -> {'label': '10.00 EUR', 'total': 10.0}
 ```
 
+You can also pass a function instead of its name. It means the node the function makes in this driver, and the
+result is still keyed by the node's name:
+
+```python
+driver.execute([pricing.label], inputs={"price": 2.5, "quantity": 4})
+# -> {'label': '10.00 EUR'}
+```
+
+fnloom matches the function itself, never its name. An `@extract_fields` function means its producer, not its fields. A
+function that makes several nodes, such as a `@parameterize` one, raises a `TypeError` listing its rows, so pass their
+names. A function that makes none, such as one from another module, an unselected `@config` variant or a lambda, raises
+a `ValueError`.
+
 Only the nodes your outputs need will run. You must supply every required input on the way, and every name you pass
 must be a node in the graph. A misspelled input is an error, never a value that's quietly ignored.
 

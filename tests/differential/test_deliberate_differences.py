@@ -198,11 +198,55 @@ def test_q32_functions_that_do_not_return_their_value(source: str, made: str) ->
 
 @pytest.mark.deliberate("Q30")
 def test_q30_final_vars_given_as_functions() -> None:
-    """Hamilton maps a function to its node; fnloom accepts only names for now."""
+    """A function means the node it makes, by identity; Hamilton maps its `__name__`.
+
+    They agree on a plain function. A `@parameterize` function makes several nodes:
+    Hamilton asks for the node named like the function, which does not exist (H5.3b),
+    and fnloom raises `TypeError` listing the rows. Hamilton accepts a function whose
+    `__module__` and `__name__` are forged (H5.3e); fnloom matches the object itself.
+    """
     module = load_fixture("chain")
     outputs: list[Any] = [module.c]
     assert run_hamilton([module], outputs, {"a": 1}) == Outcome({"c": 4}, None)
-    assert run_fnloom([module], outputs, {"a": 1}) == Outcome(None, "TypeError")
+    assert run_fnloom([module], outputs, {"a": 1}) == Outcome({"c": 4}, None)
+
+    hamilton_module = make_module(
+        "differential_q30_h",
+        """
+        from hamilton.function_modifiers import parameterize, value
+
+
+        @parameterize(p1={"y": value(1)}, p2={"y": value(2)})
+        def rows(x: int, y: int) -> int:
+            return x + y
+        """,
+    )
+    fnloom_module = make_module(
+        "differential_q30_f",
+        """
+        from fnloom import parameterize, value
+
+
+        @parameterize(p1={"y": value(1)}, p2={"y": value(2)})
+        def rows(x: int, y: int) -> int:
+            return x + y
+        """,
+    )
+    assert run_hamilton([hamilton_module], [hamilton_module.rows], {"x": 1}) == Outcome(
+        None, "ValueError"
+    )
+    with pytest.raises(TypeError, match=r"makes 2 nodes: pass 'p1', 'p2'"):
+        fnloom.build(fnloom_module).execute([fnloom_module.rows], inputs={"x": 1})
+    assert run_fnloom([fnloom_module], ["p1", "p2"], {"x": 1}) == Outcome(
+        {"p1": 2, "p2": 3}, None
+    )
+
+    def forged() -> int:
+        return 0
+
+    forged.__module__, forged.__name__ = module.__name__, "c"
+    assert run_hamilton([module], [forged], {"a": 1}) == Outcome({"c": 4}, None)
+    assert run_fnloom([module], [forged], {"a": 1}) == Outcome(None, "ValueError")
 
 
 @pytest.mark.deliberate("Q31")

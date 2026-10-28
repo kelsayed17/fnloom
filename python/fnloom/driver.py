@@ -16,6 +16,8 @@ from typing import Any, Literal, Protocol, override
 from fnloom import _async, _core, _types
 from fnloom._caching import Cache, CacheOutcome, CacheRun
 from fnloom._decorators import Source
+from fnloom._extract import is_generated
+from fnloom._requests import output_names as _requested_names
 from fnloom._scan import NodeDef, core_inputs, resolve, scan
 from fnloom._stores import CacheStore
 from fnloom._view import (
@@ -80,29 +82,18 @@ class _Request:
 
     @staticmethod
     def check(
-        final_vars: Sequence[str],
+        final_vars: Sequence[str | Callable[..., object]],
+        views: NodeViews,
         inputs: Mapping[str, object] | None,
         overrides: Mapping[str, object] | None,
     ) -> _PlanKey:
-        """The outputs, copied, and the input and override names of a request.
+        """The outputs as names, and the input and override names of a request.
 
-        `TypeError` for a bare `str`, or an output that is not a `str` (Q6). The
-        names are checked against the graph when the plan is compiled.
+        A function becomes its node's name (Q30). `TypeError` for a bare `str`
+        (Q6), or an output that is neither a name nor a function. The names are
+        checked against the graph when the plan is compiled.
         """
-        return (_check_final_vars(final_vars), _names(inputs), _names(overrides))
-
-
-def _check_final_vars(final_vars: Sequence[str]) -> tuple[str, ...]:
-    if isinstance(final_vars, str):
-        msg = "final_vars must be a sequence of names, not a single str"
-        raise TypeError(msg)
-    # Copied before checking, so a one-shot iterator is read once and not exhausted.
-    names = tuple(final_vars)
-    for item in names:
-        if not isinstance(item, str):
-            msg = f"final_vars items must be str, got {type(item).__name__}"
-            raise TypeError(msg)
-    return names
+        return (_requested_names(final_vars, views), _names(inputs), _names(overrides))
 
 
 # No names, made once: calling `frozenset[str]` costs more than the check it serves.
@@ -416,12 +407,15 @@ class Driver:
 
     def prepare(
         self,
-        final_vars: Sequence[str],
+        final_vars: Sequence[str | Callable[..., object]],
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
     ) -> PreparedPlan:
-        """Returns the plan for this request shape, compiling it on first use."""
+        """Returns the plan for this request shape, compiling it on first use.
+
+        A function in `final_vars` means its node (Q30); see `output_names`.
+        """
         last = self._last
         if (
             last is not None
@@ -433,7 +427,7 @@ class Driver:
             and _keys(overrides) == last[2]
         ):
             return last[3]
-        key = _Request.check(final_vars, inputs, overrides)
+        key = _Request.check(final_vars, self._nodes, inputs, overrides)
         with self._plans_lock:
             prepared = self._plans.pop(key, None)
             if prepared is None:
@@ -443,9 +437,9 @@ class Driver:
                 del self._plans[next(iter(self._plans))]
             # A list is copied, so a list changed after this call is not a repeat.
             if type(final_vars) is list:
-                self._last = (list(final_vars), key[1], key[2], prepared)
+                self._last = (list(key[0]), key[1], key[2], prepared)
             elif type(final_vars) is tuple:
-                self._last = (final_vars, key[1], key[2], prepared)
+                self._last = (key[0], key[1], key[2], prepared)
         return prepared
 
     def _compile(self, key: _PlanKey) -> PreparedPlan:
@@ -503,7 +497,7 @@ class Driver:
 
     def execute(
         self,
-        final_vars: Sequence[str],
+        final_vars: Sequence[str | Callable[..., object]],
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
@@ -511,13 +505,17 @@ class Driver:
         """Computes `final_vars`, reusing the cached plan for the same request shape.
 
         The result holds each requested output once, in the order first requested.
+        A function in `final_vars` stands for the node it makes in this driver,
+        matched by identity (Q30): the result is still keyed by the node's name.
+        `TypeError` when it makes several nodes, as a `@parameterize` function does,
+        and `ValueError` when it makes none.
         """
         plan = self.prepare(final_vars, inputs=inputs, overrides=overrides)
         return plan.run(inputs=inputs, overrides=overrides)
 
     def explain_cache(
         self,
-        final_vars: Sequence[str],
+        final_vars: Sequence[str | Callable[..., object]],
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
@@ -752,7 +750,7 @@ class AsyncDriver:
 
     def prepare(
         self,
-        final_vars: Sequence[str],
+        final_vars: Sequence[str | Callable[..., object]],
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
@@ -781,7 +779,7 @@ class AsyncDriver:
 
     async def execute(
         self,
-        final_vars: Sequence[str],
+        final_vars: Sequence[str | Callable[..., object]],
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
@@ -797,7 +795,7 @@ class AsyncDriver:
 
     def explain_cache(
         self,
-        final_vars: Sequence[str],
+        final_vars: Sequence[str | Callable[..., object]],
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
@@ -1091,7 +1089,9 @@ class Builder:
             unmatched = {n: why for n, why in unmatched.items() if n not in names}
             if absent := _unmatched_edges(nodes, unmatched):
                 raise ValueError(absent)
-        views = node_views(nodes)
+        views = node_views(
+            nodes, frozenset(node.name for node in nodes if is_generated(node))
+        )
         graph = _graph_of(nodes)
         if mismatches := _edge_mismatches(views.functions):
             raise ValueError("\n".join(mismatches))

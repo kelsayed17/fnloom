@@ -16,6 +16,7 @@ from fnloom._types import type_matches
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
+    from collections.abc import Set as AbstractSet
 
     from fnloom._scan import NodeDef
 
@@ -199,11 +200,20 @@ class NodeViews(Mapping[str, NodeView]):
     """
 
     def __init__(
-        self, functions: Mapping[str, NodeView], inputs: Mapping[str, object]
+        self,
+        functions: Mapping[str, NodeView],
+        inputs: Mapping[str, object],
+        generated: AbstractSet[str] = frozenset(),
     ) -> None:
-        """Holds the function nodes' views, and each input's type by name."""
+        """Holds the function nodes' views, and each input's type by name.
+
+        `generated` names the nodes made from a function's output, such as an
+        extracted field: they are not what their function stands for in a request.
+        """
         self._functions = functions
         self._inputs = inputs
+        self._generated = generated
+        self._owners: Mapping[int, tuple[str, ...]] | None = None
         self._made: dict[str, NodeView] = {}
         self._names: list[str] | None = None
 
@@ -212,6 +222,25 @@ class NodeViews(Mapping[str, NodeView]):
         if (view := self._functions.get(name)) is not None:
             return view.type
         return self._inputs[name]
+
+    @property
+    def owners(self) -> Mapping[int, tuple[str, ...]]:
+        """The nodes each function stands for, by `id` of the function, sorted.
+
+        A function is matched by identity, never by name. The nodes of an
+        `@extract_*` function stand for its producer alone, and a `@parameterize`
+        function's are its rows. Made on first use, then shared and never changed.
+        """
+        owners = self._owners
+        if owners is None:
+            built: dict[int, list[str]] = {}
+            for name, view in self._functions.items():
+                if view.origin is not None and name not in self._generated:
+                    built.setdefault(id(view.origin), []).append(name)
+            owners = {key: tuple(sorted(names)) for key, names in built.items()}
+            # Two threads may both build it: the two are equal, and one is kept.
+            self._owners = owners
+        return owners
 
     @property
     def functions(self) -> Mapping[str, NodeView]:
@@ -271,11 +300,14 @@ def _doc(fn: Callable[..., object]) -> str | None:
     return inspect.getdoc(fn)
 
 
-def node_views(nodes: Sequence[NodeDef]) -> NodeViews:
+def node_views(
+    nodes: Sequence[NodeDef], generated: AbstractSet[str] = frozenset()
+) -> NodeViews:
     """The views of `nodes` and of the inputs they read, read-only, sorted by name.
 
     `nodes` carry resolved annotations. `ValueError` when two of an input's
-    consumers declare types that match neither way.
+    consumers declare types that match neither way. `generated` names the nodes
+    made from a function's output, such as extracted fields.
     """
     # Positional, every field in order: a view is made per node, so it is kept cheap.
     functions = {
@@ -292,4 +324,4 @@ def node_views(nodes: Sequence[NodeDef]) -> NodeViews:
         )
         for node in nodes
     }
-    return NodeViews(functions, _input_types(nodes))
+    return NodeViews(functions, _input_types(nodes), generated)
