@@ -340,7 +340,7 @@ def _templated(
         )
         try:
             docs[row] = template.format_map(fields)
-        except (ValueError, AttributeError, IndexError, TypeError) as error:
+        except Exception as error:  # noqa: BLE001  # any failing format names the row
             problems.append(f"row {row!r}: {error}")
         problems.extend(
             f"row {row!r}: placeholder {{{key}}} is not {_OUTPUT_NAME!r} or a "
@@ -466,8 +466,13 @@ def parameterize_sources[F: Callable[..., object]](
         type_lines.extend(
             f"row {name!r} parameter {param!r}: a source is a str, got "
             f"{type(named).__name__}"
-            for param, named in sorted(row.items())
+            for param, named in sorted(row.items(), key=lambda item: repr(item[0]))
             if not isinstance(named, str)
+        )
+        names: list[object] = list(row)
+        type_lines.extend(
+            f"row {name!r}: parameter name {shown} is not a str"
+            for shown in sorted(repr(n) for n in names if not isinstance(n, str))
         )
         bound[name] = {param: Source(named) for param, named in row.items()}
     if type_lines:
@@ -512,7 +517,9 @@ def parameterize_values[F: Callable[..., object]](
             continue
         if name in rows:
             repeated.add(name)
-        rows[name] = ({parameter: Value(assigned)}, doc)
+        # A `value(...)` given as the value is used as it is, as in Hamilton.
+        constant = assigned if isinstance(assigned, Value) else Value(assigned)
+        rows[name] = ({parameter: constant}, doc)
     if problems:
         raise TypeError("; ".join(sorted(problems)))
     if repeated:

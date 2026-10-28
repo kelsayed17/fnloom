@@ -3393,6 +3393,17 @@ def f(xs: list[int]) -> int:
     """has {xs} here"""
     return 1
 ''',
+    "positional": '''
+@parameterize(a={"p": value(1)})
+def f(p: int) -> int:
+    """has {0} here"""
+    return p
+''',
+    "default": """
+@parameterize(a={"xs": group(source("p"), source("q"))})
+def f(xs: list[int] = [7]) -> int:  # noqa: B006
+    return sum(xs)
+""",
     "one": """
 @parameterize(a=({"p": value(1)},))
 def f(p: int) -> int:
@@ -3476,6 +3487,18 @@ def test_q82_parameterize_sugar_is_checked_when_decorating() -> None:
     assert (kind, "row" in text) == ("ValueError", False)
     kind, text = _refused(ours["brace"])
     assert (kind, "row 'a':" in text) == ("ValueError", True)
+    kind, text = _refused(hamilton["positional"])
+    assert (kind, "positional fields" in text, "row" in text) == (
+        "ValueError",
+        True,
+        False,
+    )
+    kind, text = _refused(ours["positional"])
+    assert (kind, "positional fields" in text, "row 'a':" in text) == (
+        "ValueError",
+        True,
+        True,
+    )
     # A group prints as its name in Hamilton, as its items joined in fnloom.
     assert hamilton_graph("group").graph.nodes["a"].documentation == "has xs here"
     built = fnloom.build(_decorated(ours["group"]))
@@ -3489,8 +3512,9 @@ def test_q82_parameterize_sugar_is_checked_when_decorating() -> None:
     assert hamilton_graph("number").graph.nodes["a"].documentation == int("5")
     assert _refused(ours["number"])[0] == "TypeError"
     # A non-str source: Hamilton fails when the graph is used, fnloom when decorating.
+    built_source = hamilton_graph("source")
     with pytest.raises(TypeError, match="expected str instance, int found"):
-        hamilton_graph("source").execute(["a"], inputs={"5": 1})
+        built_source.execute(["a"], inputs={"5": 1})
     kind, text = _refused(ours["source"])
     assert (kind, "a source is a str, got int" in text) == ("TypeError", True)
     # An empty assigned_output builds no node in Hamilton and is refused by fnloom.
@@ -3503,6 +3527,17 @@ def test_q82_parameterize_sugar_is_checked_when_decorating() -> None:
     )
     kind, text = _refused(ours["key"])
     assert (kind, "must be a (name, doc) tuple" in text) == ("TypeError", True)
+    # A group source is optional when the parameter has a default, so a partly
+    # supplied group is a raw KeyError; fnloom requires it and names the input.
+    optional = hamilton_graph("default")
+    assert optional.graph.nodes["a"].input_types["q"][1].name == "OPTIONAL"
+    with pytest.raises(KeyError, match="q"):
+        optional.execute(["a"], inputs={"p": 1})
+    required = fnloom.build(_decorated(ours["default"]))
+    assert required.inputs()["q"].required
+    with pytest.raises(ValueError, match="missing inputs: 'q'"):
+        required.execute(["a"], inputs={"p": 1})
+    assert required.execute(["a"], inputs={"p": 1, "q": 2}) == {"a": 3}
     # A mis-annotated group parameter is listed twice by Hamilton, once by fnloom.
     assert "xs (<class 'int'>), xs (<class 'int'>)" in _refused(hamilton["listed"])[1]
     once = _refused(ours["listed"])[1]

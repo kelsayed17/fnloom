@@ -28,7 +28,7 @@ from fnloom._decorators import (
 )
 from fnloom._functions import FunctionSource, NodeSpec
 from fnloom._namespaces import qualified
-from fnloom._types import SHALLOW, Rules, resolved_hints
+from fnloom._types import SHALLOW, Rules, Unresolved, opaque, resolved_hints
 from fnloom._view import Param
 
 if TYPE_CHECKING:
@@ -1006,7 +1006,13 @@ def resolve(nodes: Sequence[NodeDef], rules: Rules = SHALLOW) -> list[NodeDef]:
 def _resolved_param(p: Param, hint: object) -> Param:
     """`p` with its annotation resolved to `hint`: a group item's is the element."""
     if p.slot is not None:
-        hint = group_element(hint, is_list=isinstance(p.slot, int))
+        # A group whose element did not resolve is `Unresolved` as a whole; its
+        # element is read off the annotation as written (Q81).
+        hint = (
+            opaque(p.annotation)
+            if isinstance(hint, Unresolved)
+            else group_element(hint, is_list=isinstance(p.slot, int))
+        )
     return Param(p.name, p.binding, p.required, hint, p.slot)
 
 

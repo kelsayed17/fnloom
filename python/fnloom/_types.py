@@ -89,6 +89,18 @@ def _written(annotation: object) -> str:
     return _FORWARD_REF.sub(r"\1", annotationlib.type_repr(annotation))
 
 
+def opaque(annotation: object) -> object:
+    """`annotation`, or `Unresolved` with its text when a name in it did not resolve.
+
+    A string stands for a name that was never evaluated, so it is `Unresolved` too.
+    """
+    if isinstance(annotation, str):
+        return Unresolved(annotation)
+    if _unresolvable(annotation):
+        return Unresolved(_written(annotation))
+    return annotation
+
+
 def _parts(current: object, seen: set[int]) -> list[object] | None:
     """The annotations `current` is made of, or `None` when a name in it is unresolved.
 

@@ -4,7 +4,7 @@ import asyncio
 import re
 import sys
 import types
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, override
 
 import pytest
 
@@ -599,3 +599,174 @@ def test_a_group_runs_on_the_async_driver() -> None:
     assert asyncio.run(driver.execute(["total"], inputs={"a": 4, "b": 2})) == {
         "total": 42
     }
+
+
+_SLOT_TOTAL = """
+from fnloom import cache, group, parameterize, source, value
+
+@cache(version="1")
+@parameterize(r={{"xs": {group}}})
+def total(xs: dict[str, int]) -> int:
+    return xs.get("k", 0) * 100 + xs.get("j", 0)
+"""
+_FIVE = 5
+
+
+def test_group_cache_keys_include_the_slot() -> None:
+    """Renaming a dict key, or moving an item between slots, misses the cache."""
+    store = MemoryCache()
+
+    def run(group_source: str) -> object:
+        module = make_module("slots_a", _SLOT_TOTAL.format(group=group_source))
+        driver = fnloom.Builder().with_cache(store).with_modules(module).build()
+        return driver.execute(["r"], inputs={"a": _FIVE})["r"]
+
+    # The key renamed: same function and input, a different group.
+    assert run('group(k=source("a"))') == _FIVE * 100
+    assert run('group(j=source("a"))') == _FIVE
+    # Values moved between keys: the function sees different dicts.
+    module = make_module(
+        "slots_b",
+        """
+        from fnloom import cache, group, parameterize, value
+
+        @cache(version="1")
+        @parameterize(
+            first={"xs": group(k=value(1), j=value(2))},
+            second={"xs": group(j=value(1), k=value(2))},
+        )
+        def total(xs: dict[str, int]) -> int:
+            return xs["k"] * 100 + xs["j"]
+        """,
+    )
+    driver = fnloom.Builder().with_cache(store).with_modules(module).build()
+    assert driver.execute(["first", "second"]) == {"first": 102, "second": 201}
+
+
+def test_group_slot_changes_the_key_across_builds() -> None:
+    """Two builds of one function with different groups never share an entry."""
+    store = MemoryCache()
+    results = []
+    for group_source in ['group(k=source("a"))', 'group(j=source("a"))']:
+        module = make_module(
+            "slots_c",
+            f"""
+            from fnloom import cache, group, parameterize, source
+
+            @cache(version="1")
+            @parameterize(r={{"xs": {group_source}}})
+            def total(xs: dict[str, int]) -> int:
+                return 100 if "k" in xs else 5
+            """,
+        )
+        # Same module and function name in the key: only the group differs.
+        driver = fnloom.Builder().with_cache(store).with_modules(module).build()
+        results.append(driver.execute(["r"], inputs={"a": 5})["r"])
+    assert results == [100, _FIVE]
+
+
+def test_moving_a_source_between_a_parameter_and_a_group_misses() -> None:
+    """`p=source("a")` and `xs=group(source("a"))` are different keys."""
+    store = MemoryCache()
+    results = []
+    for index, binding in enumerate(
+        ['{"p": source("a")}', '{"p": group(source("a"))}']
+    ):
+        annotation = "int" if index == 0 else "list[int]"
+        module = make_module(
+            "slots_d",
+            f"""
+            from fnloom import cache, group, parameterize, source
+
+            @cache(version="1")
+            @parameterize(r={binding})
+            def total(p: {annotation}) -> int:
+                return 1 if isinstance(p, int) else 2
+            """,
+        )
+        driver = fnloom.Builder().with_cache(store).with_modules(module).build()
+        results.append(driver.execute(["r"], inputs={"a": 5})["r"])
+    assert results == [1, 2]
+
+
+_UNRESOLVED = """
+from typing import TYPE_CHECKING
+from fnloom import group, parameterize, source
+
+if TYPE_CHECKING:
+    from decimal import Decimal
+
+
+@parameterize(as_list={"xs": group(source("a"), source("b"))})
+def listed(xs: list[Decimal]) -> int:
+    return len(xs)
+
+
+@parameterize(as_dict={"ys": group(k=source("c"))})
+def keyed(ys: dict[str, Decimal]) -> int:
+    return len(ys)
+
+
+def other(a: Decimal, c: Decimal) -> int:
+    return 0
+"""
+
+
+def test_an_unresolved_group_element_is_the_element_not_the_whole() -> None:
+    """`list[Decimal]` with `Decimal` unresolved types each source `Decimal` (Q81)."""
+    from fnloom._types import Unresolved  # noqa: PLC0415  # only this test needs it
+
+    driver = fnloom.build(make_module("sugar_unresolved", _UNRESOLVED))
+    for name in ("a", "b", "c"):
+        assert driver.inputs()[name].type == Unresolved("Decimal"), name
+    with pytest.raises(TypeError, match=r"^a: .*import what it names at run time"):
+        driver.execute(["as_list"], inputs={"a": 1, "b": 2})
+
+
+def test_group_element_conflicts_are_real_conflicts() -> None:
+    """An unresolved element against a different consumer type is still refused."""
+    module = make_module(
+        "sugar_unresolved_conflict",
+        _UNRESOLVED + "\n\ndef third(a: int) -> int:\n    return a\n",
+    )
+    with pytest.raises(ValueError, match="conflicting types"):
+        fnloom.build(module)
+
+
+def test_parameterize_values_takes_a_value_unchanged() -> None:
+    """A `value(3)` given as the value is that constant, not a `Value` in a `Value`."""
+
+    @parameterize_values("p", {("n", "d"): value(3), ("m", None): 4})
+    def f(p: int) -> int:
+        return p
+
+    driver = fnloom.build(_module_of(f))
+    assert driver.execute(["n", "m"]) == {"n": 3, "m": 4}
+
+
+def test_any_failure_while_templating_names_the_row() -> None:
+    """A value whose `__format__` raises anything is reported with its row."""
+
+    class Broken:
+        @override
+        def __format__(self, spec: str) -> str:
+            msg = f"cannot format {spec!r}"
+            raise RuntimeError(msg)
+
+    def f(p: object) -> int:
+        """Shows {p}."""
+        return hash(p)
+
+    with pytest.raises(ValueError, match="row 'a': cannot format ''") as raised:
+        parameterize(a={"p": value(Broken())})(f)
+    assert "template" in str(raised.value)
+
+
+def test_parameterize_sources_reports_mixed_key_types_clearly() -> None:
+    """Parameter names of mixed types are listed, not a raw error from sorting."""
+    with pytest.raises(TypeError) as raised:
+        loose_sources(a={1: "x", "p": "y", 2.5: "z"})
+    assert str(raised.value) == (
+        "row 'a': parameter name 1 is not a str; "
+        "row 'a': parameter name 2.5 is not a str"
+    )
