@@ -7,9 +7,10 @@ plan's `recompute` nodes, in a nested run, then computes every key, walks back f
 the outputs to the first nodes
 the store holds, and runs the plan with those as overrides, so the core prunes their
 upstream. Each `default` node that runs is stored under its key as it succeeds;
-nothing else is ever looked up, so nothing else is stored. A field node of
-`@extract_fields` is keyed, so what reads it chains from its key, but is never
-looked up or stored: it always runs, so its check always runs. `explain`
+nothing else is ever looked up, so nothing else is stored. A field or column
+node of `@extract_fields` or `@extract_columns` is keyed, so what reads it chains
+from its key, but is never looked up or stored: it always runs, so its check
+always runs. `explain`
 reports what a run would do with each computed node, running nothing.
 
 The cache never fails a run: a store that raises is a miss or a skipped write,
@@ -58,7 +59,7 @@ class CacheOutcome(NamedTuple):
             the node runs and is stored; a `recompute` node is always one, with the
             reason `"policy recompute"`, and is never stored. `"uncacheable"`: the
             node has no key, so it always runs and is never stored. An
-            `@extract_fields` field node is always a miss, with the reason
+            `@extract_*` field or column node is always a miss, with the reason
             `"extracted field: always recomputed from its producer"`: it is
             keyed but never stored, so its check runs on every run. `"unknown"`:
             the key depends on the result of a `recompute` node, which only a run

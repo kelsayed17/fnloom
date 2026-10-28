@@ -88,12 +88,10 @@ def decorations(fn: Callable[..., object]) -> Decorations:
 _UNDECORATED = Decorations(None, MappingProxyType[str, str]({}))
 
 
-def too_many_rows(rows: Mapping[str, object]) -> str:
-    """Why extraction refuses these rows: it lowers one producer node."""
+def too_many_rows(rows: Mapping[str, object], decorator: str) -> str:
+    """Why `decorator`, an `extract_*`, refuses these rows: it lowers one node."""
     listed = ", ".join(repr(name) for name in sorted(rows))
-    return (
-        f"extract_fields needs one node, but parameterize makes {len(rows)}: {listed}"
-    )
+    return f"{decorator} needs one node, but parameterize makes {len(rows)}: {listed}"
 
 
 def _check_rows(
@@ -150,7 +148,8 @@ def parameterize[F: Callable[..., object]](
             msg = "function is already parameterized; apply parameterize once"
             raise ValueError(msg)
         if current.extract is not None and len(frozen) > 1:
-            raise ValueError(too_many_rows(frozen))
+            decorator = f"extract_{current.extract.kind}"
+            raise ValueError(too_many_rows(frozen, decorator))
         # Names only: annotations are evaluated at build, not when decorating.
         forward = annotationlib.Format.FORWARDREF
         params = set(inspect.signature(fn, annotation_format=forward).parameters)

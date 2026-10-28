@@ -238,7 +238,7 @@ def node_views(nodes: Sequence[NodeDef]) -> NodeViews:
             node.module,
             node.params,
             _read_only(node.tags),
-            _doc(node.origin),
+            _doc(node.origin) if node.doc is None else node.doc,
             node.config,
         )
         for node in nodes

@@ -1563,3 +1563,134 @@ def test_q63_tags_land_on_the_producer_too() -> None:
         driver = fnloom.build(fnloom_module)
         assert driver.nodes["a"].tags == {"owner": "z"}
         assert driver.nodes["p"].tags == {"owner": "z"}
+
+
+_HAMILTON_COLUMNS = "from hamilton.function_modifiers import extract_columns"
+_FNLOOM_COLUMNS = "from fnloom import extract_columns"
+
+_FRAME_AND_DICT = """
+import pandas as pd
+{decorator}
+
+@extract_columns("a")
+def frame() -> pd.DataFrame:
+    return pd.DataFrame({{"a": [1, 2]}})
+
+@extract_columns("b")
+def mapping() -> dict:
+    return {{"b": 3}}
+"""
+
+
+@pytest.mark.deliberate("Q64")
+def test_q64_extract_columns_needs_no_extension(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Hamilton without its pandas extension refuses a frame and a dict.
+
+    fnloom splits both: a frame into `pandas.Series`, read by name, and a dict
+    into columns typed `Any`.
+    """
+    pd = pytest.importorskip("pandas")
+    from hamilton import registry  # noqa: PLC0415  # only the Q64 tests need it
+
+    # As with autoload off and nothing loaded yet, whatever ran before.
+    monkeypatch.setattr(registry, "DF_TYPE_AND_COLUMN_TYPES", {})
+    with pytest.raises(InvalidDecoratorException, match="type we know about"):
+        make_module(
+            "differential_q64_h", _FRAME_AND_DICT.format(decorator=_HAMILTON_COLUMNS)
+        )
+    fnloom_module = make_module(
+        "differential_q64_f", _FRAME_AND_DICT.format(decorator=_FNLOOM_COLUMNS)
+    )
+    driver = fnloom.build(fnloom_module)
+    assert driver.nodes["a"].type is pd.Series
+    assert driver.nodes["b"].type is Any
+    result: dict[str, Any] = dict(driver.execute(["a", "b"]))
+    assert result["a"].tolist() == [1, 2]
+    assert result["b"] == 3  # noqa: PLR2004  # the value the producer returns
+
+
+_COLUMNS_FILLED = """
+import pandas as pd
+{decorator}
+
+@extract_columns("a", ("b", "The b column."), fill_with=0)
+def frame() -> pd.DataFrame:
+    return pd.DataFrame({{"a": [1, 2]}})
+"""
+
+
+def _hamilton_pandas() -> None:
+    """Registers Hamilton's pandas extension, which its autoload would load."""
+    from hamilton import registry  # noqa: PLC0415  # only the Q64 tests need it
+
+    registry.load_extension("pandas")
+
+
+@pytest.mark.deliberate("Q64")
+def test_q64_fill_never_mutates_and_fills_by_name() -> None:
+    """Hamilton fills a column named by the `(name, doc)` tuple into the frame.
+
+    It then fails to find the column by its name. fnloom fills by the name,
+    leaving the producer's frame as it was.
+    """
+    pytest.importorskip("pandas")
+    _hamilton_pandas()
+    hamilton_module = make_module(
+        "differential_q64_fill_h", _COLUMNS_FILLED.format(decorator=_HAMILTON_COLUMNS)
+    )
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    with pytest.raises(InvalidDecoratorException, match="No such column: b"):
+        hamilton.execute(["b"])
+    mutated = hamilton.execute(["a", "frame"])["frame"]
+    assert list(mutated.columns) == ["a", ("b", "The b column.")]
+    fnloom_module = make_module(
+        "differential_q64_fill_f", _COLUMNS_FILLED.format(decorator=_FNLOOM_COLUMNS)
+    )
+    result: dict[str, Any] = dict(fnloom.build(fnloom_module).execute(["b", "frame"]))
+    assert result["b"].tolist() == [0, 0]
+    assert result["b"].name == "b"
+    assert list(result["frame"].columns) == ["a"]
+
+
+_COLUMNS_CHECKED = """
+import pandas as pd
+{decorator}
+
+@extract_columns("a")
+def twice() -> pd.DataFrame:
+    return pd.DataFrame([[1, 2]], columns=["a", "a"])
+
+@extract_columns("zz")
+def lacking() -> pd.DataFrame:
+    return pd.DataFrame({{"b": [1], "c": [2]}})
+"""
+
+
+@pytest.mark.deliberate("Q64")
+def test_q64_columns_are_checked_at_run() -> None:
+    """Hamilton passes a duplicated column on as a DataFrame, unchecked.
+
+    It fails a missing column with its own exception class. fnloom checks the
+    column is a Series, and names the columns the producer returned.
+    """
+    pd = pytest.importorskip("pandas")
+    _hamilton_pandas()
+    hamilton_module = make_module(
+        "differential_q64_checked_h",
+        _COLUMNS_CHECKED.format(decorator=_HAMILTON_COLUMNS),
+    )
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    assert isinstance(hamilton.execute(["a"])["a"], pd.DataFrame)
+    with pytest.raises(InvalidDecoratorException, match="No such column: zz"):
+        hamilton.execute(["zz"])
+    fnloom_module = make_module(
+        "differential_q64_checked_f",
+        _COLUMNS_CHECKED.format(decorator=_FNLOOM_COLUMNS),
+    )
+    driver = fnloom.build(fnloom_module)
+    with pytest.raises(ValueError, match=r"'a' as pandas\.DataFrame, but it is"):
+        driver.execute(["a"])
+    with pytest.raises(ValueError, match=r"no column 'zz'; it returned 'b', 'c'"):
+        driver.execute(["zz"])

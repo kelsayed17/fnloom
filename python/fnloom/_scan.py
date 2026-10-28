@@ -39,7 +39,9 @@ class NodeDef:
     input to the parameter keyword the core passes it under, when the two differ.
     `returns` is the return annotation: as written after `collect`, its value after
     `resolve`, as are the params' annotations. `config` holds the conditions that
-    selected the function, empty for a plain one or a `@config.default`.
+    selected the function, empty for a plain one or a `@config.default`. `doc` is
+    the node's own docstring, as an `extract_columns` `(name, doc)` sets it, or
+    `None` for `origin`'s.
     """
 
     name: str
@@ -51,6 +53,7 @@ class NodeDef:
     returns: object
     renames: Mapping[str, str] = field(default_factory=dict)
     config: tuple[Condition, ...] = ()
+    doc: str | None = None
 
 
 def core_inputs(params: tuple[Param, ...]) -> list[tuple[str, bool]]:
@@ -312,8 +315,8 @@ def _skipped(module: ModuleType) -> str:
 def _definition(node: NodeDef) -> str:
     """How `node` was written: as a function, or as a row of a parameterized one."""
     function = getattr(node.origin, "__name__", node.name)
-    if _extract.is_generated(node):
-        return f"a field of function {function!r}"
+    if (payload := _extract.extractor(node)) is not None:
+        return f"a {payload.noun} of function {function!r}"
     if decorations(node.origin).rows is None:
         return f"function {function!r}"
     return f"a row of function {function!r}"

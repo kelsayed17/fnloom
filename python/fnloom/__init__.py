@@ -15,7 +15,7 @@ from fnloom._decorators import (
     tag,
     value,
 )
-from fnloom._extract import extract_fields
+from fnloom._extract import extract_columns, extract_fields
 from fnloom._fingerprint import fingerprint, register_fingerprint
 from fnloom._stores import (
     MISSING,
@@ -50,6 +50,7 @@ __all__ = [
     "build",
     "cache",
     "config",
+    "extract_columns",
     "extract_fields",
     "fingerprint",
     "parameterize",

@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:
     from collections.abc import Generator
 
-type Shape = Literal["chain", "fan_in", "layered", "rows"]
+type Shape = Literal["chain", "fan_in", "layered", "rows", "extract"]
 type Spelling = Literal["hamilton", "fnloom"]
 type Request = tuple[list[str], dict[str, object]]
 
@@ -67,10 +67,26 @@ def _rows(n: int, spelling: Spelling) -> str:
     )
 
 
+def _extract(n: int, spelling: Spelling) -> str:
+    package = "hamilton.function_modifiers" if spelling == "hamilton" else "fnloom"
+    consumers = "\n".join(
+        f"def c{i}(f{i}: int) -> int:\n    return f{i} + 1\n" for i in range(n)
+    )
+    return (
+        f"from {package} import extract_fields\n\n\n"
+        f'@extract_fields({{f"f{{i}}": int for i in range({n})}})\n'
+        "def fields(seed: int) -> dict:\n"
+        f'    return {{f"f{{i}}": seed + i for i in range({n})}}\n\n\n'
+        f"{consumers}"
+    )
+
+
 def module_source(shape: Shape, n: int, spelling: Spelling = "fnloom") -> str:
     """Returns the source of `make_module(shape, n, spelling)`."""
     if shape == "rows":
         return _rows(n, spelling)
+    if shape == "extract":
+        return _extract(n, spelling)
     return {"chain": _chain, "fan_in": _fan_in, "layered": _layered}[shape](n)
 
 
@@ -80,8 +96,10 @@ def make_module(shape: Shape, n: int, spelling: Spelling = "fnloom") -> ModuleTy
     Every function is annotated. `chain` is a line, `fan_in` one function over `n`
     inputs, `layered` rows of ten nodes each reading two nodes of the row above, and
     `rows` one function with `n` `parameterize` rows, each sourcing the row before
-    (the first sources `seed`). Only `rows` differs by `spelling`: the decorators come
-    from Hamilton or from fnloom.
+    (the first sources `seed`), and `extract` one `extract_fields` producer of `n`
+    int fields, `f0` to `f{n-1}`, each read by its own consumer `c{i}`. Only `rows`
+    and `extract` differ by `spelling`: the decorators come from Hamilton or from
+    fnloom.
     """
     source = module_source(shape, n, spelling)
     module = ModuleType(f"bench_{shape}_{n}_{next(_counter)}")
@@ -116,6 +134,8 @@ def make_request(shape: Shape, n: int) -> Request:
         return ["total"], {f"x{i}": i for i in range(n)}
     if shape == "rows":
         return [f"r{n - 1}"], {"seed": _SEED}
+    if shape == "extract":
+        return [f"c{i}" for i in range(n)], {"seed": _SEED}
     last_row = (n - 1) // LAYER_WIDTH
     outputs = [
         f"l{last_row}_{c}" for c in range(LAYER_WIDTH) if last_row * LAYER_WIDTH + c < n
@@ -131,6 +151,9 @@ def make_expected(shape: Shape, n: int) -> dict[str, object]:
         return {"total": n * (n - 1) // 2}
     if shape == "rows":
         return {f"r{n - 1}": _SEED + n}
+    if shape == "extract":
+        # Field `f{i}` is `seed + i`, and consumer `c{i}` adds one.
+        return {f"c{i}": _SEED + i + 1 for i in range(n)}
     row = [(_SEED + c) % _MODULUS for c in range(LAYER_WIDTH)]
     for _ in range((n - 1) // LAYER_WIDTH):
         row = [

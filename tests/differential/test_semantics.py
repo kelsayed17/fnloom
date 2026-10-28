@@ -3,7 +3,7 @@
 import copy
 import inspect
 import pickle
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 from hamilton import driver as hamilton_driver
@@ -601,3 +601,77 @@ def test_extract_fields_refuses_the_same_arguments_when_decorating() -> None:
                 "semantics_extract_bad_f",
                 source_text.format(decorator=_FNLOOM_EXTRACT),
             )
+
+
+# The producers for the extract_columns tests; `{decorator}` imports each
+# library's `extract_columns`.
+_COLUMNS = """
+import pandas as pd
+{decorator}
+
+@extract_columns("a", ("b", "The b column."))
+def frame(n: int) -> pd.DataFrame:
+    '''The producer.'''
+    return pd.DataFrame({{"a": [n, n + 1], "b": ["x", "y"], "c": [0, 0]}})
+"""
+_HAMILTON_COLUMNS = "from hamilton.function_modifiers import extract_columns"
+_FNLOOM_COLUMNS = "from fnloom import extract_columns"
+
+
+def _hamilton_pandas() -> None:
+    """Registers Hamilton's pandas extension, which its autoload would load."""
+    from hamilton import registry  # noqa: PLC0415  # only these tests need it
+
+    registry.load_extension("pandas")
+
+
+def test_extract_columns_makes_the_same_nodes_types_docs_and_values() -> None:
+    """The column nodes, their Series type, docs and values, and the kept producer."""
+    pd = pytest.importorskip("pandas")
+    _hamilton_pandas()
+    hamilton_module = make_module(
+        "semantics_columns_h", _COLUMNS.format(decorator=_HAMILTON_COLUMNS)
+    )
+    fnloom_module = make_module(
+        "semantics_columns_f", _COLUMNS.format(decorator=_FNLOOM_COLUMNS)
+    )
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    driver = fnloom.build(fnloom_module)
+    hamilton_nodes = {
+        v.name: (v.type, v.documentation)
+        for v in hamilton.list_available_variables()
+        if v.name != "n"
+    }
+    assert hamilton_nodes == {
+        "a": (pd.Series, "The producer."),
+        "b": (pd.Series, "The b column."),
+        "frame": (pd.DataFrame, "The producer."),
+    }
+    assert driver.node_names() == sorted([*hamilton_nodes, "n"])
+    for name, (produced, doc) in hamilton_nodes.items():
+        assert driver.nodes[name].type is produced, name
+        assert driver.nodes[name].doc == doc, name
+        assert driver.nodes[name].dependencies == (
+            ("n",) if name == "frame" else ("frame",)
+        )
+    outputs = sorted(hamilton_nodes)
+    expected = hamilton.execute(outputs, inputs={"n": 2})
+    result: dict[str, Any] = dict(driver.execute(outputs, inputs={"n": 2}))
+    assert list(result) == outputs
+    for name in outputs:
+        assert result[name].equals(expected[name]), name
+    assert list(result["frame"].columns) == ["a", "b", "c"]
+
+
+def test_extract_columns_refuses_a_list_and_no_columns() -> None:
+    """A list and no columns at all are refused when decorating, on both sides."""
+    from hamilton.function_modifiers import extract_columns  # noqa: PLC0415  # beside fnloom's
+
+    with pytest.raises(InvalidDecoratorException, match=r"Please `\*` in front"):
+        extract_columns(["a", "b"])  # ty: ignore[invalid-argument-type]  # the misuse under test
+    with pytest.raises(TypeError, match=r"put `\*` in front of it to expand it"):
+        fnloom.extract_columns(["a", "b"])  # ty: ignore[invalid-argument-type]  # the misuse under test
+    with pytest.raises(InvalidDecoratorException, match="empty arguments"):
+        extract_columns()
+    with pytest.raises(ValueError, match="got no columns"):
+        fnloom.extract_columns()

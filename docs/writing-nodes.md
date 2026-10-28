@@ -372,6 +372,71 @@ fnloom.build(halves).execute(["left"], inputs={"number": 8})
 # raises ValueError: 'split' returned field 'left' as str, but it is declared int
 ```
 
+## Extracting columns
+
+`@extract_columns` makes a node of each named column of the value a function returns: a pandas or polars
+DataFrame, a mapping, or any value that supports `in` and `[]`. No extension needs loading, and fnloom never imports
+pandas or polars itself. Name a column, or give `(name, doc)` to set that node's docstring:
+
+```python
+# file: table.py
+from fnloom import extract_columns
+
+
+@extract_columns("price", ("volume", "Shares traded."), fill_with=0)
+def bars(symbol: str) -> dict[str, list[float]]:
+    """Columns of bars, keyed by name."""
+    return {"price": [10.0, 10.5], "spread": [0.1, 0.2]}
+
+
+def notional(price: list[float], volume: object) -> float:
+    """Column nodes feed other nodes like any node."""
+    return sum(price) * (volume or 1)
+```
+
+```python
+import table
+
+driver = fnloom.build(table)
+driver.node_names()
+# -> ['bars', 'notional', 'price', 'symbol', 'volume']
+driver.execute(["price", "volume", "notional"], inputs={"symbol": "X"})
+# -> {'price': [10.0, 10.5], 'volume': 0, 'notional': 20.5}
+driver.nodes["volume"].doc
+# -> 'Shares traded.'
+driver.nodes["price"].doc
+# -> 'Columns of bars, keyed by name.'
+```
+
+- **A column's type comes from the return annotation.** A `pandas.DataFrame` return gives `pandas.Series` columns, a
+  `polars.DataFrame` gives `polars.Series`, and anything else gives `typing.Any`. Each value is checked against its
+  type on every run, so a name the frame holds twice, which reads a DataFrame, is a `ValueError` (Q64).
+- **A missing column** is a `ValueError` when run, naming the producer and the columns it returned, sorted.
+- **`fill_with`** is the value of a missing column, and never changes the producer's value. For a pandas frame it is
+  a full `Series` on the frame's index, for a polars frame a `Series` as long as the frame, and for a mapping the
+  value itself. Any other type with a missing column is a `TypeError` naming it. A `(name, doc)` column fills by
+  `name` (Q64).
+- **Refused when decorating:** no columns, and a list. Put `*` in front of a list: `extract_columns(*names)`.
+- `@tag`, `@config` and one `@parameterize` row work as they do with `@extract_fields`.
+
+```python
+# file: gaps.py
+from fnloom import extract_columns
+
+
+@extract_columns("close")
+def quotes() -> dict[str, list[float]]:
+    """Has no `close` column."""
+    return {"open": [1.0], "high": [2.0]}
+```
+
+```python
+import gaps
+
+fnloom.build(gaps).execute(["close"])
+# raises ValueError: 'quotes' returned no column 'close'; it returned 'high', 'open'
+```
+
 ## What is refused
 
 fnloom calls a node with one keyword argument per parameter, and expects it to return its value. Functions that can't

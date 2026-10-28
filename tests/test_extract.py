@@ -1,6 +1,8 @@
-"""Tests for `@extract_fields`: the producer, its field nodes and their checks."""
+"""Tests for `@extract_fields` and `@extract_columns`: producers, nodes, checks."""
 
 import itertools
+import sys
+from types import ModuleType
 from typing import TYPE_CHECKING, Any, TypedDict, override
 
 import pytest
@@ -13,6 +15,7 @@ from fnloom import (
     MemoryCache,
     _types,
     config,
+    extract_columns,
     extract_fields,
     parameterize,
     source,
@@ -20,13 +23,13 @@ from fnloom import (
     value,
 )
 from fnloom._decorators import decorations
-from fnloom._extract import MISSING_FILL, Extraction, _Extractor
+from fnloom._extract import MISSING_FILL, Extraction, _Extractor, column_type
+from fnloom._scan import collect, resolve
 from helpers import make_module
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
     from pathlib import Path
-    from types import ModuleType
 
 
 class Point(TypedDict):
@@ -818,3 +821,433 @@ def test_the_producer_format_does_not_apply_to_fields(tmp_path: Path) -> None:
     driver = Builder().with_modules(module).with_cache(store).build()
     assert driver.execute(["a", "p"]) == {"a": 1, "p": {"a": 1}}
     assert driver.execute(["a", "p"]) == {"a": 1, "p": {"a": 1}}
+
+
+# `@extract_columns`: the columns of whatever the producer returns.
+
+
+@pytest.fixture(scope="module")
+def pd() -> ModuleType:
+    """pandas, imported once, before a test's modules are forgotten.
+
+    NumPy, under it, cannot be imported a second time in one process.
+    """
+    module = pytest.importorskip("pandas")
+    assert isinstance(module, ModuleType)
+    return module
+
+
+@pytest.fixture(scope="module")
+def pl() -> ModuleType:
+    """polars, imported once, as `pd` is."""
+    module = pytest.importorskip("polars")
+    assert isinstance(module, ModuleType)
+    return module
+
+
+def _values(result: Mapping[str, object]) -> dict[str, Any]:
+    """A run's result, its values typed `Any` to read frame attributes off them."""
+    return dict(result)
+
+
+def test_columns_split_a_mapping() -> None:
+    """A mapping's columns are nodes typed `Any`; the producer keeps its name."""
+    module = make_module(
+        "columns_mapping",
+        """
+        from fnloom import extract_columns
+
+        @extract_columns("a", "b")
+        def p(n: int) -> dict:
+            '''The producer.'''
+            return {"a": [n], "b": [n + 1], "extra": []}
+
+        def total(a: list[int], b: list[int]) -> int:
+            return sum(a) + sum(b)
+        """,
+    )
+    assert decorations(module.p).extract == Extraction(
+        "columns", (("a", None, None), ("b", None, None)), MISSING_FILL
+    )
+    driver = fnloom.build(module)
+    assert driver.node_names() == ["a", "b", "n", "p", "total"]
+    assert driver.nodes["a"].type is Any
+    assert driver.nodes["a"].dependencies == ("p",)
+    assert driver.nodes["a"].doc == "The producer."
+    assert isinstance(_extract_payload(module, "a"), _Extractor)
+    assert driver.execute(["a", "b", "p", "total"], inputs={"n": 1}) == {
+        "a": [1],
+        "b": [2],
+        "p": {"a": [1], "b": [2], "extra": []},
+        "total": 3,
+    }
+
+
+def _extract_payload(module: ModuleType, name: str) -> object:
+    """The payload of node `name` of `module`, resolved as a build resolves it."""
+    nodes = {node.name: node for node in resolve(collect([module]))}
+    return nodes[name].payload
+
+
+def test_columns_split_a_pandas_frame_into_series(pd: ModuleType) -> None:
+    """A `pandas.DataFrame` producer gives `pandas.Series` columns, checked."""
+    module = make_module(
+        "columns_pandas",
+        """
+        import pandas as pd
+
+        from fnloom import extract_columns
+
+        @extract_columns("a", "b")
+        def frame(n: int) -> pd.DataFrame:
+            return pd.DataFrame({"a": [n, n], "b": ["x", "y"], "c": [0, 0]})
+        """,
+    )
+    driver = fnloom.build(module)
+    assert driver.nodes["a"].type is pd.Series
+    assert driver.nodes["b"].type is pd.Series
+    result = _values(driver.execute(["a", "b", "frame"], inputs={"n": 3}))
+    assert result["a"].tolist() == [3, 3]
+    assert result["b"].tolist() == ["x", "y"]
+    assert list(result["frame"].columns) == ["a", "b", "c"]
+    unchecked = Builder().with_modules(module).without_input_type_checks().build()
+    assert _values(unchecked.execute(["a"], inputs={"n": 1}))["a"].tolist() == [1, 1]
+
+
+def test_column_type_reads_the_frame_type_by_name(pd: ModuleType) -> None:
+    """Only pandas and polars frames give a Series; anything else gives `Any`."""
+    assert column_type(dict) is Any
+    assert column_type(list[int]) is Any
+    assert column_type("pd.DataFrame") is Any
+    fake = type("DataFrame", (), {"__module__": "polars.dataframe.frame"})
+    # A polars-like frame with no polars imported gives `Any`, not an import.
+    assert column_type(fake) is Any or "polars" in sys.modules
+    assert column_type(pd.DataFrame) is pd.Series
+    assert column_type(pd.Series) is Any
+
+
+def test_a_list_argument_is_refused_with_the_star_hint() -> None:
+    """A list is refused with Hamilton's advice; so are no columns and non-names."""
+    with pytest.raises(
+        TypeError, match=r"got a list: put `\*` in front of it to expand it"
+    ):
+        extract_columns(["a", "b"])  # ty: ignore[invalid-argument-type]  # the misuse under test
+    with pytest.raises(ValueError, match="extract_columns got no columns"):
+        extract_columns()
+    with pytest.raises(
+        TypeError,
+        match=r"column names or \(name, doc\) pairs, got: \('a',\), 1",
+    ):
+        extract_columns("a", 1, ("a",))  # ty: ignore[invalid-argument-type]  # the misuse under test
+    with pytest.raises(ValueError, match=r"more than once: 'a'"):
+        extract_columns("a", ("a", "doc"))
+
+    def p() -> dict[str, int]:
+        return {}
+
+    assert extract_columns("a", "a")(p) is p
+    extraction = decorations(p).extract
+    assert extraction is not None
+    assert extraction.items == (("a", None, None),)
+    with pytest.raises(ValueError, match="apply extract_columns once"):
+        extract_columns("b")(p)
+    with pytest.raises(ValueError, match="extract_fields and extract_columns"):
+        extract_fields("b")(p)
+
+
+def test_a_missing_column_names_the_columns_returned() -> None:
+    """A missing column is a `ValueError` naming the producer and its columns."""
+    module = make_module(
+        "columns_missing",
+        """
+        from fnloom import extract_columns
+
+        @extract_columns("zz")
+        def p() -> dict:
+            return {"b": 1, "a": 2}
+        """,
+    )
+    with pytest.raises(
+        ValueError, match=r"^'p' returned no column 'zz'; it returned 'a', 'b'\n"
+    ):
+        fnloom.build(module).execute(["zz"])
+
+
+@pytest.mark.usefixtures("pd")
+def test_a_missing_pandas_column_names_the_frame_columns() -> None:
+    """A frame's columns are read from `.columns`."""
+    module = make_module(
+        "columns_missing_pandas",
+        """
+        import pandas as pd
+
+        from fnloom import extract_columns
+
+        @extract_columns("zz")
+        def frame() -> pd.DataFrame:
+            return pd.DataFrame({"b": [1], "a": [2]})
+        """,
+    )
+    with pytest.raises(
+        ValueError, match=r"^'frame' returned no column 'zz'; it returned 'a', 'b'\n"
+    ):
+        fnloom.build(module).execute(["zz"])
+
+
+def test_fill_with_builds_a_full_column_without_mutating(pd: ModuleType) -> None:
+    """pandas: a full Series on the frame's index; the frame keeps its columns."""
+    module = make_module(
+        "columns_fill_pandas",
+        """
+        import pandas as pd
+
+        from fnloom import extract_columns
+
+        @extract_columns("a", "zz", fill_with=0)
+        def frame() -> pd.DataFrame:
+            return pd.DataFrame({"a": [1, 2]}, index=[10, 20])
+        """,
+    )
+    result = _values(fnloom.build(module).execute(["zz", "frame"]))
+    filled = result["zz"]
+    assert isinstance(filled, pd.Series)
+    assert filled.name == "zz"
+    assert filled.tolist() == [0, 0]
+    assert filled.index.tolist() == [10, 20]
+    assert list(result["frame"].columns) == ["a"]
+
+
+def test_fill_with_builds_a_full_polars_column(pl: ModuleType) -> None:
+    """polars: a full Series named by the column, as long as the frame."""
+    module = make_module(
+        "columns_fill_polars",
+        """
+        import polars as pl
+
+        from fnloom import extract_columns
+
+        @extract_columns("a", "zz", fill_with=0)
+        def frame() -> pl.DataFrame:
+            return pl.DataFrame({"a": [1, 2]})
+        """,
+    )
+    driver = fnloom.build(module)
+    assert driver.nodes["zz"].type is pl.Series
+    result = _values(driver.execute(["a", "zz", "frame"]))
+    assert result["a"].to_list() == [1, 2]
+    assert result["zz"].name == "zz"
+    assert result["zz"].to_list() == [0, 0]
+    assert result["frame"].columns == ["a"]
+
+
+def test_fill_with_on_a_mapping_is_the_value() -> None:
+    """A mapping's missing column is the fill itself, `None` included."""
+    module = make_module(
+        "columns_fill_mapping",
+        """
+        from fnloom import extract_columns
+
+        SHARED: dict[str, int] = {"a": 1}
+
+        @extract_columns("a", "b", fill_with=None)
+        def p() -> dict:
+            return SHARED
+        """,
+    )
+    assert fnloom.build(module).execute(["a", "b", "p"]) == {
+        "a": 1,
+        "b": None,
+        "p": {"a": 1},
+    }
+    assert module.SHARED == {"a": 1}
+
+
+def test_fill_with_on_another_frame_type_names_it() -> None:
+    """A fill for a value that is no mapping or known frame is a `TypeError`."""
+    module = make_module(
+        "columns_fill_other",
+        """
+        from fnloom import extract_columns
+
+        class Table:
+            def __contains__(self, key: object) -> bool:
+                return key == "a"
+
+            def __getitem__(self, key: str) -> list[int]:
+                return [1]
+
+        @extract_columns("a", "zz", fill_with=0)
+        def p() -> Table:
+            return Table()
+        """,
+    )
+    driver = fnloom.build(module)
+    assert driver.execute(["a"]) == {"a": [1]}
+    with pytest.raises(
+        TypeError,
+        match=(
+            r"^'p' returned no column 'zz', and fill_with fills only a mapping, a "
+            r"pandas DataFrame or a polars DataFrame, not columns_fill_other\.Table\n"
+        ),
+    ):
+        driver.execute(["zz"])
+
+
+def test_tuple_doc_form_sets_the_doc_and_fills_by_name() -> None:
+    """`(name, doc)` names the node `name`, with that doc, and fills by `name`."""
+    module = make_module(
+        "columns_tuple",
+        """
+        from fnloom import extract_columns
+
+        @extract_columns("a", ("b", "The b column."), fill_with=7)
+        def p() -> dict:
+            '''The producer.'''
+            return {"a": 1}
+        """,
+    )
+    assert decorations(module.p).extract == Extraction(
+        "columns", (("a", None, None), ("b", None, "The b column.")), 7
+    )
+    driver = fnloom.build(module)
+    assert driver.nodes["a"].doc == "The producer."
+    assert driver.nodes["b"].doc == "The b column."
+    assert driver.execute(["b", "p"]) == {"b": 7, "p": {"a": 1}}
+
+
+@pytest.mark.usefixtures("pd")
+def test_a_duplicated_pandas_column_fails_the_series_check() -> None:
+    """A name the frame holds twice reads a DataFrame, which is no Series."""
+    module = make_module(
+        "columns_duplicated",
+        """
+        import pandas as pd
+
+        from fnloom import extract_columns
+
+        @extract_columns("a")
+        def frame() -> pd.DataFrame:
+            return pd.DataFrame([[1, 2]], columns=["a", "a"])
+        """,
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^'frame' returned column 'a' as pandas\.DataFrame, "
+            r"but it is declared pandas\.Series\n"
+        ),
+    ):
+        fnloom.build(module).execute(["a"])
+
+
+def test_columns_compose_with_tag_config_and_one_row() -> None:
+    """`@tag` lands everywhere, a variant extracts, one row names the producer."""
+    module = make_module(
+        "columns_compose",
+        """
+        from fnloom import config, extract_columns, parameterize, tag, value
+
+        @tag(owner="z")
+        @extract_columns("a")
+        @config.when(mode="x")
+        def p__x() -> dict:
+            return {"a": 1}
+
+        @extract_columns("b")
+        @parameterize(q={"n": value(2)})
+        def r(n: int) -> dict:
+            return {"b": n}
+        """,
+    )
+    driver = Builder().with_modules(module).with_config({"mode": "x"}).build()
+    assert driver.node_names() == ["a", "b", "p", "q"]
+    assert driver.nodes["p"].tags == {"owner": "z"}
+    assert driver.nodes["a"].tags == {"owner": "z"}
+    assert driver.execute(["a", "b"]) == {"a": 1, "b": 2}
+
+    def rows(n: int) -> dict[str, int]:
+        return {"a": n}
+
+    two = parameterize(s={"n": value(1)}, t={"n": value(2)})(rows)
+    with pytest.raises(
+        ValueError, match=r"extract_columns needs one node, but parameterize makes 2"
+    ):
+        extract_columns("a")(two)
+
+    def later(n: int) -> dict[str, int]:
+        return {"a": n}
+
+    with pytest.raises(ValueError, match=r"extract_columns needs one node"):
+        parameterize(s={"n": value(1)}, t={"n": value(2)})(extract_columns("a")(later))
+
+
+def test_a_column_named_like_its_producer_is_a_duplicate() -> None:
+    """A column clashing with its producer fails the build, naming the column."""
+    module = make_module(
+        "columns_clash",
+        """
+        from fnloom import extract_columns
+
+        @extract_columns("p")
+        def p() -> dict:
+            return {"p": 1}
+        """,
+    )
+    with pytest.raises(ValueError, match="a column of function 'p'"):
+        fnloom.build(module)
+
+
+_COLUMNS_CACHED = """
+{imports}
+from fnloom import cache, extract_columns
+
+CALLS: list[str] = []
+
+@cache(version="1")
+@extract_columns("a", fill_with={fill})
+def frame(x: int) -> {returns}:
+    CALLS.append("frame")
+    return {{"b": [x]}}
+
+@cache(version="1")
+def doubled(a: object) -> object:
+    CALLS.append("doubled")
+    return [a, a]
+"""
+
+
+def test_a_changed_column_fill_is_not_served_stale(tmp_path: Path) -> None:
+    """A rebuild with a new fill gives the new fill, through a stored consumer."""
+    store = DiskCache(tmp_path / "cache")
+    for fill in ("0", "1"):
+        module = make_module(
+            "columns_cached",
+            _COLUMNS_CACHED.format(imports="", fill=fill, returns="dict"),
+        )
+        driver = Builder().with_modules(module).with_cache(store).build()
+        assert driver.execute(["doubled"], inputs={"x": 1}) == {
+            "doubled": [int(fill), int(fill)]
+        }
+
+
+@pytest.mark.usefixtures("pd")
+def test_a_changed_column_type_is_not_served_stale(tmp_path: Path) -> None:
+    """A producer now typed a DataFrame checks its column, though its key holds."""
+    store = DiskCache(tmp_path / "cache")
+    module = make_module(
+        "columns_cached_type",
+        _COLUMNS_CACHED.format(imports="", fill="0", returns="dict"),
+    )
+    driver = Builder().with_modules(module).with_cache(store).build()
+    assert driver.execute(["doubled"], inputs={"x": 1}) == {"doubled": [0, 0]}
+    # The pinned version keeps the producer's key: it hits, returning the dict.
+    module = make_module(
+        "columns_cached_type",
+        _COLUMNS_CACHED.format(
+            imports="import pandas as pd", fill="0", returns="pd.DataFrame"
+        ),
+    )
+    driver = Builder().with_modules(module).with_cache(store).build()
+    with pytest.raises(ValueError, match=r"'a' as int, but it is declared pandas"):
+        driver.execute(["doubled"], inputs={"x": 1})
+    assert module.CALLS == []

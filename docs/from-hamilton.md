@@ -52,6 +52,8 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `@config(lambda cfg: ...)` | Not there |
 | `@extract_fields({"a": int})`, `@extract_fields("a", "b")`, `@extract_fields()` | The same, imported from `fnloom` ([Extracting fields](writing-nodes.md#extracting-fields)). A `Mapping[str, T]` return works too (Q61) |
 | `@extract_fields(..., fill_with=v)` | The same, but the producer's mapping is never changed, and `None` is a fill (Q62) |
+| `@extract_columns("a", ("b", "doc"))` | The same, imported from `fnloom` ([Extracting columns](writing-nodes.md#extracting-columns)), with no pandas extension to load. A mapping or any value with `in` and `[]` works too (Q64) |
+| `@extract_columns(..., fill_with=v)` | The same, but the producer's frame is never changed, and a `("b", "doc")` column fills `b` (Q64) |
 | A row as `(bindings, docstring)`, `group(...)`, `parameterize_sources`, `parameterize_values` | Not yet. A row is a mapping |
 
 </div>
@@ -98,6 +100,8 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `@extract_fields` with a mapping and names, or a name the `TypedDict` lacks | Drops the names; a bare `KeyError` | `ValueError` when decorating (Q61) |
 | An input or field annotated with a `TypedDict` | The input check raises `TypeError` | Any `dict` is accepted (Q61) |
 | `@tag` on an `@extract_fields` function | Tags the fields only | Tags the producer and the fields (Q63) |
+| `@extract_columns` with extensions not autoloaded, or on a `dict` return | Refused when decorating | Works: a frame's columns are its `Series`, a mapping's are typed `Any` (Q64) |
+| A column missing, or named twice in the frame | `InvalidDecoratorException` when run; a DataFrame, unchecked | `ValueError` when run, naming the columns returned; each column is checked against its type (Q64) |
 
 </div>
 
@@ -124,12 +128,12 @@ value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](
 
 ## Not there yet
 
-fnloom is pre-alpha. The core, the native path, `@parameterize`, `@tag`, `@config`, `@extract_fields`, graph
-inspection, type checks and result caching are done. These Hamilton features come next, roughly in this order:
+fnloom is pre-alpha. The core, the native path, `@parameterize`, `@tag`, `@config`, `@extract_fields`,
+`@extract_columns`, graph inspection, type checks and result caching are done. These Hamilton features come next,
+roughly in this order:
 
-1. **More decorators:** `@extract_columns`.
-2. **Adapters and lifecycle hooks**, result builders and async execution.
-3. **Graph visualisation.**
-4. **Dynamic execution**, materializers, `@subdag`, `@check_output` and `@pipe`.
+1. **Adapters and lifecycle hooks**, result builders and async execution.
+2. **Graph visualisation.**
+3. **Dynamic execution**, materializers, `@subdag`, `@check_output` and `@pipe`.
 
 If your pipeline depends on one of these, it's worth waiting for it before you switch.

@@ -7,10 +7,10 @@ and at running a prepared plan, so a row where it's reliably slower counts as a 
 
 <div class="grid cards" markdown>
 
--   :lucide-repeat:{ .lg .fl-icon } **2.5× to 24× faster repeat runs**
+-   :lucide-repeat:{ .lg .fl-icon } **2.5× to 998× faster repeat runs**
 
     Running a prepared plan again, wherever both finish. A 1,000-node layered graph: 4.35 ms in Hamilton,
-    0.21 ms in fnloom.
+    0.21 ms in fnloom; 10,000 extracted fields: 6.4 s against 6.4 ms.
 
 -   :lucide-hammer:{ .lg .fl-icon } **Every graph builds faster**
 
@@ -51,14 +51,24 @@ sample.
 | rows | 100 | 1.813 / 0.520 / 0.501 | 0.351 / 0.045 / 0.022 | 0.319 / 0.013 / 0.013 | 0.024 / 0.008 |
 | rows | 1,000 | 63.2 / 5.566 / 7.593 | `RecursionError` / 0.301 / 0.207 | `RecursionError` / 0.137 / 0.139 | 0.171 / 0.187 |
 | rows | 10,000 | 5,285.0 / 128.1 / 60.9 | `RecursionError` / 3.325 / 1.965 | `RecursionError` / 1.346 / 1.344 | 3.589 / 0.594 |
+| extract | 10 | 0.430 / 0.318 / 0.143 | 0.130 / 0.046 / 0.019 | 0.075 / 0.009 / 0.006 | 0.022 / 0.007 |
+| extract | 100 | 2.679 / 1.310 / 1.232 | 1.228 / 0.137 / 0.106 | 1.176 / 0.061 / 0.060 | 0.060 / 0.036 |
+| extract | 1,000 | 65.3 / 12.7 / 11.4 | 68.4 / 1.115 / 0.919 | 65.8 / 0.602 / 0.597 | 0.480 / 0.350 |
+| extract | 10,000 | 4,520.7 / 208.3 / 179.0 | 6,161.3 / 12.9 / 10.3 | 6,372.9 / 6.385 / 6.304 | 5.770 / 3.424 |
 
 Measured on an Apple M2 Pro with 16 GB, macOS 27.0, CPython 3.14.9, `apache-hamilton==1.90.0`, and a release build
-of the extension, on 2026-10-27.
+of the extension, on 2026-10-27; the `extract` rows on 2026-10-28.
+
+**`extract`** is one `@extract_fields` producer returning a dict of `n` int fields, each read by its own consumer,
+with every consumer requested. fnloom checks each field against its type on every run, with input checks on or off
+(Q61), and still runs 8.6 to 998 times faster than Hamilton's `execute`, which checks none. Hamilton's cost grows
+faster than `n`: 65.8 ms at 1,000 fields, and 6.4 s at 10,000.
 
 **Steady execution**, the cost of running a prepared plan again, is where fnloom differs most. With checks on, it's
-2.5 to 24 times faster than Hamilton's `execute` wherever both finish, because the plan is compiled once and each run
-is a loop over its steps in Rust. The low end is `fan_in` at 10,000 parameters (2.5×), where one Python call with
-10,000 keyword arguments is most of the cost for both.
+2.5 to 24 times faster than Hamilton's `execute` on the first four shapes wherever both finish, and 8.6 to 998 times
+on `extract`, because the plan is compiled once and each run is a loop over its steps in Rust. The low end is
+`fan_in` at 10,000 parameters (2.5×), where one Python call with 10,000 keyword arguments is most of the cost for
+both.
 
 **Input checks are close to free.** The gap between the two fnloom figures is within noise: steady execution with
 checks on and off differs by at most 0.05 ms on every graph. A check against a plain class such as `int` is compiled
@@ -182,9 +192,10 @@ scan, `n` pointer comparisons per keyword, which Hamilton's calls pay too.
 ```bash
 uv run maturin develop --release   # time an optimised extension, not the debug build
 uv run python -m benches.run > bench.jsonl 2> bench.stderr
+uv run python -m benches.run extract > extract.jsonl 2> bench.stderr   # only the shapes named
 ```
 
-It prints 48 JSON lines to stdout (`shape`, `n`, `runtime`, `input_checks`, `build_ms`,
+It prints 60 JSON lines to stdout (`shape`, `n`, `runtime`, `input_checks`, `build_ms`,
 `first_execute_ms`, `steady_execute_ms`, `prepare_ms`, `error`, `error_phase`).
 Hamilton prints a help banner to stderr whenever it raises, hence the second redirect.
 Each runtime's answer is checked against the shape's closed form, and a

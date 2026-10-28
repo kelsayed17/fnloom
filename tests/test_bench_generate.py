@@ -107,3 +107,30 @@ def test_rows_shape_has_n_nodes_in_both_spellings() -> None:
         }
         names: list[str | Callable[..., object] | hamilton_driver.Variable] = [*outputs]
         assert built.execute(names, inputs=inputs) == make_expected("rows", ROWS)
+
+
+FIELDS = 25
+
+
+def test_extract_shape_has_one_producer_and_n_consumers_in_both_spellings() -> None:
+    """One producer of n fields, each read by a consumer; the closed form holds."""
+    outputs, inputs = make_request("extract", FIELDS)
+    assert outputs == [f"c{i}" for i in range(FIELDS)]
+    expected = make_expected("extract", FIELDS)
+    assert expected == {f"c{i}": 7 + i + 1 for i in range(FIELDS)}
+    fields = {f"f{i}" for i in range(FIELDS)}
+    with generated("extract", FIELDS) as module:
+        driver = fnloom.build(module)
+        assert set(driver.node_names()) == {"seed", "fields", *fields, *outputs}
+        assert driver.nodes["f3"].dependencies == ("fields",)
+        assert driver.execute(outputs, inputs=inputs) == expected
+    with generated("extract", FIELDS, spelling="hamilton") as module:
+        built = hamilton_driver.Builder().with_modules(module).build()
+        assert {v.name for v in built.list_available_variables()} == {
+            "seed",
+            "fields",
+            *fields,
+            *outputs,
+        }
+        names: list[str | Callable[..., object] | hamilton_driver.Variable] = [*outputs]
+        assert built.execute(names, inputs=inputs) == expected

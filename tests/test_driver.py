@@ -360,6 +360,7 @@ def test_public_api_is_exported() -> None:
         "build",
         "cache",
         "config",
+        "extract_columns",
         "extract_fields",
         "fingerprint",
         "parameterize",

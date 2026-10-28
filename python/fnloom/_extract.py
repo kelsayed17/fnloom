@@ -1,22 +1,31 @@
-"""`@extract_fields`: a producer node, and one checked node per field it returns.
+"""`@extract_fields` and `@extract_columns`: a producer, and a checked node per item.
 
 The decorator records an `Extraction`; the scan lowers it (`lower`) into the
-producer, unchanged, and one generated node per field. A generated node's payload
-is an `_Extractor`: it reads the field from the producer's value by key, fills a
-missing one when asked, and checks the value against the field's declared type
-with the input check's matcher, on every run (Q61).
+producer, unchanged, and one generated node per field or column. A generated
+node's payload is an `_Extractor`: it reads the item from the producer's value by
+key, fills a missing one when asked, and checks the value against the item's
+declared type with the input check's matcher, on every run (Q61, Q64). A column's
+type comes from the producer's frame type (`column_type`); pandas and polars are
+recognised by name and never imported.
 """
 
 import annotationlib
 import collections.abc
 import inspect
+import sys
 import typing
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, Final, Literal, final, override
+from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, final, override
 
 from fnloom import _types
-from fnloom._decorators import _ATTRIBUTE, Source, decorations, too_many_rows
+from fnloom._decorators import (
+    _ATTRIBUTE,
+    Decorations,
+    Source,
+    decorations,
+    too_many_rows,
+)
 from fnloom._view import Param
 
 if TYPE_CHECKING:
@@ -47,9 +56,11 @@ class Extraction:
     """What an `extract_*` decorator recorded on a function.
 
     Attributes:
-        kind: `"fields"`, read from a mapping by key.
+        kind: `"fields"`, read from a mapping by key, or `"columns"`, read from
+            any value with `in` and `[]`, typed by `column_type`.
         items: Each item to extract; empty to extract every field of a
-            `TypedDict` return.
+            `TypedDict` return. A column's doc is its own, or `None` for the
+            producer's.
         fill: The value a missing item takes, or `MISSING_FILL` for none.
     """
 
@@ -58,7 +69,6 @@ class Extraction:
     fill: object
 
 
-@final
 class _Extractor:
     """A generated field node's payload: the field, read from the producer's value.
 
@@ -69,6 +79,9 @@ class _Extractor:
     """
 
     __slots__ = ("_cls", "_declared", "_field", "_fill", "_producer")
+
+    # What an error calls the item this node reads.
+    noun: ClassVar[str] = "field"
 
     def __init__(
         self, producer: str, field: str, declared: object, fill: object
@@ -82,17 +95,17 @@ class _Extractor:
 
     @property
     def field(self) -> str:
-        """The field this node reads."""
+        """The field or column this node reads."""
         return self._field
 
     @property
     def declared(self) -> object:
-        """The field's declared type, which its value is checked against."""
+        """The item's declared type, which its value is checked against."""
         return self._declared
 
     @property
     def fill(self) -> object:
-        """The value of a missing field, or `MISSING_FILL` for none."""
+        """The value of a missing item, or `MISSING_FILL` for none."""
         return self._fill
 
     def __call__(self, /, **values: object) -> object:
@@ -117,6 +130,10 @@ class _Extractor:
                 f"{self._producer!r} returned no field {field!r}; {_returned(mapping)}"
             )
             raise ValueError(msg)
+        return self._checked(found)
+
+    def _checked(self, found: object) -> object:
+        """`found`, when it matches the declared type; `ValueError` otherwise."""
         if found is None:
             return found
         cls = self._cls
@@ -126,11 +143,111 @@ class _Extractor:
         elif _types.value_matches(self._declared, found):
             return found
         msg = (
-            f"{self._producer!r} returned field {field!r} as "
+            f"{self._producer!r} returned {self.noun} {self._field!r} as "
             f"{inspect.formatannotation(type(found))}, but it is declared "
             f"{inspect.formatannotation(self._declared)}"
         )
         raise ValueError(msg)
+
+
+@final
+class _ColumnExtractor(_Extractor):
+    """A generated column node's payload: the column, read from the producer's value.
+
+    Reads any value with `in` and `[]`: a mapping, a pandas or a polars frame. A
+    missing column takes the fill: the value itself for a mapping, a full column
+    for a pandas or polars frame, and a `TypeError` for any other value; the
+    producer's value is never changed (Q64). The value is checked against the
+    column's declared type as a field's is.
+    """
+
+    __slots__ = ()
+
+    noun: ClassVar[str] = "column"
+
+    @override
+    def __call__(self, /, **values: object) -> object:
+        """The column; `ValueError` when it is missing or of the wrong type."""
+        frame = typing.cast("Mapping[object, object]", values[self._producer])
+        column = self._field
+        try:
+            present = column in frame
+        except TypeError:
+            msg = (
+                f"{self._producer!r} returned {type(frame).__name__}, "
+                f"which has no column {column!r}"
+            )
+            raise TypeError(msg) from None
+        if present:
+            return self._checked(frame[column])
+        if self._fill is MISSING_FILL:
+            msg = (
+                f"{self._producer!r} returned no column {column!r}; "
+                f"{_returned_columns(frame)}"
+            )
+            raise ValueError(msg)
+        return self._checked(self._filled(frame))
+
+    def _filled(self, frame: object) -> object:
+        """The fill as `frame`'s missing column; `TypeError` for an unknown frame."""
+        if isinstance(frame, Mapping):
+            return self._fill
+        library = _frame_library(type(frame))
+        column = self._field
+        if library == "pandas":
+            sized = typing.cast("Any", frame)
+            series = sys.modules["pandas"].Series
+            return series(self._fill, index=sized.index, name=column)
+        if library == "polars":
+            sized = typing.cast("collections.abc.Sized", frame)
+            return sys.modules["polars"].Series(column, [self._fill] * len(sized))
+        msg = (
+            f"{self._producer!r} returned no column {column!r}, and fill_with fills "
+            "only a mapping, a pandas DataFrame or a polars DataFrame, "
+            f"not {_qualified(type(frame))}"
+        )
+        raise TypeError(msg)
+
+
+# The frame classes `column_type` knows, by (`__module__`, `__qualname__`), with
+# the library whose `Series` is their column type. pandas 3 reports `pandas`.
+_FRAMES: Final = {
+    ("pandas", "DataFrame"): "pandas",
+    ("pandas.core.frame", "DataFrame"): "pandas",
+    ("polars", "DataFrame"): "polars",
+    ("polars.dataframe.frame", "DataFrame"): "polars",
+}
+
+
+def _qualified(cls: type) -> str:
+    """`cls`'s module and qualified name, as an error names a type."""
+    return f"{cls.__module__}.{cls.__qualname__}"
+
+
+def _frame_library(cls: type) -> str | None:
+    """`"pandas"` or `"polars"` when `cls` is, or derives from, its DataFrame."""
+    for base in cls.__mro__:
+        module = getattr(base, "__module__", None)
+        if (library := _FRAMES.get((module, base.__qualname__))) is not None:
+            return library
+    return None
+
+
+def column_type(frame_type: object) -> object:
+    """The type of a column of a `frame_type` value.
+
+    `pandas.Series` for a `pandas.DataFrame`, `polars.Series` for a
+    `polars.DataFrame`, each recognised by module and name and read from
+    `sys.modules`, never imported; `typing.Any` for anything else.
+    """
+    frame_type = _types.stripped(frame_type)
+    if not isinstance(frame_type, type):
+        return Any
+    library = _frame_library(frame_type)
+    if library is None:
+        return Any
+    series = getattr(sys.modules.get(library), "Series", None)
+    return series if isinstance(series, type) else Any
 
 
 def _returned(mapping: object) -> str:
@@ -138,10 +255,26 @@ def _returned(mapping: object) -> str:
     keys = getattr(mapping, "keys", None)
     if not callable(keys):
         return f"it returned a {type(mapping).__name__}"
-    names = sorted(repr(key) for key in typing.cast("Iterable[object]", keys()))
-    if not names:
-        return "it returned no fields"
-    return f"it returned {', '.join(names)}"
+    return _listed(typing.cast("Iterable[object]", keys()), "fields")
+
+
+def _returned_columns(frame: object) -> str:
+    """The columns `frame` holds, sorted: its `columns`, else its `keys()`."""
+    columns = getattr(frame, "columns", None)
+    if isinstance(columns, Iterable) and not isinstance(columns, str | bytes):
+        return _listed(typing.cast("Iterable[object]", columns), "columns")
+    keys = getattr(frame, "keys", None)
+    if not callable(keys):
+        return f"it returned a {type(frame).__name__}"
+    return _listed(typing.cast("Iterable[object]", keys()), "columns")
+
+
+def _listed(names: Iterable[object], noun: str) -> str:
+    """`names`, sorted by `repr`, as a missing-item error ends."""
+    shown = sorted(repr(name) for name in names)
+    if not shown:
+        return f"it returned no {noun}"
+    return f"it returned {', '.join(shown)}"
 
 
 def _is_type(declared: object) -> bool:
@@ -303,11 +436,7 @@ def extract_fields[F: Callable[..., object]](
     def apply(fn: F) -> F:
         current = decorations(fn)
         label = repr(getattr(fn, "__name__", "function"))
-        if current.extract is not None:
-            msg = f"{label} already extracts fields; apply extract_fields once"
-            raise ValueError(msg)
-        if current.rows is not None and len(current.rows) > 1:
-            raise ValueError(too_many_rows(current.rows))
+        _refuse_stacking(label, current, "fields")
         annotations = annotationlib.get_annotations(
             fn, format=annotationlib.Format.FORWARDREF
         )
@@ -320,6 +449,95 @@ def extract_fields[F: Callable[..., object]](
             and (problem := _shape(label, items, returns)) is not None
         ):
             raise ValueError(problem)
+        setattr(fn, _ATTRIBUTE, replace(current, extract=extraction))
+        return fn
+
+    return apply
+
+
+def _refuse_stacking(
+    label: str, current: Decorations, kind: Literal["fields", "columns"]
+) -> None:
+    """`ValueError` when `extract_{kind}` cannot go on a function so decorated.
+
+    A function extracts once, and lowers to one producer: two `@parameterize`
+    rows are refused (Q61).
+    """
+    if current.extract is not None:
+        if current.extract.kind == kind:
+            msg = f"{label} already extracts {kind}; apply extract_{kind} once"
+        else:
+            msg = (
+                f"{label} already extracts {current.extract.kind}; "
+                "extract_fields and extract_columns don't combine"
+            )
+        raise ValueError(msg)
+    if current.rows is not None and len(current.rows) > 1:
+        raise ValueError(too_many_rows(current.rows, f"extract_{kind}"))
+
+
+def _columns(columns: tuple[object, ...]) -> tuple[Item, ...]:
+    """The items `extract_columns(*columns)` asks for, validated.
+
+    A list is refused with the advice Hamilton gives (H2.3c), and every
+    argument that is neither a name nor a `(name, doc)` pair is listed, sorted.
+    A column given twice the same way is one column; a name given twice
+    otherwise is refused.
+    """
+    if not columns:
+        msg = "extract_columns got no columns; it needs at least one column name"
+        raise ValueError(msg)
+    items: list[Item] = []
+    bad: list[str] = []
+    for column in columns:
+        if isinstance(column, str):
+            items.append((column, None, None))
+        elif (
+            isinstance(column, tuple)
+            and len(typing.cast("tuple[object, ...]", column)) == 2  # noqa: PLR2004  # a name and a doc
+            and all(isinstance(part, str) for part in column)
+        ):
+            name, doc = typing.cast("tuple[str, str]", column)
+            items.append((name, None, doc))
+        else:
+            bad.append(repr(column))
+    if bad:
+        listed = ", ".join(sorted(bad))
+        msg = f"extract_columns takes column names or (name, doc) pairs, got: {listed}"
+        if any(isinstance(column, list) for column in columns):
+            msg += "; it got a list: put `*` in front of it to expand it"
+        raise TypeError(msg)
+    unique = list(dict.fromkeys(items))
+    counts = collections.Counter(name for name, _, _ in unique)
+    if repeated := sorted(repr(name) for name, count in counts.items() if count > 1):
+        msg = f"extract_columns names a column more than once: {', '.join(repeated)}"
+        raise ValueError(msg)
+    return tuple(unique)
+
+
+def extract_columns[F: Callable[..., object]](
+    *columns: str | tuple[str, str],
+    fill_with: object = MISSING_FILL,
+) -> Callable[[F], F]:
+    """Makes a node of each named column of the value the function returns.
+
+    Works on any value with `in` and `[]`: a mapping, a pandas or a polars
+    DataFrame, or another frame; no extension is needed (Q64). A column is
+    named, or given as `(name, doc)` to set its node's doc. Its type comes from
+    the return annotation: `pandas.Series` for a `pandas.DataFrame`,
+    `polars.Series` for a `polars.DataFrame`, `typing.Any` for anything else,
+    and its value is checked against it on every run. The function stays a
+    node of its own name. `fill_with` is the value of a missing column: a full
+    column of it for a pandas or polars frame, the value itself for a mapping,
+    and a `TypeError` at run for another type; the producer's value is never
+    changed.
+    """
+    given: tuple[object, ...] = columns
+    extraction = Extraction("columns", _columns(given), fill_with)
+
+    def apply(fn: F) -> F:
+        current = decorations(fn)
+        _refuse_stacking(repr(getattr(fn, "__name__", "function")), current, "columns")
         setattr(fn, _ATTRIBUTE, replace(current, extract=extraction))
         return fn
 
@@ -372,8 +590,13 @@ def lower(
     such field; a `TypedDict` field type that does not resolve raises its
     `NameError` or `AttributeError`. Without, as when scanning, the field nodes
     are placeholders, used only to find duplicate names: a field the decorator
-    gave no type is typed `Any`, and nothing is checked yet.
+    gave no type is typed `Any`, and nothing is checked yet. Column nodes are
+    typed by `column_type` of the resolved return, and `Any` before it resolves;
+    each carries its own doc.
     """
+    if extraction.kind == "columns":
+        declared = column_type(producer.returns) if resolved else Any
+        return _lowered_columns(producer, extraction, declared)
     if resolved:
         typed = _field_types(producer, extraction)
     else:
@@ -405,13 +628,37 @@ def lower(
     ]
 
 
+def _lowered_columns(
+    producer: NodeDef, extraction: Extraction, declared: object
+) -> list[NodeDef]:
+    """`producer`, then a node per column, each typed `declared`, with its doc."""
+    param = Param(producer.name, Source(producer.name), True, producer.returns)  # noqa: FBT003  # `required`, in field order
+    return [
+        producer,
+        *(
+            replace(
+                producer,
+                name=name,
+                params=(param,),
+                payload=_ColumnExtractor(
+                    producer.name, name, declared, extraction.fill
+                ),
+                returns=declared,
+                renames={},
+                doc=doc,
+            )
+            for name, _, doc in extraction.items
+        ),
+    ]
+
+
 def is_generated(node: NodeDef) -> bool:
-    """Whether `node` is a field node `lower` made, not a function's own."""
+    """Whether `node` is a field or column node `lower` made, not a function's own."""
     return isinstance(node.payload, _Extractor)
 
 
 def extractor(node: NodeDef) -> _Extractor | None:
-    """The payload of a field node `lower` made; `None` for any other node."""
+    """The payload of a node `lower` made; `None` for any other node."""
     payload = node.payload
     return payload if isinstance(payload, _Extractor) else None
 

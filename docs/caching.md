@@ -136,7 +136,7 @@ A node changes how it is cached with `@cache`, which records the policy and read
 | `@cache()`, or no decorator | on a miss | yes | its key |
 | `@cache(behavior="recompute")` | always | no | the fingerprint of its result |
 | `@cache(behavior="disable")` | always | never | nothing: they cannot be cached either, unless they `ignore` it |
-| A field node of `@extract_fields` | always, so its type check always runs | never | its key: the producer's, with the field, its declared type and its fill |
+| A field or column node of `@extract_fields` or `@extract_columns` | always, so its type check always runs | never | its key: the producer's, with the field or column, its declared type and its fill |
 
 **`recompute`** is for a node that reads the outside world, as above. Its result is never stored, since the node
 always runs and nothing would read it back. Its result must be fingerprintable ([Fingerprints](#fingerprints)), or
@@ -384,7 +384,7 @@ same way, runs nothing, and returns every computed node of the plan, by name, wi
 | `status` | Means | `reason` |
 | --- | --- | --- |
 | `hit` | the store holds the node's key | `None` |
-| `miss` | it does not, so a run runs and stores the node | `None`, or `"policy recompute"` for a `recompute` node, which always runs and is never stored, or `"extracted field: always recomputed from its producer"` for a field node of `@extract_fields` |
+| `miss` | it does not, so a run runs and stores the node | `None`, or `"policy recompute"` for a `recompute` node, which always runs and is never stored, or `"extracted field: always recomputed from its producer"` for a field or column node of `@extract_fields` or `@extract_columns` |
 | `uncacheable` | the node has no key: it always runs and is never stored | why, for example the global (`"global 'WEIGHTS' of 'f' is a dict, ..."`), the value path (`"levels[0]: Level"`), the policy (`"policy disable"`), a source (`"reads uncacheable 'x'"`) or a failing fingerprint function (`"cannot fingerprint 'x' for the cache: ..."`) |
 | `unknown` | the key depends on a `recompute` node's result, which only a run knows | for example `"downstream of recompute node 'x'"`, or `"no key"` |
 
