@@ -336,15 +336,18 @@ asyncio.run(async_plan.run(inputs={"currency": "EUR", "amount": 4.0}))
 ```
 
 **How nodes run.** A node starts as soon as everything it reads is ready, so independent `async def` nodes await
-concurrently. A sync node runs in a worker thread, through `asyncio.to_thread`, so the event loop keeps running while
-it does. A thread costs tens of microseconds, which is more than a cheap node such as `converted`. For a graph of
-cheap sync nodes, `build_async(sync_nodes="inline")` runs them on the loop instead. The nodes `@extract_fields` and
-`@extract_columns` generate always run on the loop.
+concurrently. A sync node runs in a worker thread of the loop's default executor, through `loop.run_in_executor` with
+your context variables, so the event loop keeps running while it does. A thread costs tens of microseconds, which is
+more than a cheap node such as `converted`. For a graph of cheap sync nodes, `build_async(sync_nodes="inline")` runs
+them on the loop instead. The nodes `@extract_fields` and `@extract_columns` generate always run on the loop.
 
 **When a node fails,** the run cancels every node still running, waits for each `async def` node to stop, and raises
 the failed node's own exception, with the same note naming the node as the sync driver adds. There's no
 `ExceptionGroup`, so `except ZeroDivisionError` works as it does with `Driver`. A sync node in a thread can't be
-interrupted: the run doesn't wait for it, and drops its result when it comes.
+interrupted: the run doesn't wait for it, and drops its result when it comes. `asyncio.run` still waits for running
+threads when the loop shuts down, since it shuts the default executor down. If the caller is cancelled, as by
+`asyncio.timeout`, the run cancels its nodes the same way, and the cancellation reaches the caller once each
+`async def` node has stopped.
 
 **Not yet:** `with_cache` and `build_async` together raise `NotImplementedError`. An async driver made by a builder
 pickles as that builder, as a `Driver` does.

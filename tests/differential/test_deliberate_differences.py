@@ -1902,69 +1902,83 @@ def test_q13_the_deprecation_warning_is_hamiltons() -> None:
     assert [w for w in caught if issubclass(w.category, DeprecationWarning)] == []
 
 
-_SLEEPER = """
+# A sync node that waits for an async sibling to tick, and says whether it did.
+# The ticker ticks only after the sync node has started, so a tick can reach it
+# only while it runs, and only if the loop runs the ticker meanwhile.
+_TICKING = """
 import asyncio
-import time
+import threading
 
-LOG: list[str] = []
+STARTED = threading.Event()
+TICKED = threading.Event()
 
 
-def slow(x: int) -> int:
-    time.sleep(0.2)
-    LOG.append("slept")
-    return x
+def waits_for_tick(x: int) -> bool:
+    STARTED.set()
+    return TICKED.wait({patience})
 
 
 async def ticker(x: int) -> int:
-    await asyncio.sleep(0.05)
-    LOG.append("tick")
+    await asyncio.to_thread(STARTED.wait, 10.0)
+    TICKED.set()
     return x
 """
+# How long a sync node blocking the loop waits for a tick that can't come.
+_BLOCKED_PATIENCE = 0.1
 
 
 @pytest.mark.deliberate("Q65")
 @pytest.mark.filterwarnings(_HAMILTON_ASYNC_WARNING)
 def test_q65_sync_nodes_run_off_the_loop() -> None:
-    """Hamilton's sync node stops the loop, so the ticker waits; fnloom's doesn't."""
-    request = ["slow", "ticker"]
-    hamilton_module = make_module("differential_q65_h", _SLEEPER)
+    """Hamilton's sync node stops the loop, so no tick reaches it; fnloom's doesn't.
+
+    By order of events: the node sees the tick only if the loop ran the ticker
+    while the node waited, however long it waits.
+    """
+    request = ["waits_for_tick", "ticker"]
+    hamilton_module = make_module(
+        "differential_q65_h", _TICKING.format(patience=_BLOCKED_PATIENCE)
+    )
 
     async def hamilton() -> object:
         built = await _hamilton_async(hamilton_module)
         return await built.execute(request, inputs={"x": 1})
 
-    assert asyncio.run(hamilton()) == {"slow": 1, "ticker": 1}
-    assert hamilton_module.LOG == ["slept", "tick"]
-    for sync_nodes, order in (
-        ("thread", ["tick", "slept"]),
-        ("inline", ["slept", "tick"]),
+    assert asyncio.run(hamilton()) == {"waits_for_tick": False, "ticker": 1}
+    for sync_nodes, patience, ticked in (
+        ("thread", 10.0, True),
+        ("inline", _BLOCKED_PATIENCE, False),
     ):
-        module = make_module(f"differential_q65_{sync_nodes}", _SLEEPER)
+        module = make_module(
+            f"differential_q65_{sync_nodes}", _TICKING.format(patience=patience)
+        )
         driver = (
             fnloom.Builder().with_modules(module).build_async(sync_nodes=sync_nodes)
         )
         assert asyncio.run(driver.execute(request, inputs={"x": 1})) == {
-            "slow": 1,
+            "waits_for_tick": ticked,
             "ticker": 1,
-        }
-        assert list(module.LOG) == order, sync_nodes
+        }, sync_nodes
 
 
 _FAILING = """
 import asyncio
 
 LOG: list[str] = []
+SIBLING_STARTED = asyncio.Event()
+RELEASE = asyncio.Event()
 FINISHED = asyncio.Event()
 
 
 async def boom(x: int) -> int:
-    await asyncio.sleep(0)
+    await SIBLING_STARTED.wait()
     raise KeyError("boom")
 
 
 async def sibling(x: int) -> int:
+    SIBLING_STARTED.set()
     try:
-        await asyncio.sleep(0.2)
+        await RELEASE.wait()
     except asyncio.CancelledError:
         LOG.append("cancelled")
         raise
@@ -1977,7 +1991,11 @@ async def sibling(x: int) -> int:
 @pytest.mark.deliberate("Q66")
 @pytest.mark.filterwarnings(_HAMILTON_ASYNC_WARNING)
 def test_q66_a_failure_cancels_its_siblings() -> None:
-    """Hamilton leaves the sibling running after it raises; fnloom cancels it."""
+    """Hamilton leaves the sibling running after it raises; fnloom cancels it.
+
+    By order of events: the node fails only once the sibling waits, and the
+    sibling finishes only when released, after the run has raised.
+    """
     request = ["sibling", "boom"]
     hamilton_module = make_module("differential_q66_h", _FAILING)
 
@@ -1986,6 +2004,7 @@ def test_q66_a_failure_cancels_its_siblings() -> None:
         with pytest.raises(KeyError) as info:
             await built.execute(request, inputs={"x": 1})
         assert hamilton_module.LOG == []
+        hamilton_module.RELEASE.set()
         await asyncio.wait_for(hamilton_module.FINISHED.wait(), 10.0)
         return info.value
 
@@ -1998,6 +2017,8 @@ def test_q66_a_failure_cancels_its_siblings() -> None:
     async def fnloom_run() -> BaseException:
         with pytest.raises(KeyError) as info:
             await driver.execute(request, inputs={"x": 1})
+        # Cancelled, and done being cancelled, by the time the run raised.
+        assert module.LOG == ["cancelled"]
         return info.value
 
     error = asyncio.run(fnloom_run())
@@ -2054,3 +2075,59 @@ def test_q67_requests_are_checked_as_the_sync_driver_checks_them() -> None:
         "missing inputs: 'x' (needed by 'typed')",
         "missing inputs: 'x' (requested as an output)",
     ]
+
+
+# The row decorators in each library's spelling.
+_HAMILTON_ROWS = "from hamilton.function_modifiers import parameterize, source, value"
+_FNLOOM_ROWS = "from fnloom import parameterize, source, value"
+_ASYNC_ROWS = """
+import asyncio
+{decorator}
+
+
+@parameterize(scaled={{"factor": value(3)}}, shifted={{"factor": source("x")}})
+async def times(x: int, factor: int) -> int:
+    await asyncio.sleep(0)
+    return x * factor
+
+
+async def plain(x: int) -> int:
+    return x
+"""
+
+
+@pytest.mark.deliberate("Q69")
+@pytest.mark.filterwarnings(_HAMILTON_ASYNC_WARNING)
+def test_q69_an_async_row_is_awaited() -> None:
+    """Hamilton returns an async row's coroutine as its value; fnloom awaits it."""
+    request = ["scaled", "shifted", "plain"]
+    hamilton_module = make_module(
+        "differential_q69_h", _ASYNC_ROWS.format(decorator=_HAMILTON_ROWS)
+    )
+
+    async def hamilton() -> dict[str, object]:
+        built = await _hamilton_async(hamilton_module)
+        values = await built.execute(request, inputs={"x": 2})
+        found: dict[str, object] = {}
+        for name, value in values.items():
+            if inspect.iscoroutine(value):
+                value.close()
+                found[name] = "coroutine"
+            else:
+                found[name] = value
+        return found
+
+    assert asyncio.run(hamilton()) == {
+        "plain": 2,
+        "scaled": "coroutine",
+        "shifted": "coroutine",
+    }
+    module = make_module(
+        "differential_q69_f", _ASYNC_ROWS.format(decorator=_FNLOOM_ROWS)
+    )
+    driver = fnloom.Builder().with_modules(module).build_async()
+    assert asyncio.run(driver.execute(request, inputs={"x": 2})) == {
+        "scaled": 6,
+        "shifted": 4,
+        "plain": 2,
+    }

@@ -2,9 +2,10 @@
 
 The native core plans; this module runs the plan's computed nodes as their inputs
 become ready. A coroutine function is awaited as a task. A sync function runs in a
-worker thread, as `asyncio.to_thread` runs it, so an awaiting sibling keeps running
-(Q65); or inline, on the loop, with `sync_nodes="inline"`. A generated `extract_*`
-node always runs inline: it only reads a field.
+worker thread of the loop's default executor, through `loop.run_in_executor`, in
+the caller's context, so an awaiting sibling keeps running (Q65); or inline, on the
+loop, with `sync_nodes="inline"`. A generated `extract_*` node always runs inline:
+it only reads a field.
 
 Nothing about a run is kept on the schedule, which is shared by every run of its
 plan: each run has its own `_Run`, so runs on one loop, or on loops in several
@@ -180,6 +181,21 @@ def _awaitable_refusal(node: str, value: object) -> TypeError:
     return TypeError(msg)
 
 
+def _cancellation(name: str, future: asyncio.Future[object]) -> BaseException:
+    """What a node's future, cancelled other than by its run, is raised as.
+
+    A task nobody called `cancel` on ended with the node's own `CancelledError`,
+    which is raised as it is. A task something else cancelled is raised as a new
+    `CancelledError` naming the node: the run cancels only once it has stopped.
+    """
+    if isinstance(future, asyncio.Task) and not future.cancelling():
+        try:
+            future.result()
+        except asyncio.CancelledError as own:
+            return own
+    return asyncio.CancelledError(f"node {name!r} was cancelled")
+
+
 # What a node may raise that the walk does not catch: they stop the loop itself.
 _STOPPING = (KeyboardInterrupt, SystemExit)
 
@@ -215,25 +231,42 @@ class _Run:
         self._running: dict[asyncio.Future[object], str] = {}
         self._finished: asyncio.Future[None] = self._loop.create_future()
         self._failure: BaseException | None = None
-        # What was running when the run failed: cancelled, then awaited.
+        # The node tasks running when the run failed: cancelled, then awaited.
         self._cancelled: list[asyncio.Future[object]] = []
 
     async def wait(self) -> dict[str, object]:
-        """Runs every node; the values, or the first failure, noted, raised."""
+        """Runs every node; the values, or the first failure, noted, raised.
+
+        Whether the run fails or its caller is cancelled, every running node task
+        is cancelled and awaited before the exception goes on, as `TaskGroup` does.
+        A sync node in a thread can't be interrupted: its future is cancelled, its
+        result dropped when it comes, and the thread is not waited for.
+        """
         try:
             self._drain()
             if not self._finished.done():
                 await self._finished
             if self._cancelled:
-                # Each takes its cancellation; a thread's wrapper is done at once.
                 await asyncio.wait(self._cancelled)
+        except asyncio.CancelledError:
+            # The caller was cancelled: its nodes stop before the caller hears of it.
+            tasks = self._tasks()
+            self._stop()
+            if tasks:
+                await asyncio.wait(tasks)
+            raise
         except BaseException:
-            # The caller was cancelled, or the loop is stopping: nothing outlives it.
+            # The loop is stopping (`KeyboardInterrupt`, `SystemExit`): no waiting.
             self._stop()
             raise
         if self._failure is not None:
             raise self._failure
         return self._values
+
+    def _tasks(self) -> list[asyncio.Future[object]]:
+        """The running node tasks: everything running but a thread's future."""
+        calls = self._schedule.calls
+        return [f for f, name in self._running.items() if calls[name].kind == "await"]
 
     def _drain(self) -> None:
         """Starts every ready node, running inline ones to their dependents."""
@@ -277,10 +310,12 @@ class _Run:
         """The task awaiting an async node, or the future of a sync node's thread."""
         if kind == "await":
             coroutine = cast("Coroutine[Any, Any, object]", payload(**kwargs))
-            # Eager: a node that never suspends is done here, with no loop turn.
-            return asyncio.Task(coroutine, loop=self._loop, eager_start=True)
-        # As `asyncio.to_thread` runs it, in the caller's context; a future, not a
-        # task, so cancelling it never waits for the thread.
+            # Eager: a node that never suspends is done here, with no loop turn. A
+            # custom task factory gets `eager_start` too.
+            return self._loop.create_task(coroutine, eager_start=True)
+        # In the default executor and the caller's context, as `asyncio.to_thread`
+        # would, but as a future, not a task: cancelling it never waits for the
+        # thread.
         context = contextvars.copy_context()
         return self._loop.run_in_executor(
             None, functools.partial(context.run, payload, **kwargs)
@@ -302,8 +337,7 @@ class _Run:
     def _settle(self, name: str, kind: _Kind, future: asyncio.Future[object]) -> bool:
         """Stores a finished node's value; `False`, the run failed, when it raised."""
         if future.cancelled():
-            # Not by this run, which cancels only once it has failed.
-            self._fail(name, asyncio.CancelledError(f"node {name!r} was cancelled"))
+            self._fail(name, _cancellation(name, future))
             return False
         error = future.exception()
         if error is not None:
@@ -333,7 +367,7 @@ class _Run:
         if self._failure is not None:
             return
         self._failure = noted(error, name)
-        self._cancelled = list(self._running)
+        self._cancelled = self._tasks()
         self._stop()
 
     def _stop(self) -> None:

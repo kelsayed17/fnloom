@@ -226,6 +226,11 @@ def _check_kind(name: str, fn: Callable[..., object], *, awaits: bool) -> None:
             f"{name!r}: async function is not supported by build(), which calls "
             "nodes synchronously; build it with build_async()"
         )
+    elif awaits:
+        msg = (
+            f"{name!r}: {kind} is not supported; calling it returns a generator, "
+            "not the node's value"
+        )
     else:
         msg = f"{name!r}: {kind} is not supported; nodes are called synchronously"
     raise ValueError(msg)

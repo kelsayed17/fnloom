@@ -98,38 +98,50 @@ async def summed(left: int, right: int) -> int:
     }
 
 
-SLEEPER = """
+# A sync node that waits for an async sibling to tick, and says whether it did.
+# The ticker ticks only after the sync node has started, so a tick can reach it
+# only while it runs, and only if the loop is free to run the ticker meanwhile.
+TICKING = """
 import asyncio
-import time
+import threading
 
-LOG: list[str] = []
+STARTED = threading.Event()
+TICKED = threading.Event()
 
 
-def slow(x: int) -> int:
-    time.sleep(0.2)
-    LOG.append("slept")
-    return x
+def waits_for_tick(x: int) -> bool:
+    STARTED.set()
+    return TICKED.wait({patience})
 
 
 async def ticker(x: int) -> int:
-    await asyncio.sleep(0.05)
-    LOG.append("tick")
+    await asyncio.to_thread(STARTED.wait, 10.0)
+    TICKED.set()
     return x
 """
 
 
 def test_sync_nodes_do_not_block_the_loop() -> None:
-    """A sync node sleeping 0.2 s in its thread; an async ticker ticks within 0.05 s.
+    """A sync node waiting in its thread; the async ticker ticks meanwhile.
 
-    Asserted by order, not by the clock: the tick lands while the sync node sleeps.
+    By order of events, not by the clock: the sync node sees the tick only if the
+    loop ran the ticker while the node waited.
     """
-    module = make_module("async_sleeper", SLEEPER)
+    module = make_module("async_ticking", TICKING.format(patience=PATIENCE))
     driver = fnloom.Builder().with_modules(module).build_async()
-    assert _run(driver.execute(["slow", "ticker"], inputs={"x": 1})) == {
-        "slow": 1,
-        "ticker": 1,
-    }
-    assert module.LOG == ["tick", "slept"]
+    result = _run(driver.execute(["waits_for_tick", "ticker"], inputs={"x": 1}))
+    assert result == {"waits_for_tick": True, "ticker": 1}
+
+
+def test_inline_sync_nodes_block_the_loop() -> None:
+    """Inline, the loop waits for the sync node: the tick comes only after it.
+
+    The node's wait is short, since it can't be answered while it blocks the loop.
+    """
+    module = make_module("async_ticking_inline", TICKING.format(patience=0.1))
+    driver = fnloom.Builder().with_modules(module).build_async(sync_nodes="inline")
+    result = _run(driver.execute(["waits_for_tick", "ticker"], inputs={"x": 1}))
+    assert result == {"waits_for_tick": False, "ticker": 1}
 
 
 def test_inline_sync_nodes_run_on_the_loop_thread() -> None:
@@ -240,7 +252,6 @@ async def boom(x: int) -> int:
 
 STUCK = """
 import threading
-import time
 
 LOG: list[str] = []
 STARTED = threading.Event()
@@ -258,6 +269,8 @@ def a_sleeper(x: int) -> int:
 
 async def boom(x: int) -> int:
     if x < 0:
+        # Never awaits: blocks until the sibling's thread runs, then raises.
+        assert STARTED.wait(10.0)
         raise KeyError("boom")
     return x
 """
@@ -275,38 +288,42 @@ def test_a_failure_does_not_wait_for_a_sleeping_thread() -> None:
         with pytest.raises(KeyError) as info:
             await driver.execute(["a_sleeper", "boom"], inputs={"x": -1})
         assert info.value.__notes__ == ["in node 'boom'"]
-        # Raised while the thread still waits: the run did not wait for it.
+        # The thread started, and the run raised while it still waits.
+        assert module.STARTED.is_set()
         assert module.LOG == []
         module.RELEASE.set()
-        if module.STARTED.is_set():
-            assert await asyncio.to_thread(module.DONE.wait, PATIENCE)
+        assert await asyncio.to_thread(module.DONE.wait, PATIENCE)
         return await driver.execute(["a_sleeper", "boom"], inputs={"x": 2})
 
     assert _run(scenario()) == {"a_sleeper": 2, "boom": 2}
-    assert module.LOG in (["slept -1", "slept 2"], ["slept 2"])
+    # The discarded result was computed, and never reached a run.
+    assert module.LOG == ["slept -1", "slept 2"]
 
 
-def test_a_cancelled_caller_cancels_its_nodes() -> None:
-    """Cancelling the caller's task cancels the nodes its run started."""
-    module = make_module(
-        "async_cancelled_caller",
-        """
+WAITING = """
 import asyncio
 
 STARTED = asyncio.Event()
-CANCELLED = asyncio.Event()
+NEVER = asyncio.Event()
+LOG: list[str] = []
 
 
 async def waiting(x: int) -> int:
     STARTED.set()
     try:
-        await asyncio.sleep(60)
-    except asyncio.CancelledError:
-        CANCELLED.set()
-        raise
+        await NEVER.wait()
+    finally:
+        # Cleanup that itself awaits: done only if the run waits for the node.
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        LOG.append("cleaned up")
     return x
-""",
-    )
+"""
+
+
+def test_a_cancelled_caller_cancels_its_nodes() -> None:
+    """The caller hears of its cancellation only once its nodes have stopped."""
+    module = make_module("async_cancelled_caller", WAITING)
     driver = fnloom.Builder().with_modules(module).build_async()
 
     async def scenario() -> None:
@@ -315,10 +332,98 @@ async def waiting(x: int) -> int:
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
-        await module.CANCELLED.wait()
+        assert module.LOG == ["cleaned up"]
 
     _run(asyncio.wait_for(scenario(), PATIENCE))
-    assert module.CANCELLED.is_set()
+
+
+def test_a_timeout_waits_for_the_nodes_cleanup() -> None:
+    """`asyncio.timeout` around `execute`: the node's cleanup has run at the raise."""
+    module = make_module("async_timed_out", WAITING)
+    driver = fnloom.Builder().with_modules(module).build_async()
+
+    async def scenario() -> None:
+        with pytest.raises(TimeoutError):
+            async with asyncio.timeout(0.05):
+                await driver.execute(["waiting"], inputs={"x": 1})
+        assert module.LOG == ["cleaned up"]
+
+    _run(scenario())
+
+
+def test_a_nodes_own_cancelled_error_is_raised_as_itself() -> None:
+    """A node raising `CancelledError` itself: that very object, with the note."""
+    module = make_module(
+        "async_own_cancel",
+        """
+import asyncio
+
+MINE = asyncio.CancelledError("mine")
+
+
+async def gives_up(x: int) -> int:
+    raise MINE
+""",
+    )
+    driver = fnloom.Builder().with_modules(module).build_async()
+    error = _failure(driver.execute(["gives_up"], inputs={"x": 1}))
+    assert error is module.MINE
+    assert error.__notes__ == ["in node 'gives_up'"]
+
+
+def test_a_node_task_cancelled_from_outside_names_the_node() -> None:
+    """A node task something else cancels fails the run, naming the node."""
+    module = make_module("async_outside_cancel", WAITING)
+    seen: list[asyncio.Task[Any]] = []
+    driver = fnloom.Builder().with_modules(module).build_async()
+
+    async def scenario() -> BaseException:
+        loop = asyncio.get_running_loop()
+        loop.set_task_factory(_recording(seen))
+        run = asyncio.create_task(driver.execute(["waiting"], inputs={"x": 1}))
+        await module.STARTED.wait()
+        (node,) = [t for t in seen if t is not run]
+        node.cancel()
+        try:
+            await run
+        except asyncio.CancelledError as error:
+            return error
+        pytest.fail("the run did not raise")
+
+    error = _run(scenario())
+    assert error.args == ("node 'waiting' was cancelled",)
+    assert error.__notes__ == ["in node 'waiting'"]
+
+
+def _recording(seen: list[asyncio.Task[Any]]) -> Any:  # noqa: ANN401  # a task factory
+    """A task factory that records every task it makes, `eager_start` passed on."""
+
+    def factory(
+        loop: asyncio.AbstractEventLoop,
+        coroutine: Coroutine[Any, Any, Any],
+        **kwargs: Any,  # noqa: ANN401  # as asyncio calls it
+    ) -> asyncio.Task[Any]:
+        task = asyncio.Task(coroutine, loop=loop, **kwargs)
+        seen.append(task)
+        return task
+
+    return factory
+
+
+def test_a_custom_task_factory_makes_the_node_tasks() -> None:
+    """Node tasks come from the loop's task factory, eagerly started."""
+    module = _mixed("async_factory")
+    driver = fnloom.Builder().with_modules(module).build_async()
+    seen: list[asyncio.Task[Any]] = []
+
+    async def scenario() -> dict[str, object]:
+        asyncio.get_running_loop().set_task_factory(_recording(seen))
+        return await driver.execute(["total"], inputs={"x": 1})
+
+    assert _run(scenario()) == {"total": 5}
+    made = {getattr(t.get_coro(), "__name__", None) for t in seen}
+    # Only the async nodes are tasks; `plus_one`, a sync node, runs in a thread.
+    assert made & {"doubled", "plus_one", "total"} == {"doubled", "total"}
 
 
 def test_a_sync_node_returning_an_awaitable_is_refused() -> None:
@@ -548,8 +653,13 @@ def test_build_async_still_refuses_generators() -> None:
         )
     ):
         module = make_module(f"async_generator_{index}", source)
-        with pytest.raises(ValueError, match="generator function is not supported"):
+        with pytest.raises(ValueError, match="returns a generator") as info:
             fnloom.Builder().with_modules(module).build_async()
+        kind = "async generator function" if index else "generator function"
+        assert str(info.value) == (
+            f"'f': {kind} is not supported; calling it returns a generator, "
+            "not the node's value"
+        )
 
 
 CONFIGURED = """

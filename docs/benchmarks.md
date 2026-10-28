@@ -183,33 +183,44 @@ What closed most of the gap:
 `AsyncDriver` against Hamilton 1.90.0's `async_driver.Builder`, whose result is a dict, on the `chain` and `layered`
 graphs of trivial nodes, once with every node an `async def` and once with every node a plain function. fnloom runs
 in both `sync_nodes` modes. Milliseconds, first / steady: a first run on a new driver, then the median of the 21 runs
-after it, each row the median over five fresh processes. fnloom runs a prepared plan; Hamilton, which has none, runs
-`execute`.
+after it, each row the median over five fresh processes. fnloom runs a prepared plan, so its first run leaves out
+`prepare` and the schedule it builds from the plan's steps, both made once before the timed runs. Hamilton, which has
+no prepared plans, runs `execute`, planning included.
 
 | shape | n | nodes | Hamilton | fnloom, `thread` | fnloom, `inline` |
 | --- | ---: | --- | --- | --- | --- |
-| chain | 100 | async | 5.413 / 5.421 | 0.102 / 0.077 | 0.105 / 0.077 |
-| chain | 100 | sync | 5.335 / 5.434 | 3.928 / 3.428 | 0.082 / 0.055 |
-| chain | 1,000 | async | 54.7 / 53.9 | 0.824 / 0.780 | 0.833 / 0.790 |
-| chain | 1,000 | sync | 55.4 / 54.8 | 34.7 / 34.1 | 0.620 / 0.583 |
-| layered | 100 | async | 2.328 / 2.042 | 0.119 / 0.089 | 0.120 / 0.091 |
-| layered | 100 | sync | 2.286 / 2.043 | 3.149 / 2.317 | 0.098 / 0.068 |
-| layered | 1,000 | async | 22.9 / 22.2 | 0.994 / 0.936 | 0.990 / 0.932 |
-| layered | 1,000 | sync | 23.6 / 22.8 | 24.2 / 23.2 | 0.753 / 0.702 |
+| chain | 100 | async | 5.655 / 5.433 | 0.110 / 0.086 | 0.111 / 0.086 |
+| chain | 100 | sync | 5.307 / 5.439 | 3.915 / 3.409 | 0.080 / 0.055 |
+| chain | 1,000 | async | 55.0 / 53.8 | 0.929 / 0.882 | 0.926 / 0.881 |
+| chain | 1,000 | sync | 55.7 / 53.7 | 34.6 / 33.9 | 0.598 / 0.557 |
+| layered | 100 | async | 2.344 / 2.101 | 0.129 / 0.097 | 0.126 / 0.096 |
+| layered | 100 | sync | 2.203 / 1.978 | 3.149 / 2.326 | 0.093 / 0.065 |
+| layered | 1,000 | async | 22.2 / 21.8 | 1.073 / 1.013 | 1.057 / 1.004 |
+| layered | 1,000 | sync | 21.9 / 22.0 | 24.2 / 23.0 | 0.729 / 0.677 |
 
-Measured on the machine above, with CPython 3.14.8 and a release build, on 2026-10-28. fnloom runs a graph 22 to 98
-times faster than Hamilton wherever both run nodes on the loop: every `async` row, and the `inline` column. The
-generated `async def` nodes never suspend. fnloom starts each node's task eagerly, so a node that doesn't suspend
-finishes with no turn of the loop; Hamilton schedules a task for every node. A node that awaits real I/O pays for its
-suspensions on either.
+Measured on the machine above, with CPython 3.14.8 and a release build, on 2026-10-28. Wherever both run nodes on the
+loop, which means every `async` row and the `inline` column, fnloom is 18 to 93 times faster than Hamilton on a first
+run and 22 to 99 times faster on a steady one. The smallest gains are on the 100-node layered graph of `async def`
+nodes, 18.2× and 18.6× on the first run. The generated `async def` nodes never suspend. fnloom starts each node's
+task eagerly, so a node that doesn't suspend finishes with no turn of the loop, while Hamilton schedules a task for
+every node. A node that awaits real I/O pays for its suspensions on either.
 
-**`thread` is slower for cheap sync nodes, by design.** Each sync node is a trip through `asyncio.to_thread`: the call
-is queued to the default executor, a worker thread wakes to run it, and the loop wakes again for the result. That costs
-about 34 µs per node on the chain, where the nodes run one after another, and about 23 µs on the layered graph, where
-ten at a time are in flight. A trivial node costs well under 1 µs, so the trip is the whole cost, and a 1,000-node chain
-takes 34 ms. On the chain that's still faster than Hamilton; on the layered graph it's up to 13% slower. The thread is
-what keeps the loop free while a sync node runs (Q65), which Hamilton doesn't do, so the `thread` column isn't a
-like-for-like comparison. For a graph of cheap sync nodes, `sync_nodes="inline"` is, and it's the fastest column.
+**`thread` is slower than Hamilton on the layered graph of sync nodes, by design.** Each sync node makes a round trip
+to a worker thread: `loop.run_in_executor` queues the call to the loop's default executor, a worker thread wakes to
+run it, and the loop wakes again for the result. That costs about 34 µs per node on the chain, where the nodes run
+one after another, and about 23 µs on the layered graph, where ten at a time are in flight. A trivial node costs well
+under 1 µs, so the round trip is the whole cost. On the chain, `thread` is still 1.4 to 1.6 times faster than
+Hamilton. These are the rows where it's slower:
+
+| row | Hamilton, first / steady | fnloom `thread`, first / steady | slower by, first / steady | fnloom `inline` |
+| --- | --- | --- | --- | --- |
+| layered, 100, sync | 2.203 / 1.978 | 3.149 / 2.326 | 43% / 18% | 0.093 / 0.065 |
+| layered, 1,000, sync | 21.9 / 22.0 | 24.2 / 23.0 | 10% / 4% | 0.729 / 0.677 |
+
+Hamilton runs sync nodes on the loop and stops it while each one runs. The thread is what keeps the loop free (Q65),
+so the `thread` column isn't a like-for-like comparison. For a graph of cheap sync nodes, `sync_nodes="inline"` is
+the remedy, and it's the fastest column. A dedicated executor and dropping the per-call context copy were tried. Each
+saved 1 to 2% of the round trip, within noise, so neither was kept.
 
 ## Why fan-in is fast
 

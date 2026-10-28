@@ -678,9 +678,11 @@ def test_extract_columns_refuses_a_list_and_no_columns() -> None:
         fnloom.extract_columns()
 
 
-# A graph mixing async and sync nodes, with an optional input.
+# A graph mixing async and sync nodes, with an optional input and a sync row. An
+# async row is left out: Hamilton doesn't await one (Q69).
 _ASYNC_GRAPH = """
 import asyncio
+{decorator}
 
 
 async def doubled(x: int) -> int:
@@ -699,6 +701,11 @@ async def shifted(doubled: int, plus_one: int, offset: int = 0) -> int:
 
 def scaled(shifted: int, doubled: int) -> int:
     return shifted - doubled
+
+
+@parameterize(bumped={{"step": value(7)}}, rebased={{"step": source("plus_one")}})
+def moved(scaled: int, step: int) -> int:
+    return scaled + step
 """
 # Hamilton's AsyncDriver warns on 3.14 from its own code (Q13).
 _HAMILTON_ASYNC_WARNING = (
@@ -711,8 +718,18 @@ def test_async_driver_computes_the_same_values() -> None:
     """Hamilton's `AsyncDriver`, through its builder, and fnloom's agree on values."""
     from hamilton import async_driver  # noqa: PLC0415  # only this test needs it
 
-    module = make_module("semantics_async", _ASYNC_GRAPH)
-    outputs = ["scaled", "shifted", "plus_one", "doubled"]
+    hamilton_module = make_module(
+        "semantics_async_h",
+        _ASYNC_GRAPH.format(
+            decorator="from hamilton.function_modifiers import parameterize, "
+            "source, value"
+        ),
+    )
+    module = make_module(
+        "semantics_async_f",
+        _ASYNC_GRAPH.format(decorator="from fnloom import parameterize, source, value"),
+    )
+    outputs = ["rebased", "bumped", "scaled", "shifted", "plus_one", "doubled"]
     requests: list[tuple[dict[str, object], dict[str, object]]] = [
         ({"x": 2}, {}),
         ({"x": 2, "offset": 5}, {}),
@@ -722,7 +739,7 @@ def test_async_driver_computes_the_same_values() -> None:
 
     async def hamilton() -> list[dict[str, object]]:
         # Typed as the sync builder's `build`, which this one makes a coroutine.
-        pending: object = async_driver.Builder().with_modules(module).build()
+        pending: object = async_driver.Builder().with_modules(hamilton_module).build()
         built = await cast("Coroutine[Any, Any, async_driver.AsyncDriver]", pending)
         return [
             await built.execute(outputs, inputs=inputs, overrides=overrides)
@@ -736,7 +753,14 @@ def test_async_driver_computes_the_same_values() -> None:
         ]
 
     expected = asyncio.run(hamilton())
-    assert expected[0] == {"doubled": 4, "plus_one": 5, "scaled": 16, "shifted": 20}
+    assert expected[0] == {
+        "bumped": 23,
+        "doubled": 4,
+        "plus_one": 5,
+        "rebased": 21,
+        "scaled": 16,
+        "shifted": 20,
+    }
     for sync_nodes in ("thread", "inline"):
         builder = fnloom.Builder().with_modules(module)
         driver = builder.build_async(sync_nodes=sync_nodes)

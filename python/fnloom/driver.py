@@ -566,9 +566,9 @@ class AsyncDriver:
 
     Made by `Builder.build_async`, which is synchronous. It plans, checks requests
     and keeps plans as `Driver` does, with the same errors (Q67). A coroutine
-    function is awaited; a sync function runs in `asyncio.to_thread`, so the loop
-    keeps running (Q65), or on the loop with `sync_nodes="inline"`. A generated
-    `extract_*` node always runs on the loop.
+    function is awaited; a sync function runs in the loop's default executor, in
+    the caller's context, so the loop keeps running (Q65), or on the loop with
+    `sync_nodes="inline"`. A generated `extract_*` node always runs on the loop.
 
     A driver made by a `Builder` pickles as that builder and its `sync_nodes`, as
     `Driver` does.
@@ -931,8 +931,8 @@ class Builder:
         """Scans the modules and returns an `AsyncDriver`; synchronous (Q12).
 
         As `build`, but an `async def` node is accepted, and awaited when run.
-        `sync_nodes` says where a sync node runs: `"thread"` in
-        `asyncio.to_thread`, so the loop keeps running while it does (Q65), or
+        `sync_nodes` says where a sync node runs: `"thread"` in the loop's
+        default executor, so the loop keeps running while it does (Q65), or
         `"inline"` on the loop, which suits a graph of cheap nodes. A generated
         `extract_*` node always runs on the loop. `ValueError` for any other
         `sync_nodes`; `NotImplementedError` for a builder with a cache, which the
