@@ -59,6 +59,7 @@ driver = fnloom.build(pricing)
 | A namespace that isn't a dotted identifier path, every one listed (Q74) | `ValueError: namespace 'a-b' is not a dotted identifier path, such as 'a' or 'a.b'` |
 | `rebuild()` after a reload, with a function given to `with_functions` beside its module (Q83) | `ValueError: node 'k' is defined twice in 'm': function 'm.k' given to with_functions is stale after a reload: give the reloaded function to a new builder` |
 | A `group(...)` parameter whose annotation names something defined further down and, once resolved, is not `list[X]` or `dict[str, X]` (Q82) | `TypeError: group() parameters must be annotated as their group: 'm.f': 'xs' (int) needs list[X] for its group` |
+| A `group(...)` parameter annotated with a name that never resolves, such as one imported only under `TYPE_CHECKING` (Q81, Q82) | `TypeError: group() parameters must be annotated as their group: 'm.f': 'xs' (unresolved 'Foo') needs list[X] for its group` |
 
 ## When you decorate
 

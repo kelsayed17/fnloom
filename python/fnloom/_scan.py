@@ -997,10 +997,12 @@ def _all_classes(node: NodeDef) -> bool:
 
     `typing.get_type_hints` returns a class as it is, so such a function needs no
     evaluating: the common case, and the costly call skipped. A generic such as
-    `list[int]` is not a class, nor is `None`, which evaluates to `NoneType`.
+    `list[int]` is not a class, nor is `None`, which evaluates to `NoneType`. A
+    group item's annotation is its element, read off the whole: the whole is
+    evaluated, so `_check_groups` sees its shape, even when the element is a class.
     """
     return isinstance(node.returns, type) and all(
-        isinstance(p.annotation, type) for p in node.params
+        isinstance(p.annotation, type) and p.slot is None for p in node.params
     )
 
 

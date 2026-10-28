@@ -10,7 +10,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Literal, overload
 
 from fnloom._stores import Format
-from fnloom._types import unresolvable
+from fnloom._types import written
 
 if TYPE_CHECKING:
     from fnloom._config import ConfigPolicy
@@ -235,11 +235,7 @@ def group_mismatch(param: str, annotation: object, *, is_list: bool) -> str | No
     if shape is not None and shape[0] == is_list:
         return None
     needs = "list[X]" if is_list else "dict[str, X]"
-    found = (
-        "no annotation"
-        if annotation is _NO_ANNOTATION
-        else inspect.formatannotation(annotation)
-    )
+    found = "no annotation" if annotation is _NO_ANNOTATION else written(annotation)
     return f"{param!r} ({found}) needs {needs} for its group"
 
 
@@ -249,8 +245,10 @@ def _group_problems(
     """One line per group parameter that is not annotated as its group needs.
 
     Each parameter and group kind is listed once, however many rows bind it. A
-    string annotation is evaluated first; one naming what is not defined yet is
-    left for the build to check, once it resolves.
+    string annotation is evaluated first. One whose outer form is a name not
+    defined yet, such as `Later` or a string that does not evaluate, is left for
+    the build to check, once it resolves; a visible outer form that is wrong, such
+    as `dict[str, Later]` for a list, is refused here.
     """
     forward = annotationlib.Format.FORWARDREF
     annotations = annotationlib.get_annotations(fn, format=forward)
@@ -264,10 +262,26 @@ def _group_problems(
     for param, is_list in sorted(wanted):
         annotation = readable(fn, annotations.get(param, _NO_ANNOTATION))
         line = group_mismatch(param, annotation, is_list=is_list)
-        if line is None or isinstance(annotation, str) or unresolvable(annotation):
+        if line is None or _unread(annotation):
             continue
         lines.append(line)
     return lines
+
+
+def _unread(annotation: object) -> bool:
+    """Whether `annotation`'s outer form, under any `Optional`, is not known yet.
+
+    A string that did not evaluate, or a forward reference to a name not defined
+    yet, might still name `list[X]` or `dict[str, X]`.
+    """
+    pending = [annotation]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, str | annotationlib.ForwardRef):
+            return True
+        if typing.get_origin(current) in {typing.Union, types.UnionType}:
+            pending.extend(typing.get_args(current))
+    return False
 
 
 def group_check(

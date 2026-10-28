@@ -78,11 +78,11 @@ SHALLOW = Rules()
 """The default rules: Hamilton's shallow checks, no widening."""
 
 
-# A `ForwardRef` as `repr` shows it inside a generic, for `_written`.
+# A `ForwardRef` as `repr` shows it inside a generic, for `written`.
 _FORWARD_REF = re.compile(r"ForwardRef\('((?:[^'\\]|\\.)*)'[^)]*\)")
 
 
-def _written(annotation: object) -> str:
+def written(annotation: object) -> str:
     """`annotation` as text, each unresolved name in it as written."""
     if isinstance(annotation, annotationlib.ForwardRef):
         return annotation.__forward_arg__
@@ -97,7 +97,7 @@ def opaque(annotation: object) -> object:
     if isinstance(annotation, str):
         return Unresolved(annotation)
     if unresolvable(annotation):
-        return Unresolved(_written(annotation))
+        return Unresolved(written(annotation))
     return annotation
 
 
@@ -168,7 +168,7 @@ def resolved_hints(owner: object, *, extras: bool = True) -> dict[str, Any]:
         )
     for key, hint in hints.items():
         if unresolvable(hint):
-            hints[key] = Unresolved(_written(hint))
+            hints[key] = Unresolved(written(hint))
     return hints
 
 
@@ -185,9 +185,9 @@ def _evaluated(
     if many:
         parts = typing.cast("tuple[object, ...]", value)
         return tuple(
-            Unresolved(_written(part)) if unresolvable(part) else part for part in parts
+            Unresolved(written(part)) if unresolvable(part) else part for part in parts
         )
-    return Unresolved(_written(value)) if unresolvable(value) else value
+    return Unresolved(written(value)) if unresolvable(value) else value
 
 
 @functools.lru_cache(maxsize=256)

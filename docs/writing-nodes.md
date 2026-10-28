@@ -702,8 +702,10 @@ driver.nodes["math"].type is int
   in a dict.
 - **Misuse is refused when decorating,** each offender listed once, in one message:
     - a parameter not annotated as `list[X]` or `dict[str, X]`. A string annotation, as `from __future__ import
-      annotations` makes every one, is read then too; one naming something defined further down the module is
-      checked at build instead, once it resolves, with the same message;
+      annotations` makes every one, is read then too. One that is only a name defined further down the module, quoted
+      or not, is checked at build instead, once it resolves, with the same message. A name that never resolves, such
+      as one imported only under `TYPE_CHECKING`, is refused at build, since its shape can't be read (Q81); inside
+      `list[...]` or `dict[str, ...]` it is fine, and each item is typed `unresolved`;
     - positional and keyword items mixed, an empty `group()`, a nested `group`, or a bare string.
 - `fnloom.node(fn, bind=...)` takes a `group(...)` as a `@parameterize` row does.
 

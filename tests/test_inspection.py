@@ -181,7 +181,9 @@ def test_path_between_unknown_names_are_all_named() -> None:
         driver.what_is_the_path_between("zip", "nope")
     with pytest.raises(ValueError, match=r"unknown nodes: 'nope'$"):
         driver.what_is_the_path_between("root", "nope")
-    with pytest.raises(TypeError, match="node names must be str, got int"):
+    with pytest.raises(
+        TypeError, match=r"^node names must be str, got int for downstream$"
+    ):
         driver.what_is_the_path_between("root", 5)  # ty: ignore[invalid-argument-type]
     with pytest.raises(TypeError) as both:
         driver.what_is_the_path_between(5, 2.5)  # ty: ignore[invalid-argument-type]

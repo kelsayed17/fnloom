@@ -887,3 +887,92 @@ def test_a_quoted_group_shape_in_a_node_binding_is_read() -> None:
     spec = fnloom.node(total, name="t", bind={"xs": group(source("a"), value(5))})
     driver = fnloom.Builder().with_functions(spec).build()
     assert driver.execute(["t"], inputs={"a": 1}) == {"t": 6}
+
+
+def test_a_wrong_group_shape_named_later_is_refused_at_build_without_future() -> None:
+    """Without `__future__`, a quoted or forward-referenced class is checked at build.
+
+    Both name a class only once the module has run: `"Later"` for a list group,
+    and an unquoted `Later` for a dict group.
+    """
+    quoted = """
+    from fnloom import group, parameterize, source
+
+
+    @parameterize(bad={"ys": group(source("a"), source("b"))})
+    def bad(ys: "Later") -> str:
+        return repr(ys)
+
+
+    Later = int
+    """
+    with pytest.raises(TypeError) as raised:
+        fnloom.build(make_module("sugar_later_quoted", quoted))
+    assert str(raised.value) == (
+        "group() parameters must be annotated as their group: "
+        "'sugar_later_quoted.bad': 'ys' (int) needs list[X] for its group"
+    )
+    unquoted = """
+    from fnloom import group, parameterize, source
+
+
+    @parameterize(bad={"ys": group(k=source("a"))})
+    def bad(ys: Later) -> str:
+        return repr(ys)
+
+
+    class Later:
+        pass
+    """
+    with pytest.raises(TypeError) as raised:
+        fnloom.build(make_module("sugar_later_unquoted", unquoted))
+    assert str(raised.value) == (
+        "group() parameters must be annotated as their group: "
+        "'sugar_later_unquoted.bad': 'ys' (sugar_later_unquoted.Later) needs "
+        "dict[str, X] for its group"
+    )
+
+
+def test_a_visibly_wrong_outer_shape_is_refused_when_decorating() -> None:
+    """`dict[str, Later]` on a list group is wrong whatever `Later` names."""
+    source_text = """
+    from __future__ import annotations
+
+    from fnloom import group, parameterize, source
+
+
+    @parameterize(one={"xs": group(source("a")), "ys": group(source("b"))})
+    def f(xs: int, ys: dict[str, Later]) -> int:
+        return xs
+    """
+    with pytest.raises(TypeError) as raised:
+        make_module("sugar_future_visible", source_text)
+    assert str(raised.value) == (
+        "group() parameters must be annotated as their group: "
+        "'xs' (int) needs list[X] for its group; "
+        "'ys' (dict[str, Later]) needs list[X] for its group"
+    )
+
+
+def test_a_group_annotation_that_never_resolves_is_refused_at_build() -> None:
+    """A name imported only for type checkers has no shape to read (Q81)."""
+    source_text = """
+    from typing import TYPE_CHECKING
+
+    from fnloom import group, parameterize, source
+
+    if TYPE_CHECKING:
+        from decimal import Decimal as Foo
+
+
+    @parameterize(one={"xs": group(source("a"))})
+    def f(xs: Foo) -> int:
+        return 1
+    """
+    module = make_module("sugar_never_resolves", source_text)
+    with pytest.raises(TypeError) as raised:
+        fnloom.build(module)
+    assert str(raised.value) == (
+        "group() parameters must be annotated as their group: "
+        "'sugar_never_resolves.f': 'xs' (unresolved 'Foo') needs list[X] for its group"
+    )

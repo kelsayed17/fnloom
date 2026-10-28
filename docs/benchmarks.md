@@ -15,8 +15,8 @@ and at running a prepared plan, so a row where it's reliably slower counts as a 
 
 -   :lucide-hammer:{ .lg .fl-icon } **Every graph builds faster**
 
-    At least 1.2× faster on every graph, the least on `fan_in` with 10 parameters (one fresh process per sample),
-    and 41× on 10,000 `@parameterize` rows (5.3 s against 0.13 s).
+    At least 1.17× faster on every graph, the least on `types` with 100 parameters, counting each build marked †
+    as re-measured one fresh process per sample; 41× on 10,000 `@parameterize` rows (5.3 s against 0.13 s).
 
 -   :lucide-infinity:{ .lg .fl-icon } **Runs what Hamilton can't**
 
@@ -64,8 +64,8 @@ sample.
 
 Measured on an Apple M2 Pro with 16 GB, macOS 27.0, `apache-hamilton==1.90.0`, and a release build of the extension.
 The `chain`, `layered` and `rows` rows were measured on 2026-10-27, with the interpreter recorded then as CPython
-3.14.9; the `extract` and `types` rows on 2026-10-28. The `fan_in` row was measured again on 2026-10-28 with CPython
-3.14.8, all three runtimes in one session (`python -m benches.run fan_in`).
+3.14.9; the `extract` and `types` rows on 2026-10-28 with CPython 3.14.8. The `fan_in` row was measured again on
+2026-10-28 with CPython 3.14.8, all three runtimes in one session (`python -m benches.run fan_in`).
 
 **`extract`** is one `@extract_fields` producer returning a dict of `n` int fields, each read by its own consumer,
 with every consumer requested. fnloom checks each field against its type on every run, with input checks on or off
@@ -116,10 +116,10 @@ on `extract`, because the plan is compiled once and each run is a loop over its 
 both.
 
 **Input checks are close to free.** The gap between the two fnloom figures is within noise: steady execution with
-checks on and off differs by at most 0.05 ms on every graph of the first five shapes but `fan_in` at 10,000
-parameters, where it is 0.45 ms of 21.8 ms (2%). A check against a plain class such as `int`, or a union of them such
-as `int | None`, is compiled once per plan into one `isinstance` call. A generic or a fixed tuple gets a check made
-once per plan too, and only a value it can't settle by class takes the general path.
+checks on and off differs by at most 0.04 ms on every graph of the first five shapes but two at 10,000: `fan_in`,
+21.8 against 21.3 ms (2%), and `extract`, 6.385 against 6.304 ms (1%). A check against a plain class such as `int`,
+or a union of them such as `int | None`, is compiled once per plan into one `isinstance` call. A generic or a fixed
+tuple gets a check made once per plan too, and only a value it can't settle by class takes the general path.
 
 ### Where Hamilton raises
 
