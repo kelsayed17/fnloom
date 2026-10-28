@@ -12,6 +12,7 @@ use pyo3::{PyTraverseError, PyVisit};
 
 use crate::errors::{caught, run_error};
 use crate::graph::Graph;
+use crate::keys::Keys;
 use crate::observer::{ObserverBase, PyObserver};
 
 /// A value flowing along an edge. `Arc` makes the core's per-argument clones free of
@@ -73,7 +74,10 @@ impl Plan {
             observers.into_iter().map(PyObserver::new).collect();
         let collect_values = on_value.is_some();
         let mut value_hook = on_value.map(|callback| ValueHook {
-            callback,
+            sink: match callback.cast_into::<Keys>() {
+                Ok(keys) => Sink::Store(keys),
+                Err(error) => Sink::Call(error.into_inner()),
+            },
             keywords,
             latest: &latest,
         });
@@ -190,9 +194,17 @@ impl Evaluate<Py<PyAny>> for Caller<'_, '_> {
     }
 }
 
-/// Calls `on_value` with each computed node's name and value, as the last observer.
+/// Where each computed node's value goes.
+enum Sink<'py> {
+    /// A Python callable, called with the node's name and value.
+    Call(Bound<'py, PyAny>),
+    /// A run's keys, from `KeyPlan.walk`: stored in its memory store with no Python call.
+    Store(Bound<'py, Keys>),
+}
+
+/// Hands each computed node's name and value to `on_value`, as the last observer.
 struct ValueHook<'py, 'g> {
-    callback: Bound<'py, PyAny>,
+    sink: Sink<'py>,
     /// The graph's interned node names, by node id.
     keywords: &'g [Py<PyString>],
     /// The value the evaluator left for the node just computed.
@@ -207,9 +219,14 @@ impl Observer<PyErr> for ValueHook<'_, '_> {
         if !ok {
             return Ok(());
         }
-        let py = self.callback.py();
-        let name = keyword(py, self.keywords, id, node);
-        caught(|| self.callback.call1((name, value.bind(py))).map(drop))
+        match &self.sink {
+            Sink::Call(callback) => {
+                let py = callback.py();
+                let name = keyword(py, self.keywords, id, node);
+                caught(|| callback.call1((name, value.bind(py))).map(drop))
+            }
+            Sink::Store(keys) => caught(|| keys.get().store(keys.py(), node, &value)),
+        }
     }
 }
 

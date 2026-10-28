@@ -46,6 +46,8 @@ dev = [
     "apache-hamilton==1.90.0",
     # Generated graphs for the caching equality property.
     "hypothesis>=6.150",
+    # An independent BLAKE3, to check the binding's keyed cache keys against.
+    "blake3>=1.0",
 ]
 # The documentation site (`uv run --group docs zensical serve` to preview it).
 docs = ["zensical>=0.0.73"]

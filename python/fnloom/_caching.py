@@ -25,7 +25,7 @@ from fnloom._codeversion import UncacheableError, code_version
 from fnloom._decorators import CacheBehavior, CachePolicy, Source, decorations
 from fnloom._fingerprint import fingerprint, forget_class_versions
 from fnloom._scan import core_inputs
-from fnloom._stores import MISSING, CacheStore, CacheWarning
+from fnloom._stores import MISSING, CacheStore, CacheWarning, MemoryCache
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -33,7 +33,7 @@ if TYPE_CHECKING:
     from fnloom._scan import NodeDef
 
 # The key schema version, the first part of every static key part.
-_SCHEMA = b"fnloom-cache-1"
+_SCHEMA = b"fnloom-cache-2"
 
 # How many core plans a prepared plan keeps, one per hit set; the least recently
 # used one goes first.
@@ -75,7 +75,8 @@ class NodeKey:
 
     Attributes:
         static: The hash of the key schema, the node's name, module, qualified name,
-            code version and behavior; `None` when the node cannot be cached.
+            code version and behavior, and each key parameter's name and, for a
+            constant, its version; `None` when the node cannot be cached.
         reason: Why `static` is `None`, else `None`.
         behavior: The node's cache behavior.
         params: The key parameters, in declaration order, the ignored ones left out.
@@ -153,6 +154,13 @@ def _node_key(
     elif isinstance(code, UncacheableError):
         reason = code.reason
     elif reason is None:
+        # A read is framed as its name and an empty part, a constant as its name and
+        # its version (never empty), so neither can pass for the other.
+        framed = [
+            part
+            for name, _, version in params
+            for part in (name.encode(), version or b"")
+        ]
         static = _core.hash_parts(
             [
                 _SCHEMA,
@@ -161,6 +169,7 @@ def _node_key(
                 _qualname(node).encode(),
                 code,
                 policy.behavior.encode(),
+                *framed,
             ]
         )
     return NodeKey(static, reason, policy.behavior, tuple(params))
@@ -254,10 +263,21 @@ class CacheRun:
         keys = [cache.keys[name] for name in computed]
         self._key_plan = _core.KeyPlan(
             [
-                (name, k.static, list(k.params))
+                (
+                    name,
+                    k.static,
+                    [source for _, source, _ in k.params if source is not None],
+                    k.behavior == "default",
+                    list(cache.sources[name]),
+                )
                 for name, k in zip(computed, keys, strict=True)
-            ]
+            ],
+            self._outputs,
         )
+        # A plain `MemoryCache` is walked and written in the binding, with no call
+        # into Python per node; a subclass may override its methods, so it is not.
+        store = cache.store
+        self._native = store.native if type(store) is MemoryCache else None
         # In plan order.
         self._node_keys = dict(zip(computed, keys, strict=True))
         self._behaviors = {name: k.behavior for name, k in self._node_keys.items()}
@@ -318,13 +338,16 @@ class CacheRun:
             self._nested._execute(inputs, overrides, dict(versions), warned, known)  # noqa: SLF001  # the same class
             for name in self._first:
                 versions[name] = _version(known[name], name, warned)
-        keys = self._key_plan.keys(versions)
-        hits = self._frontier(keys, known, warned)
+        if self._native is not None and self._nested is None and values is None:
+            pending, hits = self._key_plan.walk(versions, self._native)
+            on_value: _core.Keys | Callable[[str, object], None] = pending
+        else:
+            keys = self._key_plan.keys(versions)
+            hits = self._frontier(keys, known, warned)
+            on_value = self._on_value(keys, warned, values)
         plan = self._plan_for(frozenset(hits)) if hits else self._plan
         result = plan.run(
-            inputs,
-            {**overrides, **hits} if hits else overrides,
-            on_value=self._on_value(keys, warned, values),
+            inputs, {**overrides, **hits} if hits else overrides, on_value=on_value
         )
         if values is not None:
             values.update(hits)

@@ -256,9 +256,20 @@ def check(scenario: Scenario, stores: list[Callable[[], CacheStore]]) -> None:
                 assert _same(got, expected), (code, given, got, expected)
 
 
+class PythonWalkedCache(MemoryCache):
+    """A `MemoryCache` that a run walks and writes from Python, as any other store.
+
+    Only a plain `MemoryCache` takes the binding's walk, so this one checks the other
+    path against it.
+    """
+
+
 @settings(max_examples=200, deadline=None)
 @given(scenario=scenarios())
 def test_a_cached_run_equals_an_uncached_run(scenario: Scenario) -> None:
-    """Through edits to inputs and code, both stores return what no cache returns."""
+    """Through edits to inputs and code, every store returns what no cache returns."""
     with tempfile.TemporaryDirectory() as directory:
-        check(scenario, [MemoryCache, lambda: DiskCache(directory)])
+        check(
+            scenario,
+            [MemoryCache, PythonWalkedCache, lambda: DiskCache(directory)],
+        )

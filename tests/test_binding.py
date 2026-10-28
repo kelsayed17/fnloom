@@ -8,6 +8,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, override
 
+import blake3
 import pytest
 
 from fnloom import _core
@@ -413,82 +414,148 @@ def test_stub_lists_exactly_the_runtime_names() -> None:
     assert stubbed == runtime
 
 
-ABSENT = b"\x00absent"
+ABSENT = b"\x00fnloom: optional input absent\x00\x00"
+# Versions and static parts are 32 bytes, as fingerprints and `hash_parts` make them.
+ONE, TWO, LOADED = (_core.hash_parts([name]) for name in (b"one", b"two", b"loaded"))
+STATIC = {name: _core.hash_parts([b"static", name.encode()]) for name in "bcdef"}
+
+
+def _keyed(static: bytes, *versions: bytes) -> bytes:
+    """A key: BLAKE3 keyed by the static part, over the versions it reads."""
+    return blake3.blake3(b"".join(versions), key=static).digest()
+
+
+def _node(
+    name: str, static: bytes | None, reads: list[str], *, stored: bool = True
+) -> tuple[str, bytes | None, list[str], bool, list[str]]:
+    """A key plan entry whose sources are its reads."""
+    return (name, static, reads, stored, reads)
 
 
 def _chain_key_plan() -> _core.KeyPlan:
     """The key plan of `a` (input) -> `b` -> `c` -> `d`."""
     return _core.KeyPlan(
         [
-            ("b", b"static b", [("a", "a", None)]),
-            ("c", b"static c", [("b", "b", None)]),
-            ("d", b"static d", [("c", "c", None), ("k", None, b"constant")]),
-        ]
+            _node("b", STATIC["b"], ["a"]),
+            _node("c", STATIC["c"], ["b"]),
+            _node("d", STATIC["d"], ["c"]),
+        ],
+        ["d"],
     )
 
 
 def test_key_plan_chains_versions() -> None:
     """Keys chain from the inputs' versions, and `None` spreads downstream."""
     plan = _chain_key_plan()
-    one = plan.keys({"a": b"one"})
-    two = plan.keys({"a": b"two"})
-    assert one == _chain_key_plan().keys({"a": b"one"})
+    one = plan.keys({"a": ONE})
+    two = plan.keys({"a": TWO})
+    assert one == _chain_key_plan().keys({"a": ONE})
     for name in ("b", "c", "d"):
         assert one[name] is not None
         assert one[name] != two[name]
     b, c = one["b"], one["c"]
     assert b is not None
     assert c is not None
-    assert b == _core.hash_parts([b"static b", b"a", b"one"])
-    assert c == _core.hash_parts([b"static c", b"b", b])
-    assert one["d"] == _core.hash_parts([b"static d", b"c", c, b"k", b"constant"])
+    assert b == _keyed(STATIC["b"], ONE)
+    assert c == _keyed(STATIC["c"], b)
+    assert one["d"] == _keyed(STATIC["d"], c)
     assert plan.keys({"a": None}) == {"b": None, "c": None, "d": None}
 
 
 def test_key_plan_versions_override_computed_nodes() -> None:
     """A computed node named in `versions` is read by that version, not its key."""
     plan = _chain_key_plan()
-    keys = plan.keys({"a": b"one", "b": b"loaded"})
-    assert keys["c"] == _core.hash_parts([b"static c", b"b", b"loaded"])
-    assert plan.keys({"a": None, "b": b"loaded"})["c"] is not None
+    keys = plan.keys({"a": ONE, "b": LOADED})
+    assert keys["c"] == _keyed(STATIC["c"], LOADED)
+    assert plan.keys({"a": None, "b": LOADED})["c"] is not None
+    assert plan.keys({"a": ONE, "b": None})["c"] is None
 
 
-def test_key_plan_uncacheable_static_parts_and_constants_give_none() -> None:
-    """A `None` static part or constant version makes that key and its readers' None."""
+def test_key_plan_uncacheable_static_parts_give_none() -> None:
+    """A `None` static part makes that key and its readers' None."""
     plan = _core.KeyPlan(
         [
-            ("b", None, [("a", "a", None)]),
-            ("c", b"static c", [("b", "b", None)]),
-            ("e", b"static e", [("k", None, None)]),
-            ("f", b"static f", [("a", "a", None)]),
+            _node("b", None, ["a"]),
+            _node("c", STATIC["c"], ["b"]),
+            _node("f", STATIC["f"], ["a"]),
+            _node("e", STATIC["e"], []),
         ]
     )
-    keys = plan.keys({"a": b"one"})
+    keys = plan.keys({"a": ONE})
     assert keys["b"] is None
     assert keys["c"] is None
-    assert keys["e"] is None
     assert keys["f"] is not None
+    assert keys["e"] == _keyed(STATIC["e"])
 
 
 def test_key_plan_marks_absent_optional_inputs() -> None:
     """An absent source differs from one supplied as the fingerprint of `None`."""
-    plan = _core.KeyPlan([("b", b"static b", [("maybe", "maybe", None)])])
+    plan = _core.KeyPlan([_node("b", STATIC["b"], ["maybe"])])
     absent = plan.keys({})["b"]
     supplied = plan.keys({"maybe": _core.fingerprint(None, lambda _: None)})["b"]
-    assert absent == _core.hash_parts([b"static b", b"maybe", ABSENT])
+    assert absent == _keyed(STATIC["b"], ABSENT)
     assert absent != supplied
 
 
 def test_key_plan_refuses_bad_entries() -> None:
-    """Duplicate nodes, forward reads and non-bytes versions are refused."""
+    """Duplicate nodes, forward reads, short parts and non-bytes are refused."""
     with pytest.raises(ValueError, match="'b'"):
-        _core.KeyPlan([("b", b"s", []), ("b", b"s", [])])
+        _core.KeyPlan([_node("b", STATIC["b"], []), _node("b", STATIC["b"], [])])
     with pytest.raises(ValueError, match="'c'"):
-        _core.KeyPlan([("b", b"s", [("c", "c", None)]), ("c", b"s", [])])
-    plan = _core.KeyPlan([("b", b"s", [("a", "a", None)])])
+        _core.KeyPlan([_node("b", STATIC["b"], ["c"]), _node("c", STATIC["c"], [])])
+    with pytest.raises(ValueError, match="32"):
+        _core.KeyPlan([_node("b", b"short", [])])
+    plan = _core.KeyPlan([_node("b", STATIC["b"], ["a"])])
     versions: Any = {"a": "text"}
     with pytest.raises(TypeError):
         plan.keys(versions)
+    with pytest.raises(ValueError, match="32"):
+        plan.keys({"a": b"short"})
+
+
+def test_key_plan_walk_stops_at_stored_hits() -> None:
+    """The walk loads the first stored hits back from the outputs, and nothing above."""
+    plan = _chain_key_plan()
+    keys = plan.keys({"a": ONE})
+    store = _core.MemoryStore(10)
+    _, hits = plan.walk({"a": ONE}, store)
+    assert hits == {}
+    b, c = keys["b"], keys["c"]
+    assert b is not None
+    assert c is not None
+    store.put(b, "b value")
+    store.put(c, "c value")
+    _, hits = plan.walk({"a": ONE}, store)
+    assert hits == {"c": "c value"}
+    unstored = _core.KeyPlan(
+        [
+            _node("b", STATIC["b"], ["a"]),
+            _node("c", STATIC["c"], ["b"], stored=False),
+            _node("d", STATIC["d"], ["c"]),
+        ],
+        ["d"],
+    )
+    stored_c = unstored.keys({"a": ONE})["c"]
+    assert stored_c is not None
+    store.put(stored_c, "never loaded")
+    _, hits = unstored.walk({"a": ONE}, store)
+    assert hits == {"b": "b value"}
+
+
+def test_walk_keys_store_each_stored_result_as_it_succeeds() -> None:
+    """`Plan.run` given a walk's keys stores each stored node's result under its key."""
+
+    def increment(a: int) -> int:
+        return a + 1
+
+    graph = _core.Graph([("b", [("a", False)], {}, increment)])
+    plan = graph.prepare(["b"], ["a"], [])
+    keys = _core.KeyPlan([_node("b", STATIC["b"], ["a"])], ["b"])
+    store = _core.MemoryStore(10)
+    pending, hits = keys.walk({"a": ONE}, store)
+    assert hits == {}
+    assert plan.run({"a": 1}, {}, on_value=pending) == {"b": 2}
+    assert store.items() == [(_keyed(STATIC["b"], ONE), 2)]
 
 
 def test_on_value_sees_each_computed_node_once_in_order() -> None:

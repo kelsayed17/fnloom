@@ -28,7 +28,6 @@ import threading
 import time
 import warnings
 import zlib
-from collections import OrderedDict
 
 # Imported for real: `DiskCache`'s signature annotates with it, and
 # `inspect.signature` resolves that at run time.
@@ -36,6 +35,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Final, Protocol, override
 
+from fnloom import _core
 from fnloom._codeversion import distribution_version
 
 __all__ = [
@@ -103,7 +103,8 @@ class MemoryCache:
     """Results held in memory, least recently used evicted first.
 
     A hit returns the stored object itself, not a copy, so a cached node must not
-    mutate its arguments: a change would reach every later run that hits.
+    mutate its arguments: a change would reach every later run that hits. The entries
+    live in the native extension, which a cached run reads and writes directly.
 
     Pickled or copied, the store comes back empty, with the same bounds: its entries
     belong to its process, so a driver sent to a worker process starts a cache of
@@ -129,9 +130,9 @@ class MemoryCache:
             raise ValueError(msg)
         self._max_entries = max_entries
         self._max_bytes = max_bytes
-        self._entries: OrderedDict[bytes, tuple[object, int]] = OrderedDict()
-        self._bytes = 0
-        self._lock = threading.Lock()
+        self.native: Final = _core.MemoryStore(
+            max_entries, max_bytes, None if max_bytes is None else _size
+        )
 
     @override
     def __reduce__(self) -> tuple[type[MemoryCache], tuple[int, int | None]]:
@@ -140,49 +141,34 @@ class MemoryCache:
 
     def get(self, key: bytes) -> object:
         """The value stored under `key`, the same object `put` stored, or `MISSING`."""
-        with self._lock:
-            entry = self._entries.get(key)
-            if entry is None:
-                return MISSING
-            self._entries.move_to_end(key)
-        return entry[0]
+        return self.native.get(key, MISSING)
 
     def put(self, key: bytes, value: object) -> None:
         """Stores `value` under `key`, evicting the least recently used past a bound."""
-        size = 0
-        if self._max_bytes is not None:
-            try:
-                size = sys.getsizeof(value)
-            except Exception as error:  # noqa: BLE001  # any failure skips the write
-                _warn(f"cannot size a {type(value).__qualname__} to cache it: {error}")
-                return
-        # Evicted values stay referenced by this list until the method returns, after
-        # the lock is released, in case releasing one runs code that uses the store.
-        evicted: list[tuple[object, int]] = []
-        with self._lock:
-            old = self._entries.pop(key, None)
-            if old is not None:
-                self._bytes -= old[1]
-                evicted.append(old)
-            # A value over the bound on its own is not stored, and evicts nothing.
-            if self._max_bytes is not None and size > self._max_bytes:
-                return
-            self._entries[key] = (value, size)
-            self._bytes += size
-            while len(self._entries) > self._max_entries or (
-                self._max_bytes is not None and self._bytes > self._max_bytes
-            ):
-                _, entry = self._entries.popitem(last=False)
-                self._bytes -= entry[1]
-                evicted.append(entry)
+        self.native.put(key, value)
 
     def discard(self, key: bytes) -> None:
         """Forgets `key`, if the store holds it."""
-        # The value is released on return, after the lock, as in `put`.
-        with self._lock:
-            entry = self._entries.pop(key, None)
-            if entry is not None:
-                self._bytes -= entry[1]
+        self.native.discard(key)
+
+    def __len__(self) -> int:
+        """The number of entries held."""
+        return len(self.native)
+
+    @property
+    def _entries(self) -> dict[bytes, object]:
+        """A copy of every entry, for tests."""
+        return dict(self.native.items())
+
+
+def _size(value: object) -> int | None:
+    """`value`'s size for `MemoryCache`'s bound; `None`, having warned, if unknown."""
+    try:
+        return sys.getsizeof(value)
+    except Exception as error:  # noqa: BLE001  # any failure skips the write
+        # Up: `_size`, `MemoryCache.put` (the binding adds no frame), its caller.
+        _warn(f"cannot size a {type(value).__qualname__} to cache it: {error}", 2)
+        return None
 
 
 # The entry format: a prefix of the magic, the format version, the header's and the

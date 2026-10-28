@@ -1,5 +1,6 @@
 """Tests for the cache stores: in memory and on disk, and how each fails safe."""
 
+import gc
 import json
 import os
 import pickle
@@ -10,7 +11,9 @@ import textwrap
 import threading
 import time
 import warnings
+import weakref
 from pathlib import Path
+from typing import override
 
 import pytest
 
@@ -132,6 +135,60 @@ def test_memory_evicts_least_recently_used() -> None:
     assert too_big.get(a) is MISSING
     assert too_big.get(c) is MISSING
     assert too_big.get(b) is values[1]
+
+
+def test_memory_counts_its_entries_and_refuses_bad_keys() -> None:
+    """`len` is the number of entries; a key that is not 32 bytes is refused."""
+    bound = 2
+    store = MemoryCache(max_entries=bound)
+    assert len(store) == 0
+    for n in range(bound + 1):
+        store.put(_key(n), n)
+    assert len(store) == bound
+    store.discard(_key(2))
+    assert len(store) == 1
+    with pytest.raises(ValueError, match="32 bytes"):
+        store.put(b"short", 1)
+
+
+class _Unsizable:
+    """A value `sys.getsizeof` cannot size."""
+
+    @override
+    def __sizeof__(self) -> int:
+        msg = "no size"
+        raise RuntimeError(msg)
+
+
+def test_memory_skips_a_value_it_cannot_size() -> None:
+    """With `max_bytes`, a value that cannot be sized is not stored, and warned of."""
+    store = MemoryCache(max_bytes=1000)
+    with pytest.warns(CacheWarning, match="cannot size a _Unsizable") as caught:
+        store.put(_key(1), _Unsizable())
+    assert caught[0].filename == __file__
+    assert store.get(_key(1)) is MISSING
+    unbounded = MemoryCache()
+    value = _Unsizable()
+    unbounded.put(_key(1), value)
+    assert unbounded.get(_key(1)) is value
+
+
+class _Holder:
+    """A value that refers back to the store holding it."""
+
+    def __init__(self, store: MemoryCache) -> None:
+        self.store = store
+
+
+def test_memory_values_in_a_cycle_through_the_store_are_collected() -> None:
+    """The cyclic GC sees the store's values, so a cycle through it is freed."""
+    store = MemoryCache()
+    holder = _Holder(store)
+    store.put(_key(1), holder)
+    alive = weakref.ref(holder)
+    del store, holder
+    gc.collect()
+    assert alive() is None
 
 
 def test_memory_rejects_bad_bounds() -> None:

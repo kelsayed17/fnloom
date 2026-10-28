@@ -123,6 +123,41 @@ def test_a_hit_on_the_output_loads_only_the_output() -> None:
     assert store.puts == []
 
 
+UNSIZABLE = """
+class Unsizable:
+    def __sizeof__(self) -> int:
+        raise RuntimeError("no size")
+
+def a(x: int) -> Unsizable:
+    print("a")
+    return Unsizable()
+
+def b(a: Unsizable) -> int:
+    print("b")
+    return 1
+"""
+
+
+def test_a_plain_memory_cache_skips_a_value_it_cannot_size(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A bounded `MemoryCache` skips, with a warning, a result it cannot size.
+
+    The run goes on; the node that could not be stored runs again next time.
+    """
+    driver = _cached(
+        make_module("cached_unsizable", UNSIZABLE), MemoryCache(max_bytes=10**6)
+    )
+    with pytest.warns(CacheWarning, match="cannot size a Unsizable"):
+        assert driver.execute(["b"], inputs={"x": 1}) == {"b": 1}
+    assert _called(capsys) == ["a", "b"]
+    with pytest.warns(CacheWarning, match="cannot size"):
+        assert driver.execute(["a"], inputs={"x": 1})["a"] is not None
+    assert _called(capsys) == ["a"]
+    assert driver.execute(["b"], inputs={"x": 1}) == {"b": 1}
+    assert _called(capsys) == []
+
+
 DIAMOND = """
 def a(x: int) -> int:
     print("a")
