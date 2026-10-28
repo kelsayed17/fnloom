@@ -41,6 +41,12 @@ driver = fnloom.build(pricing)
 | An annotation naming something that does not exist at run time, such as an import under `TYPE_CHECKING` | `NameError: name 'Decimal' is not defined`, with a note naming the node and the parameter |
 | Functions annotating the same input with types neither of which feeds the other (`Base` and `Child` are fine: the input is `Child`) | `ValueError: inputs have conflicting types: 'a' is int in 'f', str in 'g'` |
 | A node whose return type a parameter it feeds does not accept, one line per such parameter, sorted (see [Type checks](running.md#type-checks)) | `ValueError: g.f requires int but f returns str` |
+| A node that another node reads, with no `@config.when*` variant matching the config and no `@config.default`, one line per node, sorted (see [Config](writing-nodes.md#config)) | `ValueError: no variant of 'foo' matches the config {'mode': 'c'}; its variants need mode == 'a' (foo__a), mode == 'b' (foo__b); add @config.default or a variant for it` |
+| Two variants of one node matching the config | `ValueError: node 'foo' has more than one variant matching the config {'mode': 'a'}: 'foo__a', 'foo__nb'` |
+| Two `@config.default`s for one node | `ValueError: node 'foo' has more than one @config.default: 'foo__x', 'foo__y'` |
+| A config-decorated function defined twice in one module | `ValueError: function 'foo__a' is defined more than once in module 'm' (lines 4, 8); Python keeps only the last` |
+| A config value whose `==` returns something other than a `bool`, such as an array | `TypeError: config key 'mode': == returned ndarray, not bool` |
+| A config that isn't a mapping, or a key that isn't a `str`, given to `with_config` | `TypeError: config keys must be str, got: int` |
 
 ## When you execute or prepare
 
@@ -60,6 +66,10 @@ driver.execute(["label"], inputs={"price": 1.0})
 driver.execute(["total", "price"])
 # raises ValueError: missing inputs: 'price' (requested as an output, needed by 'total'); 'quantity' (needed by 'total')
 ```
+
+A node that no config variant gave, requested as an output, raises the build's reason: `ValueError: no variant of
+'foo' matches the config ...`. A missing input named like a config key gets a second line, since config is never
+passed to nodes (Q56): `'mode' is a config key; config is not passed to nodes: supply it in inputs=`.
 
 !!! tip "Replacing a function's value"
 

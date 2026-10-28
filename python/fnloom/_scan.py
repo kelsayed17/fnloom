@@ -6,9 +6,12 @@ import inspect
 import operator
 import typing
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING
+from types import MappingProxyType
+from typing import TYPE_CHECKING, NamedTuple
 
-from fnloom._decorators import Source, Value, decorations
+from fnloom import _config
+from fnloom._config import Condition, Found, redefinitions, resolve_variants
+from fnloom._decorators import _ATTRIBUTE, Source, Value, decorations
 from fnloom._types import read_aliases
 from fnloom._view import Param
 
@@ -35,7 +38,8 @@ class NodeDef:
     call that maps those keywords onto `origin`'s parameters. `renames` maps a core
     input to the parameter keyword the core passes it under, when the two differ.
     `returns` is the return annotation: as written after `collect`, its value after
-    `resolve`, as are the params' annotations.
+    `resolve`, as are the params' annotations. `config` holds the conditions that
+    selected the function, empty for a plain one or a `@config.default`.
     """
 
     name: str
@@ -46,6 +50,7 @@ class NodeDef:
     module: str
     returns: object
     renames: Mapping[str, str] = field(default_factory=dict)
+    config: tuple[Condition, ...] = ()
 
 
 def core_inputs(params: tuple[Param, ...]) -> list[tuple[str, bool]]:
@@ -222,12 +227,23 @@ def _node_defs(
     if parameters is None:
         parameters = _signature_parameters(name, fn, annotations)
     recorded = decorations(fn)
+    conditions: tuple[Condition, ...] = ()
+    if recorded.config is not None:
+        # A variant is named by `name=`, or by its function's name cut at `__`.
+        name = _config.node_name(fn, recorded.config.name)
+        conditions = recorded.config.conditions
     if recorded.rows is None:
         # A plain function is one node, of its own name, binding nothing, so each
         # parameter reads its own name and the payload is the function itself.
         params = _bind(parameters, {})
         returns = annotations["return"]
-        return [NodeDef(name, params, recorded.tags, fn, fn, module.__name__, returns)]
+        tags, module_name = recorded.tags, module.__name__
+        if not conditions:
+            # Positional and without `config`: the common case, kept cheapest.
+            return [NodeDef(name, params, tags, fn, fn, module_name, returns)]
+        return [
+            NodeDef(name, params, tags, fn, fn, module_name, returns, {}, conditions)
+        ]
     nodes: list[NodeDef] = []
     for node_name, row in recorded.rows.items():
         params = _bind(parameters, row)
@@ -242,18 +258,26 @@ def _node_defs(
                 module.__name__,
                 annotations["return"],
                 renames,
+                conditions,
             )
         )
     return nodes
 
 
-def _scan_module(module: ModuleType) -> list[NodeDef]:
-    return [
-        node
-        for name, value in vars(module).items()
-        if _is_node(module, name, value)
-        for node in _node_defs(module, name, value)
-    ]
+def _found(module: ModuleType) -> tuple[list[Found], bool]:
+    """The module's node functions, in definition order, with their attribute names.
+
+    And whether any is config-decorated: a function no decorator touched has no
+    record in its `__dict__`, so it costs a dict lookup, the common case.
+    """
+    functions: list[Found] = []
+    configured = False
+    for name, value in vars(module).items():
+        if _is_node(module, name, value):
+            functions.append((module, name, value))
+            if not configured and _ATTRIBUTE in value.__dict__:
+                configured = decorations(value).config is not None
+    return functions, configured
 
 
 def _skipped(module: ModuleType) -> str:
@@ -290,35 +314,88 @@ def _duplicate(first: NodeDef, second: NodeDef) -> str:
     )
 
 
-def collect(modules: Sequence[ModuleType]) -> list[NodeDef]:
+def _functions(
+    modules: Sequence[ModuleType],
+) -> tuple[list[Found], list[ModuleType]]:
+    """Every module's node functions, and the modules holding a config-decorated one.
+
+    `ValueError` naming every module with no node function (Q53).
+    """
+    found: list[Found] = []
+    configured: list[ModuleType] = []
+    empty: list[str] = []
+    # Modules hash by identity, so this drops repeats of one module, keeping the first.
+    for module in dict.fromkeys(modules):
+        functions, has_config = _found(module)
+        if not functions:
+            empty.append(_skipped(module))
+        elif has_config:
+            configured.append(module)
+        found.extend(functions)
+    if empty:
+        raise ValueError("; ".join(empty))
+    return found, configured
+
+
+# No config: what a build without `with_config` selects with. Read, never written.
+_NO_CONFIG: Mapping[str, object] = MappingProxyType({})
+
+
+class Scanned(NamedTuple):
+    """What a scan found: the nodes, and why each node no variant gave is absent."""
+
+    nodes: list[NodeDef]
+    unmatched: dict[str, str]
+
+
+def collect(
+    modules: Sequence[ModuleType], config: Mapping[str, object] = _NO_CONFIG
+) -> list[NodeDef]:
     """Returns the nodes of `modules`; `ValueError` on a malformed or duplicate one.
 
     Every duplicate name is listed, sorted by name, in one `ValueError`. A module
     with no node is refused too, before duplicates, every such module in one
     `ValueError` naming each function it holds and why that is not a node (Q53).
 
+    `config` selects among `@config.when*` variants (see `scan`).
+
     Annotations are read without being evaluated; `resolve` evaluates them.
     """
+    return scan(modules, config).nodes
+
+
+def scan(
+    modules: Sequence[ModuleType], config: Mapping[str, object] = _NO_CONFIG
+) -> Scanned:
+    """`collect`, with the reason each node that no variant gave is absent.
+
+    Variants are selected first, one per node (`_config.select`), so a variant
+    the config does not select is never lowered. A module none of whose
+    variants is selected is not empty. Without a config-decorated function
+    there is nothing to select, and selection is skipped entirely.
+    """
+    found, configured = _functions(modules)
+    unmatched: dict[str, str] = {}
+    if configured:
+        if redefined := sorted(line for m in configured for line in redefinitions(m)):
+            raise ValueError("; ".join(redefined))
+        selection = resolve_variants(found, config)
+        found, unmatched = selection.functions, selection.unmatched
     seen: dict[str, NodeDef] = {}
     clashes: list[tuple[str, str]] = []
-    empty: list[str] = []
-    # Modules hash by identity, so this drops repeats of one module, keeping the first.
-    for module in dict.fromkeys(modules):
-        nodes = _scan_module(module)
-        if not nodes:
-            empty.append(_skipped(module))
-        for node in nodes:
+    for module, name, fn in found:
+        for node in _node_defs(module, name, fn):
             if node.name in seen:
                 clashes.append((node.name, _duplicate(seen[node.name], node)))
             else:
                 seen[node.name] = node
-    if empty:
-        raise ValueError("; ".join(empty))
     if clashes:
         # Sorted by node name; a name clashing more than once keeps scan order.
         clashes.sort(key=lambda clash: clash[0])
         raise ValueError("; ".join(message for _, message in clashes))
-    return list(seen.values())
+    # A node a plain function or another variant defines is not missing.
+    missing = {n: why for n, why in unmatched.items() if n not in seen}
+    return Scanned(list(seen.values()), missing)
 
 
 def _owner(origin: Callable[..., object], names: list[str]) -> str:

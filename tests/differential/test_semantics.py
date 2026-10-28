@@ -437,3 +437,75 @@ def test_a_missing_input_names_the_nodes_needing_it() -> None:
         hamilton.execute(["c"])
     with pytest.raises(ValueError, match=r"^missing inputs: 'a' \(needed by 'b'\)$"):
         fnloom.build(module).execute(["c"])
+
+
+# Variants for the config tests; `{decorator}` imports each library's `config`.
+_CONFIG_VARIANTS = """
+{decorator}
+
+@config.when(mode="a")
+def foo__a__b(x: int) -> int:
+    return x + 1
+
+def plain__x(x: int) -> int:
+    return x
+
+@config.when(a=1, b=2)
+def both__eq(x: int) -> int:
+    return x
+
+@config.when_not(a=1, b=2)
+def neither__ne(x: int) -> int:
+    return x
+
+@config.when(flag=1)
+def truthy__one(x: int) -> int:
+    return x
+
+@config.when(flag="1")
+def text__one(x: int) -> int:
+    return x
+
+@config.when(a=1)
+@config.when(b=2)
+def stacked__ab(x: int) -> int:
+    return x
+"""
+
+_CONFIGS: list[dict[str, object]] = [
+    {"mode": "a", "a": 1, "b": 2, "flag": True},
+    {"mode": "b", "a": 0, "b": 2, "flag": 1},
+    {"mode": "a", "a": 0, "b": 0, "flag": "1"},
+    {"mode": "a", "a": 1, "b": 0, "flag": 0},
+]
+
+
+@pytest.mark.parametrize("settings", _CONFIGS, ids=repr)
+def test_config_selects_the_same_nodes(settings: dict[str, object]) -> None:
+    """Names cut at the last `__`, AND of keys, `==` matching and stacking agree."""
+    hamilton_module = make_module(
+        "semantics_config_h",
+        _CONFIG_VARIANTS.format(
+            decorator="from hamilton.function_modifiers import config"
+        ),
+    )
+    fnloom_module = make_module(
+        "semantics_config_f",
+        _CONFIG_VARIANTS.format(decorator="from fnloom import config"),
+    )
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_config(settings)
+        .with_modules(hamilton_module)
+        .build()
+    )
+    # Hamilton adds every config key as a node; fnloom never does (Q56).
+    hamilton_names = sorted(
+        v.name for v in hamilton.list_available_variables() if v.name not in settings
+    )
+    driver = fnloom.Builder().with_config(settings).with_modules(fnloom_module).build()
+    assert driver.node_names() == hamilton_names
+    outputs = [name for name in hamilton_names if name != "x"]
+    assert driver.execute(outputs, inputs={"x": 1}) == hamilton.execute(
+        outputs, inputs={"x": 1}
+    )

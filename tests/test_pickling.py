@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, cast
 import pytest
 
 import fnloom
+import picklable_config_nodes
 import picklable_nodes
 from fnloom import Builder, DiskCache, Driver, MemoryCache, PreparedPlan, build
 
@@ -45,6 +46,25 @@ def test_a_pickled_driver_keeps_the_type_check_opt_out() -> None:
     with pytest.raises(ValueError, match="a: expected int, got float"):
         checked.execute(["total"], inputs=inputs)
     assert unchecked.execute(["total"], inputs=inputs) == {"total": 8.0}
+
+
+@pytest.mark.parametrize("copier", [_round_trip, copy.deepcopy, copy.copy])
+def test_a_pickled_driver_keeps_its_config(copier: object) -> None:
+    """The config travels with the driver, so the same variants are selected again."""
+    driver = (
+        Builder()
+        .with_config({"mode": "b"})
+        .with_modules(picklable_config_nodes)
+        .build()
+    )
+    again = copier(driver)  # ty: ignore[call-non-callable]  # each copier is callable
+    assert isinstance(again, Driver)
+    assert dict(again.config) == {"mode": "b"}
+    assert again.execute(["scale"], inputs={"a": 2}) == {"scale": 20}
+    builder = _round_trip(Builder().with_config({"mode": "a"}))
+    assert dict(builder.with_modules(picklable_config_nodes).build().config) == {
+        "mode": "a"
+    }
 
 
 def test_a_pickled_driver_reopens_its_disk_cache(tmp_path: Path) -> None:

@@ -247,8 +247,8 @@ The view is made once, when the graph is built, and annotations are evaluated th
 
 A driver pickles, and copies with `copy.deepcopy`, so you can hand it to a `concurrent.futures.ProcessPoolExecutor`
 or any other tool that pickles its arguments. It is pickled as the recipe it was built from: the names of its
-modules, whether it checks input types, and its cache store. Loading it imports those modules by name and builds the
-driver again, so its compiled plans don't travel; each process compiles its own.
+modules, whether it checks input types, its config, and its cache store. Loading it imports those modules by name
+and builds the driver again, so its compiled plans don't travel; each process compiles its own.
 
 ```python
 import pickle

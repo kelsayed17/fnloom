@@ -171,6 +171,122 @@ driver.execute(
 The decorator returns the function unchanged, so you can still call it directly, and type checkers still see its
 signature.
 
+## Config
+
+`@config.when` and its relatives make one node out of several **variants**, picking one when you build. Name each
+variant after its node, followed by `__` and anything you like: `cost__post` and `cost__courier` are both variants of
+`cost`. The name is cut at the last `__`, and only on a config-decorated function, so a plain `cost__total` stays
+`cost__total`. Pass `name=` to choose the node name yourself.
+
+| Decorator | The variant is used when |
+| --- | --- |
+| `@config.when(carrier="post")` | every key equals its value |
+| `@config.when_not(carrier="post")` | every key differs from its value |
+| `@config.when_in(carrier=["courier", "express"])` | every key is one of its values |
+| `@config.when_not_in(carrier=["post"])` | every key is none of its values |
+| `@config.default` | no other variant of its node matches |
+
+```python
+# file: shipping.py
+from fnloom import config
+
+
+@config.when(carrier="post")
+def cost__post(weight: float) -> float:
+    """A flat fee plus the weight."""
+    return 2.0 + weight
+
+
+@config.when_in(carrier=["courier", "express"])
+def cost__courier(weight: float) -> float:
+    """A higher fee, and twice the weight."""
+    return 5.0 + 2 * weight
+
+
+@config.default
+def cost__free() -> float:
+    """Free shipping when no carrier matches."""
+    return 0.0
+
+
+def total(price: float, cost: float) -> float:
+    """What the customer pays."""
+    return price + cost
+```
+
+`Builder.with_config` gives the config. Each call merges into a copy, and a key given again takes its later value:
+
+```python
+import fnloom
+import shipping
+
+builder = fnloom.Builder().with_modules(shipping)
+post = builder.with_config({"carrier": "post"}).build()
+post.execute(["total"], inputs={"price": 10.0, "weight": 1.0})
+# -> {'total': 13.0}
+express = builder.with_config({"carrier": "express"}).build()
+express.execute(["total"], inputs={"price": 10.0, "weight": 1.0})
+# -> {'total': 17.0}
+fnloom.build(shipping).execute(["total"], inputs={"price": 10.0})
+# -> {'total': 10.0}
+dict(post.config)
+# -> {'carrier': 'post'}
+post.nodes["cost"].origin is shipping.cost__post
+# -> True
+[condition.key for condition in post.nodes["cost"].config]
+# -> ['carrier']
+```
+
+- **Config shapes the graph, and nothing else.** A config key is never a node, an input or an output, and its value
+  is never passed to a function. A parameter named like a config key is an ordinary input you supply in `inputs=`.
+  Hamilton passes config values to parameters (Q56).
+- **A key the config doesn't have never matches,** whichever form tests it. Hamilton reads a missing key as `None`, so
+  `when_not(carrier="post")` matches an empty config there (Q57).
+- **Values compare with `==`,** so `when(level=1)` matches a config of `{"level": True}`. An `==` that returns
+  anything but a `bool`, as a NumPy array's does, is a `TypeError` naming the key.
+- **Stacked decorators all apply:** `@config.when(carrier="post")` over `@config.when_not(region="eu")` needs both.
+  The order you stack them in, and their order with `@parameterize` and `@tag`, never matters.
+- `@parameterize` under a config decorator gives its rows only when the variant is selected.
+- `Driver.config` is a read-only copy of the config, and a pickled driver keeps it.
+
+A node that no variant matches, with no `@config.default`, is left out. That's fine when nothing reads it, and
+requesting it says why it's missing. When another node reads it, the build fails, naming what each variant needs:
+
+```python
+# file: tiers.py
+from fnloom import config
+
+
+@config.when(tier="gold")
+def discount__gold() -> float:
+    """Gold customers save a fifth."""
+    return 0.2
+
+
+def price(list_price: float, discount: float) -> float:
+    """The list price after the discount."""
+    return list_price * (1 - discount)
+```
+
+```python
+import tiers
+
+fnloom.Builder().with_config({"tier": "basic"}).with_modules(tiers).build()
+# raises ValueError: no variant of 'discount' matches the config {'tier': 'basic'}; its variants need tier == 'gold' (discount__gold); add @config.default or a variant for it
+```
+
+Mistakes are refused rather than guessed at (Q58, Q59):
+
+- Two variants of one node that both match, or two `@config.default`s for one node, fail the build naming both.
+- A config-decorated function defined twice in one module fails the build, naming the lines: Python would keep only
+  the last one. A function bound to a second name is still one variant.
+- `@config.when` without parentheses, a `str` given to `when_in`, a positional string, a name ending in `__` and a
+  `when` with no conditions are refused when the decorator is applied.
+- `name=` is always the node name. To test a config key that's literally called `name`, pass a mapping:
+  `@config.when({"name": "x"})`.
+
+The decorators never change your function, and add no tags (Q60).
+
 ## What is refused
 
 fnloom calls a node with one keyword argument per parameter, and expects it to return its value. Functions that can't

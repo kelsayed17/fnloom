@@ -46,6 +46,10 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `@cache(behavior="ignore")` on a producer | `@cache(ignore=("name",))` on the consumer instead (Q50) |
 | `@cache(format=...)` | The same, imported from `fnloom`: a format's name, or a `fnloom.Format` ([Caching](caching.md#stores)) |
 | `target_=...` | Not there. fnloom adds `version=` to pin a code version |
+| `@config.when`, `when_not`, `when_in`, `when_not_in` | The same, imported from `fnloom`, with the same `foo__variant` naming ([Config](writing-nodes.md#config)) |
+| `@config.when(name="x")` | The same. `name=` is the node name on all four forms, `when_not_in` too |
+| `@config.default` | Not in Hamilton: the variant used when no other matches |
+| `@config(lambda cfg: ...)` | Not there |
 | A row as `(bindings, docstring)`, `group(...)`, `parameterize_sources`, `parameterize_values` | Not yet. A row is a mapping |
 
 </div>
@@ -81,6 +85,12 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | A module with no nodes, such as a package that only re-exports | Builds; its nodes are unknown at `execute` | `ValueError` at build, saying why each function was skipped (Q53) |
 | A row naming no parameter of its function | `InvalidDecoratorException` | `ValueError`, when decorating (Q33) |
 | A row's defaulted parameter bound to an unsupplied `source()` | `KeyError` when run | The default applies (Q35) |
+| A config key | A node, passed to parameters of its name | Never a node or a value; a parameter of that name is an input (Q56) |
+| A config key the config doesn't have | Reads as `None`, so `when_not` matches | Never matches (Q57) |
+| A needed node no config variant matches | An input, failing at `execute` | `ValueError` at build, naming what each variant needs (Q57) |
+| Two matching variants, or a variant defined twice | Names the wrong function; keeps the last silently | `ValueError` at build naming both, or the lines (Q58) |
+| `@config.when` without parentheses, `when_in(key="ab")` | The node vanishes; substring matching | Refused when decorating (Q59) |
+| The function's `__name__`, and its tags | Renamed in place; a `hamilton.config` tag | Untouched; `NodeView.config` holds the conditions (Q60) |
 
 </div>
 
@@ -107,10 +117,10 @@ value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](
 
 ## Not there yet
 
-fnloom is pre-alpha. The core, the native path, `@parameterize`, `@tag`, graph inspection, type checks and result
-caching are done. These Hamilton features come next, roughly in this order:
+fnloom is pre-alpha. The core, the native path, `@parameterize`, `@tag`, `@config`, graph inspection, type checks
+and result caching are done. These Hamilton features come next, roughly in this order:
 
-1. **Configuration and more decorators:** `@config.when`, `@extract_columns` and `@extract_fields`.
+1. **More decorators:** `@extract_columns` and `@extract_fields`.
 2. **Adapters and lifecycle hooks**, result builders and async execution.
 3. **Graph visualisation.**
 4. **Dynamic execution**, materializers, `@subdag`, `@check_output` and `@pipe`.

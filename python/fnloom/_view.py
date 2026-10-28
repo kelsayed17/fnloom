@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, NamedTuple, override
 
+from fnloom._config import Condition
 from fnloom._decorators import Source, Value
 from fnloom._types import type_matches
 
@@ -41,7 +42,9 @@ class NodeView:
     narrowest annotation of the parameters that read it. `origin`, `module` and
     `doc` are the function's, and `None` for an input; `params` follow the
     function's declaration order and are empty for an input. `tags` are the ones
-    written with `@tag`, read-only.
+    written with `@tag`, read-only. `config` holds the conditions of the
+    `@config.when*` variant that is the node, sorted by key; it is empty for an
+    input, a plain function and a `@config.default`.
     """
 
     name: str
@@ -52,6 +55,7 @@ class NodeView:
     params: tuple[Param, ...]
     tags: Mapping[str, str]
     doc: str | None
+    config: tuple[Condition, ...] = ()
 
     @property
     def dependencies(self) -> tuple[str, ...]:
@@ -224,16 +228,18 @@ def node_views(nodes: Sequence[NodeDef]) -> NodeViews:
     `nodes` carry resolved annotations. `ValueError` when two of an input's
     consumers declare types that match neither way.
     """
+    # Positional, every field in order: a view is made per node, so it is kept cheap.
     functions = {
         node.name: NodeView(
-            name=node.name,
-            type=node.returns,
-            is_input=False,
-            origin=node.origin,
-            module=node.module,
-            params=node.params,
-            tags=_read_only(node.tags),
-            doc=_doc(node.origin),
+            node.name,
+            node.returns,
+            False,  # noqa: FBT003  # `is_input`, in field order
+            node.origin,
+            node.module,
+            node.params,
+            _read_only(node.tags),
+            _doc(node.origin),
+            node.config,
         )
         for node in nodes
     }

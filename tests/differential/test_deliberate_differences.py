@@ -946,3 +946,263 @@ def test_q55_an_unknown_format_is_refused_at_build(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="'nosuch', which the store does not know"):
         _fnloom_cached(fnloom_module, tmp_path / "fnloom")
+
+
+# Each library's config decorator, put in a fixture module's source as `{decorator}`.
+_HAMILTON_CONFIG = "from hamilton.function_modifiers import config"
+_FNLOOM_CONFIG = "from fnloom import config"
+
+
+def _hamilton_configured(
+    settings: dict[str, object], *modules: ModuleType
+) -> hamilton_driver.Driver:
+    return (
+        hamilton_driver.Builder().with_config(settings).with_modules(*modules).build()
+    )
+
+
+def _fnloom_configured(
+    settings: dict[str, object], *modules: ModuleType
+) -> fnloom.Driver:
+    return fnloom.Builder().with_config(settings).with_modules(*modules).build()
+
+
+def _hamilton_names(built: hamilton_driver.Driver) -> list[str]:
+    return sorted(v.name for v in built.list_available_variables())
+
+
+@pytest.mark.deliberate("Q56")
+def test_q56_config_is_never_a_node_or_an_input() -> None:
+    """Hamilton passes config to parameters and drops a function a key names."""
+    source = """
+def usecfg(mode: str) -> str:
+    return "mode=" + mode
+
+def a() -> int:
+    return 1
+
+def b(a: int) -> int:
+    return a * 2
+"""
+    module = make_module("differential_q56", source)
+    settings: dict[str, object] = {"mode": "fast", "a": 50}
+    hamilton = _hamilton_configured(settings, module)
+    assert _hamilton_names(hamilton) == ["a", "b", "mode", "usecfg"]
+    assert hamilton.execute(["usecfg", "b", "mode"]) == {
+        "usecfg": "mode=fast",
+        "b": 100,
+        "mode": "fast",
+    }
+    with pytest.raises(ValueError, match="present in both config and inputs"):
+        hamilton.execute(["usecfg"], inputs={"mode": "slow"})
+    driver = _fnloom_configured(settings, module)
+    assert driver.node_names() == ["a", "b", "mode", "usecfg"]
+    assert driver.nodes["mode"].is_input
+    assert not driver.nodes["a"].is_input
+    assert driver.execute(["usecfg", "b"], inputs={"mode": "slow"}) == {
+        "usecfg": "mode=slow",
+        "b": 2,
+    }
+    with pytest.raises(ValueError, match=r"'mode' is a config key; config is not"):
+        driver.execute(["usecfg"])
+
+
+_VARIANTS = """
+{decorator}
+
+@config.when(mode="a")
+def foo__a(x: int) -> int:
+    return x + 1
+
+@config.when(mode="b")
+def foo__b(x: int) -> int:
+    return x + 100
+
+@config.when_not(mode="a")
+def other__not_a(x: int) -> int:
+    return x
+
+def bar(foo: int) -> int:
+    return foo + 1
+"""
+
+
+@pytest.mark.deliberate("Q57")
+def test_q57_a_missing_key_and_a_missing_variant() -> None:
+    """Hamilton matches `when_not` on a missing key and fails late without a variant."""
+    hamilton_module = make_module(
+        "differential_q57_h", _VARIANTS.format(decorator=_HAMILTON_CONFIG)
+    )
+    fnloom_module = make_module(
+        "differential_q57_f", _VARIANTS.format(decorator=_FNLOOM_CONFIG)
+    )
+    hamilton_empty = _hamilton_configured({}, hamilton_module)
+    assert "other" in _hamilton_names(hamilton_empty)
+    unmatched = _hamilton_configured({"mode": "c"}, hamilton_module)
+    assert "foo" in _hamilton_names(unmatched)
+    with pytest.raises(ValueError, match=r"Required input foo not provided"):
+        unmatched.execute(["bar"], inputs={"x": 1})
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^no variant of 'foo' matches the config \{\}; its variants need "
+            r"mode == 'a' \(foo__a\), mode == 'b' \(foo__b\); "
+            r"add @config\.default or a variant for it$"
+        ),
+    ):
+        _fnloom_configured({}, fnloom_module)
+    with pytest.raises(ValueError, match=r"^no variant of 'foo' matches the config"):
+        _fnloom_configured({"mode": "c"}, fnloom_module)
+    without_bar = make_module(
+        "differential_q57_f_alone",
+        _VARIANTS.format(decorator=_FNLOOM_CONFIG).replace(
+            "def bar(foo: int)", "def bar(x: int)"
+        ),
+    )
+    assert _fnloom_configured({}, without_bar).node_names() == ["bar", "x"]
+
+
+_TWO_MATCHES = """
+{decorator}
+
+@config.when_not(mode="b")
+def foo__nb() -> int:
+    return 1
+
+@config.when(mode="a")
+def foo__a() -> int:
+    return 2
+"""
+
+_REDEFINED = """
+{decorator}
+
+@config.when(mode="a")
+def foo__a() -> int:
+    return 1
+
+@config.when(mode="a")
+def foo__a() -> int:
+    return 2
+"""
+
+
+@pytest.mark.deliberate("Q58")
+def test_q58_two_variants_and_a_redefinition(tmp_path: Path) -> None:
+    """Hamilton names a wrong culprit and keeps a redefinition; fnloom refuses both."""
+    hamilton_two = make_module(
+        "differential_q58_two_h", _TWO_MATCHES.format(decorator=_HAMILTON_CONFIG)
+    )
+    with pytest.raises(ValueError, match="more than once") as raised:
+        _hamilton_configured({"mode": "a"}, hamilton_two)
+    assert "foo__nb" in str(raised.value)
+    assert "foo__a " not in str(raised.value)
+    fnloom_two = make_module(
+        "differential_q58_two_f", _TWO_MATCHES.format(decorator=_FNLOOM_CONFIG)
+    )
+    with pytest.raises(ValueError, match=r": 'foo__a', 'foo__nb'$"):
+        _fnloom_configured({"mode": "a"}, fnloom_two)
+    hamilton_redefined = _file_module(
+        tmp_path,
+        "differential_q58_redef_h",
+        _REDEFINED.format(decorator=_HAMILTON_CONFIG),
+    )
+    assert _hamilton_configured({"mode": "a"}, hamilton_redefined).execute(["foo"]) == {
+        "foo": 2
+    }
+    fnloom_redefined = _file_module(
+        tmp_path,
+        "differential_q58_redef_f",
+        _REDEFINED.format(decorator=_FNLOOM_CONFIG),
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"^function 'foo__a' is defined more than once .* \(lines 5, 9\)",
+    ):
+        _fnloom_configured({"mode": "a"}, fnloom_redefined)
+
+
+_BARE_WHEN = """
+{decorator}
+
+@config.when
+def foo__a() -> int:
+    return 1
+
+def keep() -> int:
+    return 1
+"""
+
+_SUBSTRING = """
+{decorator}
+
+@config.when_in(mode="ab")
+def foo__a() -> int:
+    return 1
+"""
+
+
+@pytest.mark.deliberate("Q59")
+def test_q59_misuse_is_refused_when_decorating() -> None:
+    """Hamilton drops a bare `@config.when` and reads a `str` as substrings."""
+    bare = make_module(
+        "differential_q59_bare_h", _BARE_WHEN.format(decorator=_HAMILTON_CONFIG)
+    )
+    assert _hamilton_names(_hamilton_configured({"mode": "a"}, bare)) == [
+        "keep",
+        "mode",
+    ]
+    substring = make_module(
+        "differential_q59_sub_h", _SUBSTRING.format(decorator=_HAMILTON_CONFIG)
+    )
+    for mode in ("a", "b", "ab"):
+        assert "foo" in _hamilton_names(_hamilton_configured({"mode": mode}, substring))
+    with pytest.raises(InvalidDecoratorException, match=r"whereas$"):
+        make_module(
+            "differential_q59_trail_h",
+            f"{_HAMILTON_CONFIG}\n\n@config.when(mode='a')\n"
+            "def foo__() -> int:\n    return 1\n",
+        )
+    with pytest.raises(TypeError, match=r"with parentheses"):
+        make_module(
+            "differential_q59_bare_f", _BARE_WHEN.format(decorator=_FNLOOM_CONFIG)
+        )
+    with pytest.raises(TypeError, match=r"need a collection of values: 'mode' \(str\)"):
+        make_module(
+            "differential_q59_sub_f", _SUBSTRING.format(decorator=_FNLOOM_CONFIG)
+        )
+    with pytest.raises(ValueError, match=r"'foo__' ends in '__'"):
+        make_module(
+            "differential_q59_trail_f",
+            f"{_FNLOOM_CONFIG}\n\n@config.when(mode='a')\n"
+            "def foo__() -> int:\n    return 1\n",
+        )
+
+
+_ONE_VARIANT = """
+{decorator}
+
+@config.when(mode="a")
+def foo__a() -> int:
+    return 1
+"""
+
+
+@pytest.mark.deliberate("Q60")
+def test_q60_no_mutation_and_no_tag() -> None:
+    """Hamilton renames the function and tags the node; fnloom does neither."""
+    hamilton_module = make_module(
+        "differential_q60_h", _ONE_VARIANT.format(decorator=_HAMILTON_CONFIG)
+    )
+    hamilton = _hamilton_configured({"mode": "a"}, hamilton_module)
+    assert hamilton_module.foo__a.__name__ == "foo"
+    (foo,) = (v for v in hamilton.list_available_variables() if v.name == "foo")
+    assert foo.tags["hamilton.config"] == "mode"
+    fnloom_module = make_module(
+        "differential_q60_f", _ONE_VARIANT.format(decorator=_FNLOOM_CONFIG)
+    )
+    driver = _fnloom_configured({"mode": "a"}, fnloom_module)
+    assert fnloom_module.foo__a.__name__ == "foo__a"
+    assert not hasattr(fnloom_module.foo__a, "__original_name__")
+    assert driver.nodes["foo"].tags == {}
+    assert [c.key for c in driver.nodes["foo"].config] == ["mode"]

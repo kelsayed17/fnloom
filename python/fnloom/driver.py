@@ -9,13 +9,13 @@ import threading
 # them, and `inspect.signature` resolves those annotations at run time.
 from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
-from types import ModuleType
+from types import MappingProxyType, ModuleType
 from typing import Any, Protocol, override
 
 from fnloom import _core, _types
 from fnloom._caching import Cache, CacheOutcome, CacheRun
 from fnloom._decorators import Source
-from fnloom._scan import NodeDef, collect, core_inputs, resolve
+from fnloom._scan import NodeDef, core_inputs, resolve, scan
 from fnloom._stores import CacheStore
 from fnloom._view import NodeView, NodeViews, node_views
 
@@ -291,11 +291,22 @@ class Driver:
         *,
         check_inputs: bool = True,
         cache: Cache | None = None,
+        config: Mapping[str, object] | None = None,
     ) -> None:
-        """Wraps a native graph; `Builder` is the way to make one from modules."""
+        """Wraps a native graph; `Builder` is the way to make one from modules.
+
+        `config` is the config the graph was built with, kept read-only.
+        """
         self._graph = graph
         self._check_inputs = check_inputs
         self._cache = cache
+        self._config = (
+            config
+            if isinstance(config, MappingProxyType)
+            else MappingProxyType(dict(config or {}))
+        )
+        # Each node no `@config.when*` variant gave, with why: see `prepare`.
+        self._unmatched: Mapping[str, str] = {}
         self._nodes = (
             nodes if isinstance(nodes, NodeViews) else NodeViews(nodes or {}, {})
         )
@@ -330,9 +341,20 @@ class Driver:
             self._nodes,
             check_inputs=self._check_inputs,
             cache=self._cache,
+            config=self._config,
         )
         copied._builder = self._builder
+        copied._unmatched = self._unmatched
         return copied
+
+    @property
+    def config(self) -> Mapping[str, object]:
+        """The config the graph was built with: a read-only copy, empty by default.
+
+        Config only selects `@config.when*` variants: it is never passed to a node
+        (Q56).
+        """
+        return self._config
 
     def prepare(
         self,
@@ -374,9 +396,20 @@ class Driver:
 
     def _compile(self, key: _PlanKey) -> PreparedPlan:
         outputs, input_names, override_names = key
-        plan = self._graph.prepare(
-            list(outputs), sorted(input_names), sorted(override_names)
-        )
+        if self._unmatched and (
+            absent := sorted({name for name in outputs if name in self._unmatched})
+        ):
+            raise ValueError("\n".join(self._unmatched[name] for name in absent))
+        try:
+            plan = self._graph.prepare(
+                list(outputs), sorted(input_names), sorted(override_names)
+            )
+        except ValueError as error:
+            hint = _config_hint(str(error), self._config)
+            if hint is None:
+                raise
+            msg = f"{error}\n{hint}"
+            raise ValueError(msg) from None
         checks = self._checks(plan, override_names) if self._check_inputs else ((), ())
         runnable: _Runnable = plan
         if self._cache is not None:
@@ -463,6 +496,53 @@ class Driver:
         return sorted({*names, *self._graph.downstream_of(list(names))})
 
 
+def _config_hint(message: str, config: Mapping[str, object]) -> str | None:
+    """A line for a missing-input error naming config keys, or `None` (Q56).
+
+    A missing input is listed as `'name' (`, which no other part of the message
+    is: a consumer is followed by `,` or `)`.
+    """
+    if not config or not message.startswith("missing inputs: "):
+        return None
+    keys = [key for key in sorted(config) if f"'{key}' (" in message]
+    if not keys:
+        return None
+    listed = ", ".join(repr(key) for key in keys)
+    if len(keys) == 1:
+        return (
+            f"{listed} is a config key; config is not passed to nodes: "
+            "supply it in inputs="
+        )
+    return (
+        f"{listed} are config keys; config is not passed to nodes: "
+        "supply them in inputs="
+    )
+
+
+def _checked_config(config: object) -> dict[str, object]:
+    """A copy of `config`; `TypeError` for a non-mapping or a key that is no `str`."""
+    if not isinstance(config, Mapping):
+        msg = f"with_config takes a mapping, got {type(config).__name__}"
+        raise TypeError(msg)
+    given: dict[object, object] = dict(config)
+    not_str = sorted(type(k).__name__ for k in given if not isinstance(k, str))
+    if not_str:
+        msg = f"config keys must be str, got: {', '.join(not_str)}"
+        raise TypeError(msg)
+    return {str(k): v for k, v in given.items()}
+
+
+def _unmatched_edges(nodes: Sequence[NodeDef], unmatched: Mapping[str, str]) -> str:
+    """Why each node no variant gave that a node reads is absent, sorted; or ``""``."""
+    read = {
+        p.binding.name
+        for node in nodes
+        for p in node.params
+        if isinstance(p.binding, Source) and p.binding.name in unmatched
+    }
+    return "\n".join(unmatched[name] for name in sorted(read))
+
+
 def _prepare_again(driver: Driver, key: _PlanKey) -> PreparedPlan:
     """Prepares a pickled plan's request on its rebuilt driver."""
     outputs, input_names, override_names = key
@@ -514,17 +594,18 @@ def _builder_of(
     names: tuple[str, ...],
     check_inputs: bool,  # noqa: FBT001  # pickle passes arguments positionally
     store: CacheStore | None,
+    config: Mapping[str, object] | None = None,
 ) -> Builder:
     """A pickled builder, its modules imported again by name."""
     modules = tuple(importlib.import_module(name) for name in names)
-    return Builder(modules, check_inputs=check_inputs, store=store)
+    return Builder(modules, check_inputs=check_inputs, store=store, config=config)
 
 
 class Builder:
     """Accumulates modules, then builds a `Driver`; methods return new builders.
 
     A builder pickles as the names of its modules, which must import them, its
-    type-check setting and its store, which must pickle too.
+    type-check setting, its config and its store, which must pickle too.
     """
 
     def __init__(
@@ -533,41 +614,72 @@ class Builder:
         *,
         check_inputs: bool = True,
         store: CacheStore | None = None,
+        config: Mapping[str, object] | None = None,
     ) -> None:
         """Starts with the given modules (none by default), checking input types.
 
         `store`, when given, caches the results of the driver's runs in it.
+        `config`, copied, selects `@config.when*` variants (see `with_config`).
         `TypeError` when an item of `modules` is not a module.
         """
         self._modules = _checked_modules(modules)
         self._check_inputs = check_inputs
         self._store = store
+        # Never changed once made: `with_config` makes a new dict.
+        self._config: dict[str, object] = (
+            {} if config is None else _checked_config(config)
+        )
 
     @override
     def __reduce__(
         self,
-    ) -> tuple[Callable[..., Builder], tuple[tuple[str, ...], bool, CacheStore | None]]:
+    ) -> tuple[
+        Callable[..., Builder],
+        tuple[tuple[str, ...], bool, CacheStore | None, dict[str, object]],
+    ]:
         """The modules' names and the settings, imported again on load."""
         names = tuple(_importable_name(module) for module in self._modules)
-        return _builder_of, (names, self._check_inputs, self._store)
+        return _builder_of, (names, self._check_inputs, self._store, self._config)
+
+    def _with(
+        self,
+        modules: tuple[ModuleType, ...] | None = None,
+        *,
+        check_inputs: bool | None = None,
+        store: CacheStore | None = None,
+        config: Mapping[str, object] | None = None,
+    ) -> Builder:
+        """A new builder: this one's settings, each given one replaced."""
+        return Builder(
+            self._modules if modules is None else modules,
+            check_inputs=self._check_inputs if check_inputs is None else check_inputs,
+            store=self._store if store is None else store,
+            config=self._config if config is None else config,
+        )
 
     def with_modules(self, *modules: ModuleType) -> Builder:
         """Returns a new builder with `modules` appended to this one's.
 
         `TypeError` when an item is not a module, such as a function.
         """
-        return Builder(
-            (*self._modules, *modules),
-            check_inputs=self._check_inputs,
-            store=self._store,
-        )
+        return self._with((*self._modules, *modules))
+
+    def with_config(self, config: Mapping[str, object]) -> Builder:
+        """Returns a new builder with `config` merged into a copy of this one's.
+
+        A key given again takes its later value. The config selects among
+        `@config.when*` variants when building, and is never passed to a node
+        (Q56); the driver's `config` is a read-only copy of it. `TypeError` for a
+        non-mapping or a key that is not a `str`.
+        """
+        return self._with(config={**self._config, **_checked_config(config)})
 
     def without_input_type_checks(self) -> Builder:
         """Returns a new builder whose driver skips input and override type checks.
 
         Edge checks, between a node and the parameters it feeds, stay on (Q10).
         """
-        return Builder(self._modules, check_inputs=False, store=self._store)
+        return self._with(check_inputs=False)
 
     def with_cache(self, store: CacheStore) -> Builder:
         """Returns a new builder whose driver caches every node's result in `store`.
@@ -583,7 +695,7 @@ class Builder:
         ):
             msg = f"a cache store needs get, put and discard methods, not {store!r}"
             raise TypeError(msg)
-        return Builder(self._modules, check_inputs=self._check_inputs, store=store)
+        return self._with(store=store)
 
     def build(self) -> Driver:
         """Scans the modules and returns a `Driver`; `ValueError` on a bad node.
@@ -597,14 +709,30 @@ class Builder:
         the node. Every edge is type checked: a node whose return type a parameter
         it feeds does not accept fails the build, with one `ValueError` listing
         every such parameter.
+
+        The config selects one `@config.when*` variant per node. Two matching
+        variants, or a node that a node reads and that no variant or
+        `@config.default` gives, are a `ValueError` naming each (Q57, Q58).
         """
-        nodes = resolve(collect(self._modules))
+        scanned = scan(self._modules, self._config)
+        if scanned.unmatched and (
+            absent := _unmatched_edges(scanned.nodes, scanned.unmatched)
+        ):
+            raise ValueError(absent)
+        nodes = resolve(scanned.nodes)
         views = node_views(nodes)
         graph = _graph_of(nodes)
         if mismatches := _edge_mismatches(views.functions):
             raise ValueError("\n".join(mismatches))
         cache = None if self._store is None else Cache.of(self._store, nodes)
-        driver = Driver(graph, views, check_inputs=self._check_inputs, cache=cache)
+        driver = Driver(
+            graph,
+            views,
+            check_inputs=self._check_inputs,
+            cache=cache,
+            config=MappingProxyType(self._config),
+        )
+        driver._unmatched = scanned.unmatched  # noqa: SLF001  # the builder's own driver
         driver._builder = self  # noqa: SLF001  # the builder's own driver
         return driver
 

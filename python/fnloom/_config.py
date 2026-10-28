@@ -1,10 +1,15 @@
-"""What `@config.when*` and `@config.default` record about the build's config."""
+"""What `@config.when*` and `@config.default` record, and how the build resolves it."""
 
-from collections.abc import Callable, Iterable, Mapping
+import ast
+import inspect
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
 from fnloom._decorators import _ATTRIBUTE, decorations
+
+if TYPE_CHECKING:
+    from types import ModuleType
 
 type ConditionKind = Literal["when", "when_not", "when_in", "when_not_in"]
 
@@ -238,3 +243,246 @@ def _config_decorator[F: Callable[..., object]](
         return _record(fn, policy)
 
     return apply
+
+
+# A function found in a module: the module, its attribute name, and the function.
+type Found = tuple[ModuleType, str, Callable[..., object]]
+
+
+@dataclass(frozen=True, slots=True)
+class Variant:
+    """A config-decorated function, as one variant of the node it names.
+
+    Attributes:
+        function: The function as written, never changed.
+        policy: What its config decorators recorded.
+        node: The node name: `name=`, or the function's name cut at the last `__`.
+        produces: The names of the nodes it makes: its rows, or `node` itself.
+    """
+
+    function: Callable[..., object]
+    policy: ConfigPolicy
+    node: str
+    produces: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class Selection:
+    """What the config selected among the found functions.
+
+    Attributes:
+        functions: The functions to lower, in the order found: every plain
+            function, and the one variant selected for each node.
+        unmatched: For each node name no variant produced, why: see `unmatched`.
+    """
+
+    functions: list[Found]
+    unmatched: dict[str, str]
+
+
+def _equal(key: str, have: object, want: object) -> bool:
+    result = have == want
+    if type(result) is not bool:
+        msg = f"config key {key!r}: == returned {type(result).__name__}, not bool"
+        raise TypeError(msg)
+    return result
+
+
+def _holds(condition: Condition, config: Mapping[str, object]) -> bool:
+    if condition.key not in config:
+        return False
+    have = config[condition.key]
+    hits = [_equal(condition.key, have, want) for want in condition.values]
+    if condition.kind in {"when", "when_in"}:
+        return any(hits)
+    return not any(hits)
+
+
+def matches(policy: ConfigPolicy, config: Mapping[str, object]) -> bool:
+    """Whether every condition of `policy` holds for `config`.
+
+    A condition on a key `config` does not have is false, whichever its kind.
+
+    Raises:
+        TypeError: An `==` returned something other than a `bool`, such as an
+            array; the message names the key.
+    """
+    # Every condition is evaluated, so a bad comparison raises whatever its order.
+    held = [_holds(condition, config) for condition in policy.conditions]
+    return all(held)
+
+
+def _variant(fn: Callable[..., object], policy: ConfigPolicy) -> Variant:
+    node = node_name(fn, policy.name)
+    rows = decorations(fn).rows
+    produces = (node,) if rows is None else tuple(rows)
+    return Variant(fn, policy, node, produces)
+
+
+def _labels(variants: Sequence[Variant]) -> dict[int, str]:
+    """Names each variant by its function, with its module when they span several."""
+    modules = {str(getattr(v.function, "__module__", "")) for v in variants}
+    return {
+        id(v.function): (
+            str(getattr(v.function, "__name__", v.node))
+            if len(modules) == 1
+            else f"{v.function.__module__}.{getattr(v.function, '__name__', v.node)}"
+        )
+        for v in variants
+    }
+
+
+def _shown(config: Mapping[str, object]) -> str:
+    """The config as a dict literal, its keys sorted."""
+    return "{" + ", ".join(f"{k!r}: {config[k]!r}" for k in sorted(config)) + "}"
+
+
+_OPERATORS: dict[ConditionKind, str] = {
+    "when": "==",
+    "when_not": "!=",
+    "when_in": "in",
+    "when_not_in": "not in",
+}
+
+
+def _need(condition: Condition) -> str:
+    if condition.kind in {"when", "when_not"}:
+        shown = repr(condition.values[0])
+    else:
+        shown = repr(list(condition.values))
+    return f"{condition.key} {_OPERATORS[condition.kind]} {shown}"
+
+
+def unmatched(
+    name: str, config: Mapping[str, object], variants: Sequence[Variant]
+) -> str:
+    """Why node `name` has no variant: what `config` holds and what each variant needs.
+
+    The variants are listed sorted by function name, each condition in its
+    recorded order.
+    """
+    labels = _labels(variants)
+    needs = ", ".join(
+        f"{' and '.join(_need(c) for c in v.policy.conditions)} ({label})"
+        for label, v in sorted(
+            ((labels[id(v.function)], v) for v in variants), key=lambda pair: pair[0]
+        )
+    )
+    return (
+        f"no variant of {name!r} matches the config {_shown(config)}; "
+        f"its variants need {needs}; add @config.default or a variant for it"
+    )
+
+
+def _pick(
+    node: str, variants: list[Variant], config: Mapping[str, object]
+) -> tuple[Variant | None, str | None]:
+    """The variant selected for `node`, or `None`; and a problem to refuse, if any."""
+    labels = _labels(variants)
+    defaults = sorted(labels[id(v.function)] for v in variants if v.policy.default)
+    if len(defaults) > 1:
+        listed = ", ".join(repr(label) for label in defaults)
+        return None, f"node {node!r} has more than one @config.default: {listed}"
+    hits = [v for v in variants if not v.policy.default and matches(v.policy, config)]
+    if len(hits) > 1:
+        culprits = sorted(labels[id(v.function)] for v in hits)
+        listed = ", ".join(repr(label) for label in culprits)
+        return None, (
+            f"node {node!r} has more than one variant matching the config "
+            f"{_shown(config)}: {listed}"
+        )
+    if hits:
+        return hits[0], None
+    return next((v for v in variants if v.policy.default), None), None
+
+
+def _groups(functions: Sequence[Found]) -> dict[str, list[Variant]]:
+    """The config-decorated functions as variants, by the node they name."""
+    groups: dict[str, list[Variant]] = {}
+    seen: set[int] = set()
+    for _, _, fn in functions:
+        policy = decorations(fn).config
+        # A function bound under two names, or a module given twice, is one variant.
+        if policy is None or id(fn) in seen:
+            continue
+        seen.add(id(fn))
+        variant = _variant(fn, policy)
+        groups.setdefault(variant.node, []).append(variant)
+    return groups
+
+
+def resolve_variants(
+    functions: Sequence[Found], config: Mapping[str, object]
+) -> Selection:
+    """Selects one variant per node; see `select`. Also says why a node has none."""
+    groups = _groups(functions)
+    chosen: set[int] = set()
+    problems: list[tuple[str, str]] = []
+    missing: dict[str, str] = {}
+    for node in sorted(groups):
+        variants = groups[node]
+        picked, problem = _pick(node, variants, config)
+        if problem is not None:
+            problems.append((node, problem))
+        elif picked is not None:
+            chosen.add(id(picked.function))
+        else:
+            reason = unmatched(node, config, variants)
+            for produced in sorted({p for v in variants for p in v.produces}):
+                missing[produced] = reason
+    if problems:
+        raise ValueError("; ".join(problem for _, problem in problems))
+    selected: list[Found] = []
+    for found in functions:
+        fn = found[2]
+        if decorations(fn).config is None:
+            selected.append(found)
+        elif id(fn) in chosen:
+            chosen.discard(id(fn))
+            selected.append(found)
+    return Selection(selected, missing)
+
+
+def select(functions: Sequence[Found], config: Mapping[str, object]) -> list[Found]:
+    """The functions to lower: every plain one, and one variant per node.
+
+    A node's variant is the one whose conditions all hold for `config`, or else
+    its `@config.default`; a node with neither has no function. A function
+    bound under two names counts once, under the first.
+
+    Raises:
+        ValueError: Two variants of one node match, or one node has two
+            defaults; every such node in one message, sorted.
+        TypeError: An `==` did not return a `bool` (see `matches`).
+    """
+    return resolve_variants(functions, config).functions
+
+
+def redefinitions(module: ModuleType) -> list[str]:
+    """A line per config-decorated function `module` defines twice at top level.
+
+    Python keeps only the last definition, so the earlier ones would be lost
+    without a word. The module's source is read with `ast`; a module without
+    source, such as one built in memory, has nothing to check.
+    """
+    try:
+        source = inspect.getsource(module)
+    except OSError, TypeError:
+        return []
+    lines: dict[str, list[int]] = {}
+    for statement in ast.parse(source).body:
+        if isinstance(statement, ast.FunctionDef | ast.AsyncFunctionDef):
+            lines.setdefault(statement.name, []).append(statement.lineno)
+    found: list[str] = []
+    for name in sorted(lines):
+        if len(lines[name]) < 2:  # noqa: PLR2004  # twice is a redefinition
+            continue
+        current = getattr(module, name, None)
+        if not callable(current) or decorations(current).config is None:
+            continue
+        listed = ", ".join(str(line) for line in lines[name])
+        found.append(
+            f"function {name!r} is defined more than once in module "
+            f"{module.__name__!r} (lines {listed}); Python keeps only the last"
+        )
+    return found
