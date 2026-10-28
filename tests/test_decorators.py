@@ -72,7 +72,9 @@ def test_rows_and_tags_are_recorded_in_either_order() -> None:
         return x
 
     assert decorations(over) == decorations(under)
-    assert decorations(over) == Decorations({"r": {"x": source("up")}}, {"owner": "a"})
+    assert decorations(over) == Decorations(
+        {"r": {"x": source("up")}}, {"owner": "a"}, docs={"r": None}
+    )
 
 
 def test_plain_function_has_empty_decorations() -> None:

@@ -611,6 +611,140 @@ driver.execute(
 The decorator returns the function unchanged, so you can still call it directly, and type checkers still see its
 signature.
 
+### Docs for each row
+
+A row's node takes the function's docstring as a template, filled in per row with `str.format_map`: `{output_name}` is
+the row's name, and each parameter the row binds is a source's name or a value's own value, so a format spec such as
+`{limit:.1f}` works. A `group(...)` parameter shows its items joined: `x, 3` for a list, `k=x, j=3` for a dict. Write a
+literal brace as `{{` or `}}`. A function without a docstring gives `None` for every row.
+
+A placeholder the row lacks, a positional field such as `{}` or `{0}`, or a stray brace is a `ValueError` naming the row
+and the placeholder, when the decorator is applied. Hamilton prints a missing placeholder as the bare key (Q82).
+
+To give a row its own doc, write the row as `(bindings, doc)`. The doc is used as written, never templated, and `None`
+means no doc at all, not the function's. A tuple of any other length, or a doc that is not a `str`, is a `TypeError`.
+
+```python
+# file: limits.py
+from fnloom import parameterize, source, value
+
+
+@parameterize(
+    low={"limit": value(10)},
+    high={"limit": source("high_limit")},
+    custom=({"limit": value(50)}, "Written as is: {limit} stays braced."),
+    quiet=({"limit": value(99)}, None),
+)
+def above(readings: list[int], limit: int) -> int:
+    """{output_name}: readings over {limit}."""
+    return sum(reading > limit for reading in readings)
+```
+
+```python
+import fnloom
+import limits
+
+driver = fnloom.build(limits)
+{name: driver.nodes[name].doc for name in ["low", "high", "custom", "quiet"]}
+# -> {'low': 'low: readings over 10.', 'high': 'high: readings over high_limit.', 'custom': 'Written as is: {limit} stays braced.', 'quiet': None}
+```
+
+```python
+from fnloom import parameterize, value
+
+
+def bad(limit: int) -> int:
+    """Over {limit}, or {ceiling}."""
+    return limit
+
+
+parameterize(low={"limit": value(10)})(bad)
+# raises ValueError: the docstring of 'bad' is a template for each row's doc: row 'low': placeholder {ceiling} is not 'output_name' or a parameter the row binds; write a literal brace as {{ or }}, or give the row its own doc with (bindings, doc)
+```
+
+### Lists and dicts: `group`
+
+`group(...)` binds one parameter to a list or a dict built from several sources and values. Positional items make a list,
+for a parameter annotated `list[X]`; keywords make a dict, for one annotated `dict[str, X]`. `Optional` of either is
+fine.
+
+```python
+# file: bundles.py
+from fnloom import group, parameterize, source, value
+
+
+@parameterize(
+    scores={"parts": group(source("math"), value(10), source("art"))},
+    named={"marks": group(math=source("math"), bonus=value(10))},
+)
+def bundle(parts: list[int] = [], marks: dict[str, int] = {}) -> object:
+    return parts or marks
+```
+
+```python
+import fnloom
+import bundles
+
+driver = fnloom.build(bundles)
+driver.execute(["scores", "named"], inputs={"math": 7, "art": 9})
+# -> {'scores': [7, 10, 9], 'named': {'math': 7, 'bonus': 10}}
+driver.nodes["math"].type is int
+# -> True
+```
+
+- **Each call builds a fresh list or dict.** A `value(...)` item is the same object every time, as `value()` is
+  everywhere.
+- **Each `source` is an ordinary input,** or node, typed by the element: `list[int]` makes it an `int`. It is
+  required, even when the parameter has a default, since a group is never partly built; Hamilton makes it optional and
+  then fails with a `KeyError` when one is missing.
+- **`NodeView.params`** lists one `Param` per item, with the item's place in `slot`: its index in a list, or its key
+  in a dict.
+- **Misuse is refused when decorating,** each offender listed once, in one message:
+    - a parameter not annotated as `list[X]` or `dict[str, X]` (a quoted annotation too, since it can't be read then);
+    - positional and keyword items mixed, an empty `group()`, a nested `group`, or a bare string.
+- `fnloom.node(fn, bind=...)` takes a `group(...)` as a `@parameterize` row does.
+
+### Shorthands
+
+`parameterize_sources` is `@parameterize` with every binding a `source`, and `parameterize_values` is one parameter
+bound to a constant per node, each with its own doc:
+
+```python
+# file: shorthands.py
+from fnloom import parameterize_sources, parameterize_values
+
+
+@parameterize_sources(west=dict(rate="west_rate"), east=dict(rate="east_rate"))
+def price(rate: float, base: float = 100.0) -> float:
+    """{output_name} price at {rate}."""
+    return base * rate
+
+
+@parameterize_values("tax", {("low_tax", "A low tax."): 0.1, ("high_tax", None): 0.3})
+def taxed(tax: float, base: float = 100.0) -> float:
+    return base * (1 + tax)
+```
+
+```python
+import fnloom
+import shorthands
+
+driver = fnloom.build(shorthands)
+driver.execute(["west", "high_tax"], inputs={"west_rate": 1.5})
+# -> {'west': 150.0, 'high_tax': 130.0}
+driver.nodes["west"].doc
+# -> 'west price at west_rate.'
+driver.nodes["low_tax"].doc
+# -> 'A low tax.'
+```
+
+- **`parameterize_sources`** takes a `str` for each source, refused otherwise when decorating; Hamilton fails later with
+  a raw `TypeError`. No row may be empty.
+- **`parameterize_values`** takes a mapping of `(name, doc)` keys to values; a doc may be `None`, and a name may appear
+  once. An empty mapping is refused; Hamilton builds no node.
+- All three compose with `@config`, `@extract_fields` (one row only), `@tag`, `@cache`, `@defaults` and namespaces, and
+  each row is checked as a `@parameterize` row is.
+
 ## Config
 
 `@config.when` and its relatives make one node out of several **variants**, picking one when you build. Name each

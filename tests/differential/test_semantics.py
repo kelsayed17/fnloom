@@ -959,3 +959,107 @@ def test_strict_overrides_behave_as_hamilton(
     except Exception as error:  # noqa: BLE001  # the exception class is the thing being compared
         outcome = Outcome(None, type(error).__name__)
     assert outcome == hamilton
+
+
+_SUGAR_GRAPH = """
+{imports}
+
+@parameterize(
+    literal=({{"p": value(1)}}, "kept {{as}} written {{p}}"),
+    silent=({{"p": value(2)}}, None),
+    templated={{"p": source("up")}},
+    constant={{"p": value(4.5)}},
+)
+def rows(p: int) -> int:
+    \"\"\"{{output_name}} reads {{p}}.\"\"\"
+    return int(p) + 100
+
+
+@parameterize_sources(low=dict(p="a"), high=dict(p="b"))
+def picked(p: int, q: int = 5) -> int:
+    \"\"\"Row {{output_name}} takes {{p}}.\"\"\"
+    return p * q
+
+
+@parameterize_values("p", {{("one", "the first"): 1, ("two", None): 2}})
+def fixed(p: int) -> int:
+    \"\"\"Never shown.\"\"\"
+    return p * 10
+
+
+@parameterize(
+    listed={{"xs": group(source("a"), value(3), source("b"))}},
+    single={{"xs": group(source("b"))}},
+)
+def collected(xs: list[int]) -> list[int]:
+    return [*xs, len(xs)]
+
+
+@parameterize(
+    keyed={{"ys": group(first=source("a"), fixed=value(3), second=source("b"))}}
+)
+def mapped(ys: dict[str, int]) -> dict[str, int]:
+    return {{**ys, "n": len(ys)}}
+
+
+def up(a: int) -> int:
+    return a + 1
+"""
+_SUGAR_IMPORTS = (
+    "from {library}.function_modifiers import (\n"
+    "    group, parameterize, parameterize_sources, parameterize_values, source, value)"
+)
+
+
+def test_parameterize_sugar_values_docs_and_groups_match_hamilton() -> None:
+    """Row tuples, templated docs, shorthands and `group` agree with Hamilton (H5.4)."""
+    hamilton_module = make_module(
+        "semantics_sugar_h",
+        _SUGAR_GRAPH.format(imports=_SUGAR_IMPORTS.format(library="hamilton")),
+    )
+    module = make_module(
+        "semantics_sugar_f",
+        _SUGAR_GRAPH.format(
+            imports=_SUGAR_IMPORTS.format(library="fnloom").replace(
+                ".function_modifiers", ""
+            )
+        ),
+    )
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    built = fnloom.build(module)
+    names = sorted(
+        {
+            "literal",
+            "silent",
+            "templated",
+            "constant",
+            "low",
+            "high",
+            "one",
+            "two",
+            "listed",
+            "single",
+            "keyed",
+        }
+    )
+    assert sorted(set(names) - set(built.node_names())) == []
+    inputs = {"a": 2, "b": 3}
+    expected = hamilton.execute(cast("Any", names), inputs=inputs)
+    assert expected["listed"] == [2, 3, 3, 3]
+    assert expected["keyed"] == {"first": 2, "fixed": 3, "second": 3, "n": 3}
+    assert dict(built.execute(names, inputs=inputs)) == dict(expected)
+    # Docs: a row's own doc verbatim, the function's templated otherwise.
+    docs = {n: hamilton.graph.nodes[n].documentation for n in names}
+    assert docs["literal"] == "kept {as} written {p}"
+    assert docs["silent"] is None
+    assert docs["templated"] == "templated reads up."
+    assert docs["constant"] == "constant reads 4.5."
+    assert docs["low"] == "Row low takes a."
+    assert docs["two"] is None
+    assert {n: built.nodes[n].doc for n in names} == docs
+    # A group's sources are inputs of the element type, `int`, not `list[int]`.
+    hamilton_types = {n: v.input_types for n, v in hamilton.graph.nodes.items()}
+    assert hamilton_types["listed"]["a"][0] is int
+    assert built.nodes["a"].type is int
+    assert built.nodes["b"].type is int
+    assert built.nodes["listed"].dependencies == ("a", "b")

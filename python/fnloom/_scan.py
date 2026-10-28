@@ -17,7 +17,15 @@ from fnloom._config import (
     redefinitions,
     resolve_variants,
 )
-from fnloom._decorators import _ATTRIBUTE, Source, Value, decorations
+from fnloom._decorators import (
+    _ATTRIBUTE,
+    Binding,
+    Group,
+    Source,
+    Value,
+    decorations,
+    group_element,
+)
 from fnloom._functions import FunctionSource, NodeSpec
 from fnloom._namespaces import qualified
 from fnloom._types import SHALLOW, Rules, resolved_hints
@@ -46,9 +54,10 @@ class NodeDef:
     `returns` is the return annotation: as written after `collect`, its value after
     `resolve`, as are the params' annotations. `config` holds the conditions that
     selected the function, empty for a plain one or a `@config.default`. `doc` is
-    the node's own docstring, as an `extract_columns` `(name, doc)` sets it, or
-    `None` for `origin`'s. `namespace` is the one its module was given under, or
-    `None`; `name` is then `namespace.<name>` (Q74).
+    the node's own docstring, as an `extract_columns` `(name, doc)` or a
+    `@parameterize` row sets it, or `None` for `origin`'s, unless `documented`: the
+    doc is then `doc`, even when that is `None`. `namespace` is the one its module
+    was given under, or `None`; `name` is then `namespace.<name>` (Q74).
     """
 
     name: str
@@ -62,6 +71,7 @@ class NodeDef:
     config: tuple[Condition, ...] = ()
     doc: str | None = None
     namespace: str | None = None
+    documented: bool = False
 
 
 def core_inputs(params: tuple[Param, ...]) -> list[tuple[str, bool]]:
@@ -182,26 +192,40 @@ class Within(NamedTuple):
 
 def _bind(
     parameters: Sequence[_Parameter],
-    row: Mapping[str, Source | Value],
+    row: Mapping[str, Binding],
     within: Within | None = None,
 ) -> tuple[Param, ...]:
     """Binds each parameter to the row's source or value, or to its own name.
 
-    `within` a namespace, a source the namespace defines reads its node there.
+    `within` a namespace, a source the namespace defines reads its node there. A
+    group becomes one `Param` per item, typed by the group's element.
     """
     params: list[Param] = []
     for name, has_default, annotation in parameters:
         # A `Source` is made only for a parameter the row does not bind.
         binding = row[name] if name in row else Source(name)
-        if (
-            within is not None
-            and isinstance(binding, Source)
-            and binding.name in within.names
-        ):
-            binding = Source(within.names[binding.name])
+        if isinstance(binding, Group):
+            element = group_element(annotation, is_list=binding.is_list)
+            params.extend(
+                Param(name, _within(item, within), True, element, slot)  # noqa: FBT003  # `required`, in field order
+                for slot, item in binding.slots
+            )
+            continue
+        binding = _within(binding, within)
         required = not has_default or isinstance(binding, Value)
         params.append(Param(name, binding, required, annotation))
     return tuple(params)
+
+
+def _within(binding: Source | Value, within: Within | None) -> Source | Value:
+    """`binding`, reading the namespace's node when `within` defines its source."""
+    if (
+        within is not None
+        and isinstance(binding, Source)
+        and binding.name in within.names
+    ):
+        return Source(within.names[binding.name])
+    return binding
 
 
 def _bind_within(
@@ -232,31 +256,53 @@ def _payload(
     When each source feeds one parameter, the core passes each source under its
     parameter's name, so the payload is `origin` itself, or `origin` with each
     `Value` bound by `functools.partial`: no Python call in between. When one source
-    feeds several parameters, the payload is a call that maps the core's keywords
-    onto them. Either way a parameter whose source the core did not pass is left
-    out, so its default applies, and each `Value` is passed as the object itself,
-    the same on every call.
+    feeds several parameters, or a parameter is a `group(...)`, the payload is a call
+    that maps the core's keywords onto them, building each group's list or dict anew.
+    Either way a parameter whose source the core did not pass is left out, so its
+    default applies, and each `Value` is passed as the object itself, the same on
+    every call.
     """
+    plain = [p for p in params if p.slot is None]
     sourced = tuple(
-        (p.name, p.binding.name) for p in params if isinstance(p.binding, Source)
+        (p.name, p.binding.name) for p in plain if isinstance(p.binding, Source)
     )
-    constants = {
-        p.name: p.binding.value for p in params if isinstance(p.binding, Value)
-    }
-    if len({source for _, source in sourced}) == len(sourced):
+    constants = {p.name: p.binding.value for p in plain if isinstance(p.binding, Value)}
+    if len(plain) == len(params) and len({source for _, source in sourced}) == len(
+        sourced
+    ):
         renames = {source: param for param, source in sourced if source != param}
         if constants:
             return functools.partial(origin, **constants), renames
         return origin, renames
+    groups = _groups(params)
 
     def call(**supplied: object) -> object:
         keywords = {
             param: supplied[source] for param, source in sourced if source in supplied
         }
         keywords.update(constants)
+        for param, is_list, items in groups:
+            built = [
+                (slot, supplied[b.name] if isinstance(b, Source) else b.value)
+                for slot, b in items
+            ]
+            keywords[param] = [v for _, v in built] if is_list else dict(built)
         return origin(**keywords)
 
     return call, {}
+
+
+def _groups(
+    params: tuple[Param, ...],
+) -> list[tuple[str, bool, list[tuple[int | str, Source | Value]]]]:
+    """Each group parameter's name, whether it is a list, and its items in order."""
+    found: dict[str, list[tuple[int | str, Source | Value]]] = {}
+    for p in params:
+        if p.slot is not None:
+            found.setdefault(p.name, []).append((p.slot, p.binding))
+    return [
+        (name, isinstance(items[0][0], int), items) for name, items in found.items()
+    ]
 
 
 def _check_kind(name: str, fn: Callable[..., object], *, awaits: bool) -> None:
@@ -288,7 +334,7 @@ def _node_defs(  # noqa: PLR0913  # keyword-only options, one per kind of source
     fn: Callable[..., object],
     *,
     awaits: bool,
-    bind: Mapping[str, Source | Value] | None = None,
+    bind: Mapping[str, Binding] | None = None,
     within: Within | None = None,
 ) -> list[NodeDef]:
     """One node for a plain function; one per row for a parameterized one.
@@ -354,6 +400,7 @@ def _node_defs(  # noqa: PLR0913  # keyword-only options, one per kind of source
         return _extract.lower(node, recorded.extract, resolved=False)
     nodes: list[NodeDef] = []
     namespace = None if within is None else within.namespace
+    docs = recorded.docs if bind is None else {}
     for node_name, row in rows.items():
         params = _bind(parameters, row, within)
         payload, renames = _payload(fn, params)
@@ -368,7 +415,9 @@ def _node_defs(  # noqa: PLR0913  # keyword-only options, one per kind of source
                 annotations["return"],
                 renames,
                 conditions,
-                namespace=namespace,
+                docs.get(node_name),
+                namespace,
+                node_name in docs,
             )
         )
     if recorded.extract is not None:
@@ -941,9 +990,7 @@ def resolve(nodes: Sequence[NodeDef], rules: Rules = SHALLOW) -> list[NodeDef]:
             continue
         # A parameter whose annotation was already a value, such as `int`, is kept.
         params = tuple(
-            p
-            if hints[p.name] is p.annotation
-            else Param(p.name, p.binding, p.required, hints[p.name])
+            p if hints[p.name] is p.annotation else _resolved_param(p, hints[p.name])
             for p in node.params
         )
         returns = hints["return"]
@@ -954,6 +1001,13 @@ def resolve(nodes: Sequence[NodeDef], rules: Rules = SHALLOW) -> list[NodeDef]:
         else:
             resolved.append(replace(node, params=params, returns=returns))
     return _lowered(resolved, rules)
+
+
+def _resolved_param(p: Param, hint: object) -> Param:
+    """`p` with its annotation resolved to `hint`: a group item's is the element."""
+    if p.slot is not None:
+        hint = group_element(hint, is_list=isinstance(p.slot, int))
+    return Param(p.name, p.binding, p.required, hint, p.slot)
 
 
 def _lowered(nodes: list[NodeDef], rules: Rules) -> list[NodeDef]:

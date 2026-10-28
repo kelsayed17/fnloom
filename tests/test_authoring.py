@@ -902,7 +902,7 @@ def test_node_names_and_binds_a_callable() -> None:
     with pytest.raises(
         TypeError,
         match=(
-            r"^expected source\(\.\.\.\) or value\(\.\.\.\) for: "
+            r"^expected source\(\.\.\.\), value\(\.\.\.\) or group\(\.\.\.\) for: "
             r"parameter 'factor' \(int\), parameter 'value' \(str\)$"
         ),
     ):
@@ -1146,7 +1146,7 @@ def test_a_node_spec_made_directly_is_checked_as_node_checks_it() -> None:
     with pytest.raises(
         TypeError,
         match=(
-            r"^expected source\(\.\.\.\) or value\(\.\.\.\) for: "
+            r"^expected source\(\.\.\.\), value\(\.\.\.\) or group\(\.\.\.\) for: "
             r"parameter 'value' \(int\)$"
         ),
     ):

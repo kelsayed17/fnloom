@@ -18,7 +18,7 @@ workload.
 - **DEFER**: to be decided later.
 
 **Evidence.** The behaviours below were first reported by an earlier investigation (2026-10-22) against Hamilton 1.90.0
-and partly confirmed by reading its source. Rows Q4, Q5, Q6, Q7, Q10, Q11 to Q13, Q16, Q22, Q25 to Q48, Q50 to Q81
+and partly confirmed by reading its source. Rows Q4, Q5, Q6, Q7, Q10, Q11 to Q13, Q16, Q22, Q25 to Q48, Q50 to Q82
 have differential tests in `tests/differential/test_deliberate_differences.py`, each marked
 `deliberate("<id>")`, that assert Hamilton's behaviour and fnloom's side by side; Q3 and Q23 are covered by
 fnloom-only tests (`tests/test_driver.py`, `tests/test_binding.py` and the executor's unit tests), and Q49, a KEEP row,
@@ -105,6 +105,7 @@ before it is relied on. Source line numbers are deliberately omitted.
 | Q79 | `None` passes every input check, whatever the type: a node declared `x: int` runs with `None`. | FIX | `None` passes only a type that admits it: `Optional[T]`, `T \| None`, `object`, `Any`, `None`, `Literal[None]`, and a `TypeVar` that is free or whose bound or a constraint admits it. For any other, such as `int`, it is a mismatch: a `ValueError`, and no node runs. |
 | Q80 | A fixed-length tuple type refuses every tuple, a correct one included: `(1, 'a')` for `tuple[int, str]`, `()` for `tuple[()]`. | FIX | A fixed-length tuple takes a tuple of its length whose items each fit: `(1, 'a')` fits `tuple[int, str]`, and `('a', 1)` and `(1,)` do not; `tuple[()]` takes only `()`. |
 | Q81 | An annotation naming something that does not exist at run time, such as an import under `TYPE_CHECKING`, fails the build with a `NameError` that names no node. | FIX | The build succeeds, and the annotation is an opaque type, `unresolved 'Decimal'`, its text as written. An edge matches it only from or to the same text, or `Any`; any other edge with it fails the build, naming the text. A value checked against it, as an input or override, raises a `TypeError` saying to import it at run time. |
+| Q82 | `@parameterize` sugar is checked loosely. A `{ghost}` in the function's docstring prints as `ghost`, a `group(...)` parameter prints as its name, and a stray brace is a raw `ValueError`. A `(bindings, doc)` row of 1 item is a raw `IndexError`, one of 3 drops the extra, and a non-`str` doc is kept. `parameterize_sources(p=5)` imports, then fails with a raw `TypeError` when the graph is used. `parameterize_values` with `{}` builds no node, and a 3-item key is a raw unpacking `ValueError`. A `group` parameter annotated `int` lists itself twice in the error. | FIX | The docstring is a template, checked when decorating: a placeholder the row lacks, a positional field or a stray brace is a `ValueError` naming the row and the placeholder, and a `group(...)` prints its items joined (`x, 3`). A row of 1 or 3 items, or with a non-`str` doc, is a `TypeError`. A non-`str` source is a `TypeError` when decorating, `{}` is a `ValueError`, and a key that is no `(name, doc)` is a `TypeError`. A `group` parameter is listed once. |
 
 ## Not yet decided
 

@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Final, override
 
-from fnloom._decorators import Source, Value, decorations
+from fnloom._decorators import Binding, Group, Source, Value, decorations, group_check
 
 
 @dataclass(frozen=True, slots=True, eq=False)
@@ -33,12 +33,12 @@ class NodeSpec:
     Attributes:
         fn: The function, as written: never copied or changed.
         name: The node's name, an identifier.
-        bind: Each bound parameter's `source(...)` or `value(...)`, read-only.
+        bind: Each bound parameter's `source(...)`, `value(...)` or `group(...)`.
     """
 
     fn: Callable[..., object]
     name: str
-    bind: Mapping[str, Source | Value] = field(default_factory=dict)
+    bind: Mapping[str, Binding] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         """Checks the parts, as `node` describes; freezes a copy of `bind`."""
@@ -50,7 +50,7 @@ class NodeSpec:
         self,
     ) -> tuple[
         Callable[..., NodeSpec],
-        tuple[tuple[str, str], str, dict[str, Source | Value]],
+        tuple[tuple[str, str], str, dict[str, Binding]],
     ]:
         """The function's reference, the name and the bindings; see the class."""
         if (problem := unimportable(self.fn)) is not None:
@@ -146,17 +146,24 @@ def _binding_problems(
     wrong = sorted(
         (repr(param), type(binding).__name__)
         for param, binding in bind.items()
-        if not isinstance(binding, Source | Value)
+        if not isinstance(binding, Source | Value | Group)
     )
     type_lines: list[str] = []
     if wrong:
         listed = ", ".join(f"parameter {p} ({t})" for p, t in wrong)
-        type_lines.append(f"expected source(...) or value(...) for: {listed}")
+        type_lines.append(
+            f"expected source(...), value(...) or group(...) for: {listed}"
+        )
     # Names only: annotations are evaluated at build, not here.
     forward = annotationlib.Format.FORWARDREF
     params = set(inspect.signature(fn, annotation_format=forward).parameters)
     unknown = sorted(repr(param) for param in bind if param not in params)
     value_lines: list[str] = []
+    if not wrong and not unknown:
+        try:
+            group_check(fn, {"": bind})
+        except TypeError as error:
+            type_lines.append(str(error))
     if unknown:
         listed = ", ".join(f"parameter {p}" for p in unknown)
         value_lines.append(
@@ -179,16 +186,16 @@ def node(
     fn: Callable[..., object],
     *,
     name: str | None = None,
-    bind: Mapping[str, Source | Value] | None = None,
+    bind: Mapping[str, Binding] | None = None,
 ) -> NodeSpec:
     """One node from `fn`, named and bound without decorating it (Q72).
 
     The node is named `name`, or `fn.__name__`, which must be an identifier, so a
     dotted name, which namespaces use, is refused, and a lambda needs `name=`.
-    `bind` maps parameters to `source(...)` or `value(...)`, as a `@parameterize`
-    row does, and is checked the same way. `fn` is not changed, so one function
-    can make several nodes, each with its own spec, and its other decorations,
-    such as `@tag` and `@cache`, apply.
+    `bind` maps parameters to `source(...)`, `value(...)` or `group(...)`, as a
+    `@parameterize` row does, and is checked the same way. `fn` is not changed, so
+    one function can make several nodes, each with its own spec, and its other
+    decorations, such as `@tag` and `@cache`, apply.
 
     Give the result to `Builder.with_functions`.
 
@@ -325,7 +332,7 @@ def resolved(ref: tuple[str, str]) -> Callable[..., object]:
 
 
 def _spec_again(
-    ref: tuple[str, str], name: str, bind: Mapping[str, Source | Value]
+    ref: tuple[str, str], name: str, bind: Mapping[str, Binding]
 ) -> NodeSpec:
     """A pickled `NodeSpec`, its function imported again and checked anew."""
     return node(resolved(ref), name=name, bind=bind)

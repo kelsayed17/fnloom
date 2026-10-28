@@ -207,8 +207,9 @@ def _edge_mismatches(functions: Mapping[str, NodeView]) -> list[str]:
             upstream = functions.get(p.binding.name)
             if upstream is None or _types.type_matches(upstream.type, p.annotation):
                 continue
+            shown = p.name if p.slot is None else f"{p.name}[{p.slot!r}]"
             line = (
-                f"{view.name}.{p.name} requires "
+                f"{view.name}.{shown} requires "
                 f"{inspect.formatannotation(p.annotation)} but {upstream.name} "
                 f"returns {inspect.formatannotation(upstream.type)}"
             )

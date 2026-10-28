@@ -28,12 +28,17 @@ class Param:
     `name` is the function's own parameter. A plain parameter is bound to
     `Source(name)`. `required` is False when the parameter has a default and is
     bound to a source; a `Value`-bound parameter is always supplied, so required.
+    A `group(...)` parameter is one `Param` per item, each with the parameter's
+    `name`, its `slot` (the item's index in a list, or its key in a dict) and the
+    group's element type as `annotation`; every item is required. `slot` is `None`
+    for any other parameter.
     """
 
     name: str
     binding: Source | Value
     required: bool
     annotation: object
+    slot: int | str | None = None
 
 
 @dataclass(frozen=True)
@@ -342,7 +347,7 @@ def node_views(
             node.module,
             node.params,
             _read_only(node.tags),
-            _doc(node.origin) if node.doc is None else node.doc,
+            node.doc if node.doc is not None or node.documented else _doc(node.origin),
             node.config,
             node.namespace,
         )

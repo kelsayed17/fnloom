@@ -55,7 +55,11 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `@extract_fields(..., fill_with=v)` | The same, but the producer's mapping is never changed, and `None` is a fill (Q62) |
 | `@extract_columns("a", ("b", "doc"))` | The same, imported from `fnloom` ([Extracting columns](writing-nodes.md#extracting-columns)), with no pandas extension to load. A mapping or any value with `in` and `[]` works too (Q64) |
 | `@extract_columns(..., fill_with=v)` | The same, but the producer's frame is never changed, and a `("b", "doc")` column fills `b` (Q64) |
-| A row as `(bindings, docstring)`, `group(...)`, `parameterize_sources`, `parameterize_values` | Not yet. A row is a mapping |
+| `@parameterize(row=({...}, "doc"))` | `from fnloom import parameterize`: the doc is used as written, and `None` is no doc. A tuple of any other length, or a doc that is no `str`, is a `TypeError` (Q82) |
+| `{ghost}` in a `@parameterize` function's docstring prints as `ghost` | `ValueError` when decorating, naming the row and the placeholder; `{xs}` of a `group` is its items joined (Q82) |
+| `group(source("a"), value(3))` and `group(k=source("a"))`, misuse refused when decorating with an offender listed twice | `from fnloom import group`; each offender is listed once, and a `group` source is always required (Q82) |
+| `parameterize_sources(row=dict(p="x"))`, where a non-`str` source fails later with a raw `TypeError` | The same call; a non-`str` source is a `TypeError` when decorating (Q82) |
+| `parameterize_values("p", {("name", "doc"): v})`, where an empty mapping builds no node | The same call; an empty mapping, or a key that is no `(name, doc)`, is refused when decorating (Q82) |
 
 </div>
 

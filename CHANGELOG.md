@@ -11,6 +11,12 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Added
 
+- `@parameterize` sugar. A row may be `(bindings, doc)`, the doc used as written; otherwise the function's docstring is
+  a template filled per row (`{output_name}`, each bound parameter), and a placeholder the row lacks is a `ValueError`
+  when decorating, where Hamilton prints the bare key. `fnloom.group(*deps)` and `group(**deps)` bind a parameter to a
+  list or dict built from `source()` and `value()` items. `parameterize_sources(**rows)` and
+  `parameterize_values(parameter, assigned_output)` are the shorthands. Misuse of any is refused when decorating, each
+  offender listed once (Q82).
 - `Builder.with_functions(*items)` builds from functions, plain or decorated, without a module: nothing is copied and
   nothing is registered in `sys.modules`. `fnloom.node(fn, *, name=None, bind=None)` makes one node from a function,
   named and bound with `source()` and `value()` without decorating it, and returns a `fnloom.NodeSpec`. A lambda needs

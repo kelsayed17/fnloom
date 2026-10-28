@@ -3367,3 +3367,144 @@ def test_q81_unresolved_annotations_build_as_opaque_types() -> None:
         match=r"^counted\.rate requires int but rate returns unresolved 'Decimal'",
     ):
         fnloom.build(other)
+
+
+_Q82_HEAD = (
+    "from {library} import (\n"
+    "    group, parameterize, parameterize_sources, parameterize_values,\n"
+    "    source, value)\n"
+)
+_Q82_CASES = {
+    "unknown": '''
+@parameterize(a={"p": value(1)})
+def f(p: int) -> int:
+    """has {ghost} here"""
+    return p
+''',
+    "brace": '''
+@parameterize(a={"p": value(1)})
+def f(p: int) -> int:
+    """stray } here"""
+    return p
+''',
+    "group": '''
+@parameterize(a={"xs": group(source("q"), value(3))})
+def f(xs: list[int]) -> int:
+    """has {xs} here"""
+    return 1
+''',
+    "one": """
+@parameterize(a=({"p": value(1)},))
+def f(p: int) -> int:
+    return p
+""",
+    "three": """
+@parameterize(a=({"p": value(1)}, "d", "extra"))
+def f(p: int) -> int:
+    return p
+""",
+    "number": """
+@parameterize(a=({"p": value(1)}, 5))
+def f(p: int) -> int:
+    return p
+""",
+    "source": """
+@parameterize_sources(a=dict(p=5))
+def f(p: int) -> int:
+    return p
+""",
+    "empty": """
+@parameterize_values("p", {})
+def f(p: int) -> int:
+    return p
+""",
+    "key": """
+@parameterize_values("p", {("a", "b", "c"): 1})
+def f(p: int) -> int:
+    return p
+""",
+    "listed": """
+@parameterize(a={"xs": group(source("q"))})
+def f(xs: int) -> int:
+    return 1
+""",
+}
+
+
+def _q82_decorate(library: str) -> dict[str, ModuleType | tuple[str, str]]:
+    """Each case as `library` takes it: its module, or the error's class and text."""
+    head = _Q82_HEAD.format(library=library)
+    results: dict[str, ModuleType | tuple[str, str]] = {}
+    for label, body in _Q82_CASES.items():
+        try:
+            results[label] = make_module(f"q82_{library}_{label}", head + body)
+        except Exception as error:  # noqa: BLE001  # the class and text are what is compared
+            results[label] = (type(error).__name__, str(error))
+    return results
+
+
+def _refused(outcome: ModuleType | tuple[str, str]) -> tuple[str, str]:
+    """The exception class and text of a case that raised."""
+    assert isinstance(outcome, tuple)
+    return outcome
+
+
+def _decorated(outcome: ModuleType | tuple[str, str]) -> ModuleType:
+    """The module of a case that decorated without error."""
+    assert isinstance(outcome, types.ModuleType)
+    return outcome
+
+
+@pytest.mark.deliberate("Q82")
+def test_q82_parameterize_sugar_is_checked_when_decorating() -> None:
+    """Hamilton prints, drops or fails late; fnloom refuses when decorating."""
+    hamilton = _q82_decorate("hamilton.function_modifiers")
+    ours = _q82_decorate("fnloom")
+
+    def hamilton_graph(label: str) -> hamilton_driver.Driver:
+        return (
+            hamilton_driver.Builder().with_modules(_decorated(hamilton[label])).build()
+        )
+
+    # A placeholder the row lacks: Hamilton prints the bare key.
+    assert hamilton_graph("unknown").graph.nodes["a"].documentation == "has ghost here"
+    kind, text = _refused(ours["unknown"])
+    assert kind == "ValueError"
+    assert "row 'a': placeholder {ghost} is not 'output_name'" in text
+    # A stray brace is a ValueError in both, but only fnloom names the row.
+    kind, text = _refused(hamilton["brace"])
+    assert (kind, "row" in text) == ("ValueError", False)
+    kind, text = _refused(ours["brace"])
+    assert (kind, "row 'a':" in text) == ("ValueError", True)
+    # A group prints as its name in Hamilton, as its items joined in fnloom.
+    assert hamilton_graph("group").graph.nodes["a"].documentation == "has xs here"
+    built = fnloom.build(_decorated(ours["group"]))
+    assert built.nodes["a"].doc == "has q, 3 here"
+    # A tuple row of 1 item is a raw IndexError, one of 3 drops the extra, and a
+    # non-str doc is kept; fnloom refuses all three with a TypeError.
+    assert _refused(hamilton["one"])[0] == "IndexError"
+    assert _refused(ours["one"])[0] == "TypeError"
+    assert hamilton_graph("three").graph.nodes["a"].documentation == "d"
+    assert _refused(ours["three"])[0] == "TypeError"
+    assert hamilton_graph("number").graph.nodes["a"].documentation == int("5")
+    assert _refused(ours["number"])[0] == "TypeError"
+    # A non-str source: Hamilton fails when the graph is used, fnloom when decorating.
+    with pytest.raises(TypeError, match="expected str instance, int found"):
+        hamilton_graph("source").execute(["a"], inputs={"5": 1})
+    kind, text = _refused(ours["source"])
+    assert (kind, "a source is a str, got int" in text) == ("TypeError", True)
+    # An empty assigned_output builds no node in Hamilton and is refused by fnloom.
+    assert list(hamilton_graph("empty").graph.nodes) == []
+    assert _refused(ours["empty"])[0] == "ValueError"
+    # A key of 3 items: a raw unpacking error against a clear refusal.
+    assert _refused(hamilton["key"]) == (
+        "ValueError",
+        "too many values to unpack (expected 2, got 3)",
+    )
+    kind, text = _refused(ours["key"])
+    assert (kind, "must be a (name, doc) tuple" in text) == ("TypeError", True)
+    # A mis-annotated group parameter is listed twice by Hamilton, once by fnloom.
+    assert "xs (<class 'int'>), xs (<class 'int'>)" in _refused(hamilton["listed"])[1]
+    once = _refused(ours["listed"])[1]
+    assert "'xs' (int) needs list[X] for its group" in once
+    assert once.count("'xs'") == 1
