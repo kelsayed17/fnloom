@@ -3,7 +3,8 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** draft for maintainer review, 2026-10-28. Nothing below is built.
+**Status:** done, 2026-10-28, on `claude/plan-6`, merge pending. [As built](#as-built) records where the build went
+beyond the plan or narrowed it.
 
 **Goal:** close the roadmap's step 5. That means:
 
@@ -284,18 +285,18 @@ benchmarks.md, quirk-register.md, index.md, README.md, CHANGELOG.md, the roadmap
         - `post_node(node, *, ok, value, error)`
         - `post_graph(*, ok)`
     - The binding builds no kwargs dict and no value object for a run with no observers.
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
     - core: `observers_see_each_nodes_arguments_and_result` and `observers_see_the_error_a_node_returned`
     - binding: `test_pre_node_gets_the_kwargs_the_payload_gets`, `test_post_node_gets_the_value_or_the_error`, and
       `test_a_parameter_left_to_its_default_is_absent`
-- [ ] **Step 2: Run** `cargo test -p fnloom-core` and `uv run pytest tests/test_binding.py -q`. Expected: fail.
-- [ ] **Step 3: Implement.**
+- [x] **Step 2: Run** `cargo test -p fnloom-core` and `uv run pytest tests/test_binding.py -q`. Expected: fail.
+- [x] **Step 3: Implement.**
     - In `compute`, pass `&args` to `pre_node`, and the evaluate result by reference to `post_node`.
     - In the binding, convert to Python only inside `PyObserver`.
     - Update the existing `Recorder` tests to the new hook signatures.
-- [ ] **Step 4: Run** `bash scripts/check.sh` and the callgrind bench against `baseline.json`. Expected: exit 0, and
+- [x] **Step 4: Run** `bash scripts/check.sh` and the callgrind bench against `baseline.json`. Expected: exit 0, and
   no instruction-count regression for the no-observer run.
-- [ ] **Step 5: Commit** `core: node events carry arguments and outcomes`.
+- [x] **Step 5: Commit** `core: node events carry arguments and outcomes`.
 
 ### Task 2: Hooks on the sync driver
 
@@ -319,7 +320,7 @@ benchmarks.md, quirk-register.md, index.md, README.md, CHANGELOG.md, the roadmap
     - It runs every hook for an event, then raises the event's errors as decision 5 says.
     - `Builder.with_hooks(*hooks)`, and `Driver.hooks -> tuple[Hook, ...]`.
 - Register rows Q84 and the Q23 update go in first.
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
     - `test_hooks_see_four_events_in_order_with_their_fields`
     - `test_inputs_overrides_and_unneeded_nodes_get_no_events`
     - `test_node_inputs_are_by_parameter_name_without_defaults`, with a `source()` binding and a namespace
@@ -333,15 +334,15 @@ benchmarks.md, quirk-register.md, index.md, README.md, CHANGELOG.md, the roadmap
     - `test_prepared_plan_runs_fire_the_hooks`
     - differential KEEP tests for decisions 3 and 4, and the order across hooks (H6.2–H6.4)
     - `deliberate` Q84 (H6.1, H6.4, H6.6) and Q23 (H6.5)
-- [ ] **Step 2: Run** `UV_NO_SYNC=1 uv run pytest tests/test_hooks.py -q`. Expected: fail.
-- [ ] **Step 3: Implement.**
+- [x] **Step 2: Run** `UV_NO_SYNC=1 uv run pytest tests/test_hooks.py -q`. Expected: fail.
+- [x] **Step 3: Implement.**
     - `PreparedPlan.run` gains a hooked branch, chosen at `_compile`, and leaves the unhooked branch as it is.
     - The core gets one private observer that forwards node events to the `Dispatch`.
     - `Dispatch` maps a core group to decision 5's flat order. The core's own grouping is replaced in the hooked
       branch only; the no-hook path still raises the core's errors.
-- [ ] **Step 4: Run** `bash scripts/check.sh` and `uv run python -m benches.run`. Expected: exit 0, and steady
+- [x] **Step 4: Run** `bash scripts/check.sh` and `uv run python -m benches.run`. Expected: exit 0, and steady
   execute within noise on every shape.
-- [ ] **Step 5: Commit** `hooks: Hook and its events on the sync driver`.
+- [x] **Step 5: Commit** `hooks: Hook and its events on the sync driver`.
 
 ### Task 3: Hooks on the async driver
 
@@ -355,7 +356,7 @@ benchmarks.md, quirk-register.md, index.md, README.md, CHANGELOG.md, the roadmap
 - Consumes `_hooks.Dispatch` from Task 2.
 - Produces decision 6 on `AsyncDriver` and `AsyncPreparedPlan`.
 - Register row Q86 goes in first.
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
     - `test_async_events_carry_values_not_tasks`
     - `test_a_failing_async_node_reports_ok_false`
     - `test_hooks_run_on_the_loop_thread_for_thread_and_inline_sync_nodes`
@@ -363,12 +364,12 @@ benchmarks.md, quirk-register.md, index.md, README.md, CHANGELOG.md, the roadmap
     - `test_a_raising_hook_cancels_the_rest` (Review Focus 2)
     - `test_the_same_hook_sees_the_same_events_on_both_drivers`, on a chain and a diamond
     - `deliberate` Q86 (H6.9)
-- [ ] **Step 2: Run** them. Expected: fail.
-- [ ] **Step 3: Implement.** Fire `node_started` just before a node's task or executor call is made, and
+- [x] **Step 2: Run** them. Expected: fail.
+- [x] **Step 3: Implement.** Fire `node_started` just before a node's task or executor call is made, and
   `node_ended` in `_store` and in `_fail`. An error from a hook goes through `_fail`.
-- [ ] **Step 4: Run** `bash scripts/check.sh` and `uv run python -m benches.async_`. Expected: exit 0, and unhooked
+- [x] **Step 4: Run** `bash scripts/check.sh` and `uv run python -m benches.async_`. Expected: exit 0, and unhooked
   async within noise.
-- [ ] **Step 5: Commit** `hooks: the async driver fires the same events`.
+- [x] **Step 5: Commit** `hooks: the async driver fires the same events`.
 
 ### Task 4: Cache outcomes on node events
 
@@ -386,7 +387,7 @@ benchmarks.md, quirk-register.md, index.md, README.md, CHANGELOG.md, the roadmap
     - the hits, in plan order.
   Both the native `KeyPlan.walk` path and the Python path must expose the names of their hits.
 - Register row Q85 goes in first.
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
     - `test_a_miss_then_a_hit_carry_their_outcomes`
     - `test_a_hit_is_paired_with_no_inputs_and_the_loaded_result`
     - `test_hits_come_first_in_plan_order`
@@ -395,12 +396,12 @@ benchmarks.md, quirk-register.md, index.md, README.md, CHANGELOG.md, the roadmap
     - `test_uncacheable_nodes_say_why`
     - the same assertions on `AsyncDriver`, on `MemoryCache` and on `DiskCache`
     - `deliberate` Q85 (H6.10)
-- [ ] **Step 2: Run** them. Expected: fail.
-- [ ] **Step 3: Implement.** The outcomes come from the keys `begin` already computes. A hook-free cached run gathers
+- [x] **Step 2: Run** them. Expected: fail.
+- [x] **Step 3: Implement.** The outcomes come from the keys `begin` already computes. A hook-free cached run gathers
   nothing new.
-- [ ] **Step 4: Run** `bash scripts/check.sh` and `uv run python -m benches.cache`. Expected: exit 0, and unhooked
+- [x] **Step 4: Run** `bash scripts/check.sh` and `uv run python -m benches.cache`. Expected: exit 0, and unhooked
   cached runs within noise.
-- [ ] **Step 5: Commit** `hooks: cache outcomes on node events`.
+- [x] **Step 5: Commit** `hooks: cache outcomes on node events`.
 
 ### Task 5: Result builders and `raw_execute`
 
@@ -420,7 +421,7 @@ benchmarks.md, quirk-register.md, index.md, README.md, CHANGELOG.md, the roadmap
       equivalent.
     - `PreparedPlan.run_raw(*, inputs=None, overrides=None) -> dict[str, object]`, and the async equivalent.
 - Q19, Q24 and the new Q89 are written first.
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
     - `test_execute_returns_what_the_builder_returns`
     - `test_the_builder_gets_request_order_with_requested_inputs_and_overrides`
     - `test_raw_execute_and_run_raw_skip_the_builder_and_run_the_hooks`
@@ -434,12 +435,12 @@ benchmarks.md, quirk-register.md, index.md, README.md, CHANGELOG.md, the roadmap
     - differential KEEP tests: request order, requested inputs included, `raw_execute` skips the builder (H6.12,
       H6.13)
     - `deliberate` Q19 and Q24 (H6.12), and Q89 (H6.12, the NaN outer join)
-- [ ] **Step 2: Run** them. Expected: fail.
-- [ ] **Step 3: Implement.** The builder is applied after the run, in the same place on both drivers. The unhooked,
+- [x] **Step 2: Run** them. Expected: fail.
+- [x] **Step 3: Implement.** The builder is applied after the run, in the same place on both drivers. The unhooked,
   builder-free path returns the dict exactly as today.
-- [ ] **Step 4: Run** `bash scripts/check.sh` and `uv run python -m benches.run`. Expected: exit 0, and steady
+- [x] **Step 4: Run** `bash scripts/check.sh` and `uv run python -m benches.run`. Expected: exit 0, and steady
   execute within noise.
-- [ ] **Step 5: Commit** `results: result builders and raw_execute`.
+- [x] **Step 5: Commit** `results: result builders and raw_execute`.
 
 ### Task 6: Output checks and custom value checks
 
@@ -456,7 +457,7 @@ benchmarks.md, quirk-register.md, index.md, README.md, CHANGELOG.md, the roadmap
     - `Builder.with_value_check(check: Callable[[object, object], bool]) -> Builder`
 - Both are compiled at build into each node's checks; a node with an `Any` or `object` return gets no output check.
 - Q87 and the Q21 update go in first.
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
     - `test_a_wrong_result_fails_its_node_with_a_type_error`
     - `test_fixed_tuples_generics_and_newtypes_check_correctly`
     - `test_widening_and_none_follow_the_driver_rules` (Review Focus 5)
@@ -468,12 +469,12 @@ benchmarks.md, quirk-register.md, index.md, README.md, CHANGELOG.md, the roadmap
     - the same assertions on `AsyncDriver`
     - differential KEEP: no output check by default (H6.14)
     - `deliberate` Q87 (H6.17) and Q21 (H6.15)
-- [ ] **Step 2: Run** them. Expected: fail.
-- [ ] **Step 3: Implement.** The output check wraps only the payloads that need it, at build. A custom check is tried
+- [x] **Step 2: Run** them. Expected: fail.
+- [x] **Step 3: Implement.** The output check wraps only the payloads that need it, at build. A custom check is tried
   after the compiled default refuses a value.
-- [ ] **Step 4: Run** `bash scripts/check.sh` and `uv run python -m benches.run`. Expected: exit 0, and steady
+- [x] **Step 4: Run** `bash scripts/check.sh` and `uv run python -m benches.run`. Expected: exit 0, and steady
   execute within noise with neither setting.
-- [ ] **Step 5: Commit** `checks: output type checks and custom value checks`.
+- [x] **Step 5: Commit** `checks: output type checks and custom value checks`.
 
 ### Task 7: `LogFailures`
 
@@ -486,16 +487,16 @@ benchmarks.md, quirk-register.md, index.md, README.md, CHANGELOG.md, the roadmap
 
 - Produces decision 8's `LogFailures`.
 - Q88 goes in first.
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
     - `test_nothing_is_logged_by_default`
     - `test_log_failures_logs_the_node_and_its_cut_inputs_with_exc_info`
     - `test_log_failures_uses_the_given_logger_and_level`
     - `test_log_failures_is_silent_on_success_and_on_hits`
     - `deliberate` Q88 (H6.11)
-- [ ] **Step 2: Run** them. Expected: fail.
-- [ ] **Step 3: Implement** it as a `Hook` subclass with only `after_node`.
-- [ ] **Step 4: Run** `bash scripts/check.sh`. Expected: exit 0.
-- [ ] **Step 5: Commit** `hooks: LogFailures`.
+- [x] **Step 2: Run** them. Expected: fail.
+- [x] **Step 3: Implement** it as a `Hook` subclass with only `after_node`.
+- [x] **Step 4: Run** `bash scripts/check.sh`. Expected: exit 0.
+- [x] **Step 5: Commit** `hooks: LogFailures`.
 
 ### Task 8: Benchmarks, threads, docs and the ledger
 
@@ -505,21 +506,60 @@ benchmarks.md, quirk-register.md, index.md, README.md, CHANGELOG.md, the roadmap
 - Modify: `benches/run.py`, `benches/async_.py`, `tests/test_threads.py`, `docs/benchmarks.md`, `docs/hooks.md`,
   `docs/from-hamilton.md`, `docs/index.md`, `README.md`, `CHANGELOG.md`, the roadmap
 - Test: the CodSpeed suite, `tests/test_threads.py`
-- [ ] **Step 1: Add the measurements:**
+- [x] **Step 1: Add the measurements:**
     - CodSpeed: a chain of 1,000 nodes with a hook overriding all four methods, on both drivers, plus output checks
       on.
     - `benches.run` and `benches.async_`: rows for a hooked chain and a hooked fan-in.
-- [ ] **Step 2: Add** `test_one_hook_shared_by_threads_sees_each_run_whole`: 16 threads over one hooked, cached
+- [x] **Step 2: Add** `test_one_hook_shared_by_threads_sees_each_run_whole`: 16 threads over one hooked, cached
   driver, events grouped by `run_id`. Each run's events form a complete, ordered sequence.
-- [ ] **Step 3: Run** `uv run python -m benches.run` and `uv run python -m benches.async_` on `main` and on this
+- [x] **Step 3: Run** `uv run python -m benches.run` and `uv run python -m benches.async_` on `main` and on this
   branch.
     - Record the hooked per-node cost in `docs/benchmarks.md`.
     - Check the Global Constraints: no-hook runs within noise, and hooked fnloom faster than unhooked Hamilton.
-- [ ] **Step 4: Close the docs:**
+- [x] **Step 4: Close the docs:**
     - Close the roadmap rows that name Plan 6, and add decision 13's lines.
     - In `from-hamilton.md`, map each lifecycle adapter, `ResultBuilder`, `FunctionInputOutputTypeChecker`, `PrintLn`
       and `GracefulErrorAdapter` to what fnloom offers, and update "Not there yet".
     - Update `README.md` and `index.md`.
     - Put the CHANGELOG entries under `[Unreleased]`.
-- [ ] **Step 5: Run** `bash scripts/check.sh` and `uv run pytest benchmarks -q`. Expected: exit 0.
-- [ ] **Step 6: Commit** `plan 6: benchmarks, threads, docs and the ledger`.
+- [x] **Step 5: Run** `bash scripts/check.sh` and `uv run pytest benchmarks -q`. Expected: exit 0.
+- [x] **Step 6: Commit** `plan 6: benchmarks, threads, docs and the ledger`.
+
+## As built
+
+- **`RunStart.nodes` on the async driver is the plan's step order** (topological, ties broken by name), not the order
+  the events come in: concurrent nodes have no fixed event order (ruling R1). Q86 and the hooks guide say so.
+- **Node inputs are read-only.** `NodeStart.inputs` and `NodeEnd.inputs` are a `MappingProxyType` over the call's
+  arguments, so a hook can't change what a node is called with (R3), as decision 2 meant by a read-only mapping.
+- **Inputs are keyed by parameter name for every node.** A node the core calls through a wrapper, such as one input
+  feeding several parameters or a `group(...)`, has its arguments re-keyed to its parameter names when hooked (R4).
+- **`RunStart.nodes` is `()` when a value check fails before any node runs**, for a missing input and a mistyped one
+  alike, since such a run reports no node (R5).
+- **A node whose `after_node(ok=True)` hook raised is not stored in the cache**, on either driver. Decision 5
+  discards its value, so storing it would make the next run's hit report a value the hooks refused (R8).
+- **With a `recompute` node, `RunStart.nodes` is an upper bound.** It is the inner level's exact list, then every
+  other node the run could report, in plan order: which later nodes hit is known only after the `recompute` node ran,
+  which is after `before_run`. It is exact for a run with no `recompute` node (R9, Q85 and the hooks guide).
+- **A hooked `MemoryCache` run takes the Python walk**, not the native `KeyPlan.walk`, because the outcomes need the
+  keys; unhooked runs keep the native walk (R10). Its cost is measured in [Benchmarks](../benchmarks.md#hooks). Making
+  the native walk return its keys is the remedy if it matters.
+- **The async scheduler's `_drain` is copied, not shared.** The hooked run has its own `_drain`, the plain one plus a
+  `_begin` line, since the no-hook path may not change. `test_the_hooked_drain_mirrors_the_plain_drain` compares the
+  two methods' source with that line removed and fails, naming both, if they drift (R6).
+- **`fnloom.ValueCheck` is public**, the type `with_value_check` takes, so its signature names no private type (R14).
+  In the same round, the async driver kept its guided "returned an awaitable" refusal for a sync node when output
+  checks are on.
+- **Decision 12 was wrong about the outer join.** It said the recipes don't copy Hamilton's outer join, but
+  `pandas.DataFrame` itself outer-joins Series of different lengths or indexes, padding with NaN (R12). The docs say
+  so, and give a strict `frame` recipe that refuses outputs on different indexes, tested in `tests/test_results.py`.
+  Q89 records both.
+- **polars is a prose line, not a running block** (R13): polars is not installed in development, and a block that
+  can't run can't be tested.
+- **Hooked runs, measured** ([Benchmarks](../benchmarks.md#hooks)). Unhooked runs are within noise of the base
+  (steady 0.94× to 1.06× on `benches.run`). A hook overriding all four methods costs about 2 µs per reported node on
+  both drivers, and a hooked `MemoryCache` run about 1 µs per node more. Hooked steady execution beats unhooked
+  Hamilton on every `benches.run` shape and size, by 1.22× at the least. The first `execute` does not on seven cells
+  of 10 or 100 nodes, 3% to 43% slower in one sample each, since a hooked plan's first run also makes the node views;
+  this is recorded, not fixed.
+- **Register rows:** Q84 (hooks), Q85 (cache outcomes on node events), Q86 (hooks on the async driver), Q87 (output
+  checks), Q88 (failure logging) and Q89 (no DataFrame builder), with Q19, Q21, Q23 and Q24 updated from *Planned*.

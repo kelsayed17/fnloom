@@ -9,6 +9,41 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Added
 
+- Hooks. Subclass `fnloom.Hook`, override any of `before_run`, `before_node`, `after_node` and `after_run`, and give
+  instances to `Builder.with_hooks(*hooks)`, which is cumulative. Each method gets one frozen event, `fnloom.RunStart`,
+  `NodeStart`, `NodeEnd` or `RunEnd`, with a `run_id` shared by a run's events, the node's `NodeView`, its inputs by
+  parameter name as a read-only mapping, and its result or the very exception it raised. Every computed node a run
+  evaluates reports, extracted fields included; inputs and overrides don't. Hooks are called in the order given, and
+  only the methods a hook overrides. `with_hooks` refuses an object that is no `Hook`, a method that can't take one
+  positional event or is an `async def` (`TypeError`), and a hook given twice (`ValueError`). `Driver.hooks` lists
+  them, and pickling, `copy`, `rebuild()` and `build_async` carry them (Q84).
+- A hook that raises: every hook sees the event first, `after_run(ok=False)` still fires, and one error is raised as
+  itself, several as one `ExceptionGroup` with a failing node's own exception first. Hamilton skips the later hooks
+  and keeps a node's error only in `__context__` (Q23).
+- `AsyncDriver` calls the same hooks, on the event loop's thread, as each node starts and finishes, with real values;
+  concurrent nodes report in the order they start and finish. A raising hook fails the run as a failing node does
+  (Q86).
+- On a cached driver, every node event carries the node's `fnloom.CacheOutcome` as `cache`. A hit gets
+  `before_node` and `after_node` with `inputs=None` and the loaded value, hits first, in plan order; a node only hits
+  need reports nothing (Q85).
+- `fnloom.LogFailures(logger=None, *, level=logging.ERROR)`, a ready-made hook that logs each node that raised, with
+  its inputs, each `repr` cut to 50 characters, and the exception as `exc_info`, on the `fnloom` logger by default.
+  fnloom still logs nothing unless you add it (Q88).
+- `Builder.with_result_builder(build)` makes `execute`, `PreparedPlan.run` and the async equivalents return
+  `build(outputs)`, where `outputs` is the raw dict in request order. `Builder`, `Driver`, `AsyncDriver`,
+  `PreparedPlan` and `AsyncPreparedPlan` take a type parameter, defaulting to `dict[str, object]`, so a type checker
+  sees the built type. A second `with_result_builder` is a `ValueError` naming both (Q19, Q24). There is no pandas or
+  polars builder: pass `pandas.DataFrame` or `polars.DataFrame`, or the strict `frame` recipe in the docs, which
+  refuses outputs that would outer-join (Q89).
+- `Driver.raw_execute(final_vars, *, inputs=None, overrides=None)`, `PreparedPlan.run_raw` and their async
+  equivalents return the raw dict, skipping the result builder and firing every hook (Q19).
+- `Builder.with_output_type_checks()` checks each node's result against its return annotation by the input checks'
+  rules. A mismatch fails the node with `TypeError: x: returned str, expected int`; a node returning `Any` or `object`
+  costs nothing. Off by default, as in Hamilton (Q87).
+- `Builder.with_value_check(check)`, cumulative, adds to the default value check: `check(declared, value)` is asked
+  only about a value the default refuses, and admits it by returning a true value. It applies to inputs, overrides,
+  extracted fields, output checks and `validate`, never to edges. `fnloom.ValueCheck` is its type. Hamilton's
+  `do_validate_input` replaces the default instead (Q21).
 - `Driver.rebuild()` and `AsyncDriver.rebuild()` build a new driver from the same builder, with its modules, functions,
   namespaces, config, cache store and every setting, and `sync_nodes` for the async driver. After `importlib.reload`,
   the new driver runs the edited code and, with a shared store, misses on the edited node; the old driver keeps its

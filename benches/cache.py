@@ -2,6 +2,8 @@
 
 `fnloom-async` is fnloom's `AsyncDriver` with `sync_nodes="inline"`, timed on the
 loop. Hamilton's async driver has no row: with a cache, it fails to build (Q68).
+`fnloom-hooked` is `fnloom` with a hook overriding all four methods, which on
+`MemoryCache` walks the keys in Python instead of natively.
 
 Run it as `uv run python -m benches.cache`. Every sample is a fresh process, so no
 run inherits another's warm caches, interned strings or imported modules; a row is
@@ -31,12 +33,13 @@ from hamilton.caching.stores.memory import InMemoryMetadataStore, InMemoryResult
 
 import fnloom
 from benches.generate import Shape, make_expected, make_request, module_source
+from benches.hooks import Counting
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Mapping, Sequence
     from types import ModuleType
 
-type Runtime = Literal["fnloom", "fnloom-async", "hamilton"]
+type Runtime = Literal["fnloom", "fnloom-hooked", "fnloom-async", "hamilton"]
 type Store = Literal["none", "memory", "disk"]
 
 CASES: tuple[tuple[Shape, int], ...] = (("chain", 200), ("layered", 1000))
@@ -145,6 +148,21 @@ def _fnloom_store(store: Store, directory: Path) -> fnloom.CacheStore | None:
     return None
 
 
+def _plan_runs(
+    builder: fnloom.Builder,
+    outputs: Sequence[str],
+    inputs: Mapping[str, object],
+    store: Store,
+    directory: Path,
+) -> Callable[[], Mapping[str, object]]:
+    """A prepared plan's run over `builder`'s driver with an empty store; untimed."""
+    cache = _fnloom_store(store, directory)
+    if cache is not None:
+        builder = builder.with_cache(cache)
+    prepared = builder.build().prepare(outputs, inputs=inputs)
+    return lambda: prepared.run(inputs=inputs)
+
+
 def _fnloom_runs(
     module: ModuleType,
     outputs: Sequence[str],
@@ -154,11 +172,19 @@ def _fnloom_runs(
 ) -> Callable[[], Mapping[str, object]]:
     """A prepared plan's run over a new driver with an empty store; nothing timed."""
     builder = fnloom.Builder().with_modules(module)
-    cache = _fnloom_store(store, directory)
-    if cache is not None:
-        builder = builder.with_cache(cache)
-    prepared = builder.build().prepare(outputs, inputs=inputs)
-    return lambda: prepared.run(inputs=inputs)
+    return _plan_runs(builder, outputs, inputs, store, directory)
+
+
+def _fnloom_hooked_runs(
+    module: ModuleType,
+    outputs: Sequence[str],
+    inputs: Mapping[str, object],
+    store: Store,
+    directory: Path,
+) -> Callable[[], Mapping[str, object]]:
+    """`_fnloom_runs` with a hook overriding all four methods; nothing timed."""
+    builder = fnloom.Builder().with_modules(module).with_hooks(Counting())
+    return _plan_runs(builder, outputs, inputs, store, directory)
 
 
 async def _fnloom_async_times(
@@ -244,7 +270,10 @@ def sample(shape: Shape, n: int, runtime: Runtime, store: Store) -> Sample:
     """
     outputs, inputs = make_request(shape, n)
     expected = make_expected(shape, n)
-    make_runs = _fnloom_runs if runtime == "fnloom" else _hamilton_runs
+    make_runs = {
+        "fnloom": _fnloom_runs,
+        "fnloom-hooked": _fnloom_hooked_runs,
+    }.get(runtime, _hamilton_runs)
     cold: list[float] = []
     warm: list[float] = []
     with _file_module(shape, n, runtime) as module:

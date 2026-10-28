@@ -1,8 +1,9 @@
 # Hooks
 
 A hook watches a driver's runs: when each run starts and ends, and each node it calls, with the node's arguments and
-its result or error. Use one to log, time, trace or count. A hook can't change what a run computes. The examples on
-this page use one module:
+its result or error. Use one to log, time, trace or count. A hook can't change what a run computes. A driver with no
+hooks pays nothing for them; one with a hook pays about 2 µs per node it reports, on either driver
+([Benchmarks](benchmarks.md#hooks)). The examples on this page use one module:
 
 ```python
 # file: orders.py

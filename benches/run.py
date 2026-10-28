@@ -20,6 +20,7 @@ from hamilton import driver as hamilton_driver
 
 import fnloom
 from benches.generate import Shape, generated, make_expected, make_request
+from benches.hooks import Counting
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
@@ -92,17 +93,23 @@ def _fnloom(
     inputs: Mapping[str, object],
     *,
     input_checks: bool,
-    rules: str = "",
+    variant: str = "",
 ) -> Runtime[fnloom.Driver]:
-    """fnloom, its checks on or off; `rules` `"deep"` or `"widen"` turns one on."""
+    """fnloom, its checks on or off, as runtime `fnloom (<variant>)` if given.
+
+    `variant` `"deep"` or `"widen"` turns that rule on; `"hooked"` adds a hook
+    overriding all four methods.
+    """
 
     def build() -> fnloom.Driver:
         builder = fnloom.Builder().with_modules(module)
+        if variant == "hooked":
+            builder = builder.with_hooks(Counting())
         if not input_checks:
             builder = builder.without_input_type_checks()
-        if rules == "deep":
+        if variant == "deep":
             builder = builder.with_deep_type_checks()
-        elif rules == "widen":
+        elif variant == "widen":
             builder = builder.with_numeric_widening()
         return builder.build()
 
@@ -111,7 +118,7 @@ def _fnloom(
         return lambda: prepared.run(inputs=inputs)
 
     return Runtime(
-        f"fnloom ({rules})" if rules else "fnloom",
+        f"fnloom ({variant})" if variant else "fnloom",
         build,
         lambda driver: driver.execute(outputs, inputs=inputs),
         steady_call,
@@ -182,6 +189,8 @@ def _check_answer(
 def measure_case(shape: Shape, n: int) -> list[Row]:
     """Times Hamilton and fnloom, checks on and off, on one graph.
 
+    fnloom is timed too with a hook overriding all four methods, checks on, as
+    runtime `fnloom (hooked)`.
     The `types` shape is timed too with deep checks and with numeric widening on,
     as runtimes `fnloom (deep)` and `fnloom (widen)`. Aborts if an answer is not
     the closed form.
@@ -197,11 +206,14 @@ def measure_case(shape: Shape, n: int) -> list[Row]:
             _hamilton(hamilton_module, outputs, inputs),
             _fnloom(fnloom_module, outputs, inputs, input_checks=True),
             _fnloom(fnloom_module, outputs, inputs, input_checks=False),
+            _fnloom(
+                fnloom_module, outputs, inputs, input_checks=True, variant="hooked"
+            ),
         ]
         if shape == "types":
             runtimes += [
-                _fnloom(fnloom_module, outputs, inputs, input_checks=True, rules=rules)
-                for rules in ("deep", "widen")
+                _fnloom(fnloom_module, outputs, inputs, input_checks=True, variant=v)
+                for v in ("deep", "widen")
             ]
         for runtime in runtimes:
             row, result = _measure(runtime, shape, n)
@@ -211,7 +223,7 @@ def measure_case(shape: Shape, n: int) -> list[Row]:
 
 
 def main() -> None:
-    """Prints the 80 rows as JSON lines, or those of the shapes named as arguments."""
+    """Prints the 104 rows as JSON lines, or those of the shapes named as arguments."""
     every = get_args(Shape.__value__)
     named = sys.argv[1:]
     if unknown := sorted(set(named) - set(every)):

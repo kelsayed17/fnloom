@@ -101,6 +101,13 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `with_adapters(lifecycle.FunctionInputOutputTypeChecker())` | Checks inputs and results by `isinstance` rules of its own: crashes on fixed tuples, parameterized generics and `NewType`s, and reports a failing node as returning `None` | `with_output_type_checks()` checks every result by the input checks' rules; a node that raises keeps its own error. Inputs and overrides are always checked ([Checking results](writing-nodes.md#checking-results), Q87) |
 | An `EdgeConnectionHook` whose `validate_input` (`do_validate_input`) decides an input's type | Replaces the default check, so it can refuse a correct value | `with_value_check(check)` adds to the default: `check(declared, value)` is asked only about a value the default refuses, and can only admit it. It applies to overrides, extracted fields, results and `validate` too ([Custom value checks](running.md#custom-value-checks), Q21) |
 | `raw_execute(final_vars, overrides, display_graph, inputs)` | Positional, with a `display_graph` flag | `raw_execute(final_vars, *, inputs, overrides)`, and `PreparedPlan.run_raw` (Q19) |
+| `with_adapters(lifecycle.PrintLn())` | Prints each node's name and time, and with `verbosity=2` its inputs and result | No built-in: a three-line hook, a `fnloom.Hook` subclass whose `after_node(self, event)` prints `event.node.name` and `event.result` or `event.error` ([Hooks](hooks.md)) |
+| A failing node logged at ERROR | Always, with a support banner | Off by default; `with_hooks(fnloom.LogFailures())` logs the node and its inputs, each cut to 50 characters ([Logging failures](hooks.md#logging-failures), Q88) |
+| `GraphConstructionHook`'s `run_after_graph_construction` | Called with the built graph | Read `driver.nodes` after `build()` |
+| `lifecycle.NoEdgeAndInputTypeChecking()` | Turns off the input and edge checks | `without_input_type_checks()`; edges are always checked, at build (Q10) |
+| A `StaticValidator`, refusing a node or the graph at build | `run_to_validate_node` and `run_to_validate_graph` | Not yet. Until then, check `driver.nodes` after `build()` and raise |
+| `NodeExecutionMethod`, and `lifecycle.default.GracefulErrorAdapter` built on it | Replaces how a node is called; the graceful adapter keeps running past a failure, skipping what depends on it | Not yet: both are on the [roadmap](plans/2026-10-28-roadmap-ahead-of-hamilton.md). A failing node fails the run, and `after_node` sees its error and inputs |
+| `TaskExecutionHook` and the other task hooks | Hooks on dynamic execution's tasks | None: fnloom has no dynamic execution yet |
 
 </div>
 
@@ -187,5 +194,7 @@ features come next, roughly in this order:
 
 1. **Graph visualisation.**
 2. **Dynamic execution**, materializers, `@subdag`, `@check_output` and `@pipe`.
+3. **Node-execution wrappers** (`NodeExecutionMethod`, `GracefulErrorAdapter`) and `StaticValidator`. Hooks see every
+   node, but can't change how one is called or let a run continue past a failure.
 
 If your pipeline depends on one of these, it's worth waiting for it before you switch.
