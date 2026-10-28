@@ -95,6 +95,10 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `with_adapters(...)` with `NodeExecutionHook` and `GraphExecutionHook` | `run_before_node_execution(**kwargs)` and its kin, each taking keyword arguments; the after-graph hook gets no request | `with_hooks(...)` with a `fnloom.Hook`: `before_run`, `before_node`, `after_node` and `after_run`, each taking one frozen event, and `RunEnd` repeats the request ([Hooks](hooks.md), Q84) |
 | An object that is no adapter, or one given twice, in `with_adapters` | Ignored; called once | `TypeError`; `ValueError` (Q84) |
 | A hook method that can't take its arguments, or an `async def` hook on the sync driver | Fails at the first call; never awaited | `TypeError` naming the method, from `with_hooks` (Q84) |
+| `with_adapters(MyResult())`, a `ResultBuilder` whose `build_result(**outputs)` makes the result | It gets the outputs as keywords | `with_result_builder(build)`: any callable, given the outputs as one dict, in the same order. `execute`'s type follows it ([Result builders](running.md#result-builders), Q19) |
+| `with_adapters(base.PandasDataFrameResult())` | Flattens frame outputs into `output.column` columns and logs index warnings | No pandas builder: `with_result_builder(pandas.DataFrame)`, or `polars.DataFrame`, builds by the library's own rules ([pandas and polars frames](running.md#pandas-and-polars-frames), Q89) |
+| Two result builders | `ValueError` at `build()`, naming the method | `ValueError` from the second `with_result_builder`, naming both (Q24) |
+| `raw_execute(final_vars, overrides, display_graph, inputs)` | Positional, with a `display_graph` flag | `raw_execute(final_vars, *, inputs, overrides)`, and `PreparedPlan.run_raw` (Q19) |
 
 </div>
 
@@ -127,6 +131,8 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | A failing node and a raising after-node or after-graph hook | The hook's error, with the node's only in `__context__` | One `ExceptionGroup`, the node's error first (Q23) |
 | Hooks on a cache hit | Fire as if the node ran, for the hit and every node upstream of it, with nothing saying it was a hit | The hit reports once, with `cache` set to its outcome, `inputs=None` and the loaded value; nodes only hits need report nothing ([Hooks](hooks.md#with-a-cache), Q85) |
 | A sync hook on the async driver | Called when a node is scheduled, with `Task`s for its arguments and result; a failing node is reported a success | Called as the node starts and finishes, on the loop's thread, with real values and `ok=False` for a failure (Q86) |
+| What after-graph gets as `results` with a result builder | The built result | `RunEnd.results` is always the raw dict (Q19) |
+| A `ResultBuilder` on the async driver | Silently dropped: `execute` returns the dict | Used, as on the sync driver (Q19) |
 | A module with no nodes, such as a package that only re-exports | Builds; its nodes are unknown at `execute` | `ValueError` at build, saying why each function was skipped (Q53) |
 | A row naming no parameter of its function | `InvalidDecoratorException` | `ValueError`, when decorating (Q33) |
 | A row's defaulted parameter bound to an unsupplied `source()` | `KeyError` when run | The default applies (Q35) |
@@ -173,11 +179,10 @@ value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](
 
 fnloom is pre-alpha. The core, the native path, `@parameterize` and its sugar, `@tag`, `@config`, `@extract_fields`,
 `@extract_columns`, `@exclude`, graph inspection, `validate`, graphs from plain functions, namespaces, type checks,
-result caching, the async driver and hooks are done. These Hamilton
+result caching, the async driver, hooks and result builders are done. These Hamilton
 features come next, roughly in this order:
 
-1. **Result builders.** Hooks are done on both drivers ([Hooks](hooks.md)).
-2. **Graph visualisation.**
-3. **Dynamic execution**, materializers, `@subdag`, `@check_output` and `@pipe`.
+1. **Graph visualisation.**
+2. **Dynamic execution**, materializers, `@subdag`, `@check_output` and `@pipe`.
 
 If your pipeline depends on one of these, it's worth waiting for it before you switch.

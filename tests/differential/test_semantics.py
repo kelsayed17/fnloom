@@ -1255,3 +1255,96 @@ def test_hooks_run_in_the_order_given(names: tuple[str, ...]) -> None:
     assert log == hamilton_log
     assert [name for name, _, _ in log[:2]] == list(names)
     assert [name for name, _, _ in log[-2:]] == list(names)
+
+
+# Result builders (Plan 6, H6.12 and H6.13): what a builder gets, and `raw_execute`.
+class HamiltonSeen(lifecycle.ResultBuilder):
+    """A Hamilton result builder that keeps the outputs it gets, in order."""
+
+    def __init__(self) -> None:
+        """Nothing seen yet."""
+        self.got: list[list[tuple[str, Any]]] = []
+
+    @override
+    def build_result(self, **outputs: Any) -> Any:
+        self.got.append(list(outputs.items()))
+        return ("built", len(self.got))
+
+
+class FnloomSeen:
+    """The fnloom builder that keeps what it gets as `HamiltonSeen` does."""
+
+    def __init__(self) -> None:
+        """Nothing seen yet."""
+        self.got: list[list[tuple[str, Any]]] = []
+
+    def __call__(self, outputs: dict[str, object]) -> tuple[str, int]:
+        """Keeps the outputs as pairs, in order."""
+        self.got.append(list(outputs.items()))
+        return ("built", len(self.got))
+
+
+@pytest.mark.parametrize(
+    "request_",
+    [
+        {"final_vars": ["c", "x", "a"], "inputs": {"x": 1}},
+        {"final_vars": ["a"], "overrides": {"a": 99}},
+        {"final_vars": ["c", "b"], "inputs": {"x": 1}, "overrides": {"a": 5}},
+        {"final_vars": ["c", "c"], "inputs": {"x": 1}},
+    ],
+    ids=["input-as-output", "override-as-output", "mixed", "repeated"],
+)
+def test_a_result_builder_gets_the_outputs_in_request_order(
+    request_: dict[str, Any],
+) -> None:
+    """H6.12: request order, each once, inputs and overrides requested included."""
+    module = make_module("semantics_built", HOOKED_GRAPH)
+    hamilton_seen = HamiltonSeen()
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_adapters(hamilton_seen)
+        .build()
+    )
+    ours = FnloomSeen()
+    built = fnloom.Builder().with_modules(module).with_result_builder(ours).build()
+    assert hamilton.execute(**request_) == built.execute(**request_) == ("built", 1)
+    assert ours.got == hamilton_seen.got
+
+
+def test_raw_execute_skips_the_builder_and_runs_the_hooks() -> None:
+    """H6.13: the raw dict, no build, and every hook of the run."""
+    module = make_module("semantics_raw", HOOKED_GRAPH)
+    hamilton_log: list[HookEntry] = []
+    hamilton_seen = HamiltonSeen()
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_adapters(HamiltonRecorder("A", hamilton_log), hamilton_seen)
+        .build()
+    )
+    log: list[HookEntry] = []
+    ours = FnloomSeen()
+    built = (
+        fnloom.Builder()
+        .with_modules(module)
+        .with_hooks(FnloomRecorder("A", log))
+        .with_result_builder(ours)
+        .build()
+    )
+    request: dict[str, Any] = {"final_vars": ["c", "x"], "inputs": {"x": 1}}
+    raw = hamilton.raw_execute(**request)
+    assert raw == built.raw_execute(**request) == {"c": 7, "x": 1}
+    assert list(raw) == ["c", "x"]
+    assert hamilton_seen.got == ours.got == []
+    assert log == hamilton_log
+    assert [stage for _, stage, _ in log] == [
+        "before_run",
+        "before_node",
+        "after_node",
+        "before_node",
+        "after_node",
+        "before_node",
+        "after_node",
+        "after_run",
+    ]

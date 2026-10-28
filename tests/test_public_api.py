@@ -67,4 +67,9 @@ def test_the_regressed_callables_are_covered() -> None:
         "NodeStart",
         "NodeEnd",
         "RunEnd",
+        "Builder.with_result_builder",
+        "Driver.raw_execute",
+        "PreparedPlan.run_raw",
+        "AsyncDriver.raw_execute",
+        "AsyncPreparedPlan.run_raw",
     }

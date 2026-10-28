@@ -117,7 +117,9 @@ event by position, so a new field never breaks a hook.
 - **`RunEnd`**: `RunStart`'s fields, plus:
     - `ok`: whether the run succeeded.
     - `error`: what stopped it, as `execute` raises it unless an `after_run` hook raises too; `None` if `ok`.
-    - `results`: the outputs, in request order; `None` unless `ok`.
+    - `results`: the raw outputs, in request order, before any
+      [result builder](running.md#result-builders). `None` when the run failed before they were all in. A run
+      that only its result builder failed has them, with `ok=False` and the builder's error.
 
 ```python
 class Ends(fnloom.Hook):
@@ -136,6 +138,9 @@ end = ends.ends[0]
 (end.ok, end.outputs, end.nodes, dict(end.results))
 # -> (True, ('total',), ('subtotal', 'shipping', 'total'), {'total': 60.0})
 ```
+
+`raw_execute` and `PreparedPlan.run_raw` fire every hook, as `execute` and `run` do; they only skip the
+[result builder](running.md#result-builders), and `results` is the same raw dict either way.
 
 ## Which nodes report
 

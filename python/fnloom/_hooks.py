@@ -81,7 +81,9 @@ class RunEnd:
     `RunStart`'s fields, then whether it succeeded. `error` is what stopped it:
     the node's exception, a failed check's, or what the hooks raised, grouped as
     `execute` raises them unless an `after_run` hook raises too. `results` is a
-    read-only view of the outputs in request order, and `None` unless `ok`.
+    read-only view of the raw outputs in request order, before any result
+    builder: `None` when no outputs were computed, and there even when only
+    the result builder failed.
     """
 
     run_id: str
@@ -464,8 +466,10 @@ class Dispatch:
         """Fires `after_run`, then raises whatever stopped the run, and its errors.
 
         `error` is what the run raised, if anything. When the dispatcher saw no
-        error, it is a check's or the core's own, and leads; otherwise it is one
-        the dispatcher already holds, and they are raised instead.
+        error, it is a check's, the core's or the result builder's own, and
+        leads; otherwise it is one the dispatcher already holds, and they are
+        raised instead. `results` are the raw outputs, or `None` when none were
+        computed; a failed run passes them only when its result builder raised.
         """
         lead: list[BaseException] = []
         if self._node_error is not None:
@@ -494,8 +498,9 @@ class Dispatch:
                 nodes=start.nodes,
                 ok=succeeded,
                 error=stopped,
+                # The raw outputs, unless a hook failed a run that computed them.
                 results=None
-                if not succeeded or results is None
+                if results is None or (ok and not succeeded)
                 else MappingProxyType(results),
             )
             for method in methods:

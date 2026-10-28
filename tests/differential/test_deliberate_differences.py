@@ -35,7 +35,9 @@ from test_semantics import (
     DELIBERATE,
     HOOKED_GRAPH,
     FnloomRecorder,
+    FnloomSeen,
     HamiltonRecorder,
+    HamiltonSeen,
     HookEntry,
 )
 from type_matrix import (
@@ -4003,3 +4005,171 @@ def test_q86_async_hooks_fire_as_nodes_run_with_values() -> None:
         None,
     )
     assert (ours.events[-1].ok, ours.events[-1].error) == (False, raised.value)
+
+
+class _BuildError(Exception):
+    """What a raising result builder raises, in Hamilton and in fnloom."""
+
+
+class _HamiltonRefuse(lifecycle.ResultBuilder):
+    """A Hamilton result builder that always raises."""
+
+    @override
+    def build_result(self, **outputs: Any) -> Any:
+        raise _BuildError(sorted(outputs))
+
+
+def _refuse(outputs: dict[str, object]) -> object:
+    """A fnloom result builder that always raises."""
+    raise _BuildError(sorted(outputs))
+
+
+@pytest.mark.deliberate("Q19")
+@pytest.mark.filterwarnings(_HAMILTON_ASYNC_WARNING)
+def test_q19_hooks_get_the_raw_results_and_the_async_driver_builds() -> None:
+    """Hamilton's after-graph gets the built result, and its async driver drops it."""
+    module = make_module("differential_q19", HOOKED_GRAPH)
+    hamilton_hook = HamiltonRecorder("H", [])
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_adapters(hamilton_hook, HamiltonSeen())
+        .build()
+    )
+    assert hamilton.execute(["c"], inputs={"x": 1}) == ("built", 1)
+    assert hamilton_hook.calls[-1]["results"] == ("built", 1)
+    # A builder that raises: after-graph gets the raw dict, in both (KEEP).
+    failing = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_adapters(hamilton_hook, _HamiltonRefuse())
+        .build()
+    )
+    with pytest.raises(_BuildError) as hamilton_raised:
+        failing.execute(["c"], inputs={"x": 1})
+    end = hamilton_hook.calls[-1]
+    assert (end["success"], end["error"], end["results"]) == (
+        False,
+        hamilton_raised.value,
+        {"c": 7},
+    )
+
+    async def hamilton_async_run() -> object:
+        pending: object = (
+            hamilton_async.Builder()
+            .with_modules(module)
+            .with_adapters(HamiltonSeen())
+            .build()
+        )
+        built = await cast("Coroutine[Any, Any, hamilton_async.AsyncDriver]", pending)
+        return await built.execute(["c"], inputs={"x": 1})
+
+    # The async driver silently drops a `ResultBuilder` subclass.
+    assert asyncio.run(hamilton_async_run()) == {"c": 7}
+
+    ours = FnloomRecorder("F", [])
+    builder = fnloom.Builder().with_modules(module).with_hooks(ours)
+    assert builder.with_result_builder(FnloomSeen()).build().execute(
+        ["c"], inputs={"x": 1}
+    ) == ("built", 1)
+    assert dict(ours.events[-1].results) == {"c": 7}
+    with pytest.raises(_BuildError) as raised:
+        builder.with_result_builder(_refuse).build().execute(["c"], inputs={"x": 1})
+    finish = ours.events[-1]
+    assert (finish.ok, finish.error, dict(finish.results)) == (
+        False,
+        raised.value,
+        {"c": 7},
+    )
+    built_async = builder.with_result_builder(FnloomSeen()).build_async()
+    assert asyncio.run(built_async.execute(["c"], inputs={"x": 1})) == ("built", 1)
+
+
+@pytest.mark.deliberate("Q24")
+def test_q24_one_result_builder_refused_at_the_call() -> None:
+    """Hamilton refuses two builders at `build()`, naming the method; fnloom, both."""
+    module = make_module("differential_q24", HOOKED_GRAPH)
+    two = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_adapters(HamiltonSeen(), HamiltonSeen())
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"Multiple adapters cannot \(currently\) implement the same lifecycle "
+        r"method\. Sync methods: \['do_build_result'\]",
+    ):
+        two.build()
+    # Hooks layer in both: two of one stage are fine.
+    log: list[HookEntry] = []
+    hooked = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_adapters(HamiltonRecorder("A", log), HamiltonRecorder("B", log))
+        .build()
+    )
+    assert hooked.execute(["a"], inputs={"x": 1}) == {"a": 2}
+
+    first = fnloom.Builder().with_modules(module).with_result_builder(FnloomSeen())
+    with pytest.raises(
+        ValueError,
+        match=r"^a builder has one result builder: a FnloomSeen is set, "
+        r"so _refuse is refused",
+    ):
+        first.with_result_builder(_refuse)
+
+
+@pytest.mark.deliberate("Q89")
+def test_q89_no_pandas_builder_and_the_recipe_pads_nothing() -> None:
+    """Hamilton's frame flattens and NaN-pads; fnloom's recipe refuses the padding."""
+    pandas = pytest.importorskip("pandas")
+    from hamilton import base  # noqa: PLC0415  # only this test needs it
+
+    module = make_module(
+        "differential_q89",
+        """
+import pandas as pd
+
+
+def longer() -> pd.Series:
+    return pd.Series([1, 2, 3])
+
+
+def shorter() -> pd.Series:
+    return pd.Series([10, 20])
+
+
+def table() -> pd.DataFrame:
+    return pd.DataFrame({"p": [1, 2, 3], "q": [4, 5, 6]})
+""",
+    )
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_adapters(base.PandasDataFrameResult())
+        .build()
+    )
+    padded = hamilton.execute(["longer", "shorter"])
+    assert padded["shorter"].isna().tolist() == [False, False, True]
+    assert str(padded["shorter"].dtype) == "float64"
+    flattened = hamilton.execute(["table", "longer"])
+    assert list(flattened.columns) == ["table.p", "table.q", "longer"]
+
+    assert not hasattr(fnloom, "PandasDataFrameResult")
+    # The recipe in docs/running.md, "Result builders".
+
+    def frame(outputs: dict[str, object]) -> object:
+        indexes = [v.index for v in outputs.values() if isinstance(v, pandas.Series)]
+        if any(not index.equals(indexes[0]) for index in indexes[1:]):
+            msg = f"outputs on different indexes: {', '.join(outputs)}"
+            raise ValueError(msg)
+        return pandas.DataFrame(outputs)
+
+    ours = fnloom.Builder().with_modules(module).with_result_builder(frame).build()
+    with pytest.raises(
+        ValueError, match="outputs on different indexes: longer, shorter"
+    ):
+        ours.execute(["longer", "shorter"])
+    # No column is flattened: pandas refuses a frame as one column.
+    with pytest.raises(ValueError, match="Data must be 1-dimensional"):
+        ours.execute(["table", "longer"])
