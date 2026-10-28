@@ -121,7 +121,7 @@ def _plain_parameters(
     reports the first unsupported parameter. Reading the code object directly is
     much cheaper for a function with many parameters.
     """
-    if hasattr(fn, "__wrapped__") or hasattr(fn, "__signature__"):
+    if _resigned(fn):
         return None
     code = getattr(fn, "__code__", None)
     if code is None or code.co_posonlyargcount or code.co_flags & _VARIADIC:
@@ -308,6 +308,11 @@ def _owner(origin: Callable[..., object], names: list[str]) -> str:
     return f"nodes {rows} (rows of function {function!r})"
 
 
+def _culprit(key: str) -> str:
+    """Names the annotation `key` of a function in an unresolved-annotation note."""
+    return "the return" if key == "return" else f"parameter {key!r}"
+
+
 def _unresolved(origin: Callable[..., object]) -> list[str]:
     """The annotations of `origin` that do not evaluate, in declaration order."""
     written = annotationlib.get_annotations(origin, format=annotationlib.Format.STRING)
@@ -316,7 +321,7 @@ def _unresolved(origin: Callable[..., object]) -> list[str]:
         try:
             typing.evaluate_forward_ref(annotationlib.ForwardRef(text, owner=origin))
         except NameError, AttributeError:
-            culprits.append("the return" if key == "return" else f"parameter {key!r}")
+            culprits.append(_culprit(key))
     return culprits or ["an annotation"]
 
 
@@ -330,8 +335,7 @@ def _unread_aliases(hints: dict[str, object]) -> list[tuple[str, _Unresolved]]:
         try:
             read_aliases(hint)
         except (NameError, AttributeError) as error:
-            culprit = "the return" if key == "return" else f"parameter {key!r}"
-            culprits.append((culprit, error))
+            culprits.append((_culprit(key), error))
     return culprits
 
 
