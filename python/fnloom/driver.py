@@ -10,8 +10,9 @@ import typing
 
 # Imported for real, not under TYPE_CHECKING: the public signatures annotate with
 # them, and `inspect.signature` resolves those annotations at run time.
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
+from dataclasses import replace
 from types import MappingProxyType, ModuleType
 from typing import Any, Literal, NoReturn, Protocol, TypedDict, Unpack, override
 
@@ -187,23 +188,23 @@ def _mismatches(checks: Sequence[_Check], values: Mapping[str, object]) -> list[
     """A line for each checked value that does not fit its declared type.
 
     A value checked against an annotation that did not resolve gets an
-    `_UnresolvedLine` saying to import it at run time (Q81).
+    `_UnresolvedLine` saying to import it at run time (Q81). A value check the
+    builder added (Q21) that raises is not caught.
     """
     found: list[str] = []
     for name, declared, cls, matches in checks:
         value = values[name]
         # A plain class answers for `None` too: `isinstance(None, int)` is False,
         # and only `object`, `NoneType` and a union with it take it (Q79).
-        if cls is not None:
-            if isinstance(value, cls):
+        if cls is not None and isinstance(value, cls):
+            continue
+        # Refused by class: the check answers the same, or a custom check admits.
+        try:
+            if matches(value):
                 continue
-        else:
-            try:
-                if matches(value):
-                    continue
-            except _types.UnresolvedError as error:
-                found.append(_UnresolvedLine(f"{name}: {error}"))
-                continue
+        except _types.UnresolvedError as error:
+            found.append(_UnresolvedLine(f"{name}: {error}"))
+            continue
         found.append(
             f"{name}: expected {inspect.formatannotation(declared)}, "
             f"got {inspect.formatannotation(type(value))}{_inside(declared, value)}"
@@ -225,6 +226,77 @@ def _inside(declared: object, value: object) -> str:
         if not variadic and len(value) != len(args):
             return " (its length does not fit)"
     return " (an item does not fit)"
+
+
+def _output_checked(
+    nodes: list[NodeDef],
+    rules: _types.Rules,
+    value_checks: tuple[_types.ValueCheck, ...],
+) -> list[NodeDef]:
+    """`nodes`, each one's payload checking its result against its return type (Q87).
+
+    A node returning `Any` or `object` is kept as it is, and so is an extracted
+    field's node, whose payload checks its value already.
+    """
+    return [
+        node
+        if is_generated(node) or _types.checks_everything(node.returns)
+        else replace(node, payload=_returning(node, rules, value_checks))
+        for node in nodes
+    ]
+
+
+def _returning(
+    node: NodeDef,
+    rules: _types.Rules,
+    value_checks: tuple[_types.ValueCheck, ...],
+) -> Callable[..., object]:
+    """`node`'s payload, its result checked as an input would be; see `_output_checked`.
+
+    A mismatch is a `TypeError` raised as the node's own failure, so the core
+    notes the node on it, and `after_node` gets it. A node that raises raises
+    its own error, never checked. An `async def` node's awaited result is
+    checked, by a coroutine function the async driver awaits as it would the
+    node's own.
+    """
+    name, declared, payload = node.name, node.returns, node.payload
+    classes, matches = _types.admitting(
+        declared, _types.check_of(declared, rules), value_checks
+    )
+
+    def checked(value: object) -> object:
+        # Refused by class, or no plain class: the check, custom ones included.
+        try:
+            if matches(value):
+                return value
+        except _types.UnresolvedError as error:
+            msg = f"{name}: {error}"
+            raise TypeError(msg) from None
+        msg = (
+            f"{name}: returned {inspect.formatannotation(type(value))}, "
+            f"expected {inspect.formatannotation(declared)}"
+            f"{_inside(declared, value)}"
+        )
+        raise TypeError(msg)
+
+    if _async.awaits(node):
+        awaited = typing.cast("Callable[..., Awaitable[object]]", payload)
+
+        async def call_async(**kwargs: object) -> object:
+            value = await awaited(**kwargs)
+            if classes is not None and isinstance(value, classes):
+                return value
+            return checked(value)
+
+        return call_async
+
+    def call(**kwargs: object) -> object:
+        value = payload(**kwargs)
+        if classes is not None and isinstance(value, classes):
+            return value
+        return checked(value)
+
+    return call
 
 
 def _edge_mismatches(functions: Mapping[str, NodeView]) -> list[str]:
@@ -622,6 +694,17 @@ def _named(build: object) -> str:
     return name if isinstance(name, str) else f"a {type(build).__qualname__}"
 
 
+def _checked_value_checks(
+    checks: Sequence[_types.ValueCheck],
+) -> tuple[_types.ValueCheck, ...]:
+    """`checks` as a tuple; `TypeError` naming the first that can't be called."""
+    for check in checks:
+        if not callable(check):
+            msg = f"a value check must be callable, not {check!r}"
+            raise TypeError(msg)
+    return tuple(checks)
+
+
 def _checked_builder[R](build: _ResultBuilder[R] | None) -> _ResultBuilder[R] | None:
     """`build`, once it is callable or `None`; a `TypeError` otherwise."""
     if build is not None and not callable(build):
@@ -661,6 +744,7 @@ class Driver[R = dict[str, object]]:
         rules: _types.Rules = _types.SHALLOW,
         hooks: Sequence[Hook] = (),
         result_builder: _ResultBuilder[R] | None = None,
+        value_checks: Sequence[_types.ValueCheck] = (),
     ) -> None:
         """Wraps a native graph; `Builder` is the way to make one from modules.
 
@@ -671,7 +755,10 @@ class Driver[R = dict[str, object]]:
         input and override checks follow: deep checks and numeric widening.
         `hooks` watch every run, checked as `Builder.with_hooks` checks them.
         `result_builder` makes what `execute` returns from the raw outputs, as
-        `Builder.with_result_builder` sets it.
+        `Builder.with_result_builder` sets it. `value_checks` admit an input or
+        override the default check refuses, as `Builder.with_value_check` adds
+        them; the output checks and extracted fields' checks are in the graph's
+        payloads already.
         """
         self._graph = graph
         # The modules it was built from, each once: `Builder` sets them.
@@ -683,6 +770,7 @@ class Driver[R = dict[str, object]]:
         self._check_overrides = check_overrides
         self._strict_overrides = strict_overrides
         self._rules = rules
+        self._value_checks = _checked_value_checks(value_checks)
         self._cache = cache
         self._hook_list = _hooks.checked(hooks)
         # The methods the runs call; `None` when no hook overrides any, so a
@@ -759,6 +847,7 @@ class Driver[R = dict[str, object]]:
             rules=self._rules,
             hooks=self._hook_list,
             result_builder=self._build,
+            value_checks=self._value_checks,
         )
         copied._modules = self._modules
         copied._builder = self._builder
@@ -927,11 +1016,16 @@ class Driver[R = dict[str, object]]:
         """Each of `names` with its node's type; a name with no view goes unchecked.
 
         Each distinct type's check is made once (`_types.checks_of`), here, when a
-        plan is prepared.
+        plan is prepared, and admits what a custom value check admits (Q21).
         """
         # By type, not view: the views of many inputs are never made at all.
         typed = [(n, self._nodes.type_of(n)) for n in names if n in self._nodes]
         checks = _types.checks_of((declared for _, declared in typed), self._rules)
+        if self._value_checks:
+            checks = [
+                _types.admitting(declared, check, self._value_checks)
+                for (_, declared), check in zip(typed, checks, strict=True)
+            ]
         return tuple(
             (n, declared, classes, matches)
             for (n, declared), (classes, matches) in zip(typed, checks, strict=True)
@@ -1946,13 +2040,15 @@ class _Changes(TypedDict, total=False):
     deep_type_checks: bool
     numeric_widening: bool
     hooks: tuple[Hook, ...]
+    output_type_checks: bool
+    value_checks: tuple[_types.ValueCheck, ...]
 
 
 class _Settings(TypedDict):
     """A builder's switches, which pickling and copying carry as one value.
 
-    Hooks pickle by Python's own rules: an unpicklable hook makes the builder,
-    and its drivers, unpicklable.
+    Hooks and value checks pickle by Python's own rules: an unpicklable one
+    makes the builder, and its drivers, unpicklable.
     """
 
     check_inputs: bool
@@ -1962,6 +2058,8 @@ class _Settings(TypedDict):
     deep_type_checks: bool
     numeric_widening: bool
     hooks: tuple[Hook, ...]
+    output_type_checks: bool
+    value_checks: tuple[_types.ValueCheck, ...]
 
 
 class Builder[R = dict[str, object]]:
@@ -1991,6 +2089,8 @@ class Builder[R = dict[str, object]]:
         config: Mapping[str, object] | None = None,
         hooks: Sequence[Hook] = (),
         result_builder: _ResultBuilder[R] | None = None,
+        output_type_checks: bool = False,
+        value_checks: Sequence[_types.ValueCheck] = (),
     ) -> None:
         """Starts with the given modules (none by default), checking input types.
 
@@ -2003,11 +2103,13 @@ class Builder[R = dict[str, object]]:
         The other settings are those of `without_input_type_checks`,
         `without_override_type_checks`, `with_strict_overrides`,
         `with_declared_inputs`, `with_deep_type_checks`,
-        `with_numeric_widening`, `with_hooks` and `with_result_builder`.
+        `with_numeric_widening`, `with_hooks`, `with_result_builder`,
+        `with_output_type_checks` and `with_value_check`.
         `TypeError` when an item of `modules` is not a module, or of
         `declared_inputs` is not a `str`; see `with_functions` for the errors
-        `functions` raises, `with_hooks` for those of `hooks`, and
-        `with_result_builder` for that of `result_builder`.
+        `functions` raises, `with_hooks` for those of `hooks`,
+        `with_result_builder` for that of `result_builder`, and
+        `with_value_check` for that of `value_checks`.
         """
         self._modules = _checked_modules(modules)
         self._namespaces = _checked_namespaces(namespaces, len(self._modules))
@@ -2019,6 +2121,8 @@ class Builder[R = dict[str, object]]:
         self._rules = _types.Rules(deep=deep_type_checks, widen=numeric_widening)
         self._hooks = _hooks.checked(hooks)
         self._result_builder = _checked_builder(result_builder)
+        self._output_type_checks = output_type_checks
+        self._value_checks = _checked_value_checks(value_checks)
         self._store = store
         # Never changed once made: `with_config` makes a new dict.
         self._config: dict[str, object] = (
@@ -2073,6 +2177,8 @@ class Builder[R = dict[str, object]]:
             "deep_type_checks": self._rules.deep,
             "numeric_widening": self._rules.widen,
             "hooks": self._hooks,
+            "output_type_checks": self._output_type_checks,
+            "value_checks": self._value_checks,
         }
 
     def _with(
@@ -2226,6 +2332,42 @@ class Builder[R = dict[str, object]]:
         """
         return self._with(numeric_widening=True)
 
+    def with_output_type_checks(self) -> Builder[R]:
+        """Returns a new builder whose driver checks each node's result (Q87).
+
+        Each result is checked against the node's return annotation by the
+        rules of the input checks: `None` only for a type that admits it (Q79),
+        fixed tuples, `NewType`s and generics by value, deep checks and numeric
+        widening when they are on, and any `with_value_check`. A mismatch fails
+        the node with `TypeError: x: returned str, expected int`, so
+        `after_node` gets `ok=False` and that error. A node that raises keeps
+        its own error. An `async def` node's awaited result is checked.
+
+        The checks are made at build, around the nodes that need one: a node
+        returning `Any` or `object` costs nothing, and without this setting no
+        result is checked, as in Hamilton (H6.14). An extracted field is
+        checked either way (Q61), and its producer's result too with this
+        setting. A cache hit's value is not checked again.
+        """
+        return self._with(output_type_checks=True)
+
+    def with_value_check(self, check: _types.ValueCheck) -> Builder[R]:
+        """Returns a new builder whose checks also admit what `check` admits (Q21).
+
+        `check(declared, value)` is called with the declared type and the
+        value, only for a value the default check refuses, so a value that fits
+        costs nothing more. When it returns a true value, the value is admitted.
+        Cumulative: checks are tried in the order given, until one admits.
+        It applies to inputs, overrides, extracted fields, output checks and
+        `validate`; never to edges, which compare types (Q10). An annotation
+        that did not resolve (Q81) is passed as its `Unresolved`, and refused
+        as Q81 says unless a check admits the value. An exception `check`
+        raises is not caught: it fails the run, or, in an output check, the
+        node. `TypeError` when `check` can't be called. It pickles by Python's
+        own rules, as a hook does.
+        """
+        return self._with(value_checks=(*self._value_checks, check))
+
     def with_hooks(self, *hooks: Hook) -> Builder[R]:
         """Returns a new builder whose driver calls `hooks` on every run (Q84).
 
@@ -2354,7 +2496,7 @@ class Builder[R = dict[str, object]]:
             functions=self._functions,
             namespaces=self._namespaces,
         )
-        nodes = resolve(scanned.nodes, self._rules)
+        nodes = resolve(scanned.nodes, self._rules, self._value_checks)
         unmatched = scanned.unmatched
         if unmatched:
             # A field of a forward-referenced `TypedDict` is first known resolved.
@@ -2365,6 +2507,8 @@ class Builder[R = dict[str, object]]:
         views = node_views(
             nodes, frozenset(node.name for node in nodes if is_generated(node))
         )
+        if self._output_type_checks:
+            nodes = _output_checked(nodes, self._rules, self._value_checks)
         graph = _graph_of(nodes)
         if mismatches := _edge_mismatches(views.functions):
             raise ValueError("\n".join(mismatches))
@@ -2396,6 +2540,7 @@ class Builder[R = dict[str, object]]:
             rules=self._rules,
             hooks=self._hooks,
             result_builder=self._result_builder,
+            value_checks=self._value_checks,
         )
         driver._modules = tuple(dict.fromkeys(self._modules))  # noqa: SLF001  # the builder's own driver
         driver._unmatched = unmatched  # noqa: SLF001  # the builder's own driver

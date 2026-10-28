@@ -1348,3 +1348,24 @@ def test_raw_execute_skips_the_builder_and_runs_the_hooks() -> None:
         "after_node",
         "after_run",
     ]
+
+
+# Output checks (Plan 6, H6.14): neither side checks a node's result by default.
+WRONG_RESULT = """
+def wrong() -> int:
+    return "s"
+
+
+def reads(wrong: int) -> str:
+    return wrong * 2
+"""
+
+
+def test_no_result_is_checked_by_default() -> None:
+    """H6.14: a node returning the wrong type is passed on, unchecked, by both."""
+    module = make_module("semantics_wrong_result", WRONG_RESULT)
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    ours = fnloom.Builder().with_modules(module).build()
+    request: dict[str, Any] = {"final_vars": ["wrong", "reads"]}
+    assert hamilton.execute(**request) == ours.execute(**request)
+    assert ours.execute(**request) == {"wrong": "s", "reads": "ss"}

@@ -4173,3 +4173,155 @@ def table() -> pd.DataFrame:
     # No column is flattened: pandas refuses a frame as one column.
     with pytest.raises(ValueError, match="Data must be 1-dimensional"):
         ours.execute(["table", "longer"])
+
+
+Q87_RESULTS = """
+from collections.abc import Callable
+from typing import NewType
+
+UserId = NewType("UserId", int)
+
+
+def pair() -> tuple[int, str]:
+    return (1, "a")
+
+
+def short_pair() -> tuple[int, str]:
+    return (1,)
+
+
+def call() -> Callable[[int], int]:
+    return abs
+
+
+def frozen() -> frozenset[str]:
+    return frozenset({"a"})
+
+
+def user() -> UserId:
+    return UserId(3)
+
+
+def int_for_float() -> float:
+    return 1
+
+
+def fails() -> int:
+    raise ValueError("original failure")
+"""
+
+
+@pytest.mark.deliberate("Q87")
+def test_q87_output_checks_follow_the_input_rules_and_keep_a_nodes_error() -> None:
+    """Hamilton's checker crashes, misreads tuples and masks failures; fnloom's not."""
+    from hamilton.lifecycle import default  # noqa: PLC0415  # only this test needs it
+
+    module = make_module("differential_q87", Q87_RESULTS)
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_adapters(default.FunctionInputOutputTypeChecker())
+        .build()
+    )
+    # A correct fixed tuple is refused, and a short one accepted (#1749).
+    with pytest.raises(TypeError, match=r"Node pair returned a result of type"):
+        hamilton.execute(["pair"])
+    assert hamilton.execute(["short_pair"]) == {"short_pair": (1,)}
+    # Parameterized generics and NewTypes crash the check (#1738).
+    for name in ("call", "frozen"):
+        with pytest.raises(TypeError, match=r"parameterized generic"):
+            hamilton.execute([name])
+    with pytest.raises(TypeError, match=r"isinstance\(\) arg 2 must be a type"):
+        hamilton.execute(["user"])
+    with pytest.raises(TypeError, match=r"Node int_for_float returned a result"):
+        hamilton.execute(["int_for_float"])
+    # A failing node is reported as returning `None`; its error only in context.
+    with pytest.raises(
+        TypeError, match=r"Node fails returned a result of type"
+    ) as info:
+        hamilton.execute(["fails"])
+    assert isinstance(info.value.__context__, ValueError)
+
+    checked = fnloom.Builder().with_modules(module).with_output_type_checks()
+    ours = checked.build()
+    got = ours.execute(["pair", "call", "frozen", "user"])
+    assert got["pair"] == (1, "a")
+    assert got["user"] == 3  # noqa: PLR2004  # the NewType's value
+    with pytest.raises(
+        TypeError,
+        match=r"^short_pair: returned tuple, expected tuple\[int, str\] "
+        r"\(its length does not fit\)",
+    ):
+        ours.execute(["short_pair"])
+    with pytest.raises(
+        TypeError, match=r"^int_for_float: returned int, expected float"
+    ):
+        ours.execute(["int_for_float"])
+    widened = checked.with_numeric_widening().build()
+    assert widened.execute(["int_for_float"]) == {"int_for_float": 1}
+    with pytest.raises(ValueError, match=r"^original failure") as error:
+        ours.execute(["fails"])
+    assert error.value.__notes__ == ["in node 'fails'"]
+
+
+Q21_GRAPH = """
+def a(x: int) -> int:
+    return x + 1
+"""
+
+
+@pytest.mark.deliberate("Q21")
+def test_q21_a_custom_value_check_adds_to_the_default() -> None:
+    """Hamilton's `validate_input` replaces the default; fnloom's check only admits."""
+
+    class AlwaysFalse(lifecycle.EdgeConnectionHook):
+        @override
+        def check_edge_types_match(
+            self, type_from: type, type_to: type, **kwargs: Any
+        ) -> bool:
+            return False
+
+        @override
+        def validate_input(
+            self, node_type: type, input_value: Any, **kwargs: Any
+        ) -> bool:
+            return False
+
+    class AlwaysTrue(AlwaysFalse):
+        @override
+        def validate_input(
+            self, node_type: type, input_value: Any, **kwargs: Any
+        ) -> bool:
+            return True
+
+    module = make_module("differential_q21", Q21_GRAPH)
+
+    def hamilton_with(adapter: lifecycle.EdgeConnectionHook) -> hamilton_driver.Driver:
+        return (
+            hamilton_driver.Builder()
+            .with_modules(module)
+            .with_adapters(adapter)
+            .build()
+        )
+
+    # Refusing replaces the default: a correct value is refused.
+    with pytest.raises(ValueError, match=r"Type requirement mismatch"):
+        hamilton_with(AlwaysFalse()).execute(["a"], inputs={"x": 1})
+    # Admitting replaces it too: a wrong value reaches the node.
+    with pytest.raises(TypeError, match=r"can only concatenate str"):
+        hamilton_with(AlwaysTrue()).execute(["a"], inputs={"x": "s"})
+
+    def never(declared: object, value: object) -> bool:  # noqa: ARG001  # a check's signature
+        return False
+
+    def always(declared: object, value: object) -> bool:  # noqa: ARG001  # a check's signature
+        return True
+
+    refusing = fnloom.Builder().with_modules(module).with_value_check(never).build()
+    assert refusing.execute(["a"], inputs={"x": 1}) == {"a": 2}
+    with pytest.raises(ValueError, match=r"^x: expected int, got str"):
+        refusing.execute(["a"], inputs={"x": "s"})
+    admitting = fnloom.Builder().with_modules(module).with_value_check(always).build()
+    assert admitting.validate(["a"], inputs={"x": "s"}) == []
+    with pytest.raises(TypeError, match=r"can only concatenate str"):
+        admitting.execute(["a"], inputs={"x": "s"})

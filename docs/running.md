@@ -427,6 +427,36 @@ both.execute(["basket_total"], inputs={"prices": [1, 2.5]})
 
 `fnloom.value_matches(declared, value, deep=True, widen=True)` answers as a driver with both settings.
 
+### Custom value checks
+
+`Builder.with_value_check(check)` admits values the default check refuses. `check(declared, value)` gets the declared
+type and the value, and admits the value by returning a true value. Checks are cumulative: they're tried in the order
+given, until one admits the value. One that returns `False` refuses nothing the default admits, unlike Hamilton's
+`validate_input`, which replaces the default check (Q21):
+
+```python
+import decimal
+
+
+def decimal_floats(declared: object, value: object) -> bool:
+    """A Decimal may stand for a float."""
+    return declared is float and isinstance(value, decimal.Decimal)
+
+
+exact = fnloom.Builder().with_modules(pricing).with_value_check(decimal_floats).build()
+exact.execute(["total"], inputs={"price": decimal.Decimal("2.5"), "quantity": 4})
+# -> {'total': decimal.Decimal('10.0')}
+exact.validate(["total"], inputs={"price": "2.5", "quantity": 4})
+# -> ['price: expected float, got str']
+```
+
+A check is called only for a value the default refuses, so a value that fits costs nothing more. It applies to
+inputs, overrides, extracted fields, [results](writing-nodes.md#checking-results) and `validate`, but never to
+edges, which compare types, not values (Q10). An annotation that didn't resolve at build (Q81) is passed as its
+`unresolved` type, and still raises its `TypeError` unless a check admits the value. A check that raises isn't
+caught: its exception fails the run as it is or, checking a result, fails the node. It pickles by Python's own
+rules, as a [hook](hooks.md) does.
+
 ### Unsupported annotations
 
 Anything else refuses every value. Two examples are a plain protocol (one not marked

@@ -98,6 +98,8 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `with_adapters(MyResult())`, a `ResultBuilder` whose `build_result(**outputs)` makes the result | It gets the outputs as keywords | `with_result_builder(build)`: any callable, given the outputs as one dict, in the same order. `execute`'s type follows it ([Result builders](running.md#result-builders), Q19) |
 | `with_adapters(base.PandasDataFrameResult())` | Flattens frame outputs into `output.column` columns and logs index warnings | No pandas builder: `with_result_builder(pandas.DataFrame)`, or `polars.DataFrame`, builds by the library's own rules ([pandas and polars frames](running.md#pandas-and-polars-frames), Q89) |
 | Two result builders | `ValueError` at `build()`, naming the method | `ValueError` from the second `with_result_builder`, naming both (Q24) |
+| `with_adapters(lifecycle.FunctionInputOutputTypeChecker())` | Checks inputs and results by `isinstance` rules of its own: crashes on fixed tuples, parameterized generics and `NewType`s, and reports a failing node as returning `None` | `with_output_type_checks()` checks every result by the input checks' rules; a node that raises keeps its own error. Inputs and overrides are always checked ([Checking results](writing-nodes.md#checking-results), Q87) |
+| An `EdgeConnectionHook` whose `validate_input` (`do_validate_input`) decides an input's type | Replaces the default check, so it can refuse a correct value | `with_value_check(check)` adds to the default: `check(declared, value)` is asked only about a value the default refuses, and can only admit it. It applies to overrides, extracted fields, results and `validate` too ([Custom value checks](running.md#custom-value-checks), Q21) |
 | `raw_execute(final_vars, overrides, display_graph, inputs)` | Positional, with a `display_graph` flag | `raw_execute(final_vars, *, inputs, overrides)`, and `PreparedPlan.run_raw` (Q19) |
 
 </div>
@@ -128,6 +130,7 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | One driver shared between threads | Works, undocumented | A documented guarantee, stress-tested on the default and free-threaded builds ([Threads](running.md#threads)) |
 | A function passed where a module goes | An empty graph | `TypeError` (Q52) |
 | A hook that raises | The later hooks of the event are skipped; a raising before-graph hook skips after-graph too | Every hook sees the event, and after-run always fires (Q23) |
+| A node returning a value its annotation refuses | Never checked by default | Never checked by default either; `with_output_type_checks()` fails the node with a `TypeError` (Q87) |
 | A failing node and a raising after-node or after-graph hook | The hook's error, with the node's only in `__context__` | One `ExceptionGroup`, the node's error first (Q23) |
 | Hooks on a cache hit | Fire as if the node ran, for the hit and every node upstream of it, with nothing saying it was a hit | The hit reports once, with `cache` set to its outcome, `inputs=None` and the loaded value; nodes only hits need report nothing ([Hooks](hooks.md#with-a-cache), Q85) |
 | A sync hook on the async driver | Called when a node is scheduled, with `Task`s for its arguments and result; a failing node is reported a success | Called as the node starts and finishes, on the loop's thread, with real values and `ok=False` for a failure (Q86) |
@@ -179,7 +182,7 @@ value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](
 
 fnloom is pre-alpha. The core, the native path, `@parameterize` and its sugar, `@tag`, `@config`, `@extract_fields`,
 `@extract_columns`, `@exclude`, graph inspection, `validate`, graphs from plain functions, namespaces, type checks,
-result caching, the async driver, hooks and result builders are done. These Hamilton
+result caching, the async driver, hooks, result builders, output checks and custom value checks are done. These Hamilton
 features come next, roughly in this order:
 
 1. **Graph visualisation.**

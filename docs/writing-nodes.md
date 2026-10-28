@@ -337,6 +337,53 @@ It surfaces only where a check needs it:
     An unresolved annotation can't check a value. If a node's inputs should be checked, import the names its
     annotations use at run time, not only under `TYPE_CHECKING`.
 
+## Checking results
+
+By default a node's result isn't checked against its return annotation, as in Hamilton: the build checks that each
+edge's types agree, and a run checks inputs and overrides, but a node that returns the wrong type isn't caught until
+something downstream fails on it. `Builder.with_output_type_checks()` checks every result (Q87):
+
+```python
+# file: scores.py
+def score(raw: int) -> float:
+    """The raw score, as a float."""
+    return raw
+
+
+def best(scores: list[float]) -> float | None:
+    """The highest score, or None for no scores."""
+    return max(scores, default=None)
+```
+
+```python
+import scores
+
+fnloom.build(scores).execute(["score"], inputs={"raw": 3})
+# -> {'score': 3}
+checked = fnloom.Builder().with_modules(scores).with_output_type_checks()
+checked.build().execute(["score"], inputs={"raw": 3})
+# raises TypeError: score: returned int, expected float
+checked.with_numeric_widening().build().execute(["score"], inputs={"raw": 3})
+# -> {'score': 3}
+checked.build().execute(["best"], inputs={"scores": []})
+# -> {'best': None}
+```
+
+A result is checked by the same rules as an input: `None` only for a type that admits it (Q79), a fixed-length tuple
+by its length and items (Q80), `NewType`s and generics such as `Callable[[int], int]` or `frozenset[str]` by value,
+and with [deep checks and numeric widening](running.md#deep-checks-and-numeric-widening) when they're on. A mismatch
+is a `TypeError` raised as the node's own failure, so it carries the node's `in node 'score'` note, and a
+[hook](hooks.md)'s `after_node` gets `ok=False` with that error. A node that raises keeps its own error: its missing
+result is never checked. An `async def` node's awaited result is what's checked.
+
+The checks are made at build, around only the nodes that need one. A node returning `Any` or `object` gets no check
+and costs nothing, and without the setting no node is touched. An extracted field is checked either way
+([Extracting fields](#extracting-fields)); with the setting, its producer's result is checked too. A value loaded from
+a [cache](caching.md) isn't checked again. Hamilton's `FunctionInputOutputTypeChecker` does the same job, but crashes
+on fixed tuples, parameterized generics and `NewType`s, and reports a failing node as returning `None`.
+
+A [custom value check](running.md#custom-value-checks) applies to results too.
+
 ## Modules together
 
 `fnloom.build` takes several modules, and so does `Builder.with_modules`. Nodes are matched by name across all of

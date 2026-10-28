@@ -80,7 +80,7 @@ class Call(NamedTuple):
     args: tuple[tuple[str, str], ...]
 
 
-def _awaits(node: NodeDef) -> bool:
+def awaits(node: NodeDef) -> bool:
     """Whether calling `node`'s payload returns a coroutine to await.
 
     Read from the function as written, so a `functools.partial` over it, or a row's
@@ -98,7 +98,7 @@ def calls(nodes: Mapping[str, NodeDef], sync_nodes: SyncNodes) -> dict[str, Call
         kind: _Kind
         if _extract.is_generated(node):
             kind = "inline"
-        elif _awaits(node):
+        elif awaits(node):
             kind = "await"
         else:
             kind = sync_nodes

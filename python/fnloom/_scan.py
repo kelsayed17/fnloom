@@ -31,7 +31,14 @@ from fnloom._decorators import (
 )
 from fnloom._functions import FunctionSource, NodeSpec
 from fnloom._namespaces import qualified
-from fnloom._types import SHALLOW, Rules, Unresolved, opaque, resolved_hints
+from fnloom._types import (
+    SHALLOW,
+    Rules,
+    Unresolved,
+    ValueCheck,
+    opaque,
+    resolved_hints,
+)
 from fnloom._view import Param
 
 if TYPE_CHECKING:
@@ -1084,7 +1091,11 @@ def _resigned(fn: Callable[..., object]) -> bool:
     return hasattr(fn, "__wrapped__") or hasattr(fn, "__signature__")
 
 
-def resolve(nodes: Sequence[NodeDef], rules: Rules = SHALLOW) -> list[NodeDef]:
+def resolve(
+    nodes: Sequence[NodeDef],
+    rules: Rules = SHALLOW,
+    value_checks: tuple[ValueCheck, ...] = (),
+) -> list[NodeDef]:
     """Returns `nodes` with their annotations evaluated to values, as Hamilton does.
 
     `typing.get_type_hints` evaluates them: string annotations, and forward
@@ -1095,7 +1106,8 @@ def resolve(nodes: Sequence[NodeDef], rules: Rules = SHALLOW) -> list[NodeDef]:
     `Unresolved`, with its text as written, where Hamilton raises `NameError`
     (Q81). A PEP 695 alias's value, and a `TypeVar`'s bound and constraints, are
     read here too, so a run never evaluates one (Q44). `rules` are the value
-    checks' rules, which an extracted field's check follows.
+    checks' rules, which an extracted field's check follows, and it admits what
+    any of `value_checks` admits (Q21).
     """
     origins: dict[int, Callable[..., object]] = {}
     nodes_of: dict[int, NodeDef] = {}
@@ -1128,7 +1140,7 @@ def resolve(nodes: Sequence[NodeDef], rules: Rules = SHALLOW) -> list[NodeDef]:
             resolved.append(node)
         else:
             resolved.append(replace(node, params=params, returns=returns))
-    return _lowered(resolved, rules)
+    return _lowered(resolved, rules, value_checks)
 
 
 def _check_groups(
@@ -1179,7 +1191,9 @@ def _resolved_param(p: Param, hint: object) -> Param:
     return Param(p.name, p.binding, p.required, hint, p.slot)
 
 
-def _lowered(nodes: list[NodeDef], rules: Rules) -> list[NodeDef]:
+def _lowered(
+    nodes: list[NodeDef], rules: Rules, value_checks: tuple[ValueCheck, ...]
+) -> list[NodeDef]:
     """`nodes`, resolved, with each producer's field nodes lowered from its return.
 
     `ValueError` listing, sorted, every declared field type a return cannot feed,
@@ -1195,7 +1209,15 @@ def _lowered(nodes: list[NodeDef], rules: Rules) -> list[NodeDef]:
             lowered.append(node)
             continue
         try:
-            lowered.extend(_extract.lower(node, extraction, resolved=True, rules=rules))
+            lowered.extend(
+                _extract.lower(
+                    node,
+                    extraction,
+                    resolved=True,
+                    rules=rules,
+                    value_checks=value_checks,
+                )
+            )
         except ValueError as error:
             problems.append(str(error))
     if problems:
