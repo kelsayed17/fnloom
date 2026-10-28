@@ -390,7 +390,8 @@ driver.execute(["doubled", "tripled"], inputs={"points": 1})
 # -> {'doubled': 20, 'tripled': 30}
 ```
 
-A lambda has no name a node can take, so it needs `name=`:
+A node's name must be an identifier, so a dotted name such as `"ns.score"` is refused. A lambda has no name a node
+can take, so it needs `name=`:
 
 ```python
 import fnloom
@@ -402,14 +403,17 @@ fnloom.Builder().with_functions(lambda points: points)
 A few details:
 
 - `with_functions` is cumulative, like `with_modules`, and mixes with it: nodes are matched by name across both, and a
-  name defined twice, in a module and among the functions, is the usual duplicate error. The same function given twice
-  counts once.
+  name defined twice, in a module and among the functions, is the usual duplicate error. The same function counts
+  once, whether it's given twice or also found in a module given to the builder.
 - Only a Python function is accepted. For a `functools.partial`, give the function with `bind=`; wrap a callable
   instance in a `def`.
 - A function marked `@exclude` is refused rather than dropped, since you gave it on purpose. A module's `__all__` only
   decides what that module's scan finds, so it doesn't apply.
 - A driver built this way pickles when each function is importable by its module and qualified name: defined at the
   top of a module, or in a class there. A local function or a lambda is a `TypeError` naming it when pickled.
+  Loading finds each function again by that name, as pickle does: if the name now holds a different function, that
+  one is used, and if it holds nothing or something else, loading raises `TypeError: cannot load function 'm.f': …`.
+  A driver that is already running keeps the functions it was built with.
 
 ## One function, several nodes
 

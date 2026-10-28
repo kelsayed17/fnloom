@@ -2548,14 +2548,10 @@ def revenue() -> int:
 
 
 _Q72_SOURCE = """
-from hamilton.function_modifiers import tag
-
-
 def fa(x: int) -> int:
     return x + 1
 
 
-@tag(owner="data")
 def fb(fa: int) -> int:
     return fa * 2
 
@@ -2571,37 +2567,45 @@ def test_q72_graphs_from_functions() -> None:
     from hamilton import ad_hoc_utils  # noqa: PLC0415  # only this test needs it
 
     module = make_module("differential_q72_functions", _Q72_SOURCE)
-    # Hamilton: a copy of each function, in a new module registered in sys.modules.
+    # Hamilton: a copy of each function, sharing its code and globals, in a new
+    # module registered in sys.modules.
     before = set(sys.modules)
     temporary = ad_hoc_utils.create_temporary_module(
         module.fa, module.fb, module_name="differential_q72_temporary"
     )
     assert set(sys.modules) - before == {"differential_q72_temporary"}
+    assert sys.modules["differential_q72_temporary"] is temporary
     assert temporary.fa is not module.fa
+    assert temporary.fa.__code__ is module.fa.__code__
+    assert temporary.fa.__globals__ is module.fa.__globals__
     assert temporary.fb.__module__ == "differential_q72_temporary"
     assert module.fb.__module__ == "differential_q72_functions"
     hamilton = hamilton_driver.Builder().with_modules(temporary).build()
-    assert hamilton.execute(["fb"], inputs={"x": 1}) == {"fb": 4}
     assert hamilton.execute([temporary.fb], inputs={"x": 1}) == {"fb": 4}
-    # Decorations are copied with the function's `__dict__`.
-    (fb_variable,) = (v for v in hamilton.list_available_variables() if v.name == "fb")
-    assert fb_variable.tags["owner"] == "data"
-    assert fb_variable.tags["module"] == "differential_q72_temporary"
-    # The original function is not the node, so it is refused in `final_vars`.
+    # The node is the copy, so the original function is refused in `final_vars`.
     with pytest.raises(ValueError, match="not in a module given to the materializer"):
         hamilton.execute([module.fb], inputs={"x": 1})
-    with pytest.raises(ValueError, match="Module already exists"):
-        ad_hoc_utils.create_temporary_module(
-            module.fa, module_name="differential_q72_temporary"
-        )
+    # A private name is refused.
     with pytest.raises(ValueError, match="functions that start with '_' are reserved"):
         ad_hoc_utils.create_temporary_module(module._helper)  # noqa: SLF001  # the private function Hamilton refuses
-    # A lambda is accepted silently.
-    accepted = ad_hoc_utils.create_temporary_module(
-        lambda x: x, module_name="differential_q72_lambda"
+    # A lambda is accepted; unannotated, the build fails on its return annotation.
+    bare = ad_hoc_utils.create_temporary_module(
+        lambda x: x, module_name="differential_q72_bare_lambda"
     )
-    assert isinstance(accepted, types.ModuleType)
-    # fnloom: the functions themselves, nothing registered, private names welcome.
+    with pytest.raises(ValueError, match="Missing type hint for return value"):
+        hamilton_driver.Builder().with_modules(bare).build()
+    # Annotated, its node is named `<lambda>`.
+    annotated = cast("Any", lambda x: x)
+    annotated.__annotations__ = {"x": int, "return": int}
+    named_lambda = ad_hoc_utils.create_temporary_module(
+        annotated, module_name="differential_q72_lambda"
+    )
+    lambda_driver = hamilton_driver.Builder().with_modules(named_lambda).build()
+    assert {v.name for v in lambda_driver.list_available_variables()} == {
+        "<lambda>",
+        "x",
+    }
+    # fnloom: the functions themselves, nothing copied or registered.
     before = set(sys.modules)
     driver = (
         fnloom.Builder()
@@ -2612,19 +2616,17 @@ def test_q72_graphs_from_functions() -> None:
     assert driver.modules == ()
     assert driver.nodes["fb"].origin is module.fb
     assert driver.nodes["fb"].module == "differential_q72_functions"
+    # The original in `final_vars` means its node, and a private name is accepted.
     assert driver.execute([module.fb, "_helper"], inputs={"x": 1}) == {
         "fb": 4,
         "_helper": 1,
     }
-    # A lambda needs a name.
-    with pytest.raises(ValueError, match="has no name a node can take"):
-        fnloom.Builder().with_functions(lambda x: x)
-    named = cast("Any", lambda x: x)
-    named.__annotations__ = {"x": int, "return": int}
-    spec = fnloom.node(named, name="same")
-    assert fnloom.Builder().with_functions(spec).build().execute(
-        ["same"], inputs={"x": 5}
-    ) == {"same": 5}
+    # A lambda is refused, annotated or not, unless named.
+    for lam in (lambda x: x, annotated):
+        with pytest.raises(ValueError, match="has no name a node can take"):
+            fnloom.Builder().with_functions(lam)
+    named = fnloom.Builder().with_functions(fnloom.node(annotated, name="same"))
+    assert named.build().execute(["same"], inputs={"x": 5}) == {"same": 5}
 
 
 _Q73_SOURCE = """

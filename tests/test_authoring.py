@@ -4,6 +4,7 @@ import asyncio
 import copy
 import functools
 import pickle
+import re
 import sys
 from typing import TYPE_CHECKING, Any, TypedDict, cast
 
@@ -918,8 +919,13 @@ def test_node_names_and_binds_a_callable() -> None:
         fnloom.node(scaled, bind=cast("Any", [("value", fnloom.value(1))]))
     with pytest.raises(TypeError, match=r"^node name must be a str, got int$"):
         fnloom.node(scaled, name=cast("Any", 3))
-    with pytest.raises(ValueError, match=r"^node name must not be empty$"):
-        fnloom.node(scaled, name="")
+    # A node name is an identifier: a dotted name is a namespace's (Q72).
+    for bad in ("", "a b", "ns.p", "1st"):
+        with pytest.raises(
+            ValueError,
+            match=rf"^node name {re.escape(repr(bad))} is not an identifier$",
+        ):
+            fnloom.node(scaled, name=bad)
     # One node: a parameterized function or a config variant is given as it is.
     with pytest.raises(ValueError, match=r"^node\(\) makes one node, but function"):
         fnloom.node(module.above, name="x")
@@ -1029,12 +1035,40 @@ def test_functions_and_modules_mix_and_clash_by_name() -> None:
     with pytest.raises(
         ValueError,
         match=(
-            r"^node 'doubled' is defined in both "
-            r"'auth_functions_other' and 'auth_functions_mix'$"
+            r"^node 'doubled' is defined in both 'auth_functions_other' and "
+            r"'auth_functions_mix' \(given to with_functions\)$"
         ),
     ):
         fnloom.Builder().with_modules(other).with_functions(module.doubled).build()
-    # The same function, in its module and given again: two definitions too.
+    # The same function, in its module and given again, counts once.
+    again = fnloom.Builder().with_modules(other).with_functions(other.tripled).build()
+    assert again.node_names() == ["doubled", "tripled", "x"]
+    assert again.nodes["tripled"].origin is other.tripled
+    # So does a variant, and a parameterized function, given before their module.
+    variants = (
+        fnloom.Builder()
+        .with_config({"region": "eu"})
+        .with_functions(module.price__eu, module.above)
+        .with_modules(module)
+        .build()
+    )
+    assert variants.node_names() == [
+        "base",
+        "doubled",
+        "high",
+        "low",
+        "price",
+        "x",
+    ]
+    assert variants.execute(["price"], inputs={"x": 1}) == {"price": 2.4}
+    # Another function of the same name, in the same module, still clashes.
+    impostor = make_module(
+        "auth_functions_other",
+        """
+        def tripled(doubled: int) -> int:
+            return doubled * 4
+        """,
+    )
     with pytest.raises(
         ValueError,
         match=(
@@ -1042,7 +1076,7 @@ def test_functions_and_modules_mix_and_clash_by_name() -> None:
             r"'tripled' and by function 'tripled' given to with_functions$"
         ),
     ):
-        fnloom.Builder().with_modules(other).with_functions(other.tripled).build()
+        fnloom.Builder().with_modules(other).with_functions(impostor.tripled).build()
     # Two specs of one name, every clash listed, sorted.
     with pytest.raises(ValueError, match=r"^node 'b2' is defined twice") as twice:
         (
@@ -1100,3 +1134,41 @@ def test_cache_keys_use_the_function_module() -> None:
     elsewhere = fnloom.Builder().with_functions(copied).with_cache(store).build()
     assert elsewhere.nodes["base"].module == "temporary_module_copy"
     assert elsewhere.explain_cache(["base"], inputs={"x": 1})["base"].status == "miss"
+
+
+def test_a_node_spec_made_directly_is_checked_as_node_checks_it() -> None:
+    """The `NodeSpec` constructor makes every check `node()` does, and copies `bind`."""
+    module = make_module("auth_functions_spec", _SOURCES)
+
+    def scaled(value: int, factor: int = 2) -> int:
+        return value * factor
+
+    with pytest.raises(
+        TypeError,
+        match=(
+            r"^expected source\(\.\.\.\) or value\(\.\.\.\) for: "
+            r"parameter 'value' \(int\)$"
+        ),
+    ):
+        fnloom.NodeSpec(scaled, "s", cast("Any", {"value": 3}))
+    with pytest.raises(
+        ValueError,
+        match=r"^the function does not have the parameters named by: parameter 'zz'$",
+    ):
+        fnloom.NodeSpec(scaled, "s", {"zz": fnloom.value(1)})
+    with pytest.raises(ValueError, match=r"^node name '' is not an identifier$"):
+        fnloom.NodeSpec(scaled, "", {})
+    with pytest.raises(ValueError, match=r"has no name a node can take"):
+        fnloom.NodeSpec(cast("Any", lambda x: x), "<lambda>")
+    with pytest.raises(ValueError, match=r"is parameterized"):
+        fnloom.NodeSpec(module.above, "a")
+    # `bind` is copied: changing the given mapping later changes nothing.
+    given: dict[str, fnloom.Source | fnloom.Value] = {"factor": fnloom.value(3)}
+    spec = fnloom.NodeSpec(scaled, "s", given)
+    builder = fnloom.Builder().with_functions(spec)
+    given["value"] = fnloom.source("nope")
+    assert dict(spec.bind) == {"factor": fnloom.value(3)}
+    driver = builder.build()
+    assert driver.node_names() == ["s", "value"]
+    assert driver.execute(["s"], inputs={"value": 2}) == {"s": 6}
+    assert fnloom.NodeSpec(scaled, "plain").bind == {}

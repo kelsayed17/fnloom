@@ -372,3 +372,42 @@ def test_a_driver_of_functions_runs_in_a_process_pool() -> None:
     with ProcessPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(_execute_tenfold, [driver] * len(many), many))
     assert results == [{"tenfold": (2 * n + 1) * 10} for n in range(3)]
+
+
+def test_loading_a_function_that_moved_names_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every way a function fails to load is one `cannot load function` message."""
+    data = pickle.dumps(Builder().with_functions(picklable_functions.doubled))
+    spec = pickle.dumps(fnloom.node(picklable_functions.doubled, name="d"))
+    shown = "cannot load function 'picklable_functions.doubled': "
+    with monkeypatch.context() as patch:
+        patch.delattr(picklable_functions, "doubled")
+        for pickled in (data, spec):
+            with pytest.raises(TypeError) as missing:
+                pickle.loads(pickled)  # noqa: S301  # our own pickle
+            assert str(missing.value) == (
+                f"{shown}'picklable_functions' has no 'doubled'"
+            )
+    with monkeypatch.context() as patch:
+        patch.setattr(picklable_functions, "doubled", int)
+        with pytest.raises(TypeError) as not_a_function:
+            pickle.loads(data)  # noqa: S301  # our own pickle
+        assert str(not_a_function.value) == (f"{shown}class 'int' is not a function")
+    with monkeypatch.context() as patch:
+        patch.setitem(sys.modules, "picklable_functions", None)
+        with pytest.raises(TypeError) as unimportable:
+            pickle.loads(data)  # noqa: S301  # our own pickle
+        assert str(unimportable.value) == (
+            f"{shown}module 'picklable_functions' does not import"
+        )
+
+    # A name rebound to another function is used as found, as pickle does.
+    def rebound(a: int) -> int:
+        return a * 100
+
+    rebound.__name__ = "doubled"
+    with monkeypatch.context() as patch:
+        patch.setattr(picklable_functions, "doubled", rebound)
+        loaded = cast("Builder", pickle.loads(data))  # noqa: S301  # our own pickle
+        assert loaded.build().execute(["doubled"], inputs={"a": 2}) == {"doubled": 200}

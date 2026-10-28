@@ -112,6 +112,20 @@ without comparing consumers; an undocumented module-level function skips the sea
 an input's `NodeView` is made when `Driver.nodes` first reads it, while the input checks read each input's type
 without making its view.
 
+### Building from functions
+
+`Builder.with_functions` builds the same graph as `with_modules` from the module's functions given one by one (Q72).
+`benches/builds.py` times both, and Hamilton's nearest way, `ad_hoc_utils.create_temporary_module` and a build of it, on
+a release build, median of nine builds each, interleaved in one process (ms):
+
+| shape | n | `with_modules` | `with_functions` | Hamilton, temporary module |
+| --- | ---: | ---: | ---: | ---: |
+| chain | 1,000 | 5.428 | 5.914 | 16.2 |
+| rows | 1,000 | 4.614 | 4.651 | 50.9 |
+
+Measured on the machine above, on 2026-10-28. Giving the functions costs under a tenth more than scanning the module:
+each function is checked once, when it is given, and then scanned as a module's function is.
+
 ### Per run
 
 A prepared plan run once per incoming record (a market bar, say) pays its per-run overhead every time. Microseconds

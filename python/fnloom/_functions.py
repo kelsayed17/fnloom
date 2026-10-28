@@ -13,7 +13,7 @@ import inspect
 import sys
 import types
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any, Final, override
 
@@ -24,19 +24,26 @@ from fnloom._decorators import Source, Value, decorations
 class NodeSpec:
     """One node made from a function, named and bound without decorating it.
 
-    Made by `fnloom.node`, given to `Builder.with_functions`. Two specs are the
+    Made by `fnloom.node`, or directly, given to `Builder.with_functions`. Made
+    either way, it is checked as `node` describes, and `bind` is copied and kept
+    read-only, so changing the mapping given has no effect. Two specs are the
     same only when they are one object. A spec pickles as its parts: the function
     by its module and qualified name, the name, and the bindings.
 
     Attributes:
         fn: The function, as written: never copied or changed.
-        name: The node's name.
+        name: The node's name, an identifier.
         bind: Each bound parameter's `source(...)` or `value(...)`, read-only.
     """
 
     fn: Callable[..., object]
     name: str
-    bind: Mapping[str, Source | Value]
+    bind: Mapping[str, Source | Value] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Checks the parts, as `node` describes; freezes a copy of `bind`."""
+        _check_spec(self.fn, self.name, self.bind)
+        object.__setattr__(self, "bind", MappingProxyType(dict(self.bind)))
 
     @override
     def __reduce__(
@@ -176,11 +183,12 @@ def node(
 ) -> NodeSpec:
     """One node from `fn`, named and bound without decorating it (Q72).
 
-    The node is named `name`, or `fn.__name__`; a lambda, or a function whose name
-    is no identifier, needs `name=`. `bind` maps parameters to `source(...)` or
-    `value(...)`, as a `@parameterize` row does, and is checked the same way. `fn`
-    is not changed, so one function can make several nodes, each with its own
-    spec, and its other decorations, such as `@tag` and `@cache`, apply.
+    The node is named `name`, or `fn.__name__`, which must be an identifier, so a
+    dotted name, which namespaces use, is refused, and a lambda needs `name=`.
+    `bind` maps parameters to `source(...)` or `value(...)`, as a `@parameterize`
+    row does, and is checked the same way. `fn` is not changed, so one function
+    can make several nodes, each with its own spec, and its other decorations,
+    such as `@tag` and `@cache`, apply.
 
     Give the result to `Builder.with_functions`.
 
@@ -188,38 +196,39 @@ def node(
         TypeError: `fn` is not a Python function (a `functools.partial`, a callable
             instance, a class), `name` is not a `str`, `bind` is not a mapping or
             binds something other than `source` or `value`.
-        ValueError: `fn` needs a name, `name` is empty, `bind` names a parameter
+        ValueError: `fn` needs a name, `name` is no identifier, `bind` names a parameter
             `fn` does not have, or `fn` is marked `@exclude`, parameterized or a
             `@config` variant. Every problem is listed in one message, sorted.
     """
-    # Typed as `object`: a caller may pass anything, whatever the hints say.
-    given: object = fn
-    given_name: object = name
-    given_bind: object = {} if bind is None else bind
+    chosen = name if name is not None else getattr(fn, "__name__", "")
+    return NodeSpec(fn, chosen, {} if bind is None else bind)
+
+
+def _check_spec(fn: object, name: object, bind: object) -> None:
+    """One error naming every problem with a spec's parts; see `node`."""
     type_lines: list[str] = []
     value_lines: list[str] = []
-    if (problem := _not_a_function(given)) is not None:
+    if (problem := _not_a_function(fn)) is not None:
         type_lines.append(problem)
-    if given_name is not None and not isinstance(given_name, str):
-        type_lines.append(f"node name must be a str, got {type(given_name).__name__}")
-    elif given_name == "":
-        value_lines.append("node name must not be empty")
-    if not isinstance(given_bind, Mapping):
-        type_lines.append(f"bind must be a mapping, got {type(given_bind).__name__}")
-    if problem is None:
-        if given_name is None and not _usable_name(fn):
-            value_lines.append(
-                f"function {_shown(fn)!r} has no name a node can take: "
-                "give it one with node(fn, name=...)"
-            )
+    if not isinstance(name, str):
+        type_lines.append(f"node name must be a str, got {type(name).__name__}")
+    if not isinstance(bind, Mapping):
+        type_lines.append(f"bind must be a mapping, got {type(bind).__name__}")
+    if isinstance(fn, types.FunctionType):
+        if isinstance(name, str) and not name.isidentifier():
+            if name == fn.__name__:
+                value_lines.append(
+                    f"function {_shown(fn)!r} has no name a node can take: "
+                    "give it one with node(fn, name=...)"
+                )
+            else:
+                value_lines.append(f"node name {name!r} is not an identifier")
         value_lines.extend(_decoration_problems(fn, spec=True))
-        if isinstance(given_bind, Mapping):
-            wrong, unknown = _binding_problems(fn, given_bind)
+        if isinstance(bind, Mapping):
+            wrong, unknown = _binding_problems(fn, bind)
             type_lines.extend(wrong)
             value_lines.extend(unknown)
     _raise(type_lines, value_lines)
-    chosen = name if name is not None else str(getattr(fn, "__name__", ""))
-    return NodeSpec(fn, chosen, MappingProxyType(dict(bind or {})))
 
 
 def checked_functions(items: Sequence[object]) -> tuple[FunctionSource, ...]:
@@ -290,13 +299,27 @@ def reference(fn: Callable[..., object]) -> tuple[str, str]:
 
 
 def resolved(ref: tuple[str, str]) -> Callable[..., object]:
-    """The function a `reference` names, imported again."""
+    """The function a `reference` names, imported again, as pickle finds one.
+
+    Whatever the name holds when loading is used: a function rebound to another
+    since pickling is the new one. `TypeError: cannot load function 'm.q': ...`
+    when the module does not import, the name is not there, or it holds no
+    function.
+    """
     module, qualname = ref
-    found: object = importlib.import_module(module)
+    shown = f"{module}.{qualname}"
+    try:
+        found: object = importlib.import_module(module)
+    except ImportError as error:
+        msg = f"cannot load function {shown!r}: module {module!r} does not import"
+        raise TypeError(msg) from error
     for part in qualname.split("."):
-        found = getattr(found, part)
-    if not callable(found):
-        msg = f"{module}.{qualname} is no longer a function"
+        found = getattr(found, part, _ABSENT)
+        if found is _ABSENT:
+            msg = f"cannot load function {shown!r}: {module!r} has no {qualname!r}"
+            raise TypeError(msg)
+    if not isinstance(found, types.FunctionType):
+        msg = f"cannot load function {shown!r}: {_not_a_function(found)}"
         raise TypeError(msg)
     return found
 

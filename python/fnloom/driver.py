@@ -1400,8 +1400,9 @@ class Builder:
         Nothing is copied and no module is made or registered: a node's module is
         its function's own `__module__`, and `Driver.modules` lists only modules.
         Cumulative and ordered, after the modules; the same function or spec given
-        twice counts once. A node name a module or another item also defines is
-        the build's usual duplicate error.
+        twice counts once, and so does a function a module given to this builder
+        also holds, plain, parameterized or a variant. A node name a module or
+        another item also defines is the build's usual duplicate error.
 
         Raises one error naming every item that is refused, sorted: a `TypeError`
         when some item is no Python function or spec (a module, a class, a

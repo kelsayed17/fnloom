@@ -5,7 +5,7 @@ import sys
 from typing import TYPE_CHECKING
 
 import pytest
-from benches import async_
+from benches import async_, builds
 from benches.generate import (
     discard,
     generated,
@@ -149,3 +149,15 @@ def test_async_benchmark_samples_every_runtime(
     assert taken.error is None
     assert taken.first_ms is not None
     assert taken.run_ms is not None
+
+
+def test_builds_benchmark_times_every_way_of_building() -> None:
+    """The functions benchmark gives one row per way, each with a positive time."""
+    rows = builds.measure("chain", 20)
+    assert [row.build for row in rows] == [
+        "fnloom modules",
+        "fnloom functions",
+        "hamilton temporary module",
+    ]
+    assert all(row.build_ms > 0 for row in rows)
+    assert not [name for name in sys.modules if name.startswith("bench_temporary_")]

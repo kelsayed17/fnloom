@@ -464,9 +464,13 @@ def _duplicate(
     first: NodeDef, second: NodeDef, given: AbstractSet[int] = frozenset()
 ) -> str:
     if first.module != second.module:
+        marks = [
+            " (given to with_functions)" if id(node) in given else ""
+            for node in (first, second)
+        ]
         return (
             f"node {first.name!r} is defined in both "
-            f"{first.module!r} and {second.module!r}"
+            f"{first.module!r}{marks[0]} and {second.module!r}{marks[1]}"
         )
     return (
         f"node {first.name!r} is defined twice in {first.module!r}: "
@@ -578,17 +582,25 @@ def collect(
     return scan(modules, config, awaits=awaits, functions=functions).nodes
 
 
-def _given(functions: Sequence[FunctionSource]) -> list[Found | NodeSpec]:
+def _given(
+    functions: Sequence[FunctionSource], found: Sequence[Found]
+) -> list[Found | NodeSpec]:
     """The node sources given to `with_functions`, each once, in the order given.
 
     A function is found under its own name, in its own module; a spec is kept
-    as it is. Functions and specs hash by identity, so a repeat is dropped.
+    as it is. Functions and specs hash by identity, so a repeat is dropped, and
+    so is a function a module given to the same builder already has: one
+    function object counts once, wherever it was found.
     """
+    if not functions:
+        return []
+    known = {id(fn) for _, _, fn in found}
     return [
         item
         if isinstance(item, NodeSpec)
         else (str(item.__module__), str(getattr(item, "__name__", "")), item)
         for item in dict.fromkeys(functions)
+        if isinstance(item, NodeSpec) or id(item) not in known
     ]
 
 
@@ -609,7 +621,7 @@ def scan(
     `fnloom.node` spec is never a variant.
     """
     found, configured, left_out, variants = _functions(modules)
-    given = _given(functions)
+    given = _given(functions, found)
     entries: list[Found | NodeSpec] = [*found, *given]
     unmatched: dict[str, str] = {}
     if configured or any(
