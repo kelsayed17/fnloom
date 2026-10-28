@@ -14,7 +14,7 @@ from collections.abc import Set as AbstractSet
 from types import MappingProxyType, ModuleType
 from typing import Any, Literal, NoReturn, Protocol, TypedDict, Unpack, override
 
-from fnloom import _async, _core, _types
+from fnloom import _async, _core, _hooks, _types
 from fnloom._caching import Cache, CacheOutcome, CacheRun
 from fnloom._decorators import Source
 from fnloom._defaults import default_problems
@@ -29,6 +29,7 @@ from fnloom._functions import (
     references,
     unimportable,
 )
+from fnloom._hooks import Hook
 from fnloom._namespaces import checked_namespace
 from fnloom._requests import ABSENT, requested, suggest
 from fnloom._requests import output_names as _requested_names
@@ -60,9 +61,16 @@ class _Runnable(Protocol):
     """What a prepared plan runs: a native plan, or a cached run over one."""
 
     def run(
-        self, inputs: dict[str, Any], overrides: dict[str, Any], /
+        self,
+        inputs: dict[str, Any],
+        overrides: dict[str, Any],
+        observers: Sequence[_core.ObserverBase] = (),
+        /,
     ) -> dict[str, object]:
-        """Runs with checked values; exactly the outputs, keyed by name, sorted."""
+        """Runs with checked values; exactly the outputs, keyed by name, sorted.
+
+        `observers` see each node the core computes.
+        """
         ...
 
 
@@ -363,21 +371,91 @@ class PreparedPlan:
             given_inputs.keys() != self._input_names
             or given_overrides.keys() != self._override_names
         ):
-            problems = [
-                _difference(kind, prepared, frozenset(given))
-                for kind, prepared, given in (
-                    ("inputs", self._input_names, given_inputs),
-                    ("overrides", self._override_names, given_overrides),
-                )
-                if prepared != frozenset(given)
-            ]
-            raise ValueError("; ".join(problems))
+            self._refuse_names(given_inputs, given_overrides)
         if self._input_checks or self._override_checks:
             mismatches = _mismatches(self._input_checks, given_inputs)
             mismatches += _mismatches(self._override_checks, given_overrides)
             if mismatches:
                 _raise_mismatches(mismatches)
         return given_inputs, given_overrides
+
+    def _refuse_names(
+        self, given_inputs: dict[str, Any], given_overrides: dict[str, Any]
+    ) -> NoReturn:
+        """Raises the `ValueError` for input or override names that differ."""
+        problems = [
+            _difference(kind, prepared, frozenset(given))
+            for kind, prepared, given in (
+                ("inputs", self._input_names, given_inputs),
+                ("overrides", self._override_names, given_overrides),
+            )
+            if prepared != frozenset(given)
+        ]
+        raise ValueError("; ".join(problems))
+
+
+class _HookedPlan(PreparedPlan):
+    """A `PreparedPlan` of a driver with hooks: its runs fire the hooks' events.
+
+    Chosen when the plan is compiled, so a driver with no hooks never runs this.
+    A run checks its names first, which fires nothing, then fires `before_run`,
+    checks the values, runs, and fires `after_run` (decision 4).
+    """
+
+    def __init__(  # noqa: PLR0913  # the prepared plan's parts, and its hooks
+        self,
+        plan: _Runnable,
+        outputs: Sequence[str],
+        input_names: frozenset[str],
+        override_names: frozenset[str],
+        checks: tuple[Sequence[_Check], Sequence[_Check]],
+        *,
+        hooks: _hooks.Hooks,
+        views: _hooks.Views,
+    ) -> None:
+        """A prepared plan whose runs call `hooks`, reporting the nodes of `views`."""
+        super().__init__(plan, outputs, input_names, override_names, checks)
+        self._hooks = hooks
+        self._views = views
+
+    @override
+    def run(
+        self,
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Runs the plan as `PreparedPlan.run` does, firing the hooks' events."""
+        given_inputs = inputs if type(inputs) is dict else _as_dict(inputs)
+        given_overrides = overrides if type(overrides) is dict else _as_dict(overrides)
+        if (
+            given_inputs.keys() != self._input_names
+            or given_overrides.keys() != self._override_names
+        ):
+            self._refuse_names(given_inputs, given_overrides)
+        dispatch = _hooks.Dispatch(self._hooks, self._views, None)
+        error: BaseException | None = None
+        try:
+            dispatch.start(
+                self._outputs, given_inputs, given_overrides, self._views.names
+            )
+            if self._input_checks or self._override_checks:
+                mismatches = _mismatches(self._input_checks, given_inputs)
+                mismatches += _mismatches(self._override_checks, given_overrides)
+                if mismatches:
+                    _raise_mismatches(mismatches)
+            values = self._plan.run(given_inputs, given_overrides, dispatch.observers())
+        except BaseException as caught:  # noqa: BLE001  # raised by `end`, after `after_run`
+            error = caught
+        else:
+            if not self._sorted:
+                values = {name: values[name] for name in self._outputs}
+            # Outside the `except`, so nothing `end` raises gets a `__context__`.
+            dispatch.end(True, None, values)  # noqa: FBT003  # the dispatcher's interface
+            return values
+        dispatch.end(False, error, None)  # noqa: FBT003  # the dispatcher's interface
+        # `end` raises the error itself, or the errors that replace it.
+        raise error
 
 
 class Driver:
@@ -406,6 +484,7 @@ class Driver:
         cache: Cache | None = None,
         config: Mapping[str, object] | None = None,
         rules: _types.Rules = _types.SHALLOW,
+        hooks: Sequence[Hook] = (),
     ) -> None:
         """Wraps a native graph; `Builder` is the way to make one from modules.
 
@@ -414,6 +493,7 @@ class Driver:
         effect without `check_inputs`), and `strict_overrides` refuses an override
         of an input that is not supplied (Q75). `rules` are the opt-in rules the
         input and override checks follow: deep checks and numeric widening.
+        `hooks` watch every run, checked as `Builder.with_hooks` checks them.
         """
         self._graph = graph
         # The modules it was built from, each once: `Builder` sets them.
@@ -426,6 +506,10 @@ class Driver:
         self._strict_overrides = strict_overrides
         self._rules = rules
         self._cache = cache
+        self._hook_list = _hooks.checked(hooks)
+        # The methods the runs call; `None` when no hook overrides any, so a
+        # driver with none compiles plain plans.
+        self._hooks = _hooks.Hooks.of(self._hook_list)
         self._config = (
             config
             if isinstance(config, MappingProxyType)
@@ -492,12 +576,18 @@ class Driver:
             cache=self._cache,
             config=self._config,
             rules=self._rules,
+            hooks=self._hook_list,
         )
         copied._modules = self._modules
         copied._builder = self._builder
         copied._unmatched = self._unmatched
         copied._left_out = self._left_out
         return copied
+
+    @property
+    def hooks(self) -> tuple[Hook, ...]:
+        """The hooks watching this driver's runs, in the order they are called."""
+        return self._hook_list
 
     @property
     def config(self) -> Mapping[str, object]:
@@ -582,9 +672,26 @@ class Driver:
             runnable = CacheRun(
                 self._cache, self._graph, plan, outputs, input_names, override_names
             )
-        prepared = PreparedPlan(runnable, outputs, input_names, override_names, checks)
+        prepared = (
+            PreparedPlan(runnable, outputs, input_names, override_names, checks)
+            if self._hooks is None
+            else _HookedPlan(
+                runnable,
+                outputs,
+                input_names,
+                override_names,
+                checks,
+                hooks=self._hooks,
+                views=self._reported(plan),
+            )
+        )
         prepared._driver = self  # noqa: SLF001  # the driver's own plan
         return prepared
+
+    def _reported(self, plan: _core.Plan) -> _hooks.Views:
+        """The nodes `plan` computes, in the order it computes them, for its hooks."""
+        computed = [node for node, action in plan.steps() if action == "compute"]
+        return _hooks.Views(computed, self._nodes)
 
     def _checks(
         self, plan: _core.Plan, override_names: frozenset[str]
@@ -838,8 +945,41 @@ class Driver:
         `TypeError` when it makes several nodes, as a `@parameterize` function does,
         and `ValueError` when it makes none.
         """
-        plan = self.prepare(final_vars, inputs=inputs, overrides=overrides)
+        try:
+            plan = self.prepare(final_vars, inputs=inputs, overrides=overrides)
+        except ValueError as error:
+            # A value check of the request, not its shape: hooks see it (decision 4).
+            if self._hooks is None or not str(error).startswith(_UNSUPPLIED):
+                raise
+            self._refuse_after_hooks(self._hooks, final_vars, inputs, overrides, error)
         return plan.run(inputs=inputs, overrides=overrides)
+
+    def _refuse_after_hooks(
+        self,
+        hooks: _hooks.Hooks,
+        final_vars: Sequence[str | Callable[..., object]],
+        inputs: Mapping[str, object] | None,
+        overrides: Mapping[str, object] | None,
+        error: ValueError,
+    ) -> NoReturn:
+        """Fires a run that `error`, a missing or refused input, stops at its checks.
+
+        The request's shape is good, so its plan only lacks a value: as Hamilton
+        does, `before_run` fires, then `after_run` with the error. No node is
+        reported, since none will run.
+        """
+        outputs = tuple(
+            dict.fromkeys(_requested_names(final_vars, self._nodes, self._unmatched))
+        )
+        dispatch = _hooks.Dispatch(hooks, _hooks.Views((), self._nodes), None)
+        try:
+            dispatch.start(outputs, _as_dict(inputs), _as_dict(overrides), ())
+        except BaseException as caught:  # noqa: BLE001  # raised by `end`, after `after_run`
+            failure: BaseException = caught
+        else:
+            failure = error
+        dispatch.end(False, failure, None)  # noqa: FBT003  # the dispatcher's interface
+        raise failure
 
     def explain_cache(
         self,
@@ -1056,6 +1196,15 @@ class AsyncDriver:
         return copied
 
     @property
+    def hooks(self) -> tuple[Hook, ...]:
+        """The hooks given to the builder; see `Driver.hooks`.
+
+        Kept and carried, but not yet called: an `AsyncDriver`'s runs fire no
+        events.
+        """
+        return self._driver.hooks
+
+    @property
     def config(self) -> Mapping[str, object]:
         """The config the graph was built with; see `Driver.config`."""
         return self._driver.config
@@ -1182,6 +1331,9 @@ def _prepare_async_again(driver: AsyncDriver, key: _PlanKey) -> AsyncPreparedPla
 
 # How the core's missing-input error starts.
 _MISSING = "missing inputs: "
+# How the errors for an input a request lacks start: one missing, or an override
+# refused under strict overrides (Q75), which is Hamilton's missing input.
+_UNSUPPLIED = (_MISSING, "override of input ")
 
 
 def _unknown(kind: str, names: Sequence[str], candidates: Sequence[str]) -> str:
@@ -1414,10 +1566,15 @@ class _Changes(TypedDict, total=False):
     declared_inputs: tuple[str, ...]
     deep_type_checks: bool
     numeric_widening: bool
+    hooks: tuple[Hook, ...]
 
 
 class _Settings(TypedDict):
-    """A builder's switches, which pickling and copying carry as one value."""
+    """A builder's switches, which pickling and copying carry as one value.
+
+    Hooks pickle by Python's own rules: an unpicklable hook makes the builder,
+    and its drivers, unpicklable.
+    """
 
     check_inputs: bool
     check_overrides: bool
@@ -1425,6 +1582,7 @@ class _Settings(TypedDict):
     declared_inputs: tuple[str, ...]
     deep_type_checks: bool
     numeric_widening: bool
+    hooks: tuple[Hook, ...]
 
 
 class Builder:
@@ -1450,6 +1608,7 @@ class Builder:
         numeric_widening: bool = False,
         store: CacheStore | None = None,
         config: Mapping[str, object] | None = None,
+        hooks: Sequence[Hook] = (),
     ) -> None:
         """Starts with the given modules (none by default), checking input types.
 
@@ -1461,10 +1620,11 @@ class Builder:
         `config`, copied, selects `@config.when*` variants (see `with_config`).
         The other settings are those of `without_input_type_checks`,
         `without_override_type_checks`, `with_strict_overrides`,
-        `with_declared_inputs`, `with_deep_type_checks` and
-        `with_numeric_widening`. `TypeError` when an item of `modules` is not a
-        module, or of `declared_inputs` is not a `str`; see `with_functions` for
-        the errors `functions` raises.
+        `with_declared_inputs`, `with_deep_type_checks`,
+        `with_numeric_widening` and `with_hooks`. `TypeError` when an item of
+        `modules` is not a module, or of `declared_inputs` is not a `str`; see
+        `with_functions` for the errors `functions` raises, and `with_hooks` for
+        those of `hooks`.
         """
         self._modules = _checked_modules(modules)
         self._namespaces = _checked_namespaces(namespaces, len(self._modules))
@@ -1474,6 +1634,7 @@ class Builder:
         self._strict_overrides = strict_overrides
         self._declared_inputs = _checked_names(declared_inputs)
         self._rules = _types.Rules(deep=deep_type_checks, widen=numeric_widening)
+        self._hooks = _hooks.checked(hooks)
         self._store = store
         # Never changed once made: `with_config` makes a new dict.
         self._config: dict[str, object] = (
@@ -1525,6 +1686,7 @@ class Builder:
             "declared_inputs": self._declared_inputs,
             "deep_type_checks": self._rules.deep,
             "numeric_widening": self._rules.widen,
+            "hooks": self._hooks,
         }
 
     def _with(
@@ -1677,6 +1839,19 @@ class Builder:
         """
         return self._with(numeric_widening=True)
 
+    def with_hooks(self, *hooks: Hook) -> Builder:
+        """Returns a new builder whose driver calls `hooks` on every run (Q84).
+
+        Cumulative: the hooks are added after this builder's. Every event calls
+        the hooks in the order given, after-events too, and only the methods a
+        hook overrides. Checked here: an object that is no `fnloom.Hook`, or an
+        overridden method that can't take one positional event or is an `async
+        def`, is a `TypeError` naming each; the same hook given twice is a
+        `ValueError`. See the hooks guide for the events and for a hook that
+        raises (Q23). An `AsyncDriver` keeps the hooks but doesn't call them yet.
+        """
+        return self._with(hooks=(*self._hooks, *hooks))
+
     def with_cache(self, store: CacheStore) -> Builder:
         """Returns a new builder whose driver caches every node's result in `store`.
 
@@ -1801,6 +1976,7 @@ class Builder:
             cache=cache,
             config=MappingProxyType(self._config),
             rules=self._rules,
+            hooks=self._hooks,
         )
         driver._modules = tuple(dict.fromkeys(self._modules))  # noqa: SLF001  # the builder's own driver
         driver._unmatched = unmatched  # noqa: SLF001  # the builder's own driver

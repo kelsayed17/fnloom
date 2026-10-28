@@ -179,6 +179,17 @@ Your function's own exception reaches you unchanged, with a note naming the node
 [Running a graph](running.md#exceptions-from-your-functions)). Lineage queries raise
 `ValueError: unknown nodes: ...` for a name that isn't in the graph.
 
+## When a hook raises
+
+A [hook](hooks.md) that raises stops the run once every hook has seen the event. One error is raised as itself.
+Several are one `ExceptionGroup`, and a node's own exception is never lost: it comes first, with its `in node` note,
+then the hooks' errors in the order they were raised. A group led by a node's error says so, as in
+`node 'boom' failed and hooks raised`. See [A hook that raises](hooks.md#a-hook-that-raises).
+
+`with_hooks` refuses a hook it can't call when you attach it: a `TypeError` for an object that is no `fnloom.Hook`,
+or for a method that can't take one event or is an `async def`, and a `ValueError` for a hook given twice
+([Checked when attached](hooks.md#checked-when-attached)).
+
 An `AsyncDriver` raises a failed node's exception the same way, after cancelling the nodes still running (see
 [Async](running.md#async)). On an `AsyncDriver`, a sync node that returns a coroutine or another awaitable is an
 error, never a value:

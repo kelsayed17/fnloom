@@ -60,4 +60,11 @@ def test_the_regressed_callables_are_covered() -> None:
         "Condition",
         "type_matches",
         "value_matches",
+        "Hook",
+        "Hook.before_run",
+        "Builder.with_hooks",
+        "RunStart",
+        "NodeStart",
+        "NodeEnd",
+        "RunEnd",
     }

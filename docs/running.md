@@ -505,6 +505,8 @@ fnloom can't make your own code safe:
   reads them.
 - **Your store.** A store of your own must be safe to call from several threads at once
   ([Stores](caching.md#stores)).
+- **Your hooks.** A hook sees the runs of every thread that uses its driver, so one that keeps state must be safe to
+  call from several threads at once ([Hooks](hooks.md)).
 
 ## Rebuilding after an edit
 
@@ -548,6 +550,12 @@ broken.execute(["ratio"], inputs={"numerator": 1, "denominator": 0})
 ```
 
 Python prints the note, `in node 'ratio'`, under the traceback. It's also in the exception's `__notes__`.
+
+## Hooks
+
+`Builder.with_hooks(...)` attaches hooks that see each run start and end, and each node it calls, with the node's
+arguments and its result or error. A driver with no hooks runs exactly as without them. The [Hooks](hooks.md) guide
+has the events, their order, and what happens when a hook raises.
 
 ## Async
 

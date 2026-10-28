@@ -320,6 +320,45 @@ def _payload(
     return call, {}
 
 
+def by_parameter(
+    params: tuple[Param, ...],
+) -> Callable[[Mapping[str, object]], dict[str, object]] | None:
+    """How to key the core's keyword arguments for a node by its parameters' names.
+
+    `None` when the core already passes them so: when `_payload` calls the origin
+    itself, or a `functools.partial` of it. Otherwise the core calls `_payload`'s
+    wrapper by source name, and the result maps those onto the parameters, as the
+    wrapper does: one source feeding several parameters gives each its value, and a
+    `group(...)` parameter is its list or dict, built afresh. A parameter bound to a
+    `value()` is left out, as is one whose source the core did not pass. In
+    declaration order. Only hooks use it, so the wrapper itself stays one call.
+    """
+    plain = [p for p in params if p.slot is None]
+    sourced = tuple(
+        (p.name, p.binding.name) for p in plain if isinstance(p.binding, Source)
+    )
+    if len(plain) == len(params) and len({source for _, source in sourced}) == len(
+        sourced
+    ):
+        return None
+    groups = _groups(params)
+    order = tuple(dict.fromkeys(p.name for p in params))
+
+    def keyed(supplied: Mapping[str, object]) -> dict[str, object]:
+        keywords = {
+            param: supplied[source] for param, source in sourced if source in supplied
+        }
+        for param, is_list, items in groups:
+            built = [
+                (slot, supplied[b.name] if isinstance(b, Source) else b.value)
+                for slot, b in items
+            ]
+            keywords[param] = [v for _, v in built] if is_list else dict(built)
+        return {name: keywords[name] for name in order if name in keywords}
+
+    return keyed
+
+
 def _groups(
     params: tuple[Param, ...],
 ) -> list[tuple[str, bool, list[tuple[int | str, Source | Value]]]]:

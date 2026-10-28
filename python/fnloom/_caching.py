@@ -473,10 +473,18 @@ class CacheRun:
         return self._nested
 
     def run(
-        self, inputs: dict[str, object], overrides: dict[str, object]
+        self,
+        inputs: dict[str, object],
+        overrides: dict[str, object],
+        observers: Sequence[_core.ObserverBase] = (),
+        /,
     ) -> dict[str, object]:
-        """Runs the plan, already checked, through the store; the outputs, sorted."""
-        return self._finished(self.begin(inputs, overrides), inputs)
+        """Runs the plan, already checked, through the store; the outputs, sorted.
+
+        `observers` see the nodes the final core run computes: not a hit, nor a
+        node of the nested run.
+        """
+        return self._finished(self.begin(inputs, overrides), inputs, observers)
 
     def _execute(
         self,
@@ -492,12 +500,18 @@ class CacheRun:
         )
         return self._finished(begun, inputs)
 
-    def _finished(self, begun: Begun, inputs: dict[str, object]) -> dict[str, object]:
+    def _finished(
+        self,
+        begun: Begun,
+        inputs: dict[str, object],
+        observers: Sequence[_core.ObserverBase] = (),
+    ) -> dict[str, object]:
         """Runs a begun run's plan, storing each value as its node succeeds."""
         on_value = begun.pending
         result = begun.plan.run(
             inputs,
             begun.overrides,
+            observers,
             on_value=functools.partial(self.finish, begun)
             if on_value is None
             else on_value,

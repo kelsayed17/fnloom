@@ -12,12 +12,12 @@ import textwrap
 import types
 import warnings
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, TypedDict, cast
+from typing import TYPE_CHECKING, Annotated, Any, TypedDict, cast, override
 
 import pytest
 from hamilton import async_driver as hamilton_async
 from hamilton import driver as hamilton_driver
-from hamilton import htypes
+from hamilton import htypes, lifecycle
 from hamilton.function_modifiers import hamilton_exclude
 from hamilton.function_modifiers.base import InvalidDecoratorException
 from hamilton.lifecycle import NoEdgeAndInputTypeChecking
@@ -31,7 +31,13 @@ from harness import (
     run_fnloom,
     run_hamilton,
 )
-from test_semantics import DELIBERATE
+from test_semantics import (
+    DELIBERATE,
+    HOOKED_GRAPH,
+    FnloomRecorder,
+    HamiltonRecorder,
+    HookEntry,
+)
 from type_matrix import (
     TYPES,
     Base,
@@ -3624,3 +3630,194 @@ def test_q83_rebuild_after_reload(
     assert asyncio.run(built_async.rebuild().execute(["c"], inputs={"x": 1})) == {
         "c": 10011
     }
+
+
+@pytest.mark.deliberate("Q84")
+def test_q84_typed_events_checked_when_attached() -> None:
+    """Hamilton passes keywords and checks nothing; fnloom, events checked early."""
+    module = make_module("q84_hooked", HOOKED_GRAPH)
+    log: list[HookEntry] = []
+    hamilton_hook = HamiltonRecorder("H", log)
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_adapters(hamilton_hook, object(), hamilton_hook)  # ty: ignore[invalid-argument-type]  # the case under test
+        .build()
+    )
+    assert hamilton.execute(["c"], inputs={"x": 1}) == {"c": 7}
+    # A non-adapter is ignored, and the instance given twice is called once.
+    assert [stage for _, stage, _ in log].count("before_run") == 1
+    before, end = hamilton_hook.calls[0], hamilton_hook.calls[-1]
+    assert {"final_vars", "inputs", "overrides", "execution_path"} <= before.keys()
+    assert not {"final_vars", "inputs", "overrides"} & end.keys()
+    assert sorted(before["execution_path"]) == ["a", "b", "c"]
+    # A defaulted parameter left alone is absent from a node's arguments in both.
+    assert hamilton_hook.calls[1]["node_kwargs"] == {"x": 1}
+
+    ours = FnloomRecorder("F", [])
+    built = fnloom.Builder().with_modules(module).with_hooks(ours).build()
+    assert built.execute(["c"], inputs={"x": 1}) == {"c": 7}
+    start, finish = ours.events[0], ours.events[-1]
+    assert isinstance(start, fnloom.RunStart)
+    assert isinstance(finish, fnloom.RunEnd)
+    assert (start.nodes, finish.outputs, dict(finish.inputs)) == (
+        ("a", "b", "c"),
+        ("c",),
+        {"x": 1},
+    )
+    with pytest.raises(TypeError, match=r"object is not a fnloom\.Hook"):
+        fnloom.Builder().with_hooks(cast("fnloom.Hook", object()))
+    with pytest.raises(ValueError, match="the same FnloomRecorder is given twice"):
+        fnloom.Builder().with_hooks(ours, ours)
+
+    # A signature that can't take the call: Hamilton fails at the first call.
+    class Narrow(lifecycle.NodeExecutionHook):
+        @override
+        def run_before_node_execution(self, *, node_name: str) -> None:  # ty: ignore[invalid-method-override]  # the case under test
+            """Takes too little."""
+
+        @override
+        def run_after_node_execution(self, **kwargs: Any) -> None:
+            """Takes everything."""
+
+    narrow = hamilton_driver.Builder().with_modules(module).with_adapters(Narrow())
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        narrow.build().execute(["c"], inputs={"x": 1})
+
+    class NarrowHook(fnloom.Hook):
+        @override
+        def before_node(self) -> None:  # ty: ignore[invalid-method-override]  # the case under test
+            """Takes nothing."""
+
+    with pytest.raises(TypeError, match=r"NarrowHook\.before_node must take the event"):
+        fnloom.Builder().with_hooks(NarrowHook())
+
+    # An `async def` hook on the sync driver: Hamilton never awaits it.
+    ran: list[str] = []
+
+    class Awaiting(lifecycle.NodeExecutionHook):
+        @override
+        async def run_before_node_execution(self, **kwargs: Any) -> None:
+            ran.append(kwargs["node_name"])
+
+        @override
+        def run_after_node_execution(self, **kwargs: Any) -> None:
+            """Takes everything."""
+
+    awaiting = hamilton_driver.Builder().with_modules(module).with_adapters(Awaiting())
+    with pytest.warns(RuntimeWarning, match="was never awaited"):
+        assert awaiting.build().execute(["a"], inputs={"x": 1}) == {"a": 2}
+    assert ran == []
+
+    class AwaitingHook(fnloom.Hook):
+        @override
+        async def before_node(self, event: fnloom.NodeStart) -> None:  # ty: ignore[invalid-method-override]  # the case under test
+            ran.append(event.node.name)
+
+    with pytest.raises(TypeError, match=r"AwaitingHook\.before_node is an async def"):
+        fnloom.Builder().with_hooks(AwaitingHook())
+
+
+class _Raising(HamiltonRecorder):
+    """A Hamilton recorder that raises in one stage, after logging it.
+
+    A node stage raises for node `at` only.
+    """
+
+    def __init__(
+        self, name: str, log: list[HookEntry], stage: str, at: str | None = None
+    ) -> None:
+        super().__init__(name, log)
+        self.stage = stage
+        self.at = at
+
+    @override
+    def _record(self, stage: str, node: str | None, kwargs: dict[str, Any]) -> None:
+        super()._record(stage, node, kwargs)
+        if stage == self.stage and self.at in {None, node}:
+            msg = f"{self.name} {stage}"
+            raise RuntimeError(msg)
+
+
+class _RaisingHook(FnloomRecorder):
+    """The fnloom hook that raises as `_Raising` does."""
+
+    def __init__(
+        self, name: str, log: list[HookEntry], stage: str, at: str | None = None
+    ) -> None:
+        super().__init__(name, log)
+        self.stage = stage
+        self.at = at
+
+    @override
+    def _record(self, stage: str, node: str | None, event: object) -> None:
+        super()._record(stage, node, event)
+        if stage == self.stage and self.at in {None, node}:
+            msg = f"{self.name} {stage}"
+            raise RuntimeError(msg)
+
+
+def _raising_logs(
+    stage: str, final_vars: list[str], at: str | None = None
+) -> tuple[list[HookEntry], BaseException, list[HookEntry], BaseException]:
+    """Runs both with a raising hook `A` and a recorder `B`: their logs and errors."""
+    module = make_module("q23_hooked", HOOKED_GRAPH)
+    hamilton_log: list[HookEntry] = []
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_adapters(
+            _Raising("A", hamilton_log, stage, at), HamiltonRecorder("B", hamilton_log)
+        )
+        .build()
+    )
+    with pytest.raises(BaseException) as hamilton_error:  # noqa: PT011  # compared below
+        hamilton.execute(cast("Any", final_vars), inputs={"x": 1})
+    log: list[HookEntry] = []
+    built = (
+        fnloom.Builder()
+        .with_modules(module)
+        .with_hooks(_RaisingHook("A", log, stage, at), FnloomRecorder("B", log))
+        .build()
+    )
+    with pytest.raises(BaseException) as error:  # noqa: PT011  # compared below
+        built.execute(final_vars, inputs={"x": 1})
+    return hamilton_log, hamilton_error.value, log, error.value
+
+
+@pytest.mark.deliberate("Q23")
+def test_q23_every_hook_sees_the_event_and_no_error_is_masked() -> None:
+    """Hamilton skips a stage's later hooks and masks a node's error; fnloom doesn't."""
+    # A raising before-node hook: Hamilton skips B's, then runs after-graph.
+    hamilton_log, hamilton_error, log, error = _raising_logs("before_node", ["c"])
+    assert ("B", "before_node", "a") not in hamilton_log
+    assert hamilton_log[-2:] == [("A", "after_run", None), ("B", "after_run", None)]
+    assert ("B", "before_node", "a") in log
+    assert log[-2:] == hamilton_log[-2:]
+    assert str(hamilton_error) == str(error) == "A before_node"
+
+    # A raising before-graph hook: Hamilton skips every other hook, after-graph too.
+    hamilton_log, hamilton_error, log, error = _raising_logs("before_run", ["c"])
+    assert hamilton_log == [("A", "before_run", None)]
+    assert log == [
+        ("A", "before_run", None),
+        ("B", "before_run", None),
+        ("A", "after_run", None),
+        ("B", "after_run", None),
+    ]
+    assert str(hamilton_error) == str(error) == "A before_run"
+
+    # A node fails, and an after-node hook raises: Hamilton raises the hook's error,
+    # with the node's only in `__context__`; fnloom raises both, the node's first.
+    hamilton_log, hamilton_error, log, error = _raising_logs(
+        "after_node", ["after_boom"], "boom"
+    )
+    assert str(hamilton_error) == "A after_node"
+    assert isinstance(hamilton_error.__context__, ValueError)
+    assert str(hamilton_error.__context__) == "bad 2"
+    assert isinstance(error, ExceptionGroup)
+    node_error, hook_error = error.exceptions
+    assert (type(node_error), str(node_error)) == (ValueError, "bad 2")
+    assert str(hook_error) == "A after_node"
+    assert ("B", "after_node", "boom") not in hamilton_log
+    assert ("B", "after_node", "boom") in log
