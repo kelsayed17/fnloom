@@ -1,8 +1,10 @@
 """What `@config.when*` and `@config.default` record about the build's config."""
 
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
+
+from fnloom._decorators import _ATTRIBUTE, decorations
 
 type ConditionKind = Literal["when", "when_not", "when_in", "when_not_in"]
 
@@ -83,10 +85,19 @@ def build_conditions(
     if name == "":
         msg = f"config.{kind} name must not be empty"
         raise ValueError(msg)
+    bad = sorted(
+        (key, type(value).__name__)
+        for key, value in given.items()
+        if kind in {"when_in", "when_not_in"} and not _is_collection(value)
+    )
+    if bad:
+        listed = ", ".join(f"{k!r} ({t})" for k, t in bad)
+        msg = f"config.{kind}: these keys need a collection of values: {listed}"
+        raise TypeError(msg)
     built = tuple(
         sorted(
             (
-                Condition(kind, key, _values(kind, key, value))
+                Condition(kind, key, _values(kind, value))
                 for key, value in given.items()
             ),
             key=_sort_key,
@@ -95,19 +106,21 @@ def build_conditions(
     return ConfigPolicy(built, default=False, name=name)
 
 
-def _values(kind: ConditionKind, key: str, value: object) -> tuple[object, ...]:
+def _is_collection(value: object) -> bool:
+    return isinstance(value, Iterable) and not isinstance(value, str | bytes)
+
+
+def _values(kind: ConditionKind, value: object) -> tuple[object, ...]:
     if kind in {"when", "when_not"}:
         return (value,)
-    if isinstance(value, str | bytes):
-        msg = (
-            f"config.{kind}: {key!r} needs a collection of values, "
-            f"got a {type(value).__name__}"
-        )
-        raise TypeError(msg)
-    if not isinstance(value, Iterable):
-        msg = f"config.{kind}: {key!r} needs a collection of values, got {value!r}"
-        raise TypeError(msg)
-    return tuple[object, ...](value)
+    items = tuple[object, ...](value)  # ty: ignore[invalid-argument-type]  # checked by _is_collection
+    if isinstance(value, set | frozenset):
+        # Hash order varies between runs: store the values in a fixed order.
+        try:
+            return tuple(sorted(items))  # ty: ignore[invalid-argument-type]  # a TypeError falls back to repr
+        except TypeError:
+            return tuple(sorted(items, key=repr))
+    return items
 
 
 def node_name(fn: Callable[..., object], name: str | None) -> str:
@@ -147,3 +160,81 @@ def merge(current: ConfigPolicy | None, new: ConfigPolicy) -> ConfigPolicy:
     return ConfigPolicy(
         conditions, new.default, new.name if current.name is None else current.name
     )
+
+
+class config:  # noqa: N801  # Hamilton's name
+    """The config decorators: they record conditions, the build resolves them."""
+
+    @staticmethod
+    def when[F: Callable[..., object]](
+        conditions: Mapping[str, object] | None = None,
+        /,
+        *,
+        name: str | None = None,
+        **keys: object,
+    ) -> Callable[[F], F]:
+        """Keeps the node when every key equals its value."""
+        return _config_decorator("when", conditions, keys, name)
+
+    @staticmethod
+    def when_not[F: Callable[..., object]](
+        conditions: Mapping[str, object] | None = None,
+        /,
+        *,
+        name: str | None = None,
+        **keys: object,
+    ) -> Callable[[F], F]:
+        """Keeps the node when every key differs from its value."""
+        return _config_decorator("when_not", conditions, keys, name)
+
+    @staticmethod
+    def when_in[F: Callable[..., object]](
+        conditions: Mapping[str, object] | None = None,
+        /,
+        *,
+        name: str | None = None,
+        **keys: object,
+    ) -> Callable[[F], F]:
+        """Keeps the node when every key is one of its values."""
+        return _config_decorator("when_in", conditions, keys, name)
+
+    @staticmethod
+    def when_not_in[F: Callable[..., object]](
+        conditions: Mapping[str, object] | None = None,
+        /,
+        *,
+        name: str | None = None,
+        **keys: object,
+    ) -> Callable[[F], F]:
+        """Keeps the node when every key is none of its values."""
+        return _config_decorator("when_not_in", conditions, keys, name)
+
+    @staticmethod
+    def default[F: Callable[..., object]](fn: F) -> F:
+        """Marks the variant used when no other variant of the node matches."""
+        if not callable(fn):
+            msg = "@config.default is used bare, without parentheses"
+            raise TypeError(msg)
+        node_name(fn, None)
+        return _record(fn, ConfigPolicy((), default=True, name=None))
+
+
+def _record[F: Callable[..., object]](fn: F, policy: ConfigPolicy) -> F:
+    current = decorations(fn)
+    setattr(fn, _ATTRIBUTE, replace(current, config=merge(current.config, policy)))
+    return fn
+
+
+def _config_decorator[F: Callable[..., object]](
+    kind: ConditionKind,
+    conditions: object,
+    keys: Mapping[str, object],
+    name: str | None,
+) -> Callable[[F], F]:
+    policy = build_conditions(kind, conditions, keys, name)
+
+    def apply(fn: F) -> F:
+        node_name(fn, policy.name)
+        return _record(fn, policy)
+
+    return apply

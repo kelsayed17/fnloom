@@ -3,13 +3,13 @@
 from importlib.metadata import version as _version
 
 from fnloom._caching import CacheOutcome
+from fnloom._config import config
 from fnloom._core import UnfingerprintableError
 from fnloom._decorators import (
     CachePolicy,
     Source,
     Value,
     cache,
-    config,
     parameterize,
     source,
     tag,

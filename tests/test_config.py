@@ -149,15 +149,11 @@ def test_misuse_is_refused_when_decorating() -> None:
         config.when_in()
     with pytest.raises(ValueError, match="'mode' is given both"):
         config.when({"mode": "a"}, mode="b")
-    with pytest.raises(
-        TypeError, match="'mode' needs a collection of values, got a str"
-    ):
+    with pytest.raises(TypeError, match=r"'mode' \(str\)"):
         config.when_in(mode="ab")
-    with pytest.raises(
-        TypeError, match="'mode' needs a collection of values, got a bytes"
-    ):
+    with pytest.raises(TypeError, match=r"'mode' \(bytes\)"):
         config.when_not_in(mode=b"ab")
-    with pytest.raises(TypeError, match="'mode' needs a collection of values, got 3"):
+    with pytest.raises(TypeError, match=r"'mode' \(int\)"):
         config.when_in(mode=3)
     with pytest.raises(ValueError, match="name must not be empty"):
         config.when(mode="a", name="")
@@ -236,3 +232,33 @@ def test_config_composes_with_parameterize_tag_and_cache(order: int) -> None:
     assert got.rows is not None
     assert got.tags == {"kind": "k"}
     assert got.cache is not None
+
+
+def test_every_bad_value_is_listed_in_one_message() -> None:
+    """All keys without a collection are named, sorted, in one error."""
+    with pytest.raises(TypeError) as raised:
+        config.when_in(b=3, a="x", c=["ok"])
+    assert str(raised.value).endswith(
+        "need a collection of values: 'a' (str), 'b' (int)"
+    )
+
+
+def test_set_values_are_stored_in_a_fixed_order() -> None:
+    """A set compares equal to the same values given in order."""
+
+    def one() -> int:
+        return 1
+
+    def two() -> int:
+        return 1
+
+    def mixed() -> int:
+        return 1
+
+    config.when_in(mode={"b", "a"})(one)
+    config.when_in(mode=("a", "b"))(two)
+    assert decorations(one).config == decorations(two).config
+    config.when_not_in(mode=frozenset({1, "a"}))(mixed)
+    policy = decorations(mixed).config
+    assert policy is not None
+    assert policy.conditions[0].values == ("a", 1)  # by repr

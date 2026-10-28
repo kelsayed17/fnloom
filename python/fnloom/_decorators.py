@@ -5,16 +5,12 @@ import inspect
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, replace
 from types import MappingProxyType
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
 
-from fnloom._config import (
-    ConditionKind,
-    ConfigPolicy,
-    build_conditions,
-    merge,
-    node_name,
-)
 from fnloom._stores import Format
+
+if TYPE_CHECKING:
+    from fnloom._config import ConfigPolicy
 
 _ATTRIBUTE = "__fnloom__"
 
@@ -237,83 +233,5 @@ def cache[F: Callable[..., object]](
             raise ValueError(msg)
         setattr(fn, _ATTRIBUTE, replace(current, cache=policy))
         return fn
-
-    return apply
-
-
-class config:  # noqa: N801  # Hamilton's name
-    """The config decorators: they record conditions, the build resolves them."""
-
-    @staticmethod
-    def when[F: Callable[..., object]](
-        conditions: Mapping[str, object] | None = None,
-        /,
-        *,
-        name: str | None = None,
-        **keys: object,
-    ) -> Callable[[F], F]:
-        """Keeps the node when every key equals its value."""
-        return _config_decorator("when", conditions, keys, name)
-
-    @staticmethod
-    def when_not[F: Callable[..., object]](
-        conditions: Mapping[str, object] | None = None,
-        /,
-        *,
-        name: str | None = None,
-        **keys: object,
-    ) -> Callable[[F], F]:
-        """Keeps the node when every key differs from its value."""
-        return _config_decorator("when_not", conditions, keys, name)
-
-    @staticmethod
-    def when_in[F: Callable[..., object]](
-        conditions: Mapping[str, object] | None = None,
-        /,
-        *,
-        name: str | None = None,
-        **keys: object,
-    ) -> Callable[[F], F]:
-        """Keeps the node when every key is one of its values."""
-        return _config_decorator("when_in", conditions, keys, name)
-
-    @staticmethod
-    def when_not_in[F: Callable[..., object]](
-        conditions: Mapping[str, object] | None = None,
-        /,
-        *,
-        name: str | None = None,
-        **keys: object,
-    ) -> Callable[[F], F]:
-        """Keeps the node when every key is none of its values."""
-        return _config_decorator("when_not_in", conditions, keys, name)
-
-    @staticmethod
-    def default[F: Callable[..., object]](fn: F) -> F:
-        """Marks the variant used when no other variant of the node matches."""
-        if not callable(fn):
-            msg = "@config.default is used bare, without parentheses"
-            raise TypeError(msg)
-        node_name(fn, None)
-        return _record(fn, ConfigPolicy((), default=True, name=None))
-
-
-def _record[F: Callable[..., object]](fn: F, policy: ConfigPolicy) -> F:
-    current = decorations(fn)
-    setattr(fn, _ATTRIBUTE, replace(current, config=merge(current.config, policy)))
-    return fn
-
-
-def _config_decorator[F: Callable[..., object]](
-    kind: ConditionKind,
-    conditions: object,
-    keys: Mapping[str, object],
-    name: str | None,
-) -> Callable[[F], F]:
-    policy = build_conditions(kind, conditions, keys, name)
-
-    def apply(fn: F) -> F:
-        node_name(fn, policy.name)
-        return _record(fn, policy)
 
     return apply
