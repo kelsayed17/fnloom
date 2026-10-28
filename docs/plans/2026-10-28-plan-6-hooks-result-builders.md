@@ -534,7 +534,13 @@ benchmarks.md, quirk-register.md, index.md, README.md, CHANGELOG.md, the roadmap
 - **Inputs are keyed by parameter name for every node.** A node the core calls through a wrapper, such as one input
   feeding several parameters or a `group(...)`, has its arguments re-keyed to its parameter names when hooked (R4).
 - **`RunStart.nodes` is `()` when a value check fails before any node runs**, for a missing input and a mistyped one
-  alike, since such a run reports no node (R5).
+  alike, since such a run reports no node (R5). A custom value check that raises ends the run the same way, after
+  the final review: `before_run` with no nodes, then `after_run(ok=False)` with its very error, which `execute`
+  raises unwrapped (decision 4).
+- **Final review fixes.** `LogFailures` bounds each input's `repr` with `reprlib` before the 50-character cut, and
+  shows one that raises as `<unrepresentable TypeName>`, so the node's own exception is still the one raised
+  (decision 8). `RunEnd.results` is a copy of its own, never the dict `execute` returns. `Driver(graph, hooks=...)`
+  without `nodes` is a `TypeError` up front rather than a `KeyError` at the first `execute`.
 - **A node whose `after_node(ok=True)` hook raised is not stored in the cache**, on either driver. Decision 5
   discards its value, so storing it would make the next run's hit report a value the hooks refused (R8).
 - **With a `recompute` node, `RunStart.nodes` is an upper bound.** It is the inner level's exact list, then every

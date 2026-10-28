@@ -328,7 +328,7 @@ and two Python calls. The hook timed here overrides all four methods and only co
 
 **Unhooked runs are unchanged.** `benches.run` and `benches.async_` were run on the commit before hooks (`1374b99`) and
 with them, one after the other on the same machine and release build. Steady execution moved by 0.94× to 1.06×
-across all 56 fnloom rows of `benches.run`, a median of 1.00×, and every async row by 0.99× to 1.03×: within noise.
+across all 56 fnloom rows of `benches.run`, a median of 1.00×, and every async row by 0.99× to 1.02×: within noise.
 At 1,000 nodes, steady execute with input checks on (ms, before / after):
 
 | shape | n | `benches.run` |
@@ -352,32 +352,32 @@ For comparison, an unhooked node costs about 0.13 µs, so a hooked run of trivia
 an unhooked one. Hamilton's own run costs about 2.5 to 3.5 µs per node with no adapter at all.
 
 **A hooked run is still faster than an unhooked Hamilton run.** `benches.run`, with input checks on, milliseconds,
-Hamilton / fnloom hooked / fnloom unhooked; the last column is the hook's cost. A cell marked † is one where hooked
+Hamilton / fnloom hooked / fnloom unhooked; the last column is the hook's cost. A cell marked ‡ is one where hooked
 fnloom was slower than Hamilton in that single sample:
 
 | shape | n | first execute | steady execute | hook cost |
 | --- | ---: | --- | --- | ---: |
-| chain | 10 | 0.073 / 0.105 / 0.038 † | 0.033 / 0.026 / 0.002 | 2.35 µs a node |
-| chain | 100 | 0.282 / 0.340 / 0.047 † | 0.254 / 0.208 / 0.014 | 1.95 µs a node |
+| chain | 10 | 0.073 / 0.105 / 0.038 ‡ | 0.033 / 0.026 / 0.002 | 2.35 µs a node |
+| chain | 100 | 0.282 / 0.340 / 0.047 ‡ | 0.254 / 0.208 / 0.014 | 1.95 µs a node |
 | chain | 1,000 | `RecursionError` / 3.067 / 0.288 | `RecursionError` / 2.056 / 0.136 | 1.92 µs a node |
 | chain | 10,000 | `RecursionError` / 32.1 / 3.300 | `RecursionError` / 20.8 / 1.379 | 1.95 µs a node |
 | fan_in | 10 | 0.063 / 0.054 / 0.034 | 0.031 / 0.008 / 0.002 | 6.5 µs a run |
 | fan_in | 100 | 0.269 / 0.132 / 0.099 | 0.241 / 0.023 / 0.015 | 7.3 µs a run |
 | fan_in | 1,000 | 2.585 / 1.177 / 0.982 | 2.520 / 0.347 / 0.338 | 9.1 µs a run |
 | fan_in | 10,000 | 44.9 / 32.5 / 29.7 | 44.4 / 22.3 / 22.3 | within noise |
-| layered | 10 | 0.063 / 0.071 / 0.033 † | 0.035 / 0.026 / 0.002 | 2.33 µs a node |
+| layered | 10 | 0.063 / 0.071 / 0.033 ‡ | 0.035 / 0.026 / 0.002 | 2.33 µs a node |
 | layered | 100 | 0.396 / 0.354 / 0.054 | 0.355 / 0.213 / 0.018 | 1.94 µs a node |
 | layered | 1,000 | 3.637 / 3.220 / 0.348 | 3.499 / 2.109 / 0.179 | 1.93 µs a node |
 | layered | 10,000 | `RecursionError` / 34.2 / 3.879 | `RecursionError` / 21.5 / 1.792 | 1.97 µs a node |
-| rows | 10 | 0.066 / 0.072 / 0.029 † | 0.035 / 0.025 / 0.002 | 2.29 µs a node |
-| rows | 100 | 0.334 / 0.354 / 0.048 † | 0.288 / 0.211 / 0.014 | 1.97 µs a node |
+| rows | 10 | 0.066 / 0.072 / 0.029 ‡ | 0.035 / 0.025 / 0.002 | 2.29 µs a node |
+| rows | 100 | 0.334 / 0.354 / 0.048 ‡ | 0.288 / 0.211 / 0.014 | 1.97 µs a node |
 | rows | 1,000 | `RecursionError` / 3.097 / 0.279 | `RecursionError` / 2.049 / 0.134 | 1.92 µs a node |
 | rows | 10,000 | `RecursionError` / 31.7 / 3.159 | `RecursionError` / 20.9 / 1.336 | 1.96 µs a node |
-| extract | 10 | 0.107 / 0.110 / 0.038 † | 0.071 / 0.051 / 0.006 | 2.14 µs a node |
+| extract | 10 | 0.107 / 0.110 / 0.038 ‡ | 0.071 / 0.051 / 0.006 | 2.14 µs a node |
 | extract | 100 | 1.183 / 0.712 / 0.134 | 1.151 / 0.452 / 0.058 | 1.96 µs a node |
 | extract | 1,000 | 66.7 / 6.833 / 1.156 | 66.9 / 4.545 / 0.587 | 1.98 µs a node |
 | extract | 10,000 | 6,290.3 / 72.6 / 13.8 | 6,321.4 / 46.8 / 6.440 | 2.02 µs a node |
-| types | 10 | 0.080 / 0.085 / 0.069 † | 0.037 / 0.010 / 0.003 | 7.1 µs a run |
+| types | 10 | 0.080 / 0.085 / 0.069 ‡ | 0.037 / 0.010 / 0.003 | 7.1 µs a run |
 | types | 100 | 0.334 / 0.167 / 0.132 | 0.296 / 0.037 / 0.030 | 7.5 µs a run |
 | types | 1,000 | 3.095 / 1.367 / 1.172 | 3.060 / 0.492 / 0.485 | 7.0 µs a run |
 | types | 10,000 | 50.5 / 34.5 / 31.6 | 49.9 / 23.8 / 23.8 | within noise |
@@ -387,7 +387,7 @@ hook is faster than Hamilton's `execute` on every graph, by 1.22× (`chain`, 100
 it runs the graphs where Hamilton raises. The narrow margin is on chains of trivial nodes, where both costs are per
 node and fnloom's hooked node, about 2.1 µs, is close to Hamilton's unhooked one, about 2.5 µs.
 
-**The first execute of a small graph is slower with a hook.** On the seven cells marked †, all at 10 or 100 nodes, a
+**The first execute of a small graph is slower with a hook.** On the seven cells marked ‡, all at 10 or 100 nodes, a
 hooked fnloom's first `execute` took 3% to 43% longer than Hamilton's, one sample each. The first `execute` compiles
 the plan, and a hooked plan also makes each reported node's view and its input re-keying, once per plan; a prepared
 plan, or a second `execute` of the same request, pays none of it again. Unhooked, fnloom's first `execute` is faster

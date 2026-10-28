@@ -633,6 +633,9 @@ fnloom can't make your own code safe:
 - **Your hooks and result builder.** A hook sees the runs of every thread that uses its driver, and the result
   builder builds each of their results, so one that keeps state must be safe to call from several threads at once
   ([Hooks](hooks.md), [Result builders](#result-builders)).
+- **Your value checks.** An output check, and so a custom value check (`with_value_check`) it calls, runs with its
+  node: for a plain function on an `AsyncDriver` with `sync_nodes="thread"`, in the worker thread, so a value check
+  that keeps state must be safe to call from several threads at once.
 
 ## Rebuilding after an edit
 

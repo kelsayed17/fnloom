@@ -624,12 +624,13 @@ class _HookedPlan[R](PreparedPlan[R]):
         self,
         inputs: Mapping[str, object] | None,
         overrides: Mapping[str, object] | None,
-    ) -> tuple[dict[str, Any], dict[str, Any], list[str]]:
+    ) -> tuple[dict[str, Any], dict[str, Any], list[str] | BaseException]:
         """The inputs and overrides as dicts, once their names fit, and mismatches.
 
         The value checks are worked out here, so `RunStart.nodes` is empty when
         they fail and no node will run (R5); `_refuse_values` raises them after
-        `before_run`, as Hamilton raises them.
+        `before_run`, as Hamilton raises them. A custom value check that raises
+        is carried the same way, as its error, so the hooks see it too.
         """
         given_inputs = inputs if type(inputs) is dict else _as_dict(inputs)
         given_overrides = overrides if type(overrides) is dict else _as_dict(overrides)
@@ -638,10 +639,13 @@ class _HookedPlan[R](PreparedPlan[R]):
             or given_overrides.keys() != self._override_names
         ):
             self._refuse_names(given_inputs, given_overrides)
-        mismatches: list[str] = []
+        mismatches: list[str] | BaseException = []
         if self._input_checks or self._override_checks:
-            mismatches = _mismatches(self._input_checks, given_inputs)
-            mismatches += _mismatches(self._override_checks, given_overrides)
+            try:
+                mismatches = _mismatches(self._input_checks, given_inputs)
+                mismatches += _mismatches(self._override_checks, given_overrides)
+            except BaseException as raised:  # noqa: BLE001  # raised by `_refuse_values`, after `before_run`
+                mismatches = raised
         return given_inputs, given_overrides, mismatches
 
     def _starter(
@@ -662,10 +666,16 @@ class _HookedPlan[R](PreparedPlan[R]):
         dispatch: _hooks.Dispatch,
         inputs: dict[str, Any],
         overrides: dict[str, Any],
-        mismatches: list[str],
+        mismatches: list[str] | BaseException,
     ) -> NoReturn:
-        """Fires `before_run` with no nodes, since none will run, then raises."""
+        """Fires `before_run` with no nodes, since none will run, then raises.
+
+        What it raises is the mismatches' error, or, unwrapped, the error a
+        custom value check raised.
+        """
         dispatch.start(self._outputs, inputs, overrides, ())
+        if isinstance(mismatches, BaseException):
+            raise mismatches
         _raise_mismatches(mismatches)
 
 
@@ -684,7 +694,9 @@ def _ended(
     """
     if build is None:
         # Outside any `except`, so nothing `end` raises gets a `__context__`.
-        dispatch.end(True, None, values)  # noqa: FBT003  # the dispatcher's interface
+        # Its own copy, so a hook that keeps `RunEnd.results` never sees what
+        # the caller later changes in the dict returned.
+        dispatch.end(True, None, dict(values))  # noqa: FBT003  # the dispatcher's interface
         return values
     try:
         # A copy, as Hamilton's `**outputs` is: what the builder changes in it
@@ -785,6 +797,13 @@ class Driver[R = dict[str, object]]:
         self._value_checks = _checked_value_checks(value_checks)
         self._cache = cache
         self._hook_list = _hooks.checked(hooks)
+        if self._hook_list and nodes is None:
+            # A hook's events carry the nodes' views, so a run needs them.
+            msg = (
+                "hooks need the graph's node views: pass nodes= with hooks=, "
+                "or make the driver with Builder(...).with_hooks(...).build()"
+            )
+            raise TypeError(msg)
         # The methods the runs call; `None` when no hook overrides any, so a
         # driver with none compiles plain plans.
         self._hooks = _hooks.Hooks.of(self._hook_list)

@@ -13,7 +13,7 @@ import pytest
 import fnloom
 from fnloom import Hook, NodeEnd, NodeStart, RunEnd, RunStart, _async
 from helpers import make_module
-from test_hooks import GRAPH, SHAPES, HookError, Recorder
+from test_hooks import GRAPH, SHAPES, CheckError, HookError, Recorder, raising_check
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine
@@ -445,6 +445,36 @@ def test_value_checks_fail_after_before_run_on_the_async_driver() -> None:
     with pytest.raises(ValueError, match="unknown outputs"):
         _run(driver.execute(["nope"], inputs={"x": 1}))
     assert hook.log == []
+
+
+def test_a_raising_value_check_fires_before_and_after_run_on_the_async_driver() -> None:
+    """A custom value check that raises fires both run events (decision 4).
+
+    `before_run` lists no nodes, then `after_run` gets that very error, which
+    propagates unwrapped.
+    """
+    hook = Recorder()
+    module = make_module("hooked_async_raising_check", GRAPH)
+    driver = (
+        fnloom.Builder()
+        .with_modules(module)
+        .with_hooks(hook)
+        .with_value_check(raising_check)
+        .build_async()
+    )
+    with pytest.raises(CheckError, match="no check for 'nope'") as raised:
+        _run(driver.execute(["c"], inputs={"x": "nope"}))
+    assert type(raised.value) is CheckError
+    assert _stages(hook) == [("before_run", None), ("after_run", None)]
+    assert [s.nodes for s in hook.of(RunStart)] == [()]
+    (end,) = hook.of(RunEnd)
+    assert (end.ok, end.error, end.results, end.nodes) == (
+        False,
+        raised.value,
+        None,
+        (),
+    )
+    assert _run(driver.execute(["c"], inputs={"x": 1})) == {"c": 40}
 
 
 def test_async_prepared_plan_runs_fire_the_hooks() -> None:

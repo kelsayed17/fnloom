@@ -102,8 +102,8 @@ event by position, so a new field never breaks a hook.
     - `inputs` and `overrides`: the values given.
     - `nodes`: the nodes this run will report, in the order it reports them. That is the order they run in
       ([Execution order](running.md#execution-order)), which never changes from one run to the next. It's empty when a
-      value check fails, since no node runs. On a driver with a cache, it lists the hits first
-      ([With a cache](#with-a-cache)).
+      value check fails, or a [custom value check](running.md#custom-value-checks) raises, since no node runs. On a
+      driver with a cache, it lists the hits first ([With a cache](#with-a-cache)).
 - **`NodeStart`**
     - `run_id`
     - `node`: the node's [`NodeView`](running.md#inspecting-a-graph), with its name, tags, type and function.
@@ -119,8 +119,9 @@ event by position, so a new field never breaks a hook.
     - `ok`: whether the run succeeded.
     - `error`: what stopped it, as `execute` raises it unless an `after_run` hook raises too; `None` if `ok`.
     - `results`: the raw outputs, in request order, before any
-      [result builder](running.md#result-builders). `None` when the run failed before they were all in. A run
-      that only its result builder failed has them, with `ok=False` and the builder's error.
+      [result builder](running.md#result-builders), in a mapping of the event's own: a hook that keeps it never sees
+      what the caller later changes in the dict `execute` returned. `None` when the run failed before they were all
+      in. A run that only its result builder failed has them, with `ok=False` and the builder's error.
 
 ```python
 class Ends(fnloom.Hook):
@@ -211,12 +212,12 @@ guarded.execute(["total"], inputs={"price": 0.0, "quantity": 1})
 
 ## Checked when attached
 
-`with_hooks` refuses, with one error naming every culprit:
+`with_hooks` refuses, in two steps:
 
-- an object that is no `fnloom.Hook`: a `TypeError`. Hamilton accepts and ignores it.
-- an overridden method that can't take one positional event, or is an `async def`: a `TypeError` naming the method.
-  Hamilton fails at the first call, and never awaits an `async def` hook on its sync driver.
-- the same hook given twice: a `ValueError`. Hamilton calls it once.
+- first, one `TypeError` naming every type problem: each object that is no `fnloom.Hook` (Hamilton accepts and
+  ignores it), and each overridden method that can't take one positional event, or is an `async def` (Hamilton fails
+  at the first call, and never awaits an `async def` hook on its sync driver);
+- then, only when there is no type problem, one `ValueError` naming each hook given twice. Hamilton calls it once.
 
 ```python
 class Late(fnloom.Hook):
@@ -234,7 +235,9 @@ fnloom logs nothing by default. `fnloom.LogFailures` is a ready-made hook that l
 `fnloom` logger at `ERROR`, or on the logger and at the level you give it (Q88):
 
 - The message names the node and lists its inputs sorted by name, as `name=repr`. A `repr` over 50 characters is cut
-  there and ended with `...`. A parameter left to its default is not listed, as in `NodeStart.inputs`.
+  there and ended with `...`. A huge input is not shown in full first: each container's first 20 items, four levels
+  deep, are all its `repr` is made of. An input whose `repr` raises shows as `<unrepresentable TypeName>`, so the
+  record never replaces the node's own exception. A parameter left to its default is not listed, as in `NodeStart.inputs`.
 - The node's own exception is the record's `exc_info`, so a handler prints its traceback.
 - Nothing is logged for a node that succeeded or for a cache hit.
 

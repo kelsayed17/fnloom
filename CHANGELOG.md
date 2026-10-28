@@ -16,7 +16,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
   evaluates reports, extracted fields included; inputs and overrides don't. Hooks are called in the order given, and
   only the methods a hook overrides. `with_hooks` refuses an object that is no `Hook`, a method that can't take one
   positional event or is an `async def` (`TypeError`), and a hook given twice (`ValueError`). `Driver.hooks` lists
-  them, and pickling, `copy`, `rebuild()` and `build_async` carry them (Q84).
+  them, and pickling, `copy`, `rebuild()` and `build_async` carry them (Q84). A `Driver` made from a native graph
+  takes `hooks=` only with `nodes=`, its node views, and refuses it otherwise (`TypeError`).
 - A hook that raises: every hook sees the event first, `after_run(ok=False)` still fires, and one error is raised as
   itself, several as one `ExceptionGroup` with a failing node's own exception first. Hamilton skips the later hooks
   and keeps a node's error only in `__context__` (Q23).
@@ -28,7 +29,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
   need reports nothing (Q85).
 - `fnloom.LogFailures(logger=None, *, level=logging.ERROR)`, a ready-made hook that logs each node that raised, with
   its inputs, each `repr` cut to 50 characters, and the exception as `exc_info`, on the `fnloom` logger by default.
-  fnloom still logs nothing unless you add it (Q88).
+  A huge input's `repr` is bounded before the cut, and one whose `repr` raises shows as `<unrepresentable TypeName>`,
+  so the node's own exception is still what `execute` raises. fnloom still logs nothing unless you add it (Q88).
 - `Builder.with_result_builder(build)` makes `execute`, `PreparedPlan.run` and the async equivalents return
   `build(outputs)`, where `outputs` is the raw dict in request order. `Builder`, `Driver`, `AsyncDriver`,
   `PreparedPlan` and `AsyncPreparedPlan` take a type parameter, defaulting to `dict[str, object]`, so a type checker

@@ -1,8 +1,9 @@
 """Hooks on a cached driver: each node event carries its cache outcome (Q85).
 
 Every test runs on both drivers, the async one with inline sync nodes so its
-events come in a fixed order, and on both stores: a plain `MemoryCache`, which a
-run walks in the binding, and a `DiskCache`, which it walks in Python.
+events come in a fixed order, and on both stores: a plain `MemoryCache` and a
+`DiskCache`. A hooked run walks either in Python, since its hooks see each
+node's outcome (R10).
 """
 
 import asyncio
@@ -151,7 +152,7 @@ def test_hits_come_first_in_plan_order(
     cached.execute(["both"], inputs={"b": 1, "a": 1})
     hook.log.clear()
     hook.events.clear()
-    # A new `y`: `early` and `both` miss, while `late`, later in plan order, hits.
+    # A new `a`: `early` and `both` miss, while `late`, later in plan order, hits.
     assert cached.execute(["both"], inputs={"b": 1, "a": 2}) == {"both": 10}
     assert _stages(hook) == [
         ("before_run", None),

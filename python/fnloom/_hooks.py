@@ -7,6 +7,7 @@ front end fires the run events itself, around the value checks and the core run.
 
 import inspect
 import logging
+import reprlib
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -551,9 +552,62 @@ class _Forward(_core.ObserverBase):
 _CUT: Final = 50
 
 
+def _unrepresentable(value: object) -> str:
+    """What a value whose `repr` raises shows as."""
+    return f"<unrepresentable {type(value).__qualname__}>"
+
+
+class _Bounded(reprlib.Repr):
+    """A `repr` bounded before the cut, so a huge input is never shown in full.
+
+    Each container shows its first 20 items, four levels deep, and a string or
+    other value its first 73 characters, more than the cut keeps. A `repr` that
+    raises, even inside a container, shows as `<unrepresentable TypeName>`.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            maxlevel=4,
+            maxtuple=20,
+            maxlist=20,
+            maxarray=20,
+            maxdict=20,
+            maxset=20,
+            maxfrozenset=20,
+            maxdeque=20,
+            maxstring=_CUT * 3,
+            maxlong=_CUT * 3,
+            maxother=_CUT * 3,
+        )
+
+    @override
+    def repr_instance(self, x: object, level: int) -> str:
+        try:
+            text = repr(x)
+        except Exception:  # noqa: BLE001  # any `__repr__` may raise; the node's error leads
+            return _unrepresentable(x)
+        if len(text) > self.maxother:
+            # As `reprlib` cuts it: the start and end, with `...` between.
+            i = (self.maxother - 3) // 2
+            j = self.maxother - 3 - i
+            text = f"{text[:i]}{self.fillvalue}{text[len(text) - j :]}"
+        return text
+
+
+_REPR: Final = _Bounded()
+
+
 def _cut(value: object) -> str:
-    """`value`'s `repr`, cut to 50 characters and marked with `...` when it was."""
-    text = repr(value)
+    """`value`'s `repr`, cut to 50 characters and marked with `...` when it was.
+
+    The `repr` is bounded first, so a huge input is not shown in full only to be
+    cut. One that raises shows as `<unrepresentable TypeName>`, so logging a
+    failure never replaces the node's error.
+    """
+    try:
+        text = _REPR.repr(value)
+    except Exception:  # noqa: BLE001  # any `__repr__` may raise; the node's error leads
+        return _unrepresentable(value)
     return text if len(text) <= _CUT else f"{text[:_CUT]}..."
 
 

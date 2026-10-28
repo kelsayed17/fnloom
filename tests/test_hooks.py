@@ -4,6 +4,7 @@ import copy
 import dataclasses
 import logging
 import pickle
+import time
 from dataclasses import FrozenInstanceError
 from typing import Any, cast, override
 
@@ -351,6 +352,81 @@ def test_before_run_precedes_the_value_checks() -> None:
     # The same request with good values lists the nodes it runs.
     driver.execute(["c"], inputs={"x": 1})
     assert hook.of(RunStart)[-1].nodes == ("a", "b", "c")
+
+
+class CheckError(LookupError):
+    """What `raising_check` raises."""
+
+
+def raising_check(declared: object, value: object) -> bool:
+    """A custom value check that raises for any value the default check refuses."""
+    msg = f"no check for {value!r} as {declared!r}"
+    raise CheckError(msg)
+
+
+def test_a_raising_value_check_fires_before_and_after_run() -> None:
+    """A custom value check that raises ends the run as a mismatch does (decision 4).
+
+    `before_run` lists no nodes, `after_run` gets that very error, and the
+    error propagates unwrapped.
+    """
+    hook = Recorder()
+    module = make_module("hooked_raising_check", GRAPH)
+    driver = (
+        fnloom.Builder()
+        .with_modules(module)
+        .with_hooks(hook)
+        .with_value_check(raising_check)
+        .build()
+    )
+    with pytest.raises(CheckError, match="no check for 'nope'") as raised:
+        driver.execute(["c"], inputs={"x": "nope"})
+    assert type(raised.value) is CheckError
+    assert _stages(hook.log) == [("before_run", None), ("after_run", None)]
+    (start,) = hook.of(RunStart)
+    assert (start.outputs, dict(start.inputs), start.nodes) == (
+        ("c",),
+        {"x": "nope"},
+        (),
+    )
+    (end,) = hook.of(RunEnd)
+    assert (end.ok, end.error, end.results, end.nodes) == (
+        False,
+        raised.value,
+        None,
+        (),
+    )
+    # A good value never reaches the check, so the run is a normal one.
+    assert driver.execute(["c"], inputs={"x": 1}) == {"c": 40}
+
+
+def test_run_end_results_do_not_alias_the_returned_dict() -> None:
+    """A kept `RunEnd.results` does not see what the caller changes later."""
+    hook = Recorder()
+    driver = _driver(GRAPH, hook)
+    # Requested in plan order, so no reordering copy is made on the way out.
+    returned = driver.execute(["a", "b", "c"], inputs={"x": 1})
+    (end,) = hook.of(RunEnd)
+    returned["a"] = "changed"
+    returned["extra"] = 0
+    assert dict(end.results) == {"a": 2, "b": 4, "c": 40}
+
+
+def test_a_driver_from_a_native_graph_refuses_hooks_without_nodes() -> None:
+    """Hooks need the node views, so `hooks` without `nodes` is refused up front."""
+    built = _driver(GRAPH)
+    graph = built._graph  # noqa: SLF001  # the native graph on purpose
+    with pytest.raises(
+        TypeError, match=r"hooks need the graph's node views: pass nodes="
+    ):
+        fnloom.Driver(graph, hooks=[Recorder()])
+    # With the views, the same driver runs and fires.
+    hook = Recorder()
+    driver = fnloom.Driver(graph, built.nodes, hooks=[hook])
+    assert driver.execute(["c"], inputs={"x": 1}) == {"c": 40}
+    assert _stages(hook.log)[0] == ("before_run", None)
+    # No hooks, no views needed.
+    assert fnloom.Driver(graph).hooks == ()
 
 
 def test_strict_overrides_are_checked_after_before_run() -> None:
@@ -796,3 +872,89 @@ def test_log_failures_is_silent_on_success_and_on_hits(
     assert [r.getMessage() for r in _failures(caplog)] == [
         "node 'a' failed; inputs: none"
     ]
+
+
+class Unrepresentable:
+    """A value whose `repr` raises."""
+
+    @override
+    def __repr__(self) -> str:
+        msg = "no repr"
+        raise RuntimeError(msg)
+
+
+DIVIDING = """
+def f(v: object) -> float:
+    return 1 / 0
+"""
+
+
+def test_log_failures_survives_a_raising_repr(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An input whose `repr` raises logs a fallback; the node's error still leads."""
+    module = make_module("logged_unrepresentable", DIVIDING)
+    driver = (
+        fnloom.Builder().with_modules(module).with_hooks(fnloom.LogFailures()).build()
+    )
+    with caplog.at_level(logging.DEBUG), pytest.raises(ZeroDivisionError) as raised:
+        driver.execute(["f"], inputs={"v": Unrepresentable()})
+    assert type(raised.value) is ZeroDivisionError
+    (record,) = _failures(caplog)
+    assert record.getMessage() == (
+        "node 'f' failed; inputs: v=<unrepresentable Unrepresentable>"
+    )
+    assert isinstance(record.exc_info, tuple)
+    assert record.exc_info[1] is raised.value
+    # Inside a container too.
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG), pytest.raises(ZeroDivisionError):
+        driver.execute(["f"], inputs={"v": [1, Unrepresentable()]})
+    (record,) = _failures(caplog)
+    assert record.getMessage() == (
+        "node 'f' failed; inputs: v=[1, <unrepresentable Unrepresentable>]"
+    )
+
+
+# The items of a container `LogFailures` shows at most.
+SHOWN = 20
+
+
+class Counted:
+    """A value that counts how often its `repr` is made."""
+
+    calls = 0
+
+    @override
+    def __repr__(self) -> str:
+        Counted.calls += 1
+        return "C"
+
+
+def test_log_failures_bounds_the_repr_of_a_huge_input(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A huge input is cut as a small one is, without its full `repr` being made."""
+    module = make_module("logged_huge", DIVIDING)
+    driver = (
+        fnloom.Builder().with_modules(module).with_hooks(fnloom.LogFailures()).build()
+    )
+    many = [Counted() for _ in range(1_000_000)]
+    Counted.calls = 0
+    started = time.perf_counter()
+    with caplog.at_level(logging.DEBUG), pytest.raises(ZeroDivisionError):
+        driver.execute(["f"], inputs={"v": many})
+    assert time.perf_counter() - started < 1.0
+    # Only the items the bound shows are repr'd, not a million of them.
+    assert Counted.calls <= SHOWN
+    (record,) = _failures(caplog)
+    assert (
+        record.getMessage()
+        == f"node 'f' failed; inputs: v={repr(many[:SHOWN])[:50]}..."
+    )
+    # A huge string is cut at 50 characters too.
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG), pytest.raises(ZeroDivisionError):
+        driver.execute(["f"], inputs={"v": "z" * 50_000_000})
+    (record,) = _failures(caplog)
+    assert record.getMessage() == f"node 'f' failed; inputs: v={repr('z' * 60)[:50]}..."
