@@ -2572,6 +2572,113 @@ def test_q75_strict_overrides_and_declared_inputs() -> None:
     ) == {"a": 2}
 
 
+_Q76_SHADOWED = """
+def cost() -> int:
+    return 100
+
+
+{opt_out}def uses_cost(cost: int = 3) -> int:
+    return cost
+"""
+
+_Q76_DIFFERING = """
+{opt_out}def opt1(shared: int = 1) -> int:
+    return shared
+
+
+{opt_out}def opt2(shared: int = 2) -> int:
+    return shared
+"""
+
+
+@pytest.mark.deliberate("Q76")
+def test_q76_shadowed_and_differing_defaults() -> None:
+    """Hamilton lets a node replace a default and each consumer keep its own."""
+    shadowed = make_module("differential_q76_s", _Q76_SHADOWED.format(opt_out=""))
+    hamilton = hamilton_driver.Builder().with_modules(shadowed).build()
+    # The node replaces the default, and a supplied input is ignored (H5.6c).
+    assert hamilton.execute(["uses_cost"]) == {"uses_cost": 100}
+    assert hamilton.execute(["uses_cost"], inputs={"cost": 1}) == {"uses_cost": 100}
+    with pytest.raises(ValueError, match=r"parameter 'cost' of 'uses_cost'.*replaces"):
+        fnloom.build(shadowed)
+    # The opt-out restores Hamilton's behaviour: the node wins.
+    out_s = _Q76_SHADOWED.format(opt_out="@fnloom.defaults(shadowed=('cost',))\n")
+    allowed = make_module("differential_q76_s2", "import fnloom\n\n" + out_s)
+    assert fnloom.build(allowed).execute(["uses_cost"]) == {"uses_cost": 100}
+    # Two consumers, two defaults: each keeps its own in Hamilton (H5.6d).
+    differing = make_module("differential_q76_d", _Q76_DIFFERING.format(opt_out=""))
+    hamilton = hamilton_driver.Builder().with_modules(differing).build()
+    assert hamilton.execute(["opt1", "opt2"]) == {"opt1": 1, "opt2": 2}
+    assert hamilton.execute(["opt1", "opt2"], inputs={"shared": 9}) == {
+        "opt1": 9,
+        "opt2": 9,
+    }
+    with pytest.raises(ValueError, match="differing defaults: input 'shared'"):
+        fnloom.build(differing)
+    out_d = _Q76_DIFFERING.format(opt_out="@fnloom.defaults(differing=('shared',))\n")
+    allowed = make_module("differential_q76_d2", "import fnloom\n\n" + out_d)
+    driver = fnloom.build(allowed)
+    assert driver.execute(["opt1", "opt2"]) == {"opt1": 1, "opt2": 2}
+    assert driver.execute(["opt1", "opt2"], inputs={"shared": 9}) == {
+        "opt1": 9,
+        "opt2": 9,
+    }
+
+
+_Q77_SOURCE = """
+from {library} import parameterize, source, value
+
+
+@parameterize(r1={{"p": value(1), "s": source("src")}})
+def f(p: int, s: int) -> int:
+    return p + s
+{reader}"""
+
+# Each library, and the module it takes `parameterize`, `source` and `value` from.
+_Q77_LIBRARIES = {"hamilton": "hamilton.function_modifiers", "fnloom": "fnloom"}
+
+_Q77_READER = """
+
+def g(p: int) -> int:
+    return p * 100
+"""
+
+
+@pytest.mark.deliberate("Q77")
+def test_q77_a_value_bound_name_nothing_reads() -> None:
+    """Hamilton drops an input for a `value()`-bound name; fnloom refuses it (Q4)."""
+    alone = {
+        library: make_module(
+            f"differential_q77_{library}",
+            _Q77_SOURCE.format(library=module, reader=""),
+        )
+        for library, module in _Q77_LIBRARIES.items()
+    }
+    inputs = {"src": 1, "p": 99}
+    hamilton = hamilton_driver.Builder().with_modules(alone["hamilton"]).build()
+    assert hamilton.execute(["r1"], inputs=inputs) == {"r1": 2}
+    assert hamilton.execute(["r1"], inputs={"src": 1}, overrides={"p": 99}) == {"r1": 2}
+    built = fnloom.build(alone["fnloom"])
+    with pytest.raises(ValueError, match="'p'"):
+        built.execute(["r1"], inputs=inputs)
+    with pytest.raises(ValueError, match="'p'"):
+        built.execute(["r1"], inputs={"src": 1}, overrides={"p": 99})
+    # Another node reads the name: a real input, fed to that node alone, in both.
+    shared = {
+        library: make_module(
+            f"differential_q77_read_{library}",
+            _Q77_SOURCE.format(library=module, reader=_Q77_READER),
+        )
+        for library, module in _Q77_LIBRARIES.items()
+    }
+    expected = {"r1": 2, "g": 9900}
+    hamilton = hamilton_driver.Builder().with_modules(shared["hamilton"]).build()
+    assert hamilton.execute(["r1", "g"], inputs=inputs) == expected
+    assert (
+        fnloom.build(shared["fnloom"]).execute(["r1", "g"], inputs=inputs) == expected
+    )
+
+
 @pytest.mark.deliberate("Q78")
 @pytest.mark.parametrize("fixture", ["chain", "optional"])
 def test_q78_unsupplied_input_as_an_output(fixture: str) -> None:

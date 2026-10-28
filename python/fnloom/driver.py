@@ -16,6 +16,7 @@ from typing import Any, Literal, Protocol, TypedDict, Unpack, override
 from fnloom import _async, _core, _types
 from fnloom._caching import Cache, CacheOutcome, CacheRun
 from fnloom._decorators import Source
+from fnloom._defaults import default_problems
 from fnloom._extract import is_generated
 from fnloom._requests import ABSENT, requested, suggest
 from fnloom._requests import output_names as _requested_names
@@ -1450,6 +1451,8 @@ class Builder:
         graph = _graph_of(nodes)
         if mismatches := _edge_mismatches(views.functions):
             raise ValueError("\n".join(mismatches))
+        if problems := default_problems(nodes):
+            raise ValueError("\n".join(problems))
         if self._declared_inputs and (
             refused := _undeclared(views, self._declared_inputs)
         ):

@@ -61,6 +61,15 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Changed
 
+- **Breaking:** the build refuses a parameter with a default that reads a computed node, and an input that two
+  consumers give different defaults. Hamilton lets the node replace the default, and each consumer keep its own. One
+  `ValueError` lists every case, sorted, naming the parameter, the node or the other consumers, and the opt-out. To
+  keep the behaviour, write `@fnloom.defaults(shadowed=("cost",))` on the consumer, and
+  `@fnloom.defaults(differing=("shared",))` on each consumer of the input but one; or rename the node, or make the
+  defaults equal (Q76). `@fnloom.defaults` is new, and records names only.
+- An input or override naming a parameter that only `value()` bindings supply is refused as an unknown name, as it
+  always was (Q4); Hamilton drops it. When another node reads the name, the caller's value feeds that node, and the
+  `value()` rows keep their constant (Q77).
 - A `TypedDict`-typed input or override accepts any `dict`, its keys unchecked, as the shallow container checks do.
   Before, every value failed the check, so such an input could never be supplied (Q61).
 - `build()` still refuses a graph with an `async def` node, and its `ValueError` now names `build_async()` (Q32).

@@ -52,11 +52,26 @@ class CachePolicy:
     format: Format | str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class DefaultsPolicy:
+    """What `@defaults` recorded: the parameters whose default the build may not refuse.
+
+    Attributes:
+        shadowed: Parameters with a default that read a node's name, where the
+            node is meant to win.
+        differing: Parameters whose default is meant to differ from another
+            consumer's default for the same input.
+    """
+
+    shadowed: frozenset[str]
+    differing: frozenset[str]
+
+
 @dataclass(frozen=True)
 class Decorations:
     """What the decorators recorded on one function.
 
-    Its rows, tags, cache policy, config conditions and extraction.
+    Its rows, tags, cache policy, config conditions, extraction and defaults.
     """
 
     rows: Mapping[str, Mapping[str, Source | Value]] | None
@@ -64,6 +79,7 @@ class Decorations:
     cache: CachePolicy | None = None
     config: ConfigPolicy | None = None
     extract: Extraction | None = None
+    defaults: DefaultsPolicy | None = None
 
 
 def source(name: str) -> Source:
@@ -246,6 +262,69 @@ def cache[F: Callable[..., object]](
             msg = f"the function does not have the parameters named by ignore: {listed}"
             raise ValueError(msg)
         setattr(fn, _ATTRIBUTE, replace(current, cache=policy))
+        return fn
+
+    return apply
+
+
+def _names(given: Iterable[str], argument: str) -> frozenset[str]:
+    """`given` as a set of names; `TypeError` for one bare `str` or a non-`str` item."""
+    if isinstance(given, str):
+        msg = f"defaults {argument} must be an iterable of parameter names, not one str"
+        raise TypeError(msg)
+    names: list[object] = list(given)
+    not_str = sorted({type(n).__name__ for n in names if not isinstance(n, str)})
+    if not_str:
+        msg = f"defaults {argument} names must be str, got: {', '.join(not_str)}"
+        raise TypeError(msg)
+    return frozenset(str(n) for n in names)
+
+
+def defaults[F: Callable[..., object]](
+    *, shadowed: Iterable[str] = (), differing: Iterable[str] = ()
+) -> Callable[[F], F]:
+    """Records which defaults of the function the build may not refuse.
+
+    The build refuses a parameter with a default that reads a node's name, because
+    the node replaces the default (`shadowed`), and an input that two consumers
+    give different defaults (`differing`). Naming a parameter here opts it out.
+    Applying `defaults` again adds its names to the first call's.
+    """
+    policy = DefaultsPolicy(
+        _names(shadowed, "shadowed"), _names(differing, "differing")
+    )
+
+    def apply(fn: F) -> F:
+        current = decorations(fn)
+        # Names only: annotations are evaluated at build, not when decorating.
+        forward = annotationlib.Format.FORWARDREF
+        parameters = inspect.signature(fn, annotation_format=forward).parameters
+        optional = {
+            name
+            for name, parameter in parameters.items()
+            if parameter.default is not inspect.Parameter.empty
+        }
+        unknown = [
+            f"{argument}: {', '.join(repr(n) for n in sorted(names - optional))}"
+            for argument, names in (
+                ("shadowed", policy.shadowed),
+                ("differing", policy.differing),
+            )
+            if names - optional
+        ]
+        if unknown:
+            msg = (
+                "defaults names a parameter that is not one with a default, "
+                f"in {'; '.join(unknown)}"
+            )
+            raise ValueError(msg)
+        merged = policy
+        if current.defaults is not None:
+            merged = DefaultsPolicy(
+                current.defaults.shadowed | policy.shadowed,
+                current.defaults.differing | policy.differing,
+            )
+        setattr(fn, _ATTRIBUTE, replace(current, defaults=merged))
         return fn
 
     return apply

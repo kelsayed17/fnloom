@@ -73,6 +73,103 @@ driver.execute(["greeting"], inputs={"name": "Ada", "punctuation": "."})
     A default only makes an edge optional when the parameter reads an input. If a parameter with a default names
     another function, it still reads that function's value.
 
+## Defaults the build refuses
+
+A default only applies to an input nobody supplies. Two patterns make it quietly not apply, and Hamilton accepts both.
+fnloom refuses them when you build (Q76), each with one `ValueError` that lists every case, sorted.
+
+**A node shadows the default.** A parameter with a default that reads a node, by its own name or through
+`source("...")`, takes the node's value. The default is never used, and an input of that name is ignored:
+
+```python
+# file: surcharge.py
+def fee() -> int:
+    return 100
+
+
+def total(fee: int = 3) -> int:
+    """The author meant `3` unless the caller supplied a fee."""
+    return fee
+```
+
+```python
+import fnloom
+import surcharge
+
+fnloom.build(surcharge)
+# raises ValueError: shadowed default: parameter 'fee' of 'total' has a default, but it reads the node 'fee', which replaces it; rename one, or let the node win with @fnloom.defaults(shadowed=('fee',)) on 'total'
+```
+
+A `value()` binding has no edge, so a node of that name doesn't shadow it.
+
+**Two consumers disagree.** One input that two or more consumers give different defaults is a different value for each
+when it isn't supplied, and the same one for both when it is:
+
+```python
+# file: windows.py
+def short_window(days: int = 7) -> int:
+    return days
+
+
+def long_window(days: int = 30) -> int:
+    return days
+```
+
+```python
+import fnloom
+import windows
+
+fnloom.build(windows)
+# raises ValueError: differing defaults: input 'days' has different defaults in 'long_window' (parameter 'days') = 30, 'short_window' (parameter 'days') = 7; make them equal, or write @fnloom.defaults(differing=(<parameter>,)) on each of these consumers but one
+```
+
+Defaults are compared with `==`. An unclear comparison counts as different: a result that isn't a `bool`, as numpy
+arrays give, an error, or two objects without `__eq__` that aren't the same object. A consumer without a default has
+none to differ from.
+
+**Opting out.** When you mean it, say so on the consumer with `@fnloom.defaults`, naming the parameters:
+
+```python
+# file: windows_ok.py
+import fnloom
+
+
+def fee() -> int:
+    return 100
+
+
+@fnloom.defaults(shadowed=("fee",))
+def total(fee: int = 3) -> int:
+    return fee
+
+
+@fnloom.defaults(differing=("days",))
+def short_window(days: int = 7) -> int:
+    return days
+
+
+def long_window(days: int = 30) -> int:
+    return days
+```
+
+```python
+import fnloom
+import windows_ok
+
+driver = fnloom.build(windows_ok)
+driver.execute(["total", "short_window", "long_window"])
+# -> {'total': 100, 'short_window': 7, 'long_window': 30}
+driver.execute(["short_window", "long_window"], inputs={"days": 14})
+# -> {'short_window': 14, 'long_window': 14}
+```
+
+- With `shadowed`, the node wins, as it does in Hamilton.
+- With `differing`, each consumer keeps its default. A consumer that opts out leaves the comparison, so naming the input
+  on every consumer but one is enough: above, `long_window` is alone.
+- `@defaults` only records names, so it stacks with the other decorators in any order and returns the function itself.
+  Applying it twice merges the names.
+- A name that isn't a parameter with a default is a `ValueError` when the decorator is applied, listing every such name.
+
 ## Annotations
 
 Every parameter and every return value needs a type annotation, so each edge in the graph is typed where it's
