@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import importlib
+import os
 import subprocess
 import sys
 import textwrap
@@ -164,7 +165,7 @@ def test_path_between_is_independent_of_the_hash_seed() -> None:
     answers = {
         seed: subprocess.run(  # noqa: S603  # our own interpreter and script
             [sys.executable, "-c", script],
-            env={"PYTHONHASHSEED": seed},
+            env={**os.environ, "PYTHONHASHSEED": seed},
             capture_output=True,
             text=True,
             check=True,
