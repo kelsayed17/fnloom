@@ -601,12 +601,13 @@ class Driver:
         lines += [
             self._unmatched[n] for n in sorted(set(wanted) & self._unmatched.keys())
         ]
+        # An output no variant gave has its own line; an input or override named
+        # like one is unknown, as `execute` says.
         unknown = {
-            kind: [
-                n for n in self._unknown_names(kind, key) if n not in self._unmatched
-            ]
+            kind: self._unknown_names(kind, key)
             for kind in ("outputs", "inputs", "overrides")
         }
+        unknown["outputs"] = [n for n in unknown["outputs"] if n not in self._unmatched]
         nodes = list(self._nodes)
         lines += [
             _unknown(kind, names, nodes) for kind, names in unknown.items() if names

@@ -494,3 +494,42 @@ def test_missing_suggestions_come_from_names_not_in_the_graph() -> None:
         "missing inputs: 'revenue' (needed by 'other') (did you mean 'revenuex'?)",
         "unknown inputs: 'revenuex' (did you mean 'revenue'?)",
     ]
+
+
+VARIANTS = """
+import fnloom
+
+
+@fnloom.config.when(k="a")
+def variant__a(x: int) -> int:
+    return x
+
+
+def variants(x: int) -> int:
+    return x
+"""
+
+
+def test_an_input_or_override_named_like_an_unmatched_variant_is_unknown() -> None:
+    """Only an output no variant gave gets the variant's line; the rest are unknown."""
+    module = make_module("val_variants", VARIANTS)
+    driver = fnloom.Builder().with_config({"k": "c"}).with_modules(module).build()
+    lone: list[tuple[dict[str, object], dict[str, object]]] = [
+        ({"x": 1}, {"variant": 1}),
+        ({"x": 1, "variant": 1}, {}),
+        ({"x": "s"}, {}),
+    ]
+    expected: list[str] = []
+    for inputs, overrides in lone:
+        with pytest.raises(ValueError, match=r".") as info:
+            driver.execute(["variants"], inputs=inputs, overrides=overrides)
+        assert driver.validate(["variants"], inputs=inputs, overrides=overrides) == [
+            str(info.value)
+        ]
+        expected.append(str(info.value))
+    assert expected[0] == "unknown overrides: 'variant' (did you mean 'variants'?)"
+    assert expected[1] == "unknown inputs: 'variant' (did you mean 'variants'?)"
+    combined = driver.validate(
+        ["variants"], inputs={"x": "s", "variant": 1}, overrides={"variant": 1}
+    )
+    assert combined == sorted(expected)
