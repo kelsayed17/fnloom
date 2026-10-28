@@ -330,6 +330,9 @@ class _Frame:
     has consulted so far: its own serial while it consulted none. `mark` is how
     many provisional answers there were when it opened (see `_Answers`). `asked`
     is the question's type and value, kept alive while their ids key answers.
+    `doubt` is the lowest serial of an open question assumed not to fit (a cycle
+    through types alone, or a string met again) that a failing answer under it
+    has rested on: its own serial while none has.
     """
 
     group: _Group
@@ -337,9 +340,26 @@ class _Frame:
     descents: int
     serial: int
     low: int
+    doubt: int
     mark: int
     asked: tuple[object, object]
     next: int = 0
+
+    def consult(self, serial: int, *, fits: bool) -> None:
+        """Rests the answer on open question `serial`, assumed to fit or not."""
+        self.low = min(self.low, serial)
+        if not fits:
+            self.doubt = min(self.doubt, serial)
+
+    def hand_on(self, parent: _Frame, *, fits: bool) -> None:
+        """Gives `parent`, which asked it, what this closed frame's answer rests on.
+
+        Only a failing answer's doubt is handed on: a parent fails only through
+        the questions it asked that failed.
+        """
+        parent.low = min(parent.low, self.low)
+        if not fits:
+            parent.doubt = min(parent.doubt, self.doubt)
 
 
 type _Pair = tuple[int, int | str]
@@ -552,15 +572,28 @@ class _Open:
 
 
 class _Answers:
-    """The answers one walk keeps, so a part a value shares is read once per check.
+    """The answers one walk keeps, so a part a value shares is not read once per path.
 
     An answer that consulted no question still open below its own (its lowlink,
     `low`, is not below its own serial) is final: kept for the rest of the walk.
 
+    A `False` is final too when every open question below its own that it rests
+    on was assumed to fit (its `doubt` is not below its own serial). The walk is
+    monotone in what it assumes of open questions, and none is assumed more than
+    to fit, so an answer that fails under that assumption fails under any, as
+    in the greatest fixpoint the walk computes. A `False` that rests on an open
+    question assumed not to fit (a cycle through types alone, or a string met
+    again) is not kept, as asked elsewhere that question may fit. Only a
+    string's own characters reach such a `False` in a question that read items,
+    since an item read always changes the value.
+
     Inside a cycle, a `True` that rests on open questions fitting is provisional
-    (a greatest-fixpoint memo): reused while those questions stay open, and
-    `False` never is. When a question closes `False`, every provisional answer
-    made since it opened is dropped, as it may have assumed that question fits.
+    (a greatest-fixpoint memo): reused while those questions stay open. When a
+    question closes `False`, final or not, every provisional answer made since
+    it opened is dropped, as it may have assumed that question fits; a lowlink
+    names only the lowest question an answer rests on, so one that rests on
+    this question cannot be told from one that rests only on questions below
+    it. A dropped answer is asked again against the kept `False`.
     When the cycle's first question, whose lowlink is its own, closes `True`,
     the provisional answers made since it opened become final. A provisional
     answer's lowlink names a question that may since have closed; `_redirect`
@@ -604,14 +637,16 @@ class _Answers:
         self._held.open(pair[1])
         self._serial += 1
         serial = self._serial
-        return _Frame(group, pair, descents, serial, serial, len(self._order), asked)
+        return _Frame(
+            group, pair, descents, serial, serial, serial, len(self._order), asked
+        )
 
     def get(self, pair: _Pair, asking: _Frame) -> bool | None:
         """`pair`'s answer or `None`; `asking` takes what a provisional one rests on."""
         if (final := self._final.get(pair)) is not None:
             return final[0]
         if (provisional := self._provisional.get(pair)) is not None:
-            asking.low = min(asking.low, self._open(provisional[0]))
+            asking.consult(self._open(provisional[0]), fits=True)
             return True
         return None
 
@@ -629,8 +664,8 @@ class _Answers:
         """Keeps or drops answers as `frame` closes; `parent` takes its lowlink."""
         self._held.close(frame.pair[1])
         root = frame.low >= frame.serial
-        if not root:
-            parent.low = min(parent.low, frame.low)
+        # A root's lowlink is its own serial or above, so its parent's stays.
+        frame.hand_on(parent, fits=answer)
         if not self._enabled:
             return
         kept = frame.group.descends
@@ -638,7 +673,7 @@ class _Answers:
             for pair in self._order[frame.mark :]:
                 del self._provisional[pair]
             del self._order[frame.mark :]
-            if root and kept:
+            if kept and frame.doubt >= frame.serial:
                 self._final[frame.pair] = (False, *frame.asked)
         elif root:
             for pair in self._order[frame.mark :]:
@@ -681,7 +716,9 @@ def _walk(  # noqa: C901, PLR0912  # one loop, its branches the walk's states
     A question that read items, answered once, is not asked again in the same
     walk, so a value that shares its parts (`l = [l2, l2]`, nested), on a cycle
     or not, is read once per part, not once per path: see `_Answers`, which
-    `reuse` false turns off, to compare against.
+    `reuse` false turns off, to compare against. A check failing on a cycle may
+    read a fitting part again, once per failing part it was first read under,
+    and a failing string again each time it is met.
 
     Past `budget` groups open about one value (see `WALK_BUDGET`), a cycle no key
     can see, it raises `TypeError` naming the type. A value that does not fit
@@ -692,7 +729,7 @@ def _walk(  # noqa: C901, PLR0912  # one loop, its branches the walk's states
         if not answer and type(declared) is Unresolved:
             raise UnresolvedError(declared)
         return answer
-    stack = [_Frame(answer, _pair(declared, value), 0, 0, 0, 0, (declared, value))]
+    stack = [_Frame(answer, _pair(declared, value), 0, 0, 0, 0, 0, (declared, value))]
     # Each open question's descents and serial.
     open_pairs = {stack[0].pair: (0, 0)}
     # Made when a second group opens: a walk of one group reuses nothing.
@@ -716,8 +753,8 @@ def _walk(  # noqa: C901, PLR0912  # one loop, its branches the walk's states
             pair = _pair(question, item)
             descents = frame.descents + group.descends
             if (before := open_pairs.get(pair)) is not None:
-                frame.low = min(frame.low, before[1])
                 finished = descents > before[0] and type(item) is not str
+                frame.consult(before[1], fits=finished)
                 continue
             if answers is not None and (known := answers.get(pair, frame)) is not None:
                 finished = known

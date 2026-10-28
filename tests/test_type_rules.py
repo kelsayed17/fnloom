@@ -960,6 +960,66 @@ def test_shared_parts_on_a_cycle_are_read_once_per_part() -> None:
     assert fnloom.value_matches(_L, bad_root, deep=True) is False
 
 
+type _Either = list[_Either] | collections.abc.Sequence[_Either]
+
+
+def _list_graph(size: int, *, bad: bool) -> list[object]:
+    """`_graph`'s links as plain lists, with a string leaf in the middle node."""
+    rng = random.Random(size)  # noqa: S311  # a seeded shape, not cryptography
+    nodes: list[list[object]] = [[] for _ in range(size)]
+    for node in nodes:
+        node.extend([nodes[rng.randrange(size)], nodes[rng.randrange(size)], nodes[0]])
+    if bad:
+        nodes[size // 2].append("leaf")
+    return nodes[0]
+
+
+_FUZZED_TYPES = """
+from collections.abc import Sequence
+type A2 = int
+type A3 = A3 | list[A4] | Sequence[A4] | tuple[None | A3, tuple[A2, A3]]
+type A4 = A3
+type A0 = list[A3 | None | A4]
+"""
+"""Aliases a fuzz found, in its order; `A3` and `A4` cycle through types alone."""
+
+
+def _fuzzed_type() -> object:
+    namespace: dict[str, object] = {}
+    exec(_FUZZED_TYPES, namespace)  # noqa: S102  # fixed source
+    return namespace["A0"]
+
+
+def _fuzzed_value() -> list[object]:
+    """A cyclic value a fuzz found: 11 nodes, lists and tuples linked back."""
+    n: list[Any] = [[] for _ in range(11)]  # lists, then tuples over them
+    n[8], n[9], n[10] = (1, n[1]), (1, "s"), ("s", "t")
+    n[2] = (n[3], n[1])
+    n[0].extend([n[1], n[2]])
+    n[1].append(n[0])
+    n[3].extend([n[0], n[4], n[10]])
+    n[4].extend([n[5], n[7], 0])
+    n[5].extend([n[5], n[6], n[3]])
+    n[6].extend([n[7], n[7], n[7], n[9]])
+    n[7].extend([n[5], n[4], n[0], n[8]])
+    return typing.cast("list[object]", n[0])
+
+
+def test_a_failing_check_on_a_cycle_reads_shared_parts_once() -> None:
+    """A `False` that assumed only that open questions fit is kept, inside a cycle too.
+
+    Both members of `_Either` read the same items, so each path into a shared
+    part would read it again if a failing answer were dropped with the cycle.
+    """
+    start = time.perf_counter()
+    assert fnloom.value_matches(_Either, _list_graph(80, bad=True), deep=True) is False
+    assert fnloom.value_matches(_Either, _list_graph(80, bad=False), deep=True) is True
+    fuzzed = _fuzzed_type()
+    assert fnloom.value_matches(fuzzed, _fuzzed_value(), deep=True) is False
+    assert fnloom.value_matches(fuzzed, _fuzzed_value()) is True
+    assert time.perf_counter() - start < 0.5  # noqa: PLR2004  # well under a second
+
+
 _FUZZ_TYPES: list[object] = [
     _L,
     _Pairs,

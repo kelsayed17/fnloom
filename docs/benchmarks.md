@@ -104,8 +104,9 @@ an alias, is walked question by question and costs more per item (over 200,000 i
 | `list[list[list[int]] \| None]` | 8.3 µs |
 | `type Tree = list[Tree] \| int` | 13.7 µs |
 
-A part the value shares, even on a cycle, is read once per check. Widening costs nothing on a value that fits without
-it.
+A part the value shares, even on a cycle, is read once per check, never once per path. A check that fails on a cycle
+may read a fitting part again, once for each failing part it was first read under. Widening costs nothing on a value
+that fits without it.
 
 **Steady execution**, the cost of running a prepared plan again, is where fnloom differs most. With checks on, it's
 2.5 to 24 times faster than Hamilton's `execute` on the first four shapes wherever both finish, and 8.6 to 998 times

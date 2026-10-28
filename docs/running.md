@@ -305,8 +305,11 @@ a value of a standard class (`list`, `dict`, `set`, `tuple`, `deque`, ...) has i
 as an iterable class of your own, keeps the default checks, so an endless one is never read to its end. A subclass of
 a standard collection, such as a `list` subclass of your own, is checked by the default rules too. A value of any size
 or depth is read in full, and a part it shares, such as one list held in two places, is read once per check, on a
-cycle or not. A check gives up only when more than 10,000 of its questions are open about one value at once, which only
-a cycle no check can see, such as a type made afresh on each reading, reaches.
+cycle or not, never once per path. A check that fails on a cycle reads each failing part once, but may read a
+fitting part again, once for each failing part it was first read under. A string is the one part a failing check can
+read again each time it is met, at the cost of its characters. A check gives up only when more than 10,000 of its
+questions are open about one value at once, which only a cycle no check can see, such as a type made afresh on each
+reading, reaches.
 
 `Builder.with_numeric_widening()` lets an `int` (but not a `bool`) and a numpy integer or floating scalar fit
 `float`, and a numpy integer scalar fit `int`. Hamilton refuses them all, as fnloom does by default. numpy is
