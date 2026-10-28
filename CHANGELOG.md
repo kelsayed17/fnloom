@@ -7,6 +7,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-28
+
 ### Added
 
 - `@cache(format=...)` picks how `DiskCache` writes a node's result: a `fnloom.Format` (a name with a `dumps` and
@@ -170,6 +172,7 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - The type stub `fnloom/_core.pyi` matches the extension: `Graph`, `KeyPlan` and `ObserverBase` construct through `__new__`,
   and `Plan.run`'s `observers` defaults to `()` in its runtime signature too.
 
-[Unreleased]: https://github.com/kelsayed17/fnloom/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/kelsayed17/fnloom/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/kelsayed17/fnloom/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/kelsayed17/fnloom/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kelsayed17/fnloom/releases/tag/v0.1.0
