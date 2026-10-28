@@ -4,12 +4,16 @@ import annotationlib
 import inspect
 from typing import TYPE_CHECKING
 
+from fnloom._config import _is_bool
 from fnloom._decorators import Source, decorations
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
     from fnloom._scan import NodeDef
+
+# The least number of consumers that can disagree.
+_TWO = 2
 
 # Longest repr of a default in a message.
 _SHOWN = 40
@@ -27,10 +31,9 @@ def default_problems(nodes: Sequence[NodeDef]) -> list[str]:
     opting out every consumer but one settles it: the rest then agree.
     """
     computed = {node.name for node in nodes}
-    shadowed: list[str] = []
-    # Per input: the consumers (node, parameter, its default) that did not opt out.
-    readers: dict[str, list[tuple[str, str, object]]] = {}
-    defaults_of: dict[int, dict[str, object]] = {}
+    lines: list[str] = []
+    # Per input: the consumers (node, parameter, origin) that did not opt out.
+    readers: dict[str, list[tuple[str, str, Callable[..., object]]]] = {}
     for node in nodes:
         recorded = decorations(node.origin).defaults
         for param in node.params:
@@ -39,20 +42,35 @@ def default_problems(nodes: Sequence[NodeDef]) -> list[str]:
             read = param.binding.name
             if read in computed:
                 if recorded is None or param.name not in recorded.shadowed:
-                    shadowed.append(_shadowed(node.name, param.name, read))
+                    lines.append(_shadowed(node.name, param.name, read))
             elif recorded is None or param.name not in recorded.differing:
-                found = defaults_of.get(id(node.origin))
-                if found is None:
-                    found = defaults_of[id(node.origin)] = _defaults(node.origin)
                 readers.setdefault(read, []).append(
-                    (node.name, param.name, found[param.name])
+                    (node.name, param.name, node.origin)
                 )
-    lines = shadowed
-    for name, group in readers.items():
-        line = _differing(name, group)
-        if line is not None:
-            lines.append(line)
+    lines += _differing_lines(readers)
     return sorted(lines)
+
+
+def _differing_lines(
+    readers: dict[str, list[tuple[str, str, Callable[..., object]]]],
+) -> list[str]:
+    """A line for each input of `readers` whose consumers' defaults disagree.
+
+    Defaults are read only for an input that two or more consumers read.
+    """
+    lines: list[str] = []
+    signatures: dict[int, dict[str, object]] = {}
+    for name, group in readers.items():
+        if len(group) < _TWO:
+            continue
+        found: list[tuple[str, str, object]] = []
+        for node_name, parameter, origin in group:
+            if id(origin) not in signatures:
+                signatures[id(origin)] = _defaults(origin)
+            found.append((node_name, parameter, signatures[id(origin)][parameter]))
+        if (line := _differing(name, found)) is not None:
+            lines.append(line)
+    return lines
 
 
 def _shadowed(consumer: str, parameter: str, node: str) -> str:
@@ -84,17 +102,27 @@ def _differing(name: str, group: list[tuple[str, str, object]]) -> str | None:
 def _same(left: object, right: object) -> bool:
     """Whether two defaults are the same; an unclear comparison says no.
 
-    The same object is equal to itself, even a numpy array. Otherwise `==` must
-    return a `bool` and not raise: an array's elementwise result, or an object
-    that cannot be compared, is not a clear yes.
+    The same object is equal to itself, even a numpy array, and two NaNs are
+    equal. Otherwise `==` must give a `bool` (or numpy's) and not raise: an
+    array's elementwise result, or an object that cannot be compared, is not a
+    clear yes.
     """
     if left is right:
         return True
     try:
         result = left == right
+        if not _is_bool(result):
+            return False
+        # Unequal, but each unequal to itself: two NaNs.
+        return bool(result) or (_nan(left) and _nan(right))
     except Exception:  # noqa: BLE001  # any failure of a user's `__eq__` is "unclear"
         return False
-    return result is True
+
+
+def _nan(value: object) -> bool:
+    """Whether `value` is not equal to itself, with a `bool` result: NaN."""
+    unequal = value != value  # noqa: PLR0124  # NaN is the one value unequal to itself
+    return _is_bool(unequal) and bool(unequal)
 
 
 def _shown(default: object) -> str:

@@ -253,6 +253,50 @@ def test_an_unclear_comparison_counts_as_differing(make: type) -> None:
         fnloom.build(module)
 
 
+def _two_consumers(name: str, default: str, other: str) -> fnloom.Driver:
+    """Builds two consumers of `shared`, whose defaults are the expressions given."""
+    source = (
+        "import math\n\n\n"
+        f"def a(shared: object = {default}) -> int:\n    return 1\n\n\n"
+        f"def b(shared: object = {other}) -> int:\n    return 2\n"
+    )
+    return fnloom.build(make_module(name, source))
+
+
+def test_separate_nans_are_equal_defaults() -> None:
+    """`nan != nan`, but two NaN defaults are the same default."""
+    driver = _two_consumers("defaults_nan", "float('nan')", "math.nan")
+    assert driver.execute(["a", "b"]) == {"a": 1, "b": 2}
+
+
+def test_nan_against_a_number_differs() -> None:
+    """A NaN is not equal to a number, so the defaults differ."""
+    with pytest.raises(ValueError, match="differing defaults: input 'shared'"):
+        _two_consumers("defaults_nan_number", "float('nan')", "1.0")
+
+
+def test_equal_numpy_scalars_are_equal_defaults() -> None:
+    """`==` on two numpy scalars gives numpy's bool, which counts as a `bool`."""
+    pytest.importorskip("numpy")
+    source = (
+        "import numpy as np\n\n\n"
+        "def a(shared: object = np.float64(1.0)) -> int:\n    return 1\n\n\n"
+        "def b(shared: object = np.float64(1.0)) -> int:\n    return 2\n"
+    )
+    assert fnloom.build(make_module("defaults_np_equal", source)).execute(
+        ["a", "b"]
+    ) == {"a": 1, "b": 2}
+    different = source.replace(
+        "np.float64(1.0)) -> int:\n    return 2",
+        "np.float64(2.0)) -> int:\n    return 2",
+    )
+    with pytest.raises(ValueError, match="differing defaults: input 'shared'"):
+        fnloom.build(make_module("defaults_np_differ", different))
+    arrays = source.replace("np.float64(1.0)", "np.zeros(2)")
+    with pytest.raises(ValueError, match="differing defaults: input 'shared'"):
+        fnloom.build(make_module("defaults_np_arrays", arrays))
+
+
 def test_one_default_object_shared_is_the_same() -> None:
     """The same object is equal to itself, even where `==` would be unclear."""
     module = make_module(

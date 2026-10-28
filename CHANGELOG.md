@@ -51,6 +51,10 @@ change the public API; such changes are listed under **Changed** and **Removed**
   per column, with no registry or extension to load (Q64). A missing column raises `ValueError` when run, naming the
   columns the producer did return. `@tag` on an `@extract_*` function tags the producer and every field or column
   (Q63).
+- An input or override naming a parameter that only `value()` bindings supply is refused as an unknown name, as any
+  input nothing reads is (Q4, Q5); Hamilton drops it, even a wrong-typed one. When another node reads the name, the
+  caller's value feeds that node alone and the `value()` rows keep their constant (Q77). Documented and tested; no
+  behaviour changed.
 - `Builder.build_async()` and `AsyncDriver`, for graphs with `async def` nodes. The build is synchronous (Q12), and
   `execute` and `AsyncPreparedPlan.run` are coroutines that return the sync driver's dict, in request order (Q11). Sync
   nodes run in a worker thread, or on the loop with `build_async(sync_nodes="inline")` (Q65). A failing node cancels its
@@ -67,9 +71,6 @@ change the public API; such changes are listed under **Changed** and **Removed**
   keep the behaviour, write `@fnloom.defaults(shadowed=("cost",))` on the consumer, and
   `@fnloom.defaults(differing=("shared",))` on each consumer of the input but one; or rename the node, or make the
   defaults equal (Q76). `@fnloom.defaults` is new, and records names only.
-- An input or override naming a parameter that only `value()` bindings supply is refused as an unknown name, as it
-  always was (Q4); Hamilton drops it. When another node reads the name, the caller's value feeds that node, and the
-  `value()` rows keep their constant (Q77).
 - A `TypedDict`-typed input or override accepts any `dict`, its keys unchecked, as the shallow container checks do.
   Before, every value failed the check, so such an input could never be supplied (Q61).
 - `build()` still refuses a graph with an `async def` node, and its `ValueError` now names `build_async()` (Q32).

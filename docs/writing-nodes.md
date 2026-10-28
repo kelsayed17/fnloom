@@ -75,8 +75,8 @@ driver.execute(["greeting"], inputs={"name": "Ada", "punctuation": "."})
 
 ## Defaults the build refuses
 
-A default only applies to an input nobody supplies. Two patterns make it quietly not apply, and Hamilton accepts both.
-fnloom refuses them when you build (Q76), each with one `ValueError` that lists every case, sorted.
+A default only applies to an input nobody supplies. Two patterns make a default surprising, and Hamilton accepts
+both. fnloom refuses them when you build (Q76), each with one `ValueError` that lists every case, sorted.
 
 **A node shadows the default.** A parameter with a default that reads a node, by its own name or through
 `source("...")`, takes the node's value. The default is never used, and an input of that name is ignored:
@@ -102,8 +102,8 @@ fnloom.build(surcharge)
 
 A `value()` binding has no edge, so a node of that name doesn't shadow it.
 
-**Two consumers disagree.** One input that two or more consumers give different defaults is a different value for each
-when it isn't supplied, and the same one for both when it is:
+**Two consumers disagree.** Each consumer keeps its own default when the input isn't supplied, but one input then reads
+as two different values, and the same one for both when it is supplied:
 
 ```python
 # file: windows.py
@@ -123,8 +123,9 @@ fnloom.build(windows)
 # raises ValueError: differing defaults: input 'days' has different defaults in 'long_window' (parameter 'days') = 30, 'short_window' (parameter 'days') = 7; make them equal, or write @fnloom.defaults(differing=(<parameter>,)) on each of these consumers but one
 ```
 
-Defaults are compared with `==`. An unclear comparison counts as different: a result that isn't a `bool`, as numpy
-arrays give, an error, or two objects without `__eq__` that aren't the same object. A consumer without a default has
+Defaults are compared with `==`, and two NaNs are equal. An unclear comparison counts as different: a result that
+isn't a `bool` (numpy's scalar bool is one), as numpy arrays give, an error, or two objects without `__eq__` that
+aren't the same object. A consumer without a default has
 none to differ from.
 
 **Opting out.** When you mean it, say so on the consumer with `@fnloom.defaults`, naming the parameters:

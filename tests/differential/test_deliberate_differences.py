@@ -2658,7 +2658,13 @@ def test_q77_a_value_bound_name_nothing_reads() -> None:
     hamilton = hamilton_driver.Builder().with_modules(alone["hamilton"]).build()
     assert hamilton.execute(["r1"], inputs=inputs) == {"r1": 2}
     assert hamilton.execute(["r1"], inputs={"src": 1}, overrides={"p": 99}) == {"r1": 2}
+    # Even a wrong-typed one (H5.4e).
+    wrong = {"src": 1, "p": "not an int"}
+    assert hamilton.execute(["r1"], inputs=wrong) == {"r1": 2}
+    assert hamilton.validate_execution(["r1"], inputs=wrong) is None
     built = fnloom.build(alone["fnloom"])
+    with pytest.raises(ValueError, match="'p'"):
+        built.execute(["r1"], inputs=wrong)
     with pytest.raises(ValueError, match="'p'"):
         built.execute(["r1"], inputs=inputs)
     with pytest.raises(ValueError, match="'p'"):
