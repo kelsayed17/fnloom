@@ -44,10 +44,18 @@ interned keyword names. An optional input that was not supplied is simply absent
 
 ## Observers
 
-`Observer<E>` has four hooks, each with a default that does nothing: `pre_graph`, `pre_node`, `post_node(ok)` and
-`post_graph(ok)`. They fire only around computed steps. Every observer sees every event, in slice order, even when an
-earlier one fails; the first failure then aborts the run, and `post_graph(false)` still runs so observers can close
-what they opened. An error from `post_graph` is reported alongside the run's outcome, never instead of it.
+`Observer<V, E>`, with `V` and `E` the evaluator's value and error types, has four hooks, each with a default that
+does nothing:
+
+- `pre_graph()`, once before anything runs.
+- `pre_node(node, args)`, before a computed node is evaluated, with the very `args` `evaluate` gets.
+- `post_node(node, outcome)`, after it, with `Ok(&value)` or `Err(&error)`.
+- `post_graph(ok)`, once after the run ended.
+
+The node hooks fire only around computed steps, and get the values by reference, so an observer that ignores them
+costs nothing. Every observer sees every event, in slice order, even when an earlier one fails; the first failure then
+aborts the run, and `post_graph(false)` still runs so observers can close what they opened. An error from
+`post_graph` is reported alongside the run's outcome, never instead of it.
 
 ## Errors
 
