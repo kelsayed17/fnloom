@@ -433,8 +433,9 @@ corrupt, and a lookup is one file read.
 
     The default serializer is pickle, and loading a pickle runs whatever code it names. Whoever can write to the cache
     directory can run code in every process that reads it. Keep the directory as private as the code itself.
-    `DiskCache` makes its directories readable and writable by their owner only, and warns when it opens an existing
-    directory that other users can write or that another user owns.
+    `DiskCache` makes its directories readable and writable by their owner only, and on POSIX warns when it opens an
+    existing directory that other users can write or that another user owns. Windows controls access with ACLs, which
+    `DiskCache` does not inspect, so there it never warns: check the directory's permissions yourself.
 
 ```python
 import shutil

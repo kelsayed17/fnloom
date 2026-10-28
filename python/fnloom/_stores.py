@@ -273,8 +273,8 @@ class DiskCache:
     ) -> None:
         """Opens the store at `path`, pruning it to `max_bytes` if given.
 
-        An existing directory that other users can write is reported with a
-        `CacheWarning`: whoever can write it can run code in every reader.
+        On POSIX, an existing directory that other users can write is reported with
+        a `CacheWarning`: whoever can write it can run code in every reader.
 
         Raises:
             ValueError: `max_bytes` is negative, or `path` holds a NUL byte.
@@ -510,6 +510,10 @@ _WRITABLE_BY_OTHERS = 0o022
 
 def _warn_if_shared(path: Path) -> None:
     """Warns when `path` exists and someone other than this user may write to it."""
+    # Only POSIX mode bits and owners say who can write. Windows grants access through
+    # ACLs and reports every directory as mode 0o777, so there the check would misfire.
+    if os.name != "posix":
+        return
     try:
         status = path.stat()
     except OSError:
