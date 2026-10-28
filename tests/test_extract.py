@@ -799,6 +799,20 @@ def test_an_unfingerprintable_fill_makes_the_field_uncacheable() -> None:
     assert outcomes["mean"].status == "uncacheable"
     assert outcomes["mean"].reason is not None
     assert outcomes["mean"].reason.startswith("fill_with of field 'mean'")
+    columns = make_module(
+        "columns_unkeyed",
+        """
+        from fnloom import extract_columns
+
+        @extract_columns("a", fill_with=object())
+        def p() -> dict:
+            return {}
+        """,
+    )
+    driver = Builder().with_modules(columns).with_cache(MemoryCache()).build()
+    reason = driver.explain_cache(["a"])["a"].reason
+    assert reason is not None
+    assert reason.startswith("fill_with of column 'a'")
     assert outcomes["doubled"] == CacheOutcome(
         "uncacheable", "reads uncacheable 'mean'"
     )
@@ -914,14 +928,23 @@ def test_columns_split_a_pandas_frame_into_series(pd: ModuleType) -> None:
     assert _values(unchecked.execute(["a"], inputs={"n": 1}))["a"].tolist() == [1, 1]
 
 
-def test_column_type_reads_the_frame_type_by_name(pd: ModuleType) -> None:
+def test_column_type_reads_the_frame_type_by_name(
+    pd: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Only pandas and polars frames give a Series; anything else gives `Any`."""
     assert column_type(dict) is Any
     assert column_type(list[int]) is Any
     assert column_type("pd.DataFrame") is Any
     fake = type("DataFrame", (), {"__module__": "polars.dataframe.frame"})
     # A polars-like frame with no polars imported gives `Any`, not an import.
-    assert column_type(fake) is Any or "polars" in sys.modules
+    monkeypatch.delitem(sys.modules, "polars", raising=False)
+    assert column_type(fake) is Any
+    assert "polars" not in sys.modules
+    # With a stand-in `polars` imported, its `Series` is the column type.
+    series = type("Series", (), {})
+    monkeypatch.setitem(sys.modules, "polars", ModuleType("polars"))
+    monkeypatch.setattr(sys.modules["polars"], "Series", series, raising=False)
+    assert column_type(fake) is series
     assert column_type(pd.DataFrame) is pd.Series
     assert column_type(pd.Series) is Any
 
@@ -939,13 +962,16 @@ def test_a_list_argument_is_refused_with_the_star_hint() -> None:
         match=r"column names or \(name, doc\) pairs, got: \('a',\), 1",
     ):
         extract_columns("a", 1, ("a",))  # ty: ignore[invalid-argument-type]  # the misuse under test
-    with pytest.raises(ValueError, match=r"more than once: 'a'"):
+    with pytest.raises(ValueError, match=r"more than once: 'a'$"):
         extract_columns("a", ("a", "doc"))
+    # Never de-duplicated: every repeat is listed, sorted (Q64).
+    with pytest.raises(ValueError, match=r"more than once: 'a', 'b'$"):
+        extract_columns("b", "a", "b", "a", "c")
 
     def p() -> dict[str, int]:
         return {}
 
-    assert extract_columns("a", "a")(p) is p
+    assert extract_columns("a")(p) is p
     extraction = decorations(p).extract
     assert extraction is not None
     assert extraction.items == (("a", None, None),)
@@ -1251,3 +1277,58 @@ def test_a_changed_column_type_is_not_served_stale(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match=r"'a' as int, but it is declared pandas"):
         driver.execute(["doubled"], inputs={"x": 1})
     assert module.CALLS == []
+
+
+def test_fill_with_none_on_a_pandas_frame_stays_none(pd: ModuleType) -> None:
+    """`fill_with=None` fills a pandas column with `None`, not NaN (Q62)."""
+    module = make_module(
+        "columns_fill_none_pandas",
+        """
+        import pandas as pd
+
+        from fnloom import extract_columns
+
+        @extract_columns("zz", fill_with=None)
+        def frame() -> pd.DataFrame:
+            return pd.DataFrame({"a": [1, 2]})
+        """,
+    )
+    filled = _values(fnloom.build(module).execute(["zz"]))["zz"]
+    assert isinstance(filled, pd.Series)
+    assert filled.dtype == object
+    assert filled.tolist() == [None, None]
+
+
+_SWITCHED = """
+from typing import Any
+
+from fnloom import cache, extract_columns, extract_fields
+
+CALLS: list[str] = []
+
+@cache(version="1")
+@{decorator}
+def p(x: int) -> dict:
+    CALLS.append("p")
+    return {{"a": x}}
+
+@cache(version="1")
+def doubled(a: object) -> object:
+    CALLS.append("doubled")
+    return [a, a]
+"""
+
+
+def test_switching_the_extract_decorator_misses(tmp_path: Path) -> None:
+    """A field and a column of one name, type and fill never share a key."""
+    store = DiskCache(tmp_path / "cache")
+    for decorator, expected in (
+        ('extract_fields({"a": Any})', ["p", "doubled"]),
+        ('extract_fields({"a": Any})', []),
+        ('extract_columns("a")', ["doubled"]),
+    ):
+        module = make_module("columns_switched", _SWITCHED.format(decorator=decorator))
+        driver = Builder().with_modules(module).with_cache(store).build()
+        assert driver.execute(["doubled"], inputs={"x": 1}) == {"doubled": [1, 1]}
+        ran = module.CALLS
+        assert ran == expected, decorator

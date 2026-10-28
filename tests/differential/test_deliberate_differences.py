@@ -1565,16 +1565,68 @@ def test_q63_tags_land_on_the_producer_too() -> None:
         assert driver.nodes["p"].tags == {"owner": "z"}
 
 
+_TAGGED_COLUMNS = """
+import pandas as pd
+{decorator}
+
+{first}
+{second}
+def p() -> pd.DataFrame:
+    return pd.DataFrame({{"a": [1]}})
+"""
+_COLUMN_TAG_ORDERS = [
+    ('@tag(owner="z")', '@extract_columns("a")'),
+    ('@extract_columns("a")', '@tag(owner="z")'),
+]
+
+
+@pytest.mark.deliberate("Q63")
+def test_q63_column_tags_land_on_the_producer_too() -> None:
+    """Hamilton tags only the column nodes, in either order; fnloom the producer too."""
+    pytest.importorskip("pandas")
+    _hamilton_pandas()
+    for index, (first, second) in enumerate(_COLUMN_TAG_ORDERS):
+        hamilton_module = make_module(
+            f"differential_q63_columns_h{index}",
+            _TAGGED_COLUMNS.format(
+                decorator=_HAMILTON_COLUMNS_TAG, first=first, second=second
+            ),
+        )
+        hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+        hamilton_tags = {
+            v.name: {k: t for k, t in v.tags.items() if not k.startswith("module")}
+            for v in hamilton.list_available_variables()
+        }
+        assert hamilton_tags == {"a": {"owner": "z"}, "p": {}}, (first, second)
+        fnloom_module = make_module(
+            f"differential_q63_columns_f{index}",
+            _TAGGED_COLUMNS.format(
+                decorator=_FNLOOM_COLUMNS_TAG, first=first, second=second
+            ),
+        )
+        driver = fnloom.build(fnloom_module)
+        assert driver.nodes["a"].tags == {"owner": "z"}, (first, second)
+        assert driver.nodes["p"].tags == {"owner": "z"}, (first, second)
+
+
+_HAMILTON_COLUMNS_TAG = "from hamilton.function_modifiers import extract_columns, tag"
+_FNLOOM_COLUMNS_TAG = "from fnloom import extract_columns, tag"
+
+
 _HAMILTON_COLUMNS = "from hamilton.function_modifiers import extract_columns"
 _FNLOOM_COLUMNS = "from fnloom import extract_columns"
 
-_FRAME_AND_DICT = """
+_FRAME = """
 import pandas as pd
 {decorator}
 
 @extract_columns("a")
 def frame() -> pd.DataFrame:
     return pd.DataFrame({{"a": [1, 2]}})
+"""
+
+_DICT = """
+{decorator}
 
 @extract_columns("b")
 def mapping() -> dict:
@@ -1586,10 +1638,9 @@ def mapping() -> dict:
 def test_q64_extract_columns_needs_no_extension(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Hamilton without its pandas extension refuses a frame and a dict.
+    """Hamilton without its pandas extension refuses a frame at decoration.
 
-    fnloom splits both: a frame into `pandas.Series`, read by name, and a dict
-    into columns typed `Any`.
+    fnloom splits it into `pandas.Series` columns, read by name.
     """
     pd = pytest.importorskip("pandas")
     from hamilton import registry  # noqa: PLC0415  # only the Q64 tests need it
@@ -1597,18 +1648,68 @@ def test_q64_extract_columns_needs_no_extension(
     # As with autoload off and nothing loaded yet, whatever ran before.
     monkeypatch.setattr(registry, "DF_TYPE_AND_COLUMN_TYPES", {})
     with pytest.raises(InvalidDecoratorException, match="type we know about"):
-        make_module(
-            "differential_q64_h", _FRAME_AND_DICT.format(decorator=_HAMILTON_COLUMNS)
-        )
+        make_module("differential_q64_h", _FRAME.format(decorator=_HAMILTON_COLUMNS))
     fnloom_module = make_module(
-        "differential_q64_f", _FRAME_AND_DICT.format(decorator=_FNLOOM_COLUMNS)
+        "differential_q64_f", _FRAME.format(decorator=_FNLOOM_COLUMNS)
     )
     driver = fnloom.build(fnloom_module)
     assert driver.nodes["a"].type is pd.Series
-    assert driver.nodes["b"].type is Any
-    result: dict[str, Any] = dict(driver.execute(["a", "b"]))
+    result: dict[str, Any] = dict(driver.execute(["a"]))
     assert result["a"].tolist() == [1, 2]
-    assert result["b"] == 3  # noqa: PLR2004  # the value the producer returns
+
+
+@pytest.mark.deliberate("Q64")
+def test_q64_a_dict_return_is_split() -> None:
+    """Hamilton refuses a `dict` return even with its pandas extension loaded.
+
+    fnloom splits it into columns typed `Any`.
+    """
+    pytest.importorskip("pandas")
+    _hamilton_pandas()
+    with pytest.raises(InvalidDecoratorException, match="type we know about"):
+        make_module(
+            "differential_q64_dict_h", _DICT.format(decorator=_HAMILTON_COLUMNS)
+        )
+    fnloom_module = make_module(
+        "differential_q64_dict_f", _DICT.format(decorator=_FNLOOM_COLUMNS)
+    )
+    driver = fnloom.build(fnloom_module)
+    assert driver.nodes["b"].type is Any
+    assert driver.execute(["b", "mapping"]) == {"b": 3, "mapping": {"b": 3}}
+
+
+_REPEATED = """
+import pandas as pd
+{decorator}
+
+@extract_columns({columns})
+def frame() -> pd.DataFrame:
+    return pd.DataFrame({{"a": [1]}})
+"""
+
+
+@pytest.mark.deliberate("Q64")
+def test_q64_a_repeated_column_is_refused_when_decorating() -> None:
+    """Hamilton fails the build on a column named twice, in either form.
+
+    fnloom refuses it when decorating, listing every repeat, sorted.
+    """
+    pytest.importorskip("pandas")
+    _hamilton_pandas()
+    for index, columns in enumerate(['"a", "a"', '"a", ("a", "doc")']):
+        hamilton_module = make_module(
+            f"differential_q64_repeat_h{index}",
+            _REPEATED.format(decorator=_HAMILTON_COLUMNS, columns=columns),
+        )
+        with pytest.raises(ValueError, match="Cannot define function a more than"):
+            hamilton_driver.Builder().with_modules(hamilton_module).build()
+        with pytest.raises(ValueError, match=r"names a column more than once: 'a'$"):
+            make_module(
+                f"differential_q64_repeat_f{index}",
+                _REPEATED.format(decorator=_FNLOOM_COLUMNS, columns=columns),
+            )
+    with pytest.raises(ValueError, match=r"more than once: 'a', 'b'$"):
+        fnloom.extract_columns("b", "a", ("b", "doc"), "a")
 
 
 _COLUMNS_FILLED = """

@@ -197,6 +197,11 @@ class _ColumnExtractor(_Extractor):
         if library == "pandas":
             sized = typing.cast("Any", frame)
             series = sys.modules["pandas"].Series
+            if self._fill is None:
+                # `None` stays `None`, not NaN: it is a fill like any other (Q62).
+                # A scalar `None` is read as missing data, so it is given per row.
+                nones = [None] * len(sized.index)
+                return series(nones, index=sized.index, name=column, dtype=object)
             return series(self._fill, index=sized.index, name=column)
         if library == "polars":
             sized = typing.cast("collections.abc.Sized", frame)
@@ -481,8 +486,8 @@ def _columns(columns: tuple[object, ...]) -> tuple[Item, ...]:
 
     A list is refused with the advice Hamilton gives (H2.3c), and every
     argument that is neither a name nor a `(name, doc)` pair is listed, sorted.
-    A column given twice the same way is one column; a name given twice
-    otherwise is refused.
+    A name given more than once, in any form, is refused, every repeat listed,
+    sorted (Q64): Hamilton fails such a build.
     """
     if not columns:
         msg = "extract_columns got no columns; it needs at least one column name"
@@ -507,12 +512,11 @@ def _columns(columns: tuple[object, ...]) -> tuple[Item, ...]:
         if any(isinstance(column, list) for column in columns):
             msg += "; it got a list: put `*` in front of it to expand it"
         raise TypeError(msg)
-    unique = list(dict.fromkeys(items))
-    counts = collections.Counter(name for name, _, _ in unique)
+    counts = collections.Counter(name for name, _, _ in items)
     if repeated := sorted(repr(name) for name, count in counts.items() if count > 1):
         msg = f"extract_columns names a column more than once: {', '.join(repeated)}"
         raise ValueError(msg)
-    return tuple(unique)
+    return tuple(items)
 
 
 def extract_columns[F: Callable[..., object]](

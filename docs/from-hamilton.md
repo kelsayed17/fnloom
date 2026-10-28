@@ -99,8 +99,9 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `@extract_fields({"a": str})` on a `dict[str, int]` return | Builds | `ValueError` at build (Q61) |
 | `@extract_fields` with a mapping and names, or a name the `TypedDict` lacks | Drops the names; a bare `KeyError` | `ValueError` when decorating (Q61) |
 | An input or field annotated with a `TypedDict` | The input check raises `TypeError` | Any `dict` is accepted (Q61) |
-| `@tag` on an `@extract_fields` function | Tags the fields only | Tags the producer and the fields (Q63) |
+| `@tag` on an `@extract_fields` or `@extract_columns` function | Tags the fields or columns only | Tags the producer too (Q63) |
 | `@extract_columns` with extensions not autoloaded, or on a `dict` return | Refused when decorating | Works: a frame's columns are its `Series`, a mapping's are typed `Any` (Q64) |
+| A column named twice in `@extract_columns`, as `"a", "a"` or `"a", ("a", "doc")` | `ValueError` at build | `ValueError` when decorating, listing every repeat (Q64) |
 | A column missing, or named twice in the frame | `InvalidDecoratorException` when run; a DataFrame, unchecked | `ValueError` when run, naming the columns returned; each column is checked against its type (Q64) |
 
 </div>

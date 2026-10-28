@@ -152,24 +152,31 @@ def _field_policy(producer: CachePolicy) -> CachePolicy:
 
 
 def _extraction_parts(node: NodeDef) -> tuple[list[bytes], str | None]:
-    """An extracted field's own key parts, or why it has no key.
+    """An extracted field's or column's own key parts, or why it has no key.
 
-    Its field, its declared type's `repr` and its fill's fingerprint, or a marker
-    for no fill: a rebuild changing any of them changes the key of what reads it.
+    Which decorator made it, its field or column, its declared type's `repr` and
+    its fill's fingerprint, or a marker for no fill: a rebuild changing any of
+    them changes the key of what reads it.
     """
     payload = _extract.extractor(node)
     if payload is None:
         return [], None
-    parts = [b"extract", payload.field.encode(), repr(payload.declared).encode()]
+    noun = payload.noun
+    parts = [
+        b"extract",
+        f"{noun}s".encode(),
+        payload.field.encode(),
+        repr(payload.declared).encode(),
+    ]
     if payload.fill is _extract.MISSING_FILL:
         return [*parts, b"no fill", b""], None
     try:
         return [*parts, b"fill", fingerprint(payload.fill)], None
     except _core.UnfingerprintableError as error:
-        return parts, f"fill_with of field {payload.field!r}: {error}"
+        return parts, f"fill_with of {noun} {payload.field!r}: {error}"
     except Exception as error:  # noqa: BLE001  # a failing fingerprint: uncacheable
         reason = (
-            f"cannot fingerprint fill_with of field {payload.field!r} of node "
+            f"cannot fingerprint fill_with of {noun} {payload.field!r} of node "
             f"{node.name!r}: {error!r}"
         )
         # Up: `_extraction_parts`, `_node_key`, `node_keys`, `Cache.of`,

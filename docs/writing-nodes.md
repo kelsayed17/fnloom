@@ -416,8 +416,10 @@ driver.nodes["price"].doc
   a full `Series` on the frame's index, for a polars frame a `Series` as long as the frame, and for a mapping the
   value itself. Any other type with a missing column is a `TypeError` naming it. A `(name, doc)` column fills by
   `name` (Q64).
-- **Refused when decorating:** no columns, and a list. Put `*` in front of a list: `extract_columns(*names)`.
-- `@tag`, `@config` and one `@parameterize` row work as they do with `@extract_fields`.
+- **Refused when decorating:** no columns, a list, and a column name given more than once, in any form (Q64). Put `*`
+  in front of a list: `extract_columns(*names)`.
+- `@tag` tags the producer and every column node (Q63). `@config` and one `@parameterize` row work as they do with
+  `@extract_fields`.
 
 ```python
 # file: gaps.py
