@@ -7,6 +7,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-10-27
+
 ### Added
 
 - The Rust core, `fnloom-core`: a graph built from node specs, with cycle and duplicate detection; upstream,
@@ -91,4 +93,5 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - The type stub `fnloom/_core.pyi` matches the extension: `Graph`, `KeyPlan` and `ObserverBase` construct through `__new__`,
   and `Plan.run`'s `observers` defaults to `()` in its runtime signature too.
 
-[Unreleased]: https://github.com/kelsayed17/fnloom/commits/main
+[Unreleased]: https://github.com/kelsayed17/fnloom/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/kelsayed17/fnloom/releases/tag/v0.1.0
