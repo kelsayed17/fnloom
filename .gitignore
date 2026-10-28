@@ -17,3 +17,5 @@ bench.jsonl
 bench.stderr
 # Local Claude Code settings and worktrees.
 .claude/
+# CodSpeed results.
+.codspeed/

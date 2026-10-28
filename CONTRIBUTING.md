@@ -52,6 +52,10 @@ marker fails collection when it names no row of the register.
 
 `benches/` times fnloom against Hamilton by wall clock; see [the benchmarks page](docs/benchmarks.md).
 
+`benchmarks/` holds the CodSpeed benchmarks of the Python run path. `scripts/check.sh` does not run them; run
+`uv run pytest benchmarks` after `uv run maturin develop --release` to check they pass, and CI measures them when the
+repository enables CodSpeed.
+
 CI gates the Rust core on instruction counts under callgrind, which are stable on shared runners where wall-clock time
 is not. A rise of more than 2% over `crates/fnloom-core/benches/baseline.json` fails the `instruction-counts` job. When
 a change costs instructions on purpose, regenerate the baseline in the job's environment (the `rust:1.99.1` image on

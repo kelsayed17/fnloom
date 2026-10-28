@@ -48,6 +48,8 @@ dev = [
     "hypothesis>=6.150",
     # An independent BLAKE3, to check the binding's keyed cache keys against.
     "blake3>=1.0",
+    # The CodSpeed benchmarks in benchmarks/, which also run as plain tests without the plugin's flag.
+    "pytest-codspeed>=5.0.3",
 ]
 # The documentation site (`uv run --group docs zensical serve` to preview it).
 docs = ["zensical>=0.0.73"]
@@ -58,6 +60,8 @@ python-source = "python"
 module-name = "fnloom._core"
 
 [tool.pytest.ini_options]
+# benchmarks/ is left out: `scripts/check.sh` runs `pytest`, and the benchmarks are for the CI jobs and for
+# `uv run pytest benchmarks`.
 testpaths = ["tests", "scripts"]
 # Test modules import shared helpers as `from helpers import ...`; "." lets them import `benches`,
 # and "scripts" lets scripts/test_bench_gate.py import the script it tests.
@@ -66,7 +70,7 @@ addopts = ["-ra", "--strict-markers", "--strict-config"]
 
 [tool.ruff]
 target-version = "py314"
-src = ["python", "tests", "scripts", "benches"]
+src = ["python", "tests", "scripts", "benches", "benchmarks"]
 # Plain directories loaded by path or by pytest's rootdir, deliberately not packages.
 namespace-packages = ["tests/differential", "tests/differential/fixtures"]
 
@@ -81,7 +85,7 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"tests/**" = [
+"{tests,benchmarks}/**" = [
     "S101", # pytest tests are asserts
 ]
 # Built by the tests, so their annotation-only imports must exist at run time.
@@ -105,7 +109,7 @@ convention = "google"
 [tool.rumdl]
 flavor = "mkdocs"
 line-length = 120
-exclude = [".venv", "target", "site"]
+exclude = [".venv", "target", "site", ".codspeed"]
 # GitHub renders the README's centred header and badges only as HTML.
 # The plans quote whole signatures as single code spans, which cannot wrap.
 per-file-ignores = { "README.md" = ["MD033"], ".github/*.md" = ["MD041"], "docs/plans/*.md" = ["MD013"] }
@@ -123,7 +127,7 @@ code-blocks = false
 python-version = "3.14"
 
 [tool.ty.src]
-include = ["python", "tests", "benches", "scripts"]
+include = ["python", "tests", "benches", "benchmarks", "scripts"]
 
 [tool.ty.analysis]
 respect-type-ignore-comments = false

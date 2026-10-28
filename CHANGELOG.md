@@ -7,6 +7,12 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ## [Unreleased]
 
+### Added
+
+- CodSpeed benchmarks of the Python run path in `benchmarks/` (`uv run pytest benchmarks`): prepared runs on every
+  generated shape, repeated `Driver.execute`, cached runs, the async driver, extraction, config and `Builder.build`.
+  CI runs them once on every pull request, and measures them under CodSpeed when `CODSPEED_ENABLED` is set.
+
 ## [0.2.0] - 2026-10-28
 
 ### Added
