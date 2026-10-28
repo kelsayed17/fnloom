@@ -1,13 +1,16 @@
 """`fnloom.Hook` on the async driver: the sync driver's events, on the loop's thread."""
 
+import ast
 import asyncio
+import inspect
+import textwrap
 import threading
 from typing import TYPE_CHECKING, Any, Literal, cast, override
 
 import pytest
 
 import fnloom
-from fnloom import Hook, NodeEnd, NodeStart, RunEnd, RunStart
+from fnloom import Hook, NodeEnd, NodeStart, RunEnd, RunStart, _async
 from helpers import make_module
 from test_hooks import GRAPH, SHAPES, HookError, Recorder
 
@@ -474,3 +477,94 @@ def test_a_cached_async_driver_fires_the_events_of_the_nodes_it_runs() -> None:
     hook.log.clear()
     assert _run(driver.execute(["c"], inputs={"x": 1})) == {"c": 40}
     assert _stages(hook) == [("before_run", None), ("after_run", None)]
+
+
+GROUPED = """
+import asyncio
+
+
+async def a(x: int) -> int:
+    await asyncio.sleep(0)
+    return x + 1
+
+
+async def boom(a: int) -> int:
+    await asyncio.sleep(0)
+    raise ValueError(f"bad {a}")
+
+
+def thread_boom(a: int) -> int:
+    raise KeyError(a)
+"""
+
+
+@pytest.mark.parametrize(
+    ("failing", "error"),
+    [("boom", ValueError), ("thread_boom", KeyError)],
+    ids=["async", "thread"],
+)
+def test_a_failing_node_and_a_raising_hook_are_one_group_led_by_the_node(
+    failing: str, error: type[Exception]
+) -> None:
+    """Decision 5 on async: the node's own error, noted, then the hook's."""
+    hook = Recorder(raise_on=(("after_node", failing),))
+    driver = _async_driver(GROUPED, hook)
+    with pytest.raises(ExceptionGroup) as raised:
+        _run(driver.execute([failing], inputs={"x": 1}))
+    group = raised.value
+    assert str(group).startswith(f"node '{failing}' failed and hooks raised")
+    node_error, hook_error = group.exceptions
+    assert type(node_error) is error
+    assert node_error.__notes__ == [f"in node '{failing}'"]
+    assert type(hook_error) is HookError
+    assert str(hook_error) == f"r after_node {failing}"
+    assert hook.of(NodeEnd)[-1].error is node_error
+    end = hook.of(RunEnd)[0]
+    assert (end.ok, end.error) == (False, group)
+
+
+class _NoBegin(ast.NodeTransformer):
+    """Drops the docstring and every `if not self._begin(...): return`."""
+
+    @override
+    def visit_If(self, node: ast.If) -> ast.AST | None:
+        test = node.test
+        if (
+            isinstance(test, ast.UnaryOp)
+            and isinstance(test.op, ast.Not)
+            and isinstance(test.operand, ast.Call)
+            and isinstance(test.operand.func, ast.Attribute)
+            and test.operand.func.attr == "_begin"
+        ):
+            return None
+        return self.generic_visit(node)
+
+
+def _drain_body(method: object, *, hooked: bool) -> str:
+    """The method's body as an AST dump, without its docstring or `_begin` lines."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(cast("Any", method))))
+    function = tree.body[0]
+    assert isinstance(function, ast.FunctionDef)
+    body = function.body
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+    ):
+        body = body[1:]
+    module = ast.Module(body=body, type_ignores=[])
+    if hooked:
+        module = _NoBegin().visit(module)
+    return ast.dump(module)
+
+
+def test_the_hooked_drain_mirrors_the_plain_drain() -> None:
+    """`_HookedRun._drain` is `_Run._drain` plus `_begin`, kept apart for speed (R6)."""
+    plain = _drain_body(_async._Run._drain, hooked=False)  # noqa: SLF001  # the guarded copy
+    hooked = _drain_body(_async._HookedRun._drain, hooked=True)  # noqa: SLF001  # the guarded copy
+    assert hooked == plain, (
+        "_HookedRun._drain has drifted from _Run._drain: mirror the change in both, "
+        "keeping only the `if not self._begin(name, kwargs): return` line extra"
+    )
+    # The guard does strip something: the hooked copy does call `_begin`.
+    assert hooked != _drain_body(_async._HookedRun._drain, hooked=False)  # noqa: SLF001  # the guarded copy
