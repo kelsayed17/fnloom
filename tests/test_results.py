@@ -273,6 +273,52 @@ def test_a_raising_builder_and_a_raising_after_run_are_one_group() -> None:
     assert dict(end.results) == {"c": 7}
 
 
+def popping(outputs: dict[str, object]) -> str:
+    """A builder that changes the dict it gets, then returns."""
+    outputs.pop("x")
+    return "built"
+
+
+def popping_then_raising(outputs: dict[str, object]) -> str:
+    """A builder that changes the dict it gets, then raises."""
+    outputs.pop("x")
+    msg = "popped, then failed"
+    raise BuildError(msg)
+
+
+@pytest.mark.parametrize("kind", ["hooked", "hooked-cached"])
+@pytest.mark.parametrize("driver_kind", ["sync", "async"])
+@pytest.mark.parametrize(
+    "build", [popping, popping_then_raising], ids=["returns", "raises"]
+)
+def test_a_builder_that_changes_its_dict_leaves_run_end_results_whole(
+    build: Callable[[dict[str, object]], str], driver_kind: str, kind: str
+) -> None:
+    """The builder gets its own copy: `RunEnd.results` keeps every output."""
+    hook = Recorder()
+    builder = _builder(kind, hook).with_result_builder(build)
+    request = (["c", "x", "a"],)
+    raises = build is popping_then_raising
+    if driver_kind == "sync":
+        driver = builder.build()
+        if raises:
+            with pytest.raises(BuildError):
+                driver.execute(*request, inputs={"x": 1})
+        else:
+            assert driver.execute(*request, inputs={"x": 1}) == "built"
+    else:
+        async_driver = builder.build_async()
+        if raises:
+            with pytest.raises(BuildError):
+                _run(async_driver.execute(*request, inputs={"x": 1}))
+        else:
+            assert _run(async_driver.execute(*request, inputs={"x": 1})) == "built"
+    end = hook.of(RunEnd)[-1]
+    assert end.ok is not raises
+    assert end.results is not None
+    assert list(end.results.items()) == [("c", 7), ("x", 1), ("a", 2)]
+
+
 @pytest.mark.parametrize("sync_nodes", ["thread", "inline"])
 @pytest.mark.parametrize("kind", KINDS)
 def test_the_async_driver_uses_the_builder(kind: str, sync_nodes: SyncNodes) -> None:

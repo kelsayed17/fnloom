@@ -592,8 +592,10 @@ def _ended(
 ) -> object:
     """Builds a hooked run's outputs, then fires `after_run` with the raw ones.
 
-    A builder that raises fails the run: `after_run` gets `ok=False`, its error
-    and the raw outputs, and `end` raises the error, after any a hook adds (Q19).
+    The builder gets its own copy of the outputs, so `after_run` gets them as
+    computed. A builder that raises fails the run: `after_run` gets `ok=False`,
+    its error and the raw outputs, and `end` raises the error, after any a hook
+    adds (Q19).
     Both drivers end a hooked run here, so the builder runs in one place.
     """
     if build is None:
@@ -601,7 +603,9 @@ def _ended(
         dispatch.end(True, None, values)  # noqa: FBT003  # the dispatcher's interface
         return values
     try:
-        built = build(values)
+        # A copy, as Hamilton's `**outputs` is: what the builder changes in it
+        # never reaches `RunEnd.results`.
+        built = build(dict(values))
     except BaseException as caught:  # noqa: BLE001  # raised by `end`, after `after_run`
         failure = caught
     else:
