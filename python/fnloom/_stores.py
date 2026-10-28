@@ -686,7 +686,7 @@ def _scan(directory: Path) -> list[os.DirEntry[str]]:
         return []
 
 
-def _reopen(
+def _reopen(  # noqa: PLR0913, PLR0917  # pickle passes the constructor's arguments by position
     path: Path,
     max_bytes: int | None,
     dumps: Callable[[object], bytes],

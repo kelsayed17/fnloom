@@ -185,7 +185,7 @@ def _from_text(data: bytes) -> object:
 
 
 def test_a_pickled_disk_cache_keeps_its_formats(tmp_path: Path) -> None:
-    """The formats given to a `DiskCache` come back with it, and still read its entries."""
+    """A `DiskCache`'s formats come back with it, and still read its entries."""
     text = fnloom.Format("text", _as_text, _from_text)
     store = DiskCache(tmp_path, formats=[text])
     store.put(b"\x01" * 32, "hello", format=text)
