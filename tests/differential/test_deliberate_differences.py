@@ -2077,6 +2077,54 @@ def test_q67_requests_are_checked_as_the_sync_driver_checks_them() -> None:
     ]
 
 
+_CACHED_ASYNC = """
+import asyncio
+
+
+async def doubled(x: int) -> int:
+    await asyncio.sleep(0)
+    return x * 2
+
+
+def plus_one(doubled: int) -> int:
+    return doubled + 1
+"""
+
+
+@pytest.mark.deliberate("Q68")
+@pytest.mark.filterwarnings(_HAMILTON_ASYNC_WARNING)
+def test_q68_the_async_driver_caches(tmp_path: Path) -> None:
+    """Hamilton fails to build an async driver with a cache; fnloom's caches."""
+    module = make_module("differential_q68", _CACHED_ASYNC)
+
+    async def hamilton() -> None:
+        pending: object = (
+            hamilton_async.Builder()
+            .with_modules(module)
+            .with_cache(path=str(tmp_path / "hamilton"))
+            .build()
+        )
+        await cast("Coroutine[Any, Any, hamilton_async.AsyncDriver]", pending)
+
+    with pytest.raises(ValueError, match="Multiple adapters cannot"):
+        asyncio.run(hamilton())
+    store = DiskCache(tmp_path / "fnloom")
+    driver = fnloom.Builder().with_modules(module).with_cache(store).build_async()
+    request = ["plus_one"]
+    miss = CacheOutcome("miss", None)
+    hit = CacheOutcome("hit", None)
+    assert driver.explain_cache(request, inputs={"x": 2}) == {
+        "doubled": miss,
+        "plus_one": miss,
+    }
+    assert asyncio.run(driver.execute(request, inputs={"x": 2})) == {"plus_one": 5}
+    assert driver.explain_cache(request, inputs={"x": 2}) == {
+        "doubled": hit,
+        "plus_one": hit,
+    }
+    assert asyncio.run(driver.execute(request, inputs={"x": 2})) == {"plus_one": 5}
+
+
 # The row decorators in each library's spelling.
 _HAMILTON_ROWS = "from hamilton.function_modifiers import parameterize, source, value"
 _FNLOOM_ROWS = "from fnloom import parameterize, source, value"

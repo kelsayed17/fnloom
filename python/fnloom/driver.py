@@ -520,7 +520,10 @@ class AsyncPreparedPlan:
     """
 
     def __init__(
-        self, prepared: PreparedPlan, driver: AsyncDriver, schedule: _async.Schedule
+        self,
+        prepared: PreparedPlan,
+        driver: AsyncDriver,
+        schedule: _async.Schedule | _async.CachedSchedule,
     ) -> None:
         """The async form of `prepared`, run by `schedule`, for `driver`."""
         self._prepared = prepared
@@ -647,13 +650,16 @@ class AsyncDriver:
         prepared = self._driver.prepare(final_vars, inputs=inputs, overrides=overrides)
         plan = prepared._async  # noqa: SLF001  # this driver's own plan
         if plan is None:
-            native = prepared._plan  # noqa: SLF001  # this driver's own plan
-            if not isinstance(native, _core.Plan):
-                msg = "an AsyncDriver runs only uncached plans"
+            runnable = prepared._plan  # noqa: SLF001  # this driver's own plan
+            schedule: _async.Schedule | _async.CachedSchedule
+            if isinstance(runnable, CacheRun):
+                schedule = _async.CachedSchedule(runnable, self._calls)
+            elif isinstance(runnable, _core.Plan):
+                schedule = _async.Schedule(runnable, self._calls)
+            else:
+                msg = f"an AsyncDriver cannot run {type(runnable).__name__}"
                 raise TypeError(msg)
-            plan = AsyncPreparedPlan(
-                prepared, self, _async.Schedule(native, self._calls)
-            )
+            plan = AsyncPreparedPlan(prepared, self, schedule)
             # Two threads may both get here: either plan will do, and one is kept.
             prepared._async = plan  # noqa: SLF001  # this driver's own plan
         return plan
@@ -681,7 +687,7 @@ class AsyncDriver:
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
     ) -> dict[str, CacheOutcome]:
-        """See `Driver.explain_cache`."""
+        """See `Driver.explain_cache`; synchronous, since it runs nothing."""
         return self._driver.explain_cache(
             final_vars, inputs=inputs, overrides=overrides
         )
@@ -935,19 +941,18 @@ class Builder:
         default executor, so the loop keeps running while it does (Q65), or
         `"inline"` on the loop, which suits a graph of cheap nodes. A generated
         `extract_*` node always runs on the loop. `ValueError` for any other
-        `sync_nodes`; `NotImplementedError` for a builder with a cache, which the
-        async driver does not support yet.
+        `sync_nodes`.
+
+        With `with_cache`, runs cache as `build`'s do, with the same keys and
+        store (Q68): each node is stored as it succeeds, and a node that fails,
+        or that a failure cancels, stores nothing. Store calls run on the loop.
         """
         checked = _async.checked_sync_nodes(sync_nodes)
-        if self._store is not None:
-            msg = (
-                "build_async() does not support with_cache yet; "
-                "build without a cache, or use build()"
-            )
-            raise NotImplementedError(msg)
         nodes, views, graph, unmatched = self._scanned(awaits=True)
+        # Called here, so a `CacheWarning` points at the caller's `build_async`.
+        cache = None if self._store is None else Cache.of(self._store, nodes)
         built = AsyncDriver(
-            self._driver(graph, views, unmatched, None),
+            self._driver(graph, views, unmatched, cache),
             {node.name: node for node in nodes},
             sync_nodes=checked,
         )

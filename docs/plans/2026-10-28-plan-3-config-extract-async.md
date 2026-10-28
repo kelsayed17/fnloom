@@ -1,9 +1,14 @@
 # fnloom Plan 3: config, extract and async
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or
-> superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
 
-**Status:** approved by the maintainer, 2026-10-28. Being built on `claude/plan-3-config-extract-async`.
+**Status:** done. Every task below was built and tested on the `claude/plan-3-config-extract-async` branch on
+2026-10-28, one commit per task with its review's fixes on top. The plan is kept as written, as the record of what
+was decided. Where the build went further, the register and the changelog say so: register row Q69 (an `async def`
+`@parameterize` row is awaited, where Hamilton returns its coroutine); a `TypedDict`-typed input or field now
+accepts any `dict`, shallowly, since before it accepted nothing (Q61); and an extracted field or column is keyed
+by its extraction but never looked up or stored, so its check runs on every run.
 
 **Goal:** the three Hamilton capabilities Plan 2 reserved, without Hamilton's problems: `Builder.with_config`,
 `Driver.config` and `@config.when*` with `@config.default` and `name=`; `@extract_fields` and `@extract_columns`;
@@ -199,7 +204,7 @@ benchmarks.md, CHANGELOG.md, the roadmap's ledger
     - A name, from `name=` or the cut function name, that is empty, or a function name ending in `__`.
     - `@config.default` combined with a `when*` on the same function.
     - Applying `name=` twice with different names.
-- [ ] **Step 1: Write the failing tests** in `tests/test_config.py`:
+- [x] **Step 1: Write the failing tests** in `tests/test_config.py`:
     - `test_when_records_conditions_and_returns_the_function`: `config.when(mode="a")(f) is f` and
       `decorations(f).config == ConfigPolicy((Condition("when", "mode", ("a",)),), False, None)`.
     - `test_stacking_ands_in_either_order`: both orders give equal `decorations`.
@@ -208,10 +213,10 @@ benchmarks.md, CHANGELOG.md, the roadmap's ledger
     - `test_misuse_is_refused_when_decorating`: one `pytest.raises` per refusal above, matching its message.
     - `test_default_records_and_excludes_when`.
     - `test_config_composes_with_parameterize_tag_and_cache`: each order gives equal `decorations`.
-- [ ] **Step 2: Run** `UV_NO_SYNC=1 uv run pytest tests/test_config.py -q`. Expected: fails to import.
-- [ ] **Step 3: Implement** `_config.py` and the `Decorations` field, and export `config` from `fnloom`.
-- [ ] **Step 4: Run** the tests, then `bash scripts/check.sh`. Expected: pass, exit 0.
-- [ ] **Step 5: Commit** `config: record @config.when* and @config.default`.
+- [x] **Step 2: Run** `UV_NO_SYNC=1 uv run pytest tests/test_config.py -q`. Expected: fails to import.
+- [x] **Step 3: Implement** `_config.py` and the `Decorations` field, and export `config` from `fnloom`.
+- [x] **Step 4: Run** the tests, then `bash scripts/check.sh`. Expected: pass, exit 0.
+- [x] **Step 5: Commit** `config: record @config.when* and @config.default`.
 
 ### Task 2: Config resolution at build
 
@@ -238,7 +243,7 @@ benchmarks.md, CHANGELOG.md, the roadmap's ledger
     - `_config.unmatched(name) -> str`: the "no variant of ..." reason that `build` raises for a consumed node and
       `prepare` gives for a requested one.
 - Register rows Q56, Q57, Q58, Q59 and Q60, from decisions 1–8, go in first, in this task's commit.
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
     - `tests/test_config.py`:
         - `test_the_matching_variant_is_the_node`: two variants of `foo` and a consumer `bar(foo)` give
           `bar == foo + 1` for mode a, and the other value for mode b.
@@ -263,18 +268,18 @@ benchmarks.md, CHANGELOG.md, the roadmap's ledger
       Hamilton's side (from H1.5, H1.2a–d with H1.4a, H1.4e with H1.4h, H1.3 with H1.2j–k and H1.1c, and H1.1d–e)
       and fnloom's.
     - `tests/test_pickling.py`: `test_a_pickled_driver_keeps_its_config`.
-- [ ] **Step 2: Run** `UV_NO_SYNC=1 uv run pytest tests/test_config.py tests/differential tests/test_pickling.py -q`.
+- [x] **Step 2: Run** `UV_NO_SYNC=1 uv run pytest tests/test_config.py tests/differential tests/test_pickling.py -q`.
   Expected: the new tests fail.
-- [ ] **Step 3: Implement.**
+- [x] **Step 3: Implement.**
     - In `collect`, gather each module's public functions, then call `select`, then lower the selected ones.
     - Lowering stays as Plan 2 built it, with the node name taken from `policy.name` or the cut attribute name.
     - The AST redefinition check reads `inspect.getsource(module)` and runs only when a module has a
       config-decorated function. It skips an `OSError` or `TypeError`.
     - `Builder.build` raises decision 3's error for any edge into an unmatched node, all culprits sorted.
-- [ ] **Step 4: Run** the tests, then `bash scripts/check.sh`. Expected: pass, exit 0. Then run
+- [x] **Step 4: Run** the tests, then `bash scripts/check.sh`. Expected: pass, exit 0. Then run
   `uv run python -m benches.run` for the `chain` and `rows` shapes at 1,000. Expected: build times within noise of
   `docs/benchmarks.md`, since a build without config skips selection.
-- [ ] **Step 5: Commit** `config: select variants at build; config never becomes a node`.
+- [x] **Step 5: Commit** `config: select variants at build; config never becomes a node`.
 
 ### Task 3: `@extract_fields`
 
@@ -298,7 +303,7 @@ benchmarks.md, CHANGELOG.md, the roadmap's ledger
       producer unchanged plus one `NodeDef` per item. Each generated payload is a callable reading `{producer.name:
       value}`, and its one core input is the producer.
 - Register rows Q61, Q62 and Q63 go in first.
-- [ ] **Step 1: Write the failing tests** in `tests/test_extract.py`:
+- [x] **Step 1: Write the failing tests** in `tests/test_extract.py`:
     - `test_mapping_form_makes_typed_fields_and_keeps_the_producer`.
     - `test_names_take_types_from_a_typed_dict_or_dict_value_type`: covers `TypedDict`, `dict[str, int]` and
       `Mapping[str, int]`.
@@ -322,14 +327,14 @@ benchmarks.md, CHANGELOG.md, the roadmap's ledger
       decoration-time refusals Hamilton also makes (empty mapping, non-type values). Each must raise fnloom's own
       class at the same moment.
     - Differential `deliberate` tests for Q61, Q62 and Q63.
-- [ ] **Step 2: Run** `UV_NO_SYNC=1 uv run pytest tests/test_extract.py -q`. Expected: fails to import.
-- [ ] **Step 3: Implement** the decorator in `_extract.py` and lowering in `_scan._node_defs` after rows.
+- [x] **Step 2: Run** `UV_NO_SYNC=1 uv run pytest tests/test_extract.py -q`. Expected: fails to import.
+- [x] **Step 3: Implement** the decorator in `_extract.py` and lowering in `_scan._node_defs` after rows.
     - A field check uses `_types.plain_class` for the fast `isinstance` path, or `value_matches` otherwise, as
       `driver._checks` does for inputs.
     - Fill copies the mapping with `{**value, name: fill}` semantics: only the field node sees the fill, and the
       producer's value is untouched.
-- [ ] **Step 4: Run** the tests, then `bash scripts/check.sh`. Expected: pass, exit 0.
-- [ ] **Step 5: Commit** `extract: @extract_fields with checked fields`.
+- [x] **Step 4: Run** the tests, then `bash scripts/check.sh`. Expected: pass, exit 0.
+- [x] **Step 5: Commit** `extract: @extract_fields with checked fields`.
 
 ### Task 4: `@extract_columns`, and the extraction benchmark
 
@@ -351,7 +356,7 @@ benchmarks.md, CHANGELOG.md, the roadmap's ledger
       `n` consumers.
 - Register row Q64 goes in first. Decision 13 says what it records, against H2.3's autoload failure, the tuple fill
   bug and DataFrame-valued duplicates.
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
     - `test_columns_split_a_mapping`.
     - `test_columns_split_a_pandas_frame_into_series`: skipped without pandas, and checks `NodeView.type is
       pandas.Series`.
@@ -364,12 +369,12 @@ benchmarks.md, CHANGELOG.md, the roadmap's ledger
       loads the pandas extension explicitly first.
     - The Q64 `deliberate` test.
     - `tests/test_bench_generate.py`: the `extract` shape's closed form.
-- [ ] **Step 2: Run** them. Expected: fail.
-- [ ] **Step 3: Implement** the decorator and the column payloads.
-- [ ] **Step 4: Run** `bash scripts/check.sh`, then `uv run python -m benches.run` for `extract` at 10, 100, 1,000
+- [x] **Step 2: Run** them. Expected: fail.
+- [x] **Step 3: Implement** the decorator and the column payloads.
+- [x] **Step 4: Run** `bash scripts/check.sh`, then `uv run python -m benches.run` for `extract` at 10, 100, 1,000
   and 10,000. Add the four rows to `docs/benchmarks.md`. Expected: fnloom with field checks on beats Hamilton's
   steady execute on every row. A row that doesn't is a bug to fix in this task.
-- [ ] **Step 5: Commit** `extract: generic @extract_columns; extraction benchmarks`.
+- [x] **Step 5: Commit** `extract: generic @extract_columns; extraction benchmarks`.
 
 ### Task 5: The async driver
 
@@ -408,7 +413,7 @@ benchmarks.md, CHANGELOG.md, the roadmap's ledger
     - It holds no per-run state on the driver, so concurrent runs are independent (Review Focus 5).
 - Register rows: Q11, Q12 and Q13 lose *Planned*, and their tests land here. Q65, Q66 and Q67 are new (decisions
   16–18).
-- [ ] **Step 1: Write the failing tests** in `tests/test_async.py` (with `asyncio.run` in plain tests, no plugin):
+- [x] **Step 1: Write the failing tests** in `tests/test_async.py` (with `asyncio.run` in plain tests, no plugin):
     - `test_build_is_sync_and_execute_returns_a_dict_in_request_order`.
     - `test_async_and_sync_nodes_mix`.
     - `test_sync_nodes_do_not_block_the_loop`: a sync node sleeping 0.2 s and an async ticker that must tick
@@ -429,13 +434,13 @@ benchmarks.md, CHANGELOG.md, the roadmap's ledger
       mixed graph.
     - `deliberate` tests for Q11, Q12, Q13, Q65, Q66 and Q67. Q13 asserts that the 3.14 `DeprecationWarning` comes
       from Hamilton and not from fnloom.
-- [ ] **Step 2: Run** `UV_NO_SYNC=1 uv run pytest tests/test_async.py -q`. Expected: fail.
-- [ ] **Step 3: Implement** `_async.py` and `build_async`.
-- [ ] **Step 4: Run** `bash scripts/check.sh`. Then write `benches/async_.py`, which runs fnloom `AsyncDriver` against
+- [x] **Step 2: Run** `UV_NO_SYNC=1 uv run pytest tests/test_async.py -q`. Expected: fail.
+- [x] **Step 3: Implement** `_async.py` and `build_async`.
+- [x] **Step 4: Run** `bash scripts/check.sh`. Then write `benches/async_.py`, which runs fnloom `AsyncDriver` against
   Hamilton's on the `chain` and `layered` shapes at 100 and 1,000, with all nodes async and with all nodes sync
   (fnloom in both `sync_nodes` modes). Add its table to `docs/benchmarks.md`. Expected: fnloom inline beats
   Hamilton everywhere. Thread mode's per-node cost is reported as it is, with the reason.
-- [ ] **Step 5: Commit** `async: AsyncDriver, built synchronously, with cancellation and checked inputs`.
+- [x] **Step 5: Commit** `async: AsyncDriver, built synchronously, with cancellation and checked inputs`.
 
 ### Task 6: Async cached runs, and closing the ledger
 
@@ -458,24 +463,24 @@ benchmarks.md, CHANGELOG.md, the roadmap's ledger
     - A plain `MemoryCache` keeps its native fast path on the sync driver. On the async driver its store calls go
       through Python: the walk is already Python.
 - Register row Q68 goes in first.
-- [ ] **Step 1: Write the failing tests:**
+- [x] **Step 1: Write the failing tests:**
     - `test_async_cached_run_hits_and_explains`.
     - `test_async_cached_failure_stores_nothing_for_the_failed_node`.
     - The hypothesis property in `tests/test_caching_property.py`, extended so that every store is also driven
       through `build_async()`, with results equal to the uncached sync driver's.
     - The `deliberate("Q68")` test (Hamilton's async `with_cache` fails at build, H3.18).
-- [ ] **Step 2: Run** them. Expected: fail.
-- [ ] **Step 3: Implement** the split and the async use.
-- [ ] **Step 4: Run** `bash scripts/check.sh` and `uv run python -m benches.cache`. Expected: the sync cache rows are
+- [x] **Step 2: Run** them. Expected: fail.
+- [x] **Step 3: Implement** the split and the async use.
+- [x] **Step 4: Run** `bash scripts/check.sh` and `uv run python -m benches.cache`. Expected: the sync cache rows are
   within noise of the follow-up's figures in `docs/benchmarks.md`.
-- [ ] **Step 5: Close the ledger.**
+- [x] **Step 5: Close the ledger.**
     - Mark each config, extract and async row of the roadmap's "Hamilton's problems" fixed, with its Q-number.
     - Strike config, extract and async from `from-hamilton.md`'s "Not there yet".
     - Add the design change-log row for Plan 3's new items (`@config.default`, `name=` on all four forms,
       `sync_nodes=`).
     - Write the changelog entries.
     - Expected: no config, extract or async row of the ledger says **same** or **worse**.
-- [ ] **Step 6: Commit** `async: cached runs; close the config, extract and async ledger rows`.
+- [x] **Step 6: Commit** `async: cached runs; close the config, extract and async ledger rows`.
 
 ## Self-review
 

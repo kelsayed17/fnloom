@@ -18,10 +18,12 @@ reported with one `CacheWarning` per node per run. A node's own exception fails 
 run as without the cache, and nothing is stored for that node.
 """
 
+import functools
 import threading
 import warnings
 from collections import abc
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
 
 from fnloom import _core, _extract
@@ -32,7 +34,7 @@ from fnloom._scan import core_inputs
 from fnloom._stores import MISSING, CacheStore, CacheWarning, Format, MemoryCache
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Mapping, Sequence
 
     from fnloom._scan import NodeDef
 
@@ -71,6 +73,10 @@ class CacheOutcome(NamedTuple):
     status: Literal["hit", "miss", "uncacheable", "unknown"]
     reason: str | None
 
+
+# A run's keys on the binding's walk, which keeps them itself.
+_EMPTY_KEYS: dict[str, bytes | None] = {}
+_NO_KEYS: Mapping[str, bytes | None] = MappingProxyType(_EMPTY_KEYS)
 
 # The outcome of a `recompute` node with a key, or one that only a run would know.
 _RECOMPUTE = CacheOutcome("miss", "policy recompute")
@@ -323,6 +329,31 @@ class Cache:
         return cls(store, node_keys(nodes), sources, _formats(store, nodes))
 
 
+@dataclass(frozen=True, slots=True)
+class Begun:
+    """A cached run, begun: what `CacheRun.begin` found, for the run and `finish`.
+
+    Attributes:
+        plan: The core plan to run: the request's, with the hits as overrides.
+        overrides: The run's overrides and the hits, by name.
+        hits: The values loaded from the store or computed by the pre-run, by name.
+        keys: Each computed node's key, by name; empty on the binding's walk.
+        pending: On the binding's walk, the keys it stores as the core run calls
+            it; `None` when `finish` stores each value instead.
+        warned: The nodes this run has already warned about.
+        values: Receives every value the run computes, for an enclosing run;
+            `None` for none.
+    """
+
+    plan: _core.Plan
+    overrides: dict[str, object]
+    hits: dict[str, object]
+    keys: Mapping[str, bytes | None]
+    pending: _core.Keys | None
+    warned: set[str]
+    values: dict[str, object] | None
+
+
 class _Preparer(Protocol):
     """The part of `_core.Graph` a cached run uses."""
 
@@ -431,48 +462,118 @@ class CacheRun:
         self._plans: dict[frozenset[str], _core.Plan] = {}
         self._plans_lock = threading.Lock()
 
+    @property
+    def nested(self) -> CacheRun | None:
+        """The run of the `recompute` nodes something reads, which goes first."""
+        return self._nested
+
     def run(
         self, inputs: dict[str, object], overrides: dict[str, object]
     ) -> dict[str, object]:
         """Runs the plan, already checked, through the store; the outputs, sorted."""
-        return self._execute(inputs, overrides, None, set(), None)
+        return self._finished(self.begin(inputs, overrides), inputs)
 
     def _execute(
         self,
         inputs: dict[str, object],
         overrides: dict[str, object],
-        versions: dict[str, bytes | None] | None,
+        versions: dict[str, bytes | None],
         warned: set[str],
-        values: dict[str, object] | None,
+        values: dict[str, object],
     ) -> dict[str, object]:
-        """One cached run: versions, keys, the hit frontier, then the pruned plan.
+        """A nested run; `values` receives every value it computed or loaded."""
+        begun = self.begin(
+            inputs, overrides, versions=versions, warned=warned, values=values
+        )
+        return self._finished(begun, inputs)
 
-        `versions` are the inputs' and overrides' when an enclosing run already
-        has them. `values`, when given, receives every value this run computed or
-        loaded, for the enclosing run to use as it is.
+    def _finished(self, begun: Begun, inputs: dict[str, object]) -> dict[str, object]:
+        """Runs a begun run's plan, storing each value as its node succeeds."""
+        on_value = begun.pending
+        result = begun.plan.run(
+            inputs,
+            begun.overrides,
+            on_value=functools.partial(self.finish, begun)
+            if on_value is None
+            else on_value,
+        )
+        if begun.values is not None:
+            begun.values.update(begun.hits)
+            begun.values.update(result)
+        return result
+
+    def begin(  # noqa: PLR0913  # the request, and what an enclosing run already has
+        self,
+        inputs: dict[str, object],
+        overrides: dict[str, object],
+        *,
+        known: dict[str, object] | None = None,
+        versions: dict[str, bytes | None] | None = None,
+        warned: set[str] | None = None,
+        values: dict[str, object] | None = None,
+        native: bool = True,
+    ) -> Begun:
+        """Everything a cached run does before its core run: versions, keys, hits.
+
+        `known` holds the values of the nested run, when the caller ran it; when
+        it is `None`, the nested run, if any, runs here, synchronously. `versions`
+        are the inputs' and overrides' when the caller already has them, and
+        `warned` the nodes it already warned about. `values`, when given, receives
+        every value the run computes or loads. With `native`, a plain
+        `MemoryCache` is walked and written in the binding; without, every store
+        call goes through `finish`.
         """
+        warned = set() if warned is None else warned
         if versions is None:
             versions = self._versions(inputs, overrides, warned)
-        known: dict[str, object] = {}
-        if self._nested is not None:
-            self._nested._execute(inputs, overrides, dict(versions), warned, known)  # noqa: SLF001  # the same class
-            for name in self._first:
-                versions[name] = _version(known[name], name, warned)
-        if self._native is not None and self._nested is None and values is None:
+        if known is None:
+            known = {}
+            if self._nested is not None:
+                self._nested._execute(inputs, overrides, dict(versions), warned, known)  # noqa: SLF001  # the same class
+        for name in self._first:
+            versions[name] = _version(known[name], name, warned)
+        keys: Mapping[str, bytes | None]
+        pending: _core.Keys | None = None
+        if native and self._native is not None and not known and values is None:
             pending, hits = self._key_plan.walk(versions, self._native)
-            on_value: _core.Keys | Callable[[str, object], None] = pending
+            keys = _NO_KEYS
         else:
             keys = self._key_plan.keys(versions)
             hits = self._frontier(keys, known, warned)
-            on_value = self._on_value(keys, warned, values)
-        plan = self._plan_for(frozenset(hits)) if hits else self._plan
-        result = plan.run(
-            inputs, {**overrides, **hits} if hits else overrides, on_value=on_value
-        )
-        if values is not None:
-            values.update(hits)
-            values.update(result)
-        return result
+        if not hits:
+            return Begun(self._plan, overrides, hits, keys, pending, warned, values)
+        plan = self._plan_for(frozenset(hits))
+        return Begun(plan, {**overrides, **hits}, hits, keys, pending, warned, values)
+
+    def versions(
+        self, inputs: dict[str, object], overrides: dict[str, object], warned: set[str]
+    ) -> dict[str, bytes | None]:
+        """The fingerprint of every input and override a key reads; see `begin`."""
+        return self._versions(inputs, overrides, warned)
+
+    def finish(self, begun: Begun, name: str, value: object) -> None:
+        """Stores node `name`'s `value`, which it just computed, under its key.
+
+        Only a `default` node is ever looked up, so only one is stored: a
+        `disable` node has no key, and a `recompute` node or an extracted field
+        always runs. A store that raises skips the write, and warns.
+        """
+        if begun.values is not None:
+            begun.values[name] = value
+        key = begun.keys.get(name)
+        if key is None or not self._stored[name]:
+            return
+        try:
+            if (format_ := self._formats.get(name)) is not None:
+                self._store.put(key, value, format=format_)  # ty: ignore[unknown-argument]  # as in `_get`
+            else:
+                self._store.put(key, value)
+        except Exception as error:  # noqa: BLE001  # a store error skips the write
+            _warn_once(
+                begun.warned,
+                name,
+                f"cannot store node {name!r} in the cache: {error!r}",
+            )
 
     def explain(
         self, inputs: dict[str, object], overrides: dict[str, object]
@@ -631,38 +732,6 @@ class CacheRun:
                 warned, name, f"cannot load node {name!r} from the cache: {error!r}"
             )
             return MISSING
-
-    def _on_value(
-        self,
-        keys: Mapping[str, bytes | None],
-        warned: set[str],
-        values: dict[str, object] | None,
-    ) -> Callable[[str, object], None]:
-        """What stores each computed value as its node succeeds, and records it."""
-        store = self._store
-        stored = self._stored
-        formats = self._formats
-
-        def on_value(name: str, value: object) -> None:
-            if values is not None:
-                values[name] = value
-            # Only a `default` node is ever looked up, so only one is stored: a
-            # `disable` node has no key, and a `recompute` node or an extracted
-            # field always runs.
-            key = keys[name]
-            if key is None or not stored[name]:
-                return
-            try:
-                if (format_ := formats.get(name)) is not None:
-                    store.put(key, value, format=format_)  # ty: ignore[unknown-argument]  # as in `_get`
-                else:
-                    store.put(key, value)
-            except Exception as error:  # noqa: BLE001  # a store error skips the write
-                _warn_once(
-                    warned, name, f"cannot store node {name!r} in the cache: {error!r}"
-                )
-
-        return on_value
 
 
 def _version(value: object, name: str, warned: set[str]) -> bytes | None:

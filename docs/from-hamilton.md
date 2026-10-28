@@ -131,6 +131,7 @@ value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](
 | `@cache(format=...)` | Formats from a registry of data savers; an unknown name fails every run; `json` turns a tuple into a list on a hit | `"pickle"`, `"json"` or a `fnloom.Format`, checked at build (Q55); `json` stores only what loads back exactly (Q54) |
 | A corrupt stored entry | Fails the run | A miss, with a `CacheWarning` (Q51) |
 | What a run did with each node | A log that reports a hit on every lookup | `driver.explain_cache(...)` |
+| A cache on the async driver | Fails at build | The same keys, store and `explain_cache` as the sync driver (Q68) |
 
 </div>
 

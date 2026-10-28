@@ -7,6 +7,12 @@ the caller's context, so an awaiting sibling keeps running (Q65); or inline, on 
 loop, with `sync_nodes="inline"`. A generated `extract_*` node always runs inline:
 it only reads a field.
 
+A cached plan runs through `CachedSchedule`: `CacheRun.begin` finds the hits, the
+walk runs the core plan it returns, and `CacheRun.finish` stores each value as its
+node succeeds, so a node that fails, or that a failure cancels, stores nothing. The
+`recompute` nodes something reads run first, on the loop too, so an `async def` one
+is awaited. Every store call runs on the loop's thread.
+
 Nothing about a run is kept on the schedule, which is shared by every run of its
 plan: each run has its own `_Run`, so runs on one loop, or on loops in several
 threads, never share a value (Review Focus 5). Nothing recurses over the graph's
@@ -17,17 +23,23 @@ import asyncio
 import contextvars
 import functools
 import inspect
+import threading
 from collections import deque
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from fnloom import _extract
+from fnloom._caching import HIT_PLAN_CACHE_SIZE
 from fnloom._scan import core_inputs
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Mapping
 
     from fnloom import _core
+    from fnloom._caching import CacheRun
     from fnloom._scan import NodeDef
+
+# What the walk calls with each node's name and value as the node succeeds.
+type OnValue = Callable[[str, object], None]
 
 type SyncNodes = Literal["thread", "inline"]
 
@@ -125,15 +137,84 @@ class Schedule:
         self.start = tuple(name for name in computed if not self.pending[name])
 
     async def run(
-        self, inputs: Mapping[str, object], overrides: Mapping[str, object]
+        self,
+        inputs: Mapping[str, object],
+        overrides: Mapping[str, object],
+        on_value: OnValue | None = None,
     ) -> dict[str, object]:
-        """Every planned node's value, by name; see `walk`."""
+        """Every planned node's value, by name; see `walk`.
+
+        `on_value`, when given, is called with each computed node's name and value
+        as the node succeeds, on the loop's thread.
+        """
         values: dict[str, object] = {name: inputs[name] for name in self.given}
         for name in self.overridden:
             values[name] = overrides[name]
         if not self.calls:
             return values
-        return await _Run(self, values).wait()
+        return await _Run(self, values, on_value).wait()
+
+
+class CachedSchedule:
+    """A cached plan's runs on the loop: its `CacheRun`, and a `Schedule` per plan.
+
+    A run's hits make it a core plan of their own, so a schedule is read once per
+    core plan, on first use, and kept, as `CacheRun` keeps the plans: the least
+    recently used goes first. Safe to share between runs and threads.
+    """
+
+    __slots__ = ("_cache_run", "_calls", "_lock", "_schedules")
+
+    # How many schedules are kept: a cached run's plans, and its nested run's.
+    SIZE = 2 * HIT_PLAN_CACHE_SIZE
+
+    def __init__(self, cache_run: CacheRun, calls: Mapping[str, Call]) -> None:
+        """Runs `cache_run`'s plans, with `calls` for every node of its graph."""
+        self._cache_run = cache_run
+        self._calls = calls
+        # By the plan's id; the plan is kept with its schedule, so the id is not
+        # reused while the entry lives. Insertion order is recency order.
+        self._schedules: dict[int, tuple[_core.Plan, Schedule]] = {}
+        self._lock = threading.Lock()
+
+    def _schedule(self, plan: _core.Plan) -> Schedule:
+        """`plan`'s schedule, read on first use."""
+        with self._lock:
+            entry = self._schedules.pop(id(plan), None)
+            if entry is None:
+                entry = (plan, Schedule(plan, self._calls))
+            self._schedules[id(plan)] = entry
+            if len(self._schedules) > self.SIZE:
+                del self._schedules[next(iter(self._schedules))]
+        return entry[1]
+
+    async def run(
+        self, inputs: dict[str, object], overrides: dict[str, object]
+    ) -> dict[str, object]:
+        """Every planned node's value, by name, the hits loaded, the rest stored.
+
+        The nested runs of `recompute` nodes go first, innermost first, each
+        walked on the loop: a loop, not a recursion, however deep they nest.
+        """
+        levels = [self._cache_run]
+        while (inner := levels[-1].nested) is not None:
+            levels.append(inner)
+        warned: set[str] = set()
+        versions = self._cache_run.versions(inputs, overrides, warned)
+        known: dict[str, object] = {}
+        for level in reversed(levels):
+            begun = level.begin(
+                inputs,
+                overrides,
+                known=known,
+                versions=versions if level is self._cache_run else dict(versions),
+                warned=warned,
+                native=False,
+            )
+            known = await self._schedule(begun.plan).run(
+                inputs, begun.overrides, functools.partial(level.finish, begun)
+            )
+        return known
 
 
 async def walk(
@@ -212,6 +293,7 @@ class _Run:
         "_failure",
         "_finished",
         "_loop",
+        "_on_value",
         "_pending",
         "_ready",
         "_remaining",
@@ -220,10 +302,19 @@ class _Run:
         "_values",
     )
 
-    def __init__(self, schedule: Schedule, values: dict[str, object]) -> None:
-        """A run over `schedule`, starting from the given and overridden `values`."""
+    def __init__(
+        self,
+        schedule: Schedule,
+        values: dict[str, object],
+        on_value: OnValue | None = None,
+    ) -> None:
+        """A run over `schedule`, starting from the given and overridden `values`.
+
+        `on_value`, when given, is called as each computed node succeeds.
+        """
         self._schedule = schedule
         self._values = values
+        self._on_value = on_value
         self._loop = asyncio.get_running_loop()
         self._pending = dict(schedule.pending)
         self._remaining = len(schedule.calls)
@@ -278,17 +369,8 @@ class _Run:
             payload, kind, args = calls[name]
             kwargs = {keyword: values[source] for source, keyword in args}
             if kind == "inline":
-                try:
-                    value = payload(**kwargs)
-                except _STOPPING:
-                    raise
-                except BaseException as error:  # noqa: BLE001  # raised once the run stops
-                    self._fail(name, error)
+                if not self._inline(name, payload, kwargs):
                     return
-                if inspect.isawaitable(value):
-                    self._fail(name, _awaitable_refusal(name, value))
-                    return
-                self._store(name, value)
                 continue
             try:
                 future = self._started(payload, kind, kwargs)
@@ -303,6 +385,22 @@ class _Run:
                 continue
             self._running[future] = name
             future.add_done_callback(self._done)
+
+    def _inline(
+        self, name: str, payload: Callable[..., object], kwargs: dict[str, object]
+    ) -> bool:
+        """Runs a node on the loop and stores its value; `False` if the run failed."""
+        try:
+            value = payload(**kwargs)
+        except _STOPPING:
+            raise
+        except BaseException as error:  # noqa: BLE001  # raised once the run stops
+            self._fail(name, error)
+            return False
+        if inspect.isawaitable(value):
+            self._fail(name, _awaitable_refusal(name, value))
+            return False
+        return self._store(name, value)
 
     def _started(
         self, payload: Callable[..., object], kind: _Kind, kwargs: dict[str, object]
@@ -347,11 +445,23 @@ class _Run:
         if kind == "thread" and inspect.isawaitable(value):
             self._fail(name, _awaitable_refusal(name, value))
             return False
-        self._store(name, value)
-        return True
+        return self._store(name, value)
 
-    def _store(self, name: str, value: object) -> None:
-        """Keeps `name`'s value; readies each node it was the last wait of."""
+    def _store(self, name: str, value: object) -> bool:
+        """Keeps `name`'s value; readies each node it was the last wait of.
+
+        `on_value` hears of it first. `False`, the run failed, when that raises:
+        a `CacheWarning` made an error by a warnings filter, say. That is raised
+        without the node's note, as the sync driver raises it.
+        """
+        if self._on_value is not None:
+            try:
+                self._on_value(name, value)
+            except _STOPPING:
+                raise
+            except BaseException as error:  # noqa: BLE001  # raised once the run stops
+                self._fail(name, error, note=False)
+                return False
         self._values[name] = value
         self._remaining -= 1
         pending = self._pending
@@ -361,12 +471,16 @@ class _Run:
                 self._ready.append(after)
         if not self._remaining and not self._finished.done():
             self._finished.set_result(None)
+        return True
 
-    def _fail(self, name: str, error: BaseException) -> None:
-        """Keeps the first failure, noted; cancels everything still running."""
+    def _fail(self, name: str, error: BaseException, *, note: bool = True) -> None:
+        """Keeps the first failure, noted; cancels everything still running.
+
+        Without `note`, the failure is not the node's, and is raised as it is.
+        """
         if self._failure is not None:
             return
-        self._failure = noted(error, name)
+        self._failure = noted(error, name) if note else error
         self._cancelled = self._tasks()
         self._stop()
 

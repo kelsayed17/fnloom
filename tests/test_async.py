@@ -4,7 +4,7 @@ import asyncio
 import copy
 import pickle
 import threading
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, override
 
 import pytest
 
@@ -14,6 +14,7 @@ from helpers import make_module
 
 if TYPE_CHECKING:
     from collections.abc import Coroutine, Sequence
+    from pathlib import Path
     from types import ModuleType
 
 # How long a test waits on an event before calling the run stuck: generous, so a
@@ -778,14 +779,359 @@ def test_sync_nodes_takes_only_its_two_modes() -> None:
         builder.build_async(sync_nodes="loop")  # ty: ignore[invalid-argument-type]  # the misuse under test
 
 
-def test_a_cache_is_refused_for_now() -> None:
-    """`with_cache` and `build_async` together are refused until async caching lands."""
-    builder = fnloom.Builder().with_modules(_mixed()).with_cache(fnloom.MemoryCache())
-    with pytest.raises(NotImplementedError, match="does not support with_cache yet"):
-        builder.build_async()
+CACHED = """
+import asyncio
+
+
+async def doubled(x: int) -> int:
+    print("doubled")
+    await asyncio.sleep(0)
+    return x * 2
+
+
+def plus_one(doubled: int) -> int:
+    print("plus_one")
+    return doubled + 1
+
+
+async def total(plus_one: int, doubled: int) -> int:
+    print("total")
+    await asyncio.sleep(0)
+    return plus_one + doubled
+"""
+
+
+# The nodes of `CACHED`, sorted.
+CACHED_NODES = ["doubled", "plus_one", "total"]
+
+
+def _called(capsys: pytest.CaptureFixture[str]) -> list[str]:
+    """The nodes that ran since the last call, sorted: each prints its name."""
+    return sorted(capsys.readouterr().out.split())
+
+
+class _CountingCache(fnloom.MemoryCache):
+    """A memory store that counts its `put`s; walked from Python, as any store."""
+
+    def __init__(self) -> None:
+        """Starts empty."""
+        super().__init__()
+        self.puts = 0
+
+    @override
+    def put(self, key: bytes, value: object) -> None:
+        self.puts += 1
+        super().put(key, value)
+
+
+@pytest.mark.parametrize("sync_nodes", ["thread", "inline"])
+@pytest.mark.parametrize("plain", [True, False], ids=["memory", "subclass"])
+def test_async_cached_run_hits_and_explains(
+    capsys: pytest.CaptureFixture[str], sync_nodes: _async.SyncNodes, *, plain: bool
+) -> None:
+    """A cold run stores every node, a warm one loads the outputs and runs nothing.
+
+    `explain_cache` works on the async driver, runs nothing, and agrees with what
+    the runs did.
+    """
+    module = make_module("async_cached", CACHED)
+    store = fnloom.MemoryCache() if plain else _CountingCache()
+    driver = (
+        fnloom.Builder()
+        .with_modules(module)
+        .with_cache(store)
+        .build_async(sync_nodes=sync_nodes)
+    )
+    request = ["total", "doubled"]
+    miss = fnloom.CacheOutcome("miss", None)
+    hit = fnloom.CacheOutcome("hit", None)
+    explained = driver.explain_cache(request, inputs={"x": 3})
+    assert explained == {"doubled": miss, "plus_one": miss, "total": miss}
+    assert _called(capsys) == []
+    assert _run(driver.execute(request, inputs={"x": 3})) == {"total": 13, "doubled": 6}
+    assert _called(capsys) == CACHED_NODES
+    explained = driver.explain_cache(request, inputs={"x": 3})
+    assert explained == {"doubled": hit, "plus_one": hit, "total": hit}
+    assert _run(driver.execute(request, inputs={"x": 3})) == {"total": 13, "doubled": 6}
+    assert _called(capsys) == []
+    # A new input misses everything that reads it.
+    assert _run(driver.execute(request, inputs={"x": 4})) == {"total": 17, "doubled": 8}
+    assert _called(capsys) == CACHED_NODES
+    if isinstance(store, _CountingCache):
+        assert store.puts == 2 * len(CACHED_NODES)
+
+
+CACHED_FAILING = """
+import asyncio
+
+RAISE = True
+
+
+async def a(x: int) -> int:
+    return x + 1
+
+
+async def b(a: int) -> int:
+    await asyncio.sleep(0)
+    if RAISE:
+        raise KeyError("b")
+    return a * 10
+
+
+async def slow(x: int) -> int:
+    await asyncio.sleep(60)
+    return x
+
+
+def c(b: int, slow: int) -> int:
+    return b + slow
+"""
+
+
+@pytest.mark.parametrize("plain", [True, False], ids=["memory", "subclass"])
+def test_async_cached_failure_stores_nothing_for_the_failed_node(
+    *, plain: bool
+) -> None:
+    """A failing node and a sibling it cancels store nothing; what succeeded does.
+
+    As on the sync driver, a node stored as it succeeded stays stored, so the
+    next run loads it and runs only the rest.
+    """
+    module = make_module("async_cached_failing", CACHED_FAILING)
+    store = fnloom.MemoryCache() if plain else _CountingCache()
+    driver = fnloom.Builder().with_modules(module).with_cache(store).build_async()
+    error = _failure(driver.execute(["c"], inputs={"x": 1}))
+    assert type(error) is KeyError
+    assert error.__notes__ == ["in node 'b'"]
+    miss = fnloom.CacheOutcome("miss", None)
+    hit = fnloom.CacheOutcome("hit", None)
+    assert driver.explain_cache(["c"], inputs={"x": 1}) == {
+        "a": hit,
+        "b": miss,
+        "c": miss,
+        "slow": miss,
+    }
+    if isinstance(store, _CountingCache):
+        assert store.puts == 1
+    # The same code, so the same keys: only the failed node runs, and is stored.
+    setattr(module, "RAISE", False)  # noqa: B010  # a module attribute ty cannot see
+    assert _run(driver.execute(["b"], inputs={"x": 1})) == {"b": 20}
+    assert driver.explain_cache(["b"], inputs={"x": 1}) == {"a": hit, "b": hit}
+
+
+RECOMPUTED = """
+import asyncio
+from pathlib import Path
+
+from fnloom import cache
+
+
+@cache(behavior="recompute")
+async def text(path: str) -> str:
+    print("text")
+    await asyncio.sleep(0)
+    return Path(path).read_text()
+
+
+async def words(text: str) -> int:
+    print("words")
+    await asyncio.sleep(0)
+    return len(text.split())
+
+
+def shout(words: int) -> str:
+    print("shout")
+    return "!" * words
+"""
+
+
+@pytest.mark.parametrize("sync_nodes", ["thread", "inline"])
+def test_an_async_recompute_node_is_awaited_first(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path, sync_nodes: _async.SyncNodes
+) -> None:
+    """An `async def` `recompute` node runs, awaited, in every run, before the rest.
+
+    What reads it is keyed by its result: the same result hits, a new one misses.
+    """
+    file = tmp_path / "words.txt"
+    file.write_text("one two")
+    module = make_module("async_recomputed", RECOMPUTED)
+    driver = (
+        fnloom.Builder()
+        .with_modules(module)
+        .with_cache(fnloom.MemoryCache())
+        .build_async(sync_nodes=sync_nodes)
+    )
+    inputs = {"path": str(file)}
+    assert _run(driver.execute(["shout", "text"], inputs=inputs)) == {
+        "shout": "!!",
+        "text": "one two",
+    }
+    assert capsys.readouterr().out.split() == ["text", "words", "shout"]
+    assert _run(driver.execute(["shout"], inputs=inputs)) == {"shout": "!!"}
+    assert _called(capsys) == ["text"]
+    file.write_text("one two three")
+    assert _run(driver.execute(["shout"], inputs=inputs)) == {"shout": "!!!"}
+    assert capsys.readouterr().out.split() == ["text", "words", "shout"]
+    unknown = fnloom.CacheOutcome("unknown", "downstream of recompute node 'text'")
+    assert driver.explain_cache(["shout"], inputs=inputs) == {
+        "shout": unknown,
+        "text": fnloom.CacheOutcome("miss", "policy recompute"),
+        "words": unknown,
+    }
+
+
+def test_async_store_failures_never_fail_the_run() -> None:
+    """A store that raises is a miss and a skipped write, warned once per node."""
+
+    class Raising(fnloom.MemoryCache):
+        @override
+        def get(self, key: bytes) -> object:
+            raise OSError(key.hex()[:8])
+
+        @override
+        def put(self, key: bytes, value: object) -> None:
+            raise OSError(key.hex()[:8])
+
+    module = make_module("async_cached_raising", CACHED)
+    driver = fnloom.Builder().with_modules(module).with_cache(Raising()).build_async()
+    with pytest.warns(fnloom.CacheWarning) as caught:
+        assert _run(driver.execute(["total"], inputs={"x": 1})) == {"total": 5}
+    messages = sorted(str(warning.message) for warning in caught)
+    assert [m.split(" from the cache")[0] for m in messages] == [
+        "cannot load node 'doubled'",
+        "cannot load node 'plus_one'",
+        "cannot load node 'total'",
+    ]
+
+
+LOADERS = """
+import asyncio
+from pathlib import Path
+
+from fnloom import cache
+
+
+@cache(behavior="recompute")
+async def first(path: str) -> str:
+    print("first")
+    await asyncio.sleep(0)
+    return Path(path).read_text()
+
+
+def middle(first: str) -> str:
+    print("middle")
+    return first.upper()
+
+
+@cache(behavior="recompute")
+async def second(middle: str, other: str) -> str:
+    print("second")
+    await asyncio.sleep(0)
+    return middle + Path(other).read_text()
+
+
+def last(second: str) -> int:
+    print("last")
+    return len(second)
+"""
+
+
+def test_a_recompute_node_behind_another_runs_async_as_on_the_sync_driver(
+    capsys: pytest.CaptureFixture[str], tmp_path: Path
+) -> None:
+    """Two nested pre-runs, innermost first: each loader runs every time, awaited.
+
+    The same calls, in the same order, as `test_caching`'s sync version.
+    """
+    module = make_module("async_cached_loaders", LOADERS)
+    one, two = tmp_path / "one.txt", tmp_path / "two.txt"
+    one.write_text("ab")
+    two.write_text("c")
+    driver = (
+        fnloom.Builder()
+        .with_modules(module)
+        .with_cache(fnloom.MemoryCache())
+        .build_async(sync_nodes="inline")
+    )
+    inputs = {"path": str(one), "other": str(two)}
+
+    def ran() -> list[str]:
+        return capsys.readouterr().out.split()
+
+    assert _run(driver.execute(["last"], inputs=inputs)) == {"last": 3}
+    assert ran() == ["first", "middle", "second", "last"]
+    assert _run(driver.execute(["last"], inputs=inputs)) == {"last": 3}
+    assert ran() == ["first", "second"]
+    one.write_text("abcd")
+    assert _run(driver.execute(["last"], inputs=inputs)) == {"last": 5}
+    assert ran() == ["first", "middle", "second", "last"]
+    two.write_text("cd")
+    assert _run(driver.execute(["last"], inputs=inputs)) == {"last": 6}
+    assert ran() == ["first", "second", "last"]
+
+
+CHAIN = """
+def a(x: int) -> int:
+    return x + 1
+
+
+def b(a: int) -> int:
+    return a * 2
+"""
+
+
+@pytest.mark.filterwarnings("error::fnloom.CacheWarning")
+def test_a_store_warning_made_an_error_fails_the_run_as_on_the_sync_driver() -> None:
+    """A `CacheWarning` a filter makes an error is raised as the sync driver raises it.
+
+    It is not the node's failure, so it carries no note naming the node.
+    """
+
+    class PutRaises(fnloom.MemoryCache):
+        @override
+        def put(self, key: bytes, value: object) -> None:
+            msg = "full"
+            raise OSError(msg)
+
+    module = make_module("async_cached_warning_error", CHAIN)
+    builder = fnloom.Builder().with_modules(module).with_cache(PutRaises())
+    with pytest.raises(fnloom.CacheWarning) as sync_info:
+        builder.build().execute(["b"], inputs={"x": 1})
+    for sync_nodes in ("thread", "inline"):
+        driver = builder.build_async(sync_nodes=sync_nodes)
+        error = _failure(driver.execute(["b"], inputs={"x": 1}))
+        assert type(error) is fnloom.CacheWarning
+        assert str(error) == str(sync_info.value)
+        assert str(error) == "cannot store node 'a' in the cache: OSError('full')"
+        assert getattr(error, "__notes__", None) is None
+
+
+def test_an_uncached_async_driver_cannot_explain() -> None:
+    """`explain_cache` on an async driver built without a cache: the sync error."""
     driver = fnloom.Builder().with_modules(_mixed()).build_async()
     with pytest.raises(ValueError, match="explain_cache needs a driver built with"):
         driver.explain_cache(["total"], inputs={"x": 1})
+
+
+def test_a_cached_async_driver_pickles_and_shares_runs() -> None:
+    """Pickled, it builds again with its store; concurrent runs never mix."""
+    module = make_module("async_cached_pickled", CACHED)
+    driver = (
+        fnloom.Builder()
+        .with_modules(module)
+        .with_cache(fnloom.MemoryCache())
+        .build_async(sync_nodes="inline")
+    )
+    again = pickle.loads(pickle.dumps(driver))  # noqa: S301  # our own pickle
+    assert _run(again.execute(["total"], inputs={"x": 1})) == {"total": 5}
+
+    async def both() -> list[dict[str, object]]:
+        runs = [driver.execute(["total"], inputs={"x": x}) for x in range(20)]
+        return list(await asyncio.gather(*runs, *runs))
+
+    expected = [{"total": 4 * x + 1} for x in range(20)]
+    assert _run(both()) == expected * 2
 
 
 def test_pickles_as_its_builder() -> None:

@@ -64,6 +64,31 @@ A key covers a node's code as well as its inputs, so an edit to the function, to
 it reads misses too. The code is read when the driver is built, never per run: **rebuild the driver after editing
 code** ([Code versions](#code-versions)).
 
+### On the async driver
+
+`with_cache` works the same way with `build_async()` (Q68). The keys, stores, [policies](#policies) and
+`explain_cache` are the sync driver's, so the two drivers share what a store holds:
+
+```python
+import asyncio
+
+store = fnloom.MemoryCache()
+builder = fnloom.Builder().with_modules(quotes).with_cache(store)
+quote = {"bid": 98.0, "ask": 102.0}
+asyncio.run(builder.build_async().execute(["relative_spread"], inputs=quote))
+# -> {'relative_spread': 0.04}
+outcomes = builder.build().explain_cache(["relative_spread"], inputs=quote)
+{name: outcome.status for name, outcome in outcomes.items()}
+# -> {"mid": "hit", "relative_spread": "hit", "spread": "hit"}
+```
+
+Each node is stored as it succeeds. A node that fails, or that a failing node cancels, stores nothing, so the next run
+loads what succeeded and runs the rest. A `recompute` node that something reads runs first in every run, and an
+`async def` one is awaited. `explain_cache` is synchronous on `AsyncDriver` too, since it runs nothing.
+
+Store calls run on the event loop's thread. A `MemoryCache` costs next to nothing there. A `DiskCache` reads and
+writes files, which stops the loop while it does, as an inline sync node would.
+
 ## The purity contract
 
 A hit returns a stored value in place of running the node, so the cache is only right for a node whose result depends

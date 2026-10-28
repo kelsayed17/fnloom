@@ -144,14 +144,22 @@ the timed runs, while Hamilton's include the planning each `execute` does. Hamil
 | shape | n | runtime | uncached | memory | disk |
 | --- | ---: | --- | --- | --- | --- |
 | chain | 200 | fnloom | 0.031 / 0.028 | 0.070 / 0.019 | 42.5 / 0.075 |
+| chain | 200 | fnloom, async | 0.128 / 0.117 | 0.492 / 0.027 | 43.9 / 0.075 |
 | chain | 200 | Hamilton | 0.564 / 0.506 | 14.8 / 13.8 | 93.4 / 21.8 |
 | layered | 1,000 | fnloom | 0.203 / 0.191 | 0.376 / 0.082 | 192.8 / 0.485 |
+| layered | 1,000 | fnloom, async | 0.745 / 0.725 | 2.789 / 0.117 | 200.9 / 0.484 |
 | layered | 1,000 | Hamilton | 3.612 / 3.541 | 95.3 / 88.0 | 495.8 / 127.3 |
 
 Measured on the machine and build above, on 2026-10-28. A warm fnloom run is 260 to 1,070 times faster than
 Hamilton's on the same kind of store, and 7 to 43 times faster than Hamilton's uncached run. A warm fnloom run on
 `MemoryCache` is faster than an uncached fnloom run: it loads the outputs and runs nothing. Hamilton's warm runs cost
 more than its uncached ones, 25 to 27 times as much in memory, as the caching design found (Q16).
+
+**fnloom, async** is `AsyncDriver` with `sync_nodes="inline"`, timed on the loop; Hamilton's async driver has no row,
+since it fails to build with a cache (Q68). Its warm runs load the outputs and run nothing, as the sync driver's do.
+Its cold runs with `MemoryCache` cost 3.7 to 3.8 times its uncached ones, against 1.9 to 2.3 times on the sync
+driver: the async walk is Python, so it looks up and stores each node through Python calls instead of the native walk
+a plain `MemoryCache` gets on `Driver`. With `DiskCache`, the files cost the same on either driver.
 
 The targets of the caching design (§8), with fnloom's figures:
 
@@ -251,10 +259,11 @@ The cached runs have their own script, which starts a fresh process per sample:
 uv run python -m benches.cache > cache.jsonl
 ```
 
-It prints 12 JSON lines (`shape`, `n`, `runtime`, `store`, `cold_ms`, `warm_ms`, `warm_loads`, `processes`,
-`error`), one per shape, runtime and store (`none`, `memory` or `disk`). `warm_loads` is how many entries a warm fnloom
-run loads, counted on a separate, untimed driver. The graphs are written to files and imported, since Hamilton's cache
-versions a function by its source, and every answer is checked against the shape's closed form.
+It prints 18 JSON lines (`shape`, `n`, `runtime`, `store`, `cold_ms`, `warm_ms`, `warm_loads`, `processes`, `error`),
+one per shape, runtime (`fnloom`, `fnloom-async` or `hamilton`) and store (`none`, `memory` or `disk`). `warm_loads` is
+how many entries a warm `fnloom` run loads, counted on a separate, untimed driver. The graphs are written to files and
+imported, since Hamilton's cache versions a function by its source, and every answer is checked against the shape's
+closed form.
 
 The async runs have their own script too, also a fresh process per sample:
 

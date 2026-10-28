@@ -18,9 +18,9 @@ workload.
 - **DEFER**: to be decided later.
 
 **Evidence.** The behaviours below were first reported by an earlier investigation (2026-10-22) against Hamilton 1.90.0
-and partly confirmed by reading its source. Rows Q4, Q5, Q6, Q7, Q10, Q11 to Q13, Q16, Q22, Q25 to Q48, Q50 to Q67 and
-Q69 have differential tests in `tests/differential/test_deliberate_differences.py`, each marked `deliberate("<id>")`,
-that assert Hamilton's behaviour and fnloom's side by side; Q3 and Q23 are covered by fnloom-only tests
+and partly confirmed by reading its source. Rows Q4, Q5, Q6, Q7, Q10, Q11 to Q13, Q16, Q22, Q25 to Q48 and Q50 to Q69
+have differential tests in `tests/differential/test_deliberate_differences.py`, each marked `deliberate("<id>")`, that
+assert Hamilton's behaviour and fnloom's side by side; Q3 and Q23 are covered by fnloom-only tests
 (`tests/test_driver.py`, `tests/test_binding.py` and the executor's unit tests), and Q49, a KEEP row, by
 `tests/test_caching.py`. Every other row is not yet re-run for this repository and becomes a differential test before it
 is relied on. Source line numbers are deliberately omitted.
@@ -91,6 +91,7 @@ is relied on. Source line numbers are deliberately omitted.
 | Q65 | The `AsyncDriver` runs a sync node inline on the event loop, so the loop stops while it runs: an awaiting sibling, and every other coroutine on the loop, waits for it to finish. | FIX | A sync node runs in a worker thread of the loop's default executor, through `loop.run_in_executor` in the caller's context, so the loop keeps running while it does. `build_async(sync_nodes="inline")` runs sync nodes on the loop instead, for a graph of cheap nodes, where a thread costs more than the node. A generated `extract_*` node always runs on the loop. |
 | Q66 | When a node fails, the `AsyncDriver` raises its exception and leaves its running siblings running: they finish, unobserved, after `execute` has raised. | FIX | The first node to fail cancels every node still running and waits for each task to take its cancellation, as a cancelled caller does. A node's own `CancelledError` is raised as itself. A sync node in a thread can't be interrupted, so the run doesn't wait for it and drops its result. The failing node's own exception is raised once, with the sync driver's note naming the node, and no `ExceptionGroup`, so `except KeyError` works as it does on `Driver`. |
 | Q67 | `AsyncDriver.execute` checks no input or override type. A missing input raises `NotImplementedError: x was expected to be passed in but was not.`, and an unsupplied input requested as an output raises `KeyError`. | FIX | The `AsyncDriver` checks a request as `Driver` does, with the same errors: input and override types, unknown names, a missing input as `ValueError` naming what needs it, and an unsupplied input requested as an output. |
+| Q68 | `with_cache(...)` on the async driver's builder fails at build, with `ValueError: Multiple adapters cannot (currently) implement the same lifecycle method. Sync methods: ['do_node_execute']. Async methods: []`. The async driver can't cache, and the message doesn't say so. | FIX | `Builder.with_cache(...).build_async()` caches as `Driver` does: the same keys, stores, `@cache` policies and `explain_cache`, so a cached result is shared between the two drivers. A node is stored as it succeeds; a node that fails, or that a failure cancels, stores nothing. A `recompute` node runs first in every run, awaited when it's an `async def`. Store calls run on the event loop's thread. |
 | Q69 | The `AsyncDriver` doesn't await an `async def` under `@parameterize`: each row's value is the un-awaited coroutine object, since the row's wrapper is a sync function. A plain `async def` is awaited. | FIX | Every `async def` node is awaited, a row of one included: a row's call returns its function's coroutine, and the driver awaits it. |
 
 ## Not yet decided

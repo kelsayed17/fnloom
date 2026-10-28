@@ -46,8 +46,8 @@ executor rebuilt in Rust.
 
     ---
 
-    A misspelled input, a cycle, a type mismatch or an `async def` node raises a clear error naming the culprit,
-    before any node runs. Hamilton accepts several of these silently.
+    A misspelled input, a cycle, a type mismatch or an `async def` node in a sync build raises a clear error naming
+    the culprit, before any node runs. Hamilton accepts several of these silently.
 
     [:lucide-arrow-right: Errors](errors.md)
 
@@ -149,6 +149,6 @@ tested against Hamilton side by side.
 !!! note "Status: pre-alpha"
 
     fnloom isn't on PyPI yet, so [build it from source](getting-started.md). The Rust core, the native Python path,
-    `@parameterize`, `@tag`, graph inspection, type checks and [result caching](caching.md) are done.
-    Configuration, adapters and async execution come later; [the design](design/2026-10-26-fnloom-design.md) has the
-    full plan.
+    `@parameterize`, `@tag`, `@config.when*`, `@extract_fields`, `@extract_columns`, graph inspection, type checks,
+    [result caching](caching.md) and the async driver are done. Adapters and visualisation come later;
+    [the design](design/2026-10-26-fnloom-design.md) has the full plan.
