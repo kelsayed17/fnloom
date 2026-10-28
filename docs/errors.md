@@ -198,6 +198,9 @@ then the hooks' errors in the order they were raised. A group led by a node's er
 or for a method that can't take one event or is an `async def`, and a `ValueError` for a hook given twice
 ([Checked when attached](hooks.md#checked-when-attached)).
 
+fnloom does not log a failed node. To have each one logged, with its inputs and traceback, attach
+[`fnloom.LogFailures`](hooks.md#logging-failures).
+
 An `AsyncDriver` raises a failed node's exception the same way, after cancelling the nodes still running (see
 [Async](running.md#async)). On an `AsyncDriver`, a sync node that returns a coroutine or another awaitable is an
 error, never a value:

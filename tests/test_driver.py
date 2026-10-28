@@ -363,6 +363,7 @@ def test_public_api_is_exported() -> None:
         "Group",
         "Hook",
         "InputView",
+        "LogFailures",
         "MISSING",
         "MemoryCache",
         "NodeEnd",

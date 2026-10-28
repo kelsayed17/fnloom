@@ -227,6 +227,54 @@ fnloom.Builder().with_hooks(Late())
 # raises TypeError: Late.after_run is an async def: a hook method must be a plain def
 ```
 
+## Logging failures
+
+fnloom logs nothing by default. `fnloom.LogFailures` is a ready-made hook that logs each node that raised, on the
+`fnloom` logger at `ERROR`, or on the logger and at the level you give it (Q88):
+
+- The message names the node and lists its inputs sorted by name, as `name=repr`. A `repr` over 50 characters is cut
+  there and ended with `...`. A parameter left to its default is not listed, as in `NodeStart.inputs`.
+- The node's own exception is the record's `exc_info`, so a handler prints its traceback.
+- Nothing is logged for a node that succeeded or for a cache hit.
+
+```python
+# file: shaky.py
+def average(total: float, count: int) -> float:
+    return total / count
+```
+
+```python
+import logging
+import shaky
+
+logs: list[str] = []
+
+
+class Collect(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        logs.append(record.getMessage())
+
+
+app = logging.getLogger("my.app")
+app.addHandler(Collect())
+app.propagate = False
+
+logging_driver = (
+    fnloom.Builder()
+    .with_modules(shaky)
+    .with_hooks(fnloom.LogFailures(app, level=logging.WARNING))
+    .build()
+)
+try:
+    logging_driver.execute(["average"], inputs={"total": 10.0, "count": 0})
+except ZeroDivisionError:
+    pass
+logs
+# -> ["node 'average' failed; inputs: count=0, total=10.0"]
+```
+
+Hamilton always logs a failure at `ERROR`, with a banner, then asks the reader to join its Slack (Q88).
+
 ## Carrying hooks
 
 A driver's hooks travel with it. `copy.copy` and `rebuild()` keep the same hook objects. Pickling, and

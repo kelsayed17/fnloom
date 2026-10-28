@@ -3,6 +3,7 @@
 import ast
 import asyncio
 import inspect
+import logging
 import textwrap
 import threading
 from typing import TYPE_CHECKING, Any, Literal, cast, override
@@ -574,3 +575,23 @@ def test_the_hooked_drain_mirrors_the_plain_drain() -> None:
     )
     # The guard does strip something: the hooked copy does call `_begin`.
     assert hooked != _drain_body(_async._HookedRun._drain, hooked=False)  # noqa: SLF001  # the guarded copy
+
+
+def test_log_failures_logs_on_the_async_driver(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The async driver logs the same record, once the failure is in."""
+    from test_hooks import BIG, LOGGED  # noqa: PLC0415  # only this test needs them
+
+    driver = _async_driver(LOGGED, fnloom.LogFailures())
+    with (
+        caplog.at_level(logging.DEBUG),
+        pytest.raises(ValueError, match="bad") as raised,
+    ):
+        _run(driver.execute(["fine", "boom"], inputs={"x": 1, "big": BIG}))
+    (record,) = [r for r in caplog.records if r.name == "fnloom"]
+    cut = repr(BIG)[:50] + "..."
+    assert record.getMessage() == f"node 'boom' failed; inputs: a=2, big={cut}"
+    assert record.levelno == logging.ERROR
+    assert isinstance(record.exc_info, tuple)
+    assert record.exc_info[1] is raised.value

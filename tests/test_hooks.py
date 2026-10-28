@@ -1,6 +1,8 @@
 """`fnloom.Hook` on the sync driver: its events, its order, and hooks that raise."""
 
 import copy
+import dataclasses
+import logging
 import pickle
 from dataclasses import FrozenInstanceError
 from typing import Any, cast, override
@@ -693,3 +695,104 @@ def test_hook_methods_get_the_event_positionally() -> None:
     _driver(GRAPH, Positional()).execute(["a"], inputs={"x": 1})
     assert len(got) == 1
     assert isinstance(got[0], RunStart)
+
+
+LOGGED = """
+def a(x: int) -> int:
+    return x + 1
+
+def boom(a: int, big: list[int], tag: str = "dflt") -> int:
+    raise ValueError("bad")
+
+def fine(a: int) -> int:
+    return a
+"""
+
+BIG = list(range(100))
+
+
+def _failures(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name != "asyncio"]
+
+
+def test_nothing_is_logged_by_default(caplog: pytest.LogCaptureFixture) -> None:
+    """No failure is logged unless a `LogFailures` hook is attached."""
+    module = make_module("logged_default", LOGGED)
+    driver = fnloom.Builder().with_modules(module).build()
+    caplog.set_level(logging.DEBUG)
+    with pytest.raises(ValueError, match="bad"):
+        driver.execute(["boom"], inputs={"x": 1, "big": BIG})
+    assert _failures(caplog) == []
+
+
+def test_log_failures_logs_the_node_and_its_cut_inputs_with_exc_info(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """One record: the node, its inputs cut at 50 characters, and the error."""
+    module = make_module("logged_cut", LOGGED)
+    driver = (
+        fnloom.Builder().with_modules(module).with_hooks(fnloom.LogFailures()).build()
+    )
+    with (
+        caplog.at_level(logging.DEBUG),
+        pytest.raises(ValueError, match="bad") as raised,
+    ):
+        driver.execute(["boom"], inputs={"x": 1, "big": BIG})
+    (record,) = _failures(caplog)
+    assert (record.name, record.levelno) == ("fnloom", logging.ERROR)
+    cut = repr(BIG)[:50] + "..."
+    assert record.getMessage() == f"node 'boom' failed; inputs: a=2, big={cut}"
+    # The defaulted `tag` is not an input of the call; the exception is the node's own.
+    assert "tag" not in record.getMessage()
+    assert isinstance(record.exc_info, tuple)
+    assert record.exc_info[1] is raised.value
+
+
+def test_log_failures_uses_the_given_logger_and_level(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The logger and level are the hook's own, and the driver still pickles."""
+    module = make_module("logged_given", LOGGED)
+    hook = fnloom.LogFailures(logging.getLogger("my.app"), level=logging.WARNING)
+    driver = fnloom.Builder().with_modules(module).with_hooks(hook).build()
+    with caplog.at_level(logging.DEBUG), pytest.raises(ValueError, match="bad"):
+        driver.execute(["boom"], inputs={"x": 1, "big": [1]})
+    (record,) = _failures(caplog)
+    assert (record.name, record.levelno) == ("my.app", logging.WARNING)
+    assert record.getMessage() == "node 'boom' failed; inputs: a=2, big=[1]"
+    # It overrides only `after_node`, so no other method is called.
+    assert type(hook).before_node is Hook.before_node
+    assert type(hook).before_run is Hook.before_run
+    assert type(hook).after_run is Hook.after_run
+    # The driver pickles with it, and the copy logs too.
+    caplog.clear()
+    again = pickle.loads(pickle.dumps(driver))  # noqa: S301  # our own driver
+    with caplog.at_level(logging.DEBUG), pytest.raises(ValueError, match="bad"):
+        again.execute(["boom"], inputs={"x": 1, "big": [1]})
+    assert [r.name for r in _failures(caplog)] == ["my.app"]
+
+
+def test_log_failures_is_silent_on_success_and_on_hits(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Success and a cache hit log nothing; a failure without inputs says so."""
+    module = make_module("logged_silent", LOGGED)
+    builder = fnloom.Builder().with_modules(module).with_hooks(fnloom.LogFailures())
+    with caplog.at_level(logging.DEBUG):
+        assert builder.build().execute(["fine"], inputs={"x": 1}) == {"fine": 2}
+        cached = builder.with_cache(fnloom.MemoryCache()).build()
+        cached.execute(["fine"], inputs={"x": 1})
+        assert cached.execute(["fine"], inputs={"x": 1}) == {"fine": 2}
+        recorder = Recorder()
+        fnloom.Builder().with_modules(module).with_hooks(recorder).build().execute(
+            ["fine"], inputs={"x": 1}
+        )
+    assert _failures(caplog) == []
+    # A node end without inputs, as a hit's is, that did fail: the line says so.
+    ended = next(e for e in recorder.events if isinstance(e, NodeEnd))
+    failed = dataclasses.replace(ended, inputs=None, ok=False, error=ValueError("x"))
+    with caplog.at_level(logging.DEBUG):
+        fnloom.LogFailures().after_node(failed)
+    assert [r.getMessage() for r in _failures(caplog)] == [
+        "node 'a' failed; inputs: none"
+    ]

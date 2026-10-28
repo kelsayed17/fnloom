@@ -6,6 +6,7 @@ front end fires the run events itself, around the value checks and the core run.
 """
 
 import inspect
+import logging
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -544,4 +545,56 @@ class _Forward(_core.ObserverBase):
             None if outcomes is None else outcomes.get(node),
             value,
             error,
+        )
+
+
+_CUT: Final = 50
+
+
+def _cut(value: object) -> str:
+    """`value`'s `repr`, cut to 50 characters and marked with `...` when it was."""
+    text = repr(value)
+    return text if len(text) <= _CUT else f"{text[:_CUT]}..."
+
+
+class LogFailures(Hook):
+    """Logs each node that raised, with its inputs and its exception.
+
+    Logs nothing on success or for a cache hit. The record's message names the
+    node and lists its inputs sorted by name, `name=repr`, each `repr` cut to 50
+    characters and ended with `...` when it was; the node's error is the record's
+    `exc_info`. A node without inputs shows `inputs: none`.
+    """
+
+    __slots__ = ("_level", "_logger")
+
+    def __init__(
+        self, logger: logging.Logger | None = None, *, level: int = logging.ERROR
+    ) -> None:
+        """Logs to `logger`, by default the `fnloom` logger, at `level`."""
+        self._logger = logging.getLogger("fnloom") if logger is None else logger
+        self._level = level
+
+    @override
+    def after_node(self, event: NodeEnd) -> None:
+        if event.ok:
+            return
+        inputs = event.inputs
+        shown = (
+            "none"
+            if inputs is None
+            else ", ".join(
+                f"{name}={_cut(value)}" for name, value in sorted(inputs.items())
+            )
+            or "none"
+        )
+        error = event.error
+        self._logger.log(
+            self._level,
+            "node '%s' failed; inputs: %s",
+            event.node.name,
+            shown,
+            exc_info=None
+            if error is None
+            else (type(error), error, error.__traceback__),
         )

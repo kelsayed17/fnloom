@@ -24,7 +24,7 @@ from fnloom._decorators import (
 from fnloom._extract import extract_columns, extract_fields
 from fnloom._fingerprint import fingerprint, register_fingerprint
 from fnloom._functions import NodeSpec, node
-from fnloom._hooks import Hook, NodeEnd, NodeStart, RunEnd, RunStart
+from fnloom._hooks import Hook, LogFailures, NodeEnd, NodeStart, RunEnd, RunStart
 from fnloom._stores import (
     MISSING,
     CacheStore,
@@ -62,6 +62,7 @@ __all__ = [
     "Group",
     "Hook",
     "InputView",
+    "LogFailures",
     "MemoryCache",
     "NodeEnd",
     "NodeSpec",

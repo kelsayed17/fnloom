@@ -4,6 +4,7 @@ import asyncio
 import collections.abc
 import importlib.util
 import inspect
+import logging
 import os
 import pickle
 import subprocess
@@ -4325,3 +4326,55 @@ def test_q21_a_custom_value_check_adds_to_the_default() -> None:
     assert admitting.validate(["a"], inputs={"x": "s"}) == []
     with pytest.raises(TypeError, match=r"can only concatenate str"):
         admitting.execute(["a"], inputs={"x": "s"})
+
+
+_Q88_GRAPH = """
+def a(x: int) -> int:
+    return x + 1
+
+def boom(a: int, big: list, s: str = "dflt") -> int:
+    raise RuntimeError("bad")
+"""
+
+
+@pytest.mark.deliberate("Q88")
+def test_q88_failures_are_logged_only_on_request(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Hamilton always logs a failure at ERROR; fnloom does when asked."""
+    module = make_module("q88_logged", _Q88_GRAPH)
+    big = list(range(100))
+    cut = repr(big)[:50] + "..."
+    inputs = {"x": 1, "big": big}
+
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    with caplog.at_level(logging.DEBUG), pytest.raises(RuntimeError, match="bad"):
+        hamilton.execute(["boom"], inputs=inputs)
+    logged = [
+        r for r in caplog.records if r.name == "hamilton.execution.graph_functions"
+    ]
+    errors = [r for r in logged if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert errors[0].exc_info is not None
+    assert "boom" in errors[0].getMessage()
+    assert cut in errors[0].getMessage()
+    # The defaulted `s` is not among the inputs.
+    assert "dflt" not in errors[0].getMessage()
+
+    caplog.clear()
+    quiet = fnloom.Builder().with_modules(module).build()
+    with caplog.at_level(logging.DEBUG), pytest.raises(RuntimeError, match="bad"):
+        quiet.execute(["boom"], inputs=inputs)
+    assert not [r for r in caplog.records if r.name.startswith(("fnloom", "hamilton"))]
+
+    caplog.clear()
+    loud = (
+        fnloom.Builder().with_modules(module).with_hooks(fnloom.LogFailures()).build()
+    )
+    with caplog.at_level(logging.DEBUG), pytest.raises(RuntimeError, match="bad"):
+        loud.execute(["boom"], inputs=inputs)
+    (record,) = [r for r in caplog.records if r.name == "fnloom"]
+    assert record.levelno == logging.ERROR
+    assert record.getMessage() == f"node 'boom' failed; inputs: a=2, big={cut}"
+    assert record.exc_info is not None
+    assert "dflt" not in record.getMessage()
