@@ -174,3 +174,21 @@ def test_drivers_and_plans_run_in_a_process_pool(tmp_path: Path) -> None:
     # The workers stored their results in the shared directory.
     explained = driver.explain_cache(["total"], inputs={"a": 3, "b": 1})
     assert {outcome.status for outcome in explained.values()} == {"hit"}
+
+
+def _as_text(value: object) -> bytes:
+    return str(value).encode()
+
+
+def _from_text(data: bytes) -> object:
+    return data.decode()
+
+
+def test_a_pickled_disk_cache_keeps_its_formats(tmp_path: Path) -> None:
+    """A `DiskCache`'s formats come back with it, and still read its entries."""
+    text = fnloom.Format("text", _as_text, _from_text)
+    store = DiskCache(tmp_path, formats=[text])
+    store.put(b"\x01" * 32, "hello", format=text)
+    again = _round_trip(store)
+    assert again.formats == store.formats
+    assert again.get(b"\x01" * 32, format=again.formats["text"]) == "hello"

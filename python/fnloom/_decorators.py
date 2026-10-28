@@ -7,6 +7,8 @@ from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import Literal
 
+from fnloom._stores import Format
+
 _ATTRIBUTE = "__fnloom__"
 
 # How a node uses the result cache: see `cache`.
@@ -35,11 +37,15 @@ class CachePolicy:
         behavior: `"default"`, `"recompute"` or `"disable"`.
         ignore: Parameters left out of this node's cache key.
         version: The user's own code version, or None for the automatic one.
+        format: How a `DiskCache` stores the result: a `Format`, a format's name,
+            or None for the store's default. Only a `default` node is stored, so
+            on another behavior it is checked at build and otherwise unused.
     """
 
     behavior: CacheBehavior
     ignore: frozenset[str]
     version: str | None
+    format: Format | str | None = None
 
 
 @dataclass(frozen=True)
@@ -166,16 +172,27 @@ def tag[F: Callable[..., object]](**tags: str) -> Callable[[F], F]:
 _BEHAVIORS = ("default", "recompute", "disable")
 
 
+def _check_format(format_: object) -> None:
+    """Refuses a format that is neither a `Format` nor a non-empty name."""
+    if format_ is None or isinstance(format_, Format):
+        return
+    if not isinstance(format_, str) or not format_:
+        msg = f"cache format must be a Format or its name, got {format_!r}"
+        raise TypeError(msg)
+
+
 def cache[F: Callable[..., object]](
     *,
     behavior: CacheBehavior = "default",
     ignore: Iterable[str] = (),
     version: str | None = None,
+    format: Format | str | None = None,  # noqa: A002  # Hamilton's name for it
 ) -> Callable[[F], F]:
     """Records the node's cache policy; the build reads it, nothing runs here."""
     # Typed as `object`: a caller may pass anything, whatever the hint says.
     given_behavior: object = behavior
     given_version: object = version
+    given_format: object = format
     if given_behavior not in _BEHAVIORS:
         allowed = ", ".join(repr(b) for b in _BEHAVIORS)
         msg = f"cache behavior {given_behavior!r} is not one of {allowed}"
@@ -194,7 +211,8 @@ def cache[F: Callable[..., object]](
         listed = ", ".join(not_str)
         msg = f"cache ignore names must be str, got: {listed}"
         raise TypeError(msg)
-    policy = CachePolicy(behavior, frozenset(str(n) for n in names), version)
+    _check_format(given_format)
+    policy = CachePolicy(behavior, frozenset(str(n) for n in names), version, format)
 
     def apply(fn: F) -> F:
         current = decorations(fn)

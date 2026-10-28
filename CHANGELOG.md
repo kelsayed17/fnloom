@@ -7,6 +7,24 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ## [Unreleased]
 
+### Added
+
+- `@cache(format=...)` picks how `DiskCache` writes a node's result: a `fnloom.Format` (a name with a `dumps` and
+  `loads` pair) or the name of one the store knows. `"pickle"` and `"json"` are built in, and
+  `DiskCache(formats=...)` adds more. A name the store does not know is refused when the driver is built (Q55). The
+  `json` format refuses any value that would not load back as the same types, such as a tuple, so a hit never
+  returns a different value (Q54).
+- `len(MemoryCache)`, the number of entries it holds.
+
+### Changed
+
+- A cold cached run is 2.7 to 2.9 times faster with `MemoryCache`, and a warm one 2.1 to 3.3 times faster: a plain
+  `MemoryCache` keeps its entries in the native extension, which walks it and stores each result with no call into
+  Python per node (issue #10). A subclass of `MemoryCache` is used through its methods, like any other store.
+  The caching design's cold-run target is restated as at most 0.25 µs of overhead per node, which it meets.
+- Cache keys are BLAKE3 keyed by each node's static part (schema `fnloom-cache-2`), so a node reading one value
+  hashes one block. Entries written by 0.1.0 are misses, and are replaced as nodes run.
+
 ## [0.1.1] - 2026-10-28
 
 ### Added

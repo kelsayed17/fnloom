@@ -44,7 +44,8 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `@tag(owner="data")` | The same, imported from `fnloom`. A value must be a `str`, not a list (Q36) |
 | `@cache(behavior="recompute")`, `@cache(behavior="disable")` | The same, imported from `fnloom` ([Caching](#caching)) |
 | `@cache(behavior="ignore")` on a producer | `@cache(ignore=("name",))` on the consumer instead (Q50) |
-| `@cache(format=...)`, `target_=...` | Not there. fnloom adds `version=` to pin a code version |
+| `@cache(format=...)` | The same, imported from `fnloom`: a format's name, or a `fnloom.Format` ([Caching](caching.md#stores)) |
+| `target_=...` | Not there. fnloom adds `version=` to pin a code version |
 | A row as `(bindings, docstring)`, `group(...)`, `parameterize_sources`, `parameterize_values` | Not yet. A row is a mapping |
 
 </div>
@@ -98,7 +99,7 @@ value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](
 | A code version | The function's source, hashed on every run | Its code, helpers, constants and libraries, read once at build (Q16, Q48) |
 | A helper or global the node reads | Not seen | Seen; a mutable global makes the node uncacheable unless it gives `@cache(version=...)` |
 | A value that cannot be hashed, nested in a list | A constant hash | The nodes reading it run, and `explain_cache` says why (Q47) |
-| `@cache(format=...)`, result stores per format | Supported | Not there: `DiskCache` takes one `dumps`/`loads` pair |
+| `@cache(format=...)` | Formats from a registry of data savers; an unknown name fails every run; `json` turns a tuple into a list on a hit | `"pickle"`, `"json"` or a `fnloom.Format`, checked at build (Q55); `json` stores only what loads back exactly (Q54) |
 | A corrupt stored entry | Fails the run | A miss, with a `CacheWarning` (Q51) |
 | What a run did with each node | A log that reports a hit on every lookup | `driver.explain_cache(...)` |
 

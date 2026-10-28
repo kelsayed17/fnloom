@@ -7,6 +7,7 @@ mod graph;
 mod keys;
 mod observer;
 mod plan;
+mod store;
 
 use pyo3::prelude::*;
 
@@ -44,5 +45,7 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<graph::Graph>()?;
     module.add_class::<plan::Plan>()?;
     module.add_class::<keys::KeyPlan>()?;
+    module.add_class::<keys::Keys>()?;
+    module.add_class::<store::MemoryStore>()?;
     module.add_class::<observer::ObserverBase>()
 }

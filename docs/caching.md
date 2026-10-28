@@ -404,12 +404,15 @@ drivers in one process. A pickled driver takes its store along: a `DiskCache` re
 
 **`MemoryCache(max_entries=100_000, max_bytes=None)`** holds the results themselves, so a hit costs a lookup and no
 copy (hence the [purity contract](#the-purity-contract)). Past either bound it evicts the least recently used entries.
+`len(store)` is the number of entries it holds. Its entries live in the native extension: a run walks a plain
+`MemoryCache` and stores into it without calling Python per node. A subclass is used through its methods, like any
+other store.
 `max_bytes` counts each value by `sys.getsizeof` of the object itself, not of what it holds, so it is an
 approximation: a list of large arrays counts as the list.
 
-**`DiskCache(path, *, max_bytes=None, dumps=pickle.dumps, loads=pickle.loads, serializer="pickle")`** keeps one file
-per key, at `<path>/v1/<first two hex digits of the key>/<key in hex>`. There is no index, so nothing to lock or
-corrupt, and a lookup is one file read.
+**`DiskCache(path, *, max_bytes=None, dumps=pickle.dumps, loads=pickle.loads, serializer="pickle", formats=())`**
+keeps one file per key, at `<path>/v1/<first two hex digits of the key>/<key in hex>`. There is no index, so nothing
+to lock or corrupt, and a lookup is one file read.
 
 - Each entry starts with a header naming the format version, the serializer, the Python version, and the version of
   the library that defines the value's type. An entry written by another Python, serializer or library version is a
@@ -429,6 +432,43 @@ corrupt, and a lookup is one file read.
   unreadable, so it is a miss, never a wrong value.
 - `dumps` and `loads` replace pickle. Give `serializer` a new name whenever you change them: entries written under
   another name are misses.
+
+**Formats.** A node can pick how `DiskCache` writes its result with `@cache(format=...)`: a `fnloom.Format`, which is
+a name with a `dumps` and `loads` pair, or the name of one the store knows. Every `DiskCache` knows `"pickle"` and
+`"json"`, and its `formats=` argument adds more. A name the store doesn't know is refused when the driver is built,
+naming the node, not when the node first runs (Q55). A `MemoryCache` holds values, never bytes, so it takes any format
+and ignores it. An entry records its format's name, and an entry read with another format is a miss. Only `"pickle"`
+and `"json"` are built in, since fnloom has no dependencies: write a `Format` for Parquet or CSV with the library
+you already use.
+
+The `"json"` format stores dicts with `str` keys, lists, `str`, `int`, finite `float`, `bool` and `None`, each of
+exactly that type, so a hit returns the value the node computed. A value that JSON would load back as something else,
+such as a tuple, which would come back as a list, is not stored: the write is skipped with a `CacheWarning` naming
+where the value is, and the node runs again next time (Q54). Loading JSON runs no code, unlike pickle.
+
+```python
+# file: summary.py
+from fnloom import cache
+
+
+@cache(format="json")
+def summary(bid: float, ask: float) -> dict[str, float]:
+    """The quote, stored as JSON that any tool can read."""
+    return {"bid": bid, "ask": ask}
+```
+
+```python
+import tempfile
+
+import summary
+
+store = fnloom.DiskCache(tempfile.mkdtemp())
+built = fnloom.Builder().with_modules(summary).with_cache(store).build()
+built.execute(["summary"], inputs={"bid": 99.0, "ask": 101.0})
+# -> {'summary': {'bid': 99.0, 'ask': 101.0}}
+sorted(store.formats)
+# -> ['json', 'pickle']
+```
 
 !!! warning "Loading a pickle can run code"
 

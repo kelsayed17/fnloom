@@ -15,6 +15,7 @@ from fnloom._decorators import (
     tag,
     value,
 )
+from fnloom._stores import JSON
 
 
 def f(x: int) -> int:
@@ -261,6 +262,31 @@ def test_cache_errors() -> None:
         cache(ignore=(1, 2))  # ty: ignore[invalid-argument-type]
     with pytest.raises(TypeError, match="not one str"):
         cache(ignore="x")
+
+
+def test_cache_records_a_format_by_object_or_name() -> None:
+    """`format` is kept as given; it is resolved against the store at build."""
+
+    def g(x: int) -> int:
+        return x
+
+    def h(x: int) -> int:
+        return x
+
+    cache(format="json")(g)
+    assert decorations(g).cache == CachePolicy("default", frozenset(), None, "json")
+    cache(format=JSON)(h)
+    assert decorations(h).cache == CachePolicy("default", frozenset(), None, JSON)
+
+
+def test_cache_format_errors() -> None:
+    """A format is a `Format` or a non-empty name, on any behavior."""
+    for bad in ("", 2, b"json"):
+        with pytest.raises(TypeError, match="Format or its name"):
+            cache(format=bad)  # ty: ignore[invalid-argument-type]
+    # As in Hamilton, a format is accepted on any behavior; only stored results use it.
+    for behavior in ("recompute", "disable"):
+        cache(behavior=behavior, format="json")
 
 
 def test_cache_does_not_evaluate_annotations() -> None:

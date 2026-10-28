@@ -885,3 +885,64 @@ def test_q53_a_hand_built_module() -> None:
         ValueError, match=r"^module 'q53_handmade' has no nodes: 'f' is defined in "
     ):
         fnloom.build(handmade)
+
+
+# A node whose dict holds a tuple, stored as JSON (Hamilton's JSON saver takes dicts);
+# `{decorator}` imports each library's `cache`.
+_PAIR_AS_JSON = """
+{decorator}
+
+@cache(format="json")
+def pair(x: int) -> dict[str, tuple[int, int]]:
+    return {{"xy": (x, x + 1)}}
+"""
+
+
+@pytest.mark.deliberate("Q54")
+def test_q54_json_never_serves_a_changed_value(tmp_path: Path) -> None:
+    """Hamilton's JSON hit turns a tuple into a list; fnloom never stores the tuple."""
+    hamilton_module = _file_module(
+        tmp_path / "code",
+        "differential_json_pair_h",
+        _PAIR_AS_JSON.format(decorator="from hamilton.function_modifiers import cache"),
+    )
+    hamilton = _hamilton_cached(hamilton_module, tmp_path / "hamilton")
+    assert hamilton.execute(["pair"], inputs={"x": 1}) == {"pair": {"xy": (1, 2)}}
+    assert hamilton.execute(["pair"], inputs={"x": 1}) == {"pair": {"xy": [1, 2]}}
+    fnloom_module = _file_module(
+        tmp_path / "code",
+        "differential_json_pair_f",
+        _PAIR_AS_JSON.format(decorator="from fnloom import cache"),
+    )
+    driver = _fnloom_cached(fnloom_module, tmp_path / "fnloom")
+    for _ in range(2):
+        with pytest.warns(CacheWarning, match=r"json cannot store a tuple at \['xy'\]"):
+            assert driver.execute(["pair"], inputs={"x": 1}) == {"pair": {"xy": (1, 2)}}
+
+
+@pytest.mark.deliberate("Q55")
+def test_q55_an_unknown_format_is_refused_at_build(tmp_path: Path) -> None:
+    """Hamilton fails each run after the node ran; fnloom refuses to build."""
+    source = """
+        {decorator}
+
+        @cache(format="nosuch")
+        def b(x: int) -> int:
+            return x
+        """
+    hamilton_module = _file_module(
+        tmp_path / "code",
+        "differential_unknown_format_h",
+        source.format(decorator="from hamilton.function_modifiers import cache"),
+    )
+    hamilton = _hamilton_cached(hamilton_module, tmp_path / "hamilton")
+    for _ in range(2):
+        with pytest.raises(KeyError, match="nosuch"):
+            hamilton.execute(["b"], inputs={"x": 1})
+    fnloom_module = _file_module(
+        tmp_path / "code",
+        "differential_unknown_format_f",
+        source.format(decorator="from fnloom import cache"),
+    )
+    with pytest.raises(ValueError, match="'nosuch', which the store does not know"):
+        _fnloom_cached(fnloom_module, tmp_path / "fnloom")

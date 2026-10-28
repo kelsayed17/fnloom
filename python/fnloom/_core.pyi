@@ -4,6 +4,8 @@ from typing import Any, Self, final
 __all__ = [
     "Graph",
     "KeyPlan",
+    "Keys",
+    "MemoryStore",
     "ObserverBase",
     "Plan",
     "UnfingerprintableError",
@@ -50,7 +52,7 @@ class Plan:
         inputs: dict[str, Any],
         overrides: dict[str, Any],
         observers: Sequence[ObserverBase] = (),
-        on_value: Callable[[str, object], None] | None = None,
+        on_value: Callable[[str, object], None] | Keys | None = None,
     ) -> dict[str, object]: ...
     def steps(self) -> list[tuple[str, str]]: ...
 
@@ -58,11 +60,30 @@ class Plan:
 class KeyPlan:
     def __new__(
         cls,
-        nodes: list[
-            tuple[str, bytes | None, list[tuple[str, str | None, bytes | None]]]
-        ],
+        nodes: list[tuple[str, bytes | None, list[str], bool, list[str]]],
+        outputs: Sequence[str] = (),
     ) -> Self: ...
     def keys(self, versions: dict[str, bytes | None]) -> dict[str, bytes | None]: ...
+    def walk(
+        self, versions: dict[str, bytes | None], store: MemoryStore
+    ) -> tuple[Keys, dict[str, object]]: ...
+
+@final
+class Keys: ...
+
+@final
+class MemoryStore:
+    def __new__(
+        cls,
+        max_entries: int,
+        max_bytes: int | None = None,
+        sizeof: Callable[[object], int | None] | None = None,
+    ) -> Self: ...
+    def get(self, key: bytes, default: object) -> object: ...
+    def put(self, key: bytes, value: object) -> None: ...
+    def discard(self, key: bytes) -> None: ...
+    def __len__(self) -> int: ...
+    def items(self) -> list[tuple[bytes, object]]: ...
 
 class ObserverBase:
     def __new__(cls, *_args: object, **_kwargs: object) -> Self: ...

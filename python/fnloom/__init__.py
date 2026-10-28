@@ -15,7 +15,14 @@ from fnloom._decorators import (
     value,
 )
 from fnloom._fingerprint import fingerprint, register_fingerprint
-from fnloom._stores import MISSING, CacheStore, CacheWarning, DiskCache, MemoryCache
+from fnloom._stores import (
+    MISSING,
+    CacheStore,
+    CacheWarning,
+    DiskCache,
+    Format,
+    MemoryCache,
+)
 from fnloom._view import NodeView, Param
 from fnloom.driver import Builder, Driver, PreparedPlan, build
 
@@ -30,6 +37,7 @@ __all__ = [
     "CacheWarning",
     "DiskCache",
     "Driver",
+    "Format",
     "MemoryCache",
     "NodeView",
     "Param",

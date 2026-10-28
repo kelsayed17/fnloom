@@ -255,7 +255,8 @@ is safe to share between threads, and between drivers in one process.
 
 - in memory, a hit costs at most 1 µs of overhead per node;
 - a fully cached run of a 200-node chain of trivial nodes costs at most about twice the same run uncached;
-- a cold run (all misses) costs at most 1.5 times an uncached run, with the memory store;
+- a cold run (all misses) costs at most 0.25 µs of overhead per node over an uncached run, with the memory store
+  (restated 2026-10-28 from "at most 1.5 times an uncached run"; see §13);
 - a requested output that hits loads one entry, whatever the size of the graph above it.
 
 ## 9. Hamilton's faults and what fixes them
@@ -345,8 +346,14 @@ Where the code departs from the sections above, each with its reason. The sectio
   its consumers. Replacing across policies would need a double write or consumers keyed by value.
 - **`recompute` results are not stored** (§3 step 4): only `default` nodes are ever looked up, so a stored recompute
   result would never be read.
-- **The backward walk and `MemoryCache` are Python, not Rust** (§8). Keys, fingerprints and key plans are Rust; the
-  cold-run target is missed, see `docs/benchmarks.md`.
+- **The backward walk and `MemoryCache` were Python, not Rust** (§8), in 0.1.0. The Plan 4 follow-up (issue #10)
+  moved both into the binding, as §8 placed them: a plain `MemoryCache` is walked and written with no Python call per
+  node, and any other store, a `MemoryCache` subclass included, takes the Python path. A cold run went from 6.0× and
+  5.5× an uncached one to 2.2× and 1.9×; see `docs/benchmarks.md`.
+- **The cold-run target is restated per node** (§8), at the maintainer's call, 2026-10-28: at most 0.25 µs of
+  overhead per node, not 1.5 times an uncached run. On trivial nodes a ratio cannot reach 1.5: one BLAKE3 block per
+  key, about 75 ns, is already half of an uncached trivial node, about 0.16 µs, and a weaker key would risk a wrong
+  hit. The overhead is per node, not per byte, so a fixed bound per node says what a user pays.
 - **The stores live in the private `fnloom._stores`**, used through `fnloom` (`fnloom.cache` is the decorator).
 - **`serializer=` is the pair's name**, a non-empty `str`; the pair itself is `dumps=` and `loads=`.
 - **Canonical forms are stricter than §5's list**: exact types (a subclass is refused unless registered), a time
@@ -356,3 +363,11 @@ Where the code departs from the sections above, each with its reason. The sectio
   attribute set beyond their fields or buffer, by name, or are refused.
 - **A class counts through all its attributes**, its metaclass and its bases, not its methods alone (§4).
 - **Mutable defaults are fingerprinted at build** (a known limit): a default mutated after the build is not seen.
+- **A key is BLAKE3 keyed by its static part, over 32-byte versions** (§3), from the Plan 4 follow-up, schema
+  `fnloom-cache-2`. §3's fixed, length-prefixed encoding still holds: the schema, the identity, the code version, the
+  behavior, and each key parameter's name, with a constant's version, are framed into the static part once, at build.
+  What a run hashes is the fixed-length versions of the sources a key reads, in declaration order, under that static
+  part as BLAKE3's key; an absent optional input is a 32-byte marker. A node reading one value hashes one block.
+- **`@cache(format=...)`** (Plan 4 follow-up): a `Format` is a name with a `dumps`/`loads` pair, and `DiskCache`
+  records the name in the entry's header where it recorded the serializer's (§7). Names resolve against the store
+  when the driver is built (Q55). The built-in `json` format refuses what would not load back exactly (Q54).

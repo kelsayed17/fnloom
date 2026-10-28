@@ -123,6 +123,43 @@ def test_a_hit_on_the_output_loads_only_the_output() -> None:
     assert store.puts == []
 
 
+UNSIZABLE = """
+class Unsizable:
+    def __sizeof__(self) -> int:
+        raise RuntimeError("no size")
+
+def a(x: int) -> Unsizable:
+    print("a")
+    return Unsizable()
+
+def b(a: Unsizable) -> int:
+    print("b")
+    return 1
+"""
+
+
+def test_a_plain_memory_cache_skips_a_value_it_cannot_size(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A bounded `MemoryCache` skips, with a warning, a result it cannot size.
+
+    The run goes on; the node that could not be stored runs again next time.
+    """
+    driver = _cached(
+        make_module("cached_unsizable", UNSIZABLE), MemoryCache(max_bytes=10**6)
+    )
+    with pytest.warns(CacheWarning, match="cannot size a Unsizable") as caught:
+        assert driver.execute(["b"], inputs={"x": 1}) == {"b": 1}
+    # Reported at the caller's `execute`, not inside fnloom.
+    assert caught[0].filename == __file__
+    assert _called(capsys) == ["a", "b"]
+    with pytest.warns(CacheWarning, match="cannot size"):
+        assert driver.execute(["a"], inputs={"x": 1})["a"] is not None
+    assert _called(capsys) == ["a"]
+    assert driver.execute(["b"], inputs={"x": 1}) == {"b": 1}
+    assert _called(capsys) == []
+
+
 DIAMOND = """
 def a(x: int) -> int:
     print("a")
@@ -818,3 +855,97 @@ def test_explain_names_the_nearest_recompute_node() -> None:
     # A `recompute` node with no key is never stored: uncacheable, not a miss.
     outcomes = driver.explain_cache(["second"], inputs={"path": "p", "other": object()})
     assert outcomes["second"] == CacheOutcome("uncacheable", "other: object")
+
+
+FORMATTED = """
+from fnloom import cache
+
+@cache(format="json")
+def report(x: int) -> dict[str, list[int]]:
+    print("report")
+    return {"xs": [x, x + 1]}
+
+@cache(format="json")
+def pair(x: int) -> tuple[int, int]:
+    print("pair")
+    return (x, x)
+"""
+
+
+def test_a_json_node_is_stored_as_json_and_hits(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A node naming `json` is written as JSON and read back by the next run."""
+    store = DiskCache(tmp_path)
+    driver = _cached(make_module("cached_json", FORMATTED), store)
+    assert driver.execute(["report"], inputs={"x": 1}) == {"report": {"xs": [1, 2]}}
+    assert _called(capsys) == ["report"]
+    payloads = [p.read_bytes() for p in (tmp_path / "v1").rglob("*") if p.is_file()]
+    assert len(payloads) == 1
+    assert payloads[0].endswith(b'{"xs": [1, 2]}')
+    assert driver.explain_cache(["report"], inputs={"x": 1}) == {
+        "report": CacheOutcome("hit", None)
+    }
+    assert driver.execute(["report"], inputs={"x": 1}) == {"report": {"xs": [1, 2]}}
+    assert _called(capsys) == []
+
+
+def test_a_value_json_cannot_store_exactly_is_never_served_changed(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A tuple is not stored as JSON, which would load it as a list: the node reruns."""
+    driver = _cached(make_module("cached_json_tuple", FORMATTED), DiskCache(tmp_path))
+    for _ in range(2):
+        with pytest.warns(CacheWarning, match="json cannot store a tuple"):
+            assert driver.execute(["pair"], inputs={"x": 1}) == {"pair": (1, 1)}
+        assert _called(capsys) == ["pair"]
+
+
+def test_a_format_object_needs_no_registration(tmp_path: Path) -> None:
+    """A node may give a `Format` itself; the store need not know it by name."""
+    module = make_module(
+        "cached_own_format",
+        """
+from fnloom import Format, cache
+
+TEXT = Format("text", lambda v: v.encode(), lambda b: b.decode())
+
+@cache(format=TEXT)
+def greeting(name: str) -> str:
+    return "hi " + name
+""",
+    )
+    store = DiskCache(tmp_path)
+    driver = _cached(module, store)
+    assert driver.execute(["greeting"], inputs={"name": "a"}) == {"greeting": "hi a"}
+    files = [p for p in (tmp_path / "v1").rglob("*") if p.is_file()]
+    assert [f.read_bytes().endswith(b"hi a") for f in files] == [True]
+
+
+def test_a_format_the_store_cannot_use_is_refused_at_build(tmp_path: Path) -> None:
+    """Unknown names, clashing objects and stores without formats fail the build."""
+    unknown = make_module(
+        "cached_unknown_format",
+        """
+from fnloom import Format, cache
+
+@cache(format="parquet")
+def a(x: int) -> int:
+    return x
+
+@cache(format=Format("json", repr, eval))
+def b(x: int) -> int:
+    return x
+""",
+    )
+    message = (
+        r"node 'a' names cache format 'parquet', which the store does not know "
+        r"\(it knows 'json', 'pickle'\); node 'b' names a cache format 'json' unlike"
+    )
+    with pytest.raises(ValueError, match=message):
+        _cached(unknown, DiskCache(tmp_path))
+    with pytest.raises(ValueError, match="RaisingCache takes no formats"):
+        _cached(unknown, RaisingCache())
+    # A memory store holds values, never bytes: any format is fine, and ignored.
+    driver = _cached(unknown, MemoryCache())
+    assert driver.execute(["a", "b"], inputs={"x": 1}) == {"a": 1, "b": 1}
