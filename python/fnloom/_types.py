@@ -50,10 +50,12 @@ def _alias_value(annotation: object) -> object | None:  # noqa: PLR0911  # one r
     if getattr(aliased, "__parameters__", None) != params:
         return None
     try:
-        return _substituted(aliased, args)
+        hash((aliased, args))
     except TypeError:
-        # An unhashable argument: substituted afresh on each reading.
+        # An unhashable part, such as `Annotated` metadata: substituted afresh on
+        # each reading, so only the walk's budget ends a cycle through it.
         return aliased[args]
+    return _substituted(aliased, args)
 
 
 @functools.lru_cache(maxsize=256)
@@ -164,19 +166,48 @@ def _fixed_items(declared: object) -> tuple[object, ...] | None:
 
 @dataclasses.dataclass(slots=True)
 class _Group:
-    """The questions one question depends on: any of them (`any_`), or all of them."""
+    """The questions one question depends on: any of them (`any_`), or all of them.
+
+    `descends` when the questions are about the value's items, not the value.
+    """
 
     any_: bool
     questions: list[tuple[object, object]]
+    descends: bool = False
 
 
 @dataclasses.dataclass(slots=True)
 class _Frame:
-    """A group being evaluated: its next question, and its own pair while it is open."""
+    """A group being evaluated: its next question, and its own pair while it is open.
+
+    `descents` counts the steps into an item between the first question and this
+    one, so a repeated question tells whether the value changed on the way.
+    """
 
     group: _Group
-    pair: tuple[int, int]
+    pair: _Pair
+    descents: int
     next: int = 0
+
+
+type _Pair = tuple[int, int | str]
+"""A question's key: its type by identity, its value by identity, a string by value.
+
+A one-character string above U+00FF is a new object each time it is read from a
+string, so a string is compared by equality, or the walk would never see it again.
+"""
+
+
+def _pair(declared: object, value: object) -> _Pair:
+    return (id(declared), value if type(value) is str else id(value))
+
+
+WALK_BUDGET = 1_000_000
+"""How many groups one check may open before it gives up with a `TypeError`.
+
+A legitimate value opens a few groups per level it is read to, so this is far
+beyond any real depth; only a cycle the walk cannot see ends here.
+"""
 
 
 type _Expanded = bool | _Group
@@ -185,7 +216,7 @@ type _Expanded = bool | _Group
 def _first_item(element: object, value: object) -> _Expanded:
     """The question about the first item of the collection `value`; `True` if empty."""
     for item in typing.cast("collections.abc.Iterable[object]", value):
-        return _Group(any_=False, questions=[(element, item)])
+        return _Group(any_=False, questions=[(element, item)], descends=True)
     return True
 
 
@@ -204,7 +235,11 @@ def _expand_generic(  # noqa: PLR0911  # one return per form
         if (items := _fixed_items(declared)) is not None:
             if len(value) != len(items):
                 return False
-            return _Group(any_=False, questions=list(zip(items, value, strict=True)))
+            return _Group(
+                any_=False,
+                questions=list(zip(items, value, strict=True)),
+                descends=True,
+            )
     if type(value) is origin:
         return True
     if isinstance(value, collections.abc.Iterator):
@@ -272,21 +307,33 @@ def _walk(
     declared: object,
     value: object,
     expand: collections.abc.Callable[[object, object], _Expanded] = _expand,
+    budget: int = WALK_BUDGET,
 ) -> bool:
     """Whether `value` fits `declared`, by the rules of `expand`, with no recursion.
 
     `expand` answers one (type, value) question or names the group it depends on;
     this evaluates the groups depth first with an explicit stack, stopping a group
-    as soon as its answer is known. A question already open further up the stack,
-    the same type object about the same value object, is a cycle in the value or a
-    recursive alias: it fits, so a cyclic value ends, except that a string, whose
-    first item is a string again, does not fit (a recursive alias never ends in one).
+    as soon as its answer is known.
+
+    A question already open further up the stack (the same type object, about the
+    same value object or an equal string) is a cycle:
+
+    - **Through the value's items** (a list holding itself): it fits, so a cyclic
+      value ends.
+    - **Through types alone** (`type X = X | int`), with no step into an item on
+      the way: it does not fit, so a union falls to its other members.
+    - **A string**, whose first item is a string again: it does not fit, as a
+      recursive alias never ends in one.
+
+    Past `budget` groups, a cycle no key can see (a type made afresh on each
+    reading), it raises `TypeError` naming the type.
     """
     answer = expand(declared, value)
     if isinstance(answer, bool):
         return answer
-    stack = [_Frame(answer, (id(declared), id(value)))]
-    open_pairs = {stack[0].pair}
+    stack = [_Frame(answer, _pair(declared, value), 0)]
+    open_pairs = {stack[0].pair: 0}
+    opened = 1
     finished: bool | None = None
     while True:
         frame = stack[-1]
@@ -300,20 +347,28 @@ def _walk(
         else:
             question, item = group.questions[frame.next]
             frame.next += 1
-            pair = (id(question), id(item))
-            if pair in open_pairs:
-                finished = not isinstance(item, str)
+            pair = _pair(question, item)
+            descents = frame.descents + group.descends
+            if (before := open_pairs.get(pair)) is not None:
+                finished = descents > before and type(item) is not str
                 continue
             expanded = expand(question, item)
             if isinstance(expanded, bool):
                 finished = expanded
                 continue
-            stack.append(_Frame(expanded, pair))
-            open_pairs.add(pair)
+            opened += 1
+            if opened > budget:
+                msg = (
+                    f"value too deep or too cyclic to check against {declared!r}: "
+                    f"more than {budget:,} steps"
+                )
+                raise TypeError(msg)
+            stack.append(_Frame(expanded, pair, descents))
+            open_pairs[pair] = descents
             finished = None
             continue
         stack.pop()
-        open_pairs.discard(frame.pair)
+        del open_pairs[frame.pair]
         if not stack:
             return answer
         finished = answer

@@ -1,6 +1,7 @@
 """Type rules: `None` only where admitted, fixed tuples, and the public matchers."""
 
 import collections.abc
+import dataclasses
 import re
 import types
 import typing
@@ -259,6 +260,16 @@ type _Rec = tuple[int, _Rec | None]
 type _RecSeq = tuple[int, collections.abc.Sequence[_RecSeq]]
 type _Seq = collections.abc.Sequence[_Seq]
 type _GenericSeq[T] = collections.abc.Sequence[_GenericSeq[T]]
+type _SeqOrInt = collections.abc.Sequence[_SeqOrInt] | int
+type _Self = _Self | int  # ty: ignore[cyclic-type-alias-definition]  # the cycle is the point
+type _ListOrSelf = list[_ListOrSelf] | _ListOrSelf  # ty: ignore[cyclic-type-alias-definition]  # the cycle is the point
+
+
+@dataclasses.dataclass
+class _Meta:
+    """Metadata that is not hashable: a dataclass with `eq` and no `frozen`."""
+
+    n: int
 
 
 def _chain(depth: int, leaf: object) -> object:
@@ -297,6 +308,32 @@ def test_a_cyclic_value_ends() -> None:
     assert fnloom.value_matches(_Seq, "ab") is False
     # A generic alias reads as one object each time, so its cycle is seen too.
     assert fnloom.value_matches(_GenericSeq[int], itself) is True
+    # A one-character string above U+00FF is a new object on each reading, so a
+    # string is compared by value: these end, and a string still does not fit.
+    assert fnloom.value_matches(_Seq, "中") is False
+    assert fnloom.value_matches(_Seq, "中文") is False
+    assert fnloom.value_matches(_SeqOrInt, "中文") is False
+    assert fnloom.value_matches(_SeqOrInt, [1, "中"]) is True
+    assert fnloom.value_matches(_SeqOrInt, ["中"]) is False
+
+
+def test_a_cycle_through_types_alone_does_not_fit() -> None:
+    """With no step into an item, a repeated question fails; a union tries the rest."""
+    assert fnloom.value_matches(_Self, 1.5) is False
+    assert fnloom.value_matches(_Self, 1) is True
+    assert fnloom.value_matches(_ListOrSelf, 1.5) is False
+    assert fnloom.value_matches(_ListOrSelf, []) is True
+
+
+def test_a_cycle_no_key_can_see_runs_out_of_budget() -> None:
+    """A type made afresh on each reading never repeats: the walk raises, not hangs."""
+    itself: list[object] = []
+    itself.append(itself)
+    fresh = _GenericSeq[Annotated[int, _Meta(1)]]
+    with pytest.raises(TypeError, match=r"^value too deep or too cyclic to check "):
+        _types._walk(fresh, itself, budget=1_000)  # noqa: SLF001  # a small budget, for speed
+    # The default budget is far beyond a legitimate value's depth.
+    assert fnloom.value_matches(_Rec, _chain(50_000, None)) is True
 
 
 def test_fixed_tuple_inputs_are_checked_by_the_driver() -> None:
