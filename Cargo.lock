@@ -90,14 +90,14 @@ checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
 
 [[package]]
 name = "fnloom-core"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "gungraun",
 ]
 
 [[package]]
 name = "fnloom-py"
-version = "0.0.0"
+version = "0.1.0"
 dependencies = [
  "blake3",
  "fnloom-core",
