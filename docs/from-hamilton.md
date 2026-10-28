@@ -55,7 +55,11 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `@extract_fields(..., fill_with=v)` | The same, but the producer's mapping is never changed, and `None` is a fill (Q62) |
 | `@extract_columns("a", ("b", "doc"))` | The same, imported from `fnloom` ([Extracting columns](writing-nodes.md#extracting-columns)), with no pandas extension to load. A mapping or any value with `in` and `[]` works too (Q64) |
 | `@extract_columns(..., fill_with=v)` | The same, but the producer's frame is never changed, and a `("b", "doc")` column fills `b` (Q64) |
-| A row as `(bindings, docstring)`, `group(...)`, `parameterize_sources`, `parameterize_values` | Not yet. A row is a mapping |
+| `@parameterize(row=({...}, "doc"))` | `from fnloom import parameterize`: the doc is used as written, and `None` is no doc. A tuple of any other length, or a doc that is no `str`, is a `TypeError` (Q82) |
+| `{ghost}` in a `@parameterize` function's docstring prints as `ghost` | `ValueError` when decorating, naming the row and the placeholder; `{xs}` of a `group` is its items joined (Q82) |
+| `group(source("a"), value(3))` and `group(k=source("a"))`, misuse refused when decorating, a mis-annotated parameter sometimes listed twice, for example a positional group on an `int` parameter | `from fnloom import group`; each offender is listed once, and a `group` source is required even when the parameter has a default (Q82) |
+| `parameterize_sources(row=dict(p="x"))`, where a non-`str` source fails later with a raw `TypeError` | The same call; a non-`str` source is a `TypeError` when decorating (Q82) |
+| `parameterize_values("p", {("name", "doc"): v})`, where an empty mapping builds no node | The same call; an empty mapping, or a key that is no `(name, doc)`, is refused when decorating (Q82) |
 
 </div>
 
@@ -68,10 +72,26 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `inputs` and `overrides` | `overrides` is the second positional parameter | Keyword-only (Q31) |
 | A misspelled input or override | Ignored | `ValueError` naming it (Q4, Q5) |
 | `final_vars="total"` | One output per character | `TypeError` (Q6) |
-| A function in `final_vars` | Its node | `TypeError` for now: pass names (Q30) |
-| Overriding an input | Only when it's also supplied | Any node. It beats or replaces the input (Q7) |
+| A function in `final_vars` | Its `__name__`, even when no node has that name, and a forged function is accepted | The node it makes, matched by the function itself. A `@parameterize` function is a `TypeError` listing its rows; a function no node comes from is a `ValueError` (Q30) |
+| Overriding an input | Only when it's also supplied | Any node. It beats or replaces the input (Q7) ; `with_strict_overrides()` restores Hamilton's rule, and `with_declared_inputs(...)` turns a misspelled parameter into a build error (Q75) |
+| A node named like a parameter that has a default | The node silently replaces the default, and a supplied input of that name is ignored | `ValueError` at build, naming the parameter and the node. `@fnloom.defaults(shadowed=("cost",))` on the consumer lets the node win (Q76) |
+| Two functions with different defaults for one input | Each keeps its own default | `ValueError` at build, naming every consumer and its default. `@fnloom.defaults(differing=("shared",))` on each consumer but one keeps them (Q76) |
+| An input or override naming a parameter only `value()` supplies | Silently dropped, even a wrong-typed one | `ValueError`, as for any unknown name; when another node reads the name, it's an input for that node alone, as in Hamilton (Q77) |
+| `__all__` in a module | Ignored: every public function the module defines is a node | Only the functions it names are nodes, by attribute name, so a `@config` variant is listed as `foo__a`. A malformed `__all__` is a `TypeError`. A missing input named like a function it left out says so (Q73) |
+| `@hamilton_exclude` | An instance, so only `@hamilton_exclude` works; `@hamilton_exclude()` raises | `@fnloom.exclude` and `@fnloom.exclude()` both work, return the function unchanged, and beat `__all__` (Q73) |
+| `ad_hoc_utils.create_temporary_module(fa, fb)` | Copies the functions into a module it registers in `sys.modules`; refuses `_` names; the original function in `final_vars` is refused | `Builder().with_functions(fa, fb)`: the functions themselves, no module made or registered, the original in `final_vars` means its node ([Graphs without modules](writing-nodes.md#graphs-without-modules), Q72) |
+| A lambda in `create_temporary_module` | Accepted, failing later | Needs a name: `fnloom.node(fn, name="x")`, which also binds parameters with `bind={...}` (Q72) |
+| `allow_module_overrides()` | The later module's function silently replaces the earlier one, for every reader | No override: a name defined twice fails the build. To use one module twice, give it a namespace ([Namespaces](writing-nodes.md#namespaces), Q74) |
+| `@subdag(module, ...)` to reuse a module | The module's nodes are named `<function>.<name>`, under a function you write | `Builder().with_modules(module, namespace="ns")` names them `ns.<name>`; inside, a parameter reads the namespace's node first, then the plain name, and inputs keep their plain names (Q74) |
 | `what_is_upstream_of` | `HamiltonNode` objects | Sorted names, including the ones you named (Q28) |
 | Reusing a request | Re-planned on every call | `prepare(...)` returns a plan to run again (Q3) |
+| `validate_execution(final_vars, overrides, inputs)` | Returns `None` or raises one kind of problem; refuses a function in `final_vars`; a missing input names every consumer in the graph | `validate(final_vars, *, inputs, overrides)` returns every problem, one sorted line each, and names only the consumers the request needs; unknown names get a `did you mean` suggestion (Q71) |
+| `what_is_the_path_between(a, b)` | `HamiltonNode` objects in an order that changes with `PYTHONHASHSEED`; the error names one unknown name | Sorted-by-dependency names, ties broken by name; both endpoints included, as in Hamilton; the error names every unknown name (Q70) |
+| `graph_modules` | A tuple, keeping a module given twice | `driver.modules`: each module once, in build order (Q70) |
+| `list_available_variables()` | Every node, including inputs, as objects | `driver.nodes` for the nodes; `driver.inputs()` for the inputs with their types, requiredness and consumers; `driver.outputs()` for the nodes nothing reads (Q70) |
+| `htypes.check_input_type(t, v)` | Public, with Hamilton's rules | `fnloom.value_matches(t, v)` answers as the input check, and `fnloom.type_matches(produced, expected)` as the edge check ([What the checks understand](running.md#what-the-checks-understand)) |
+| An override's value | Not type checked | Checked as an input is; `without_override_type_checks()` skips only the override checks (Q22) |
+| After `importlib.reload(module)` | A new `Builder` to see the edit | `driver.rebuild()` builds again with every setting; the old driver keeps its old code, as Hamilton's does (Q83) |
 
 </div>
 
@@ -90,9 +110,15 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | An async driver's result | A DataFrame from `AsyncDriver(...)`; a dict, sorted by name, from its builder | The sync driver's dict, in request order (Q11) |
 | A sync node in an async driver | Runs on the event loop, which stops while it does | Runs in a worker thread (`loop.run_in_executor`), or on the loop with `sync_nodes="inline"` (Q65) |
 | A failing node in an async driver | Its siblings keep running after `execute` raises | They're cancelled; its own exception is raised once, noted with its name (Q66) |
+| `None` for an input declared `x: int` | Passes the check; the node then runs with `None` | `ValueError` before anything runs; annotate `x: int \| None` (Q79) |
+| A `tuple[int, str]` input | Every tuple refused, a correct one too | Checked by length and each item (Q80) |
+| An annotation imported only under `TYPE_CHECKING` | `NameError` at build, naming no node | Builds as `unresolved 'Decimal'`; a value checked against it is a `TypeError` saying to import it (Q81) |
+| An `int` for `float`, a numpy scalar for `int` | Refused | Refused too, unless built `with_numeric_widening()`; items of a collection with `with_deep_type_checks()` |
 | Inputs to an async driver | Types unchecked; `NotImplementedError` or `KeyError` for a missing one | Checked as the sync driver checks them, with the same errors (Q67) |
 | An `async def` under `@parameterize`, in an async driver | Each row's value is an un-awaited coroutine | Awaited, as any `async def` node (Q69) |
 | Hamilton's `AsyncDriver` on Python 3.14 | `DeprecationWarning` on every node; breaks on 3.16 | No warning (Q13) |
+| An input nobody supplied, requested as an output | `None` for it | `ValueError: missing inputs: 'x' (requested as an output)` (Q78) |
+| One driver shared between threads | Works, undocumented | A documented guarantee, stress-tested on the default and free-threaded builds ([Threads](running.md#threads)) |
 | A function passed where a module goes | An empty graph | `TypeError` (Q52) |
 | A module with no nodes, such as a package that only re-exports | Builds; its nodes are unknown at `execute` | `ValueError` at build, saying why each function was skipped (Q53) |
 | A row naming no parameter of its function | `InvalidDecoratorException` | `ValueError`, when decorating (Q33) |
@@ -138,8 +164,9 @@ value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](
 
 ## Not there yet
 
-fnloom is pre-alpha. The core, the native path, `@parameterize`, `@tag`, `@config`, `@extract_fields`,
-`@extract_columns`, graph inspection, type checks, result caching and the async driver are done. These Hamilton
+fnloom is pre-alpha. The core, the native path, `@parameterize` and its sugar, `@tag`, `@config`, `@extract_fields`,
+`@extract_columns`, `@exclude`, graph inspection, `validate`, graphs from plain functions, namespaces, type checks,
+result caching and the async driver are done. These Hamilton
 features come next, roughly in this order:
 
 1. **Adapters and lifecycle hooks**, and result builders.

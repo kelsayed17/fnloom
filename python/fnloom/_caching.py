@@ -201,8 +201,11 @@ def _node_key(
     for param in node.params:
         if param.name in policy.ignore:
             continue
+        # A group item is keyed by its place too, `xs[0]` or `xs['k']`: no plain
+        # parameter has such a name, so a move between places or into a group misses.
+        key_name = param.name if param.slot is None else f"{param.name}[{param.slot!r}]"
         if isinstance(param.binding, Source):
-            params.append((param.name, param.binding.name, None))
+            params.append((key_name, param.binding.name, None))
             continue
         try:
             version = fingerprint(param.binding.value)
@@ -215,7 +218,7 @@ def _node_key(
             reason = reason or f"{failed} of node {node.name!r}: {error!r}"
             # Up: `_node_key`, `node_keys`, `Cache.of`, `Builder.build`, its caller.
             _warn_build(reason, stacklevel=6)
-        params.append((param.name, None, version))
+        params.append((key_name, None, version))
     extraction, unkeyed = _extraction_parts(node)
     reason = reason or unkeyed
     static = None

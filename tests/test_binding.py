@@ -108,7 +108,11 @@ def test_keyword_names_reach_the_function_interned() -> None:
 
 
 def test_a_renamed_input_reaches_the_function_under_its_keyword_interned() -> None:
-    """A rename passes an input under another keyword, interned; others keep theirs."""
+    """A rename passes an input under another keyword; others keep theirs.
+
+    The keyword is the `str` given, so an interned one, as every parameter name
+    read off a code object is, stays interned.
+    """
     seen: dict[str, tuple[int, bool]] = {}
 
     def record(**kwargs: int) -> int:
@@ -130,6 +134,19 @@ def test_a_rename_of_an_unknown_node_raises_value_error_naming_it() -> None:
         _core.Graph(nodes, {"nowhere": {"a": "x"}})
     with pytest.raises(ValueError, match="'gone'"):
         _core.Graph(nodes, {"b": {"gone": "x"}})
+    # Every unknown name, consumer or input, in one message, sorted.
+    with pytest.raises(
+        ValueError, match=r"^rename of unknown nodes: 'gone', 'nowhere', 'zed'$"
+    ):
+        _core.Graph(nodes, {"nowhere": {"a": "x"}, "b": {"zed": "y", "gone": "x"}})
+
+
+def test_a_rename_that_is_not_str_to_str_raises_type_error() -> None:
+    """Renames are a dict of dicts of `str`; anything else is a `TypeError`."""
+    nodes: list[NodeTuple] = [("b", [("a", True)], {}, _add_one)]
+    for bad in ({"b": {"a": 1}}, {"b": ["a"]}, {1: {"a": "x"}}, {"b": {2: "x"}}):
+        with pytest.raises(TypeError):
+            _core.Graph(nodes, bad)  # ty: ignore[invalid-argument-type]  # refused on purpose
 
 
 def test_overrides_and_optional_inputs_have_their_actions() -> None:

@@ -4,7 +4,9 @@ import asyncio
 import collections.abc
 import importlib.util
 import inspect
+import os
 import pickle
+import subprocess
 import sys
 import textwrap
 import types
@@ -16,9 +18,11 @@ import pytest
 from hamilton import async_driver as hamilton_async
 from hamilton import driver as hamilton_driver
 from hamilton import htypes
+from hamilton.function_modifiers import hamilton_exclude
 from hamilton.function_modifiers.base import InvalidDecoratorException
 from hamilton.lifecycle import NoEdgeAndInputTypeChecking
 from harness import (
+    FIXTURES,
     Nodes,
     Outcome,
     load_fixture,
@@ -42,6 +46,7 @@ from type_matrix import (
 import fnloom
 from fnloom import CacheOutcome, CacheWarning, DiskCache
 from fnloom import _caching as fnloom_caching
+from fnloom import _types as fnloom_types
 from fnloom._types import type_matches, value_matches
 from helpers import make_module
 
@@ -195,11 +200,177 @@ def test_q32_functions_that_do_not_return_their_value(source: str, made: str) ->
 
 @pytest.mark.deliberate("Q30")
 def test_q30_final_vars_given_as_functions() -> None:
-    """Hamilton maps a function to its node; fnloom accepts only names for now."""
+    """A function means the node it makes, by identity; Hamilton maps its `__name__`.
+
+    They agree on a plain function. A `@parameterize` function makes several nodes:
+    Hamilton asks for the node named like the function, which does not exist (H5.3b),
+    and fnloom raises `TypeError` listing the rows. Hamilton accepts a function whose
+    `__module__` and `__name__` are forged (H5.3e); fnloom matches the object itself.
+    """
     module = load_fixture("chain")
     outputs: list[Any] = [module.c]
     assert run_hamilton([module], outputs, {"a": 1}) == Outcome({"c": 4}, None)
-    assert run_fnloom([module], outputs, {"a": 1}) == Outcome(None, "TypeError")
+    assert run_fnloom([module], outputs, {"a": 1}) == Outcome({"c": 4}, None)
+
+    hamilton_module = make_module(
+        "differential_q30_h",
+        """
+        from hamilton.function_modifiers import parameterize, value
+
+
+        @parameterize(p1={"y": value(1)}, p2={"y": value(2)})
+        def rows(x: int, y: int) -> int:
+            return x + y
+        """,
+    )
+    fnloom_module = make_module(
+        "differential_q30_f",
+        """
+        from fnloom import parameterize, value
+
+
+        @parameterize(p1={"y": value(1)}, p2={"y": value(2)})
+        def rows(x: int, y: int) -> int:
+            return x + y
+        """,
+    )
+    assert run_hamilton([hamilton_module], [hamilton_module.rows], {"x": 1}) == Outcome(
+        None, "ValueError"
+    )
+    with pytest.raises(TypeError, match=r"makes 2 nodes: pass 'p1', 'p2'"):
+        fnloom.build(fnloom_module).execute([fnloom_module.rows], inputs={"x": 1})
+    assert run_fnloom([fnloom_module], ["p1", "p2"], {"x": 1}) == Outcome(
+        {"p1": 2, "p2": 3}, None
+    )
+
+    def forged() -> int:
+        return 0
+
+    forged.__module__, forged.__name__ = module.__name__, "c"
+    assert run_hamilton([module], [forged], {"a": 1}) == Outcome({"c": 4}, None)
+    assert run_fnloom([module], [forged], {"a": 1}) == Outcome(None, "ValueError")
+
+
+Q30_IMPORTS = {
+    "hamilton": "from hamilton.function_modifiers import config, extract_fields",
+    "fnloom": "from fnloom import config, extract_fields",
+}
+
+Q30_SOURCE = """
+{imports}
+
+
+def base(x: int) -> int:
+    return x * 10
+
+
+@extract_fields({{"f1": int, "f2": str}})
+def produced(base: int) -> dict:
+    return {{"f1": base, "f2": "s"}}
+
+
+@config.when(k="a")
+def variant__a(base: int) -> int:
+    return base
+
+
+@config.when(k="b")
+def variant__b(base: int) -> int:
+    return -base
+"""
+
+
+def _q30_pair(name: str) -> tuple[types.ModuleType, types.ModuleType]:
+    """The same module written for Hamilton and for fnloom, config `k=a` active."""
+    return (
+        make_module(
+            f"differential_q30_{name}_h",
+            Q30_SOURCE.format(imports=Q30_IMPORTS["hamilton"]),
+        ),
+        make_module(
+            f"differential_q30_{name}_f",
+            Q30_SOURCE.format(imports=Q30_IMPORTS["fnloom"]),
+        ),
+    )
+
+
+def _q30_outcomes(
+    hamilton_module: types.ModuleType,
+    fnloom_module: types.ModuleType,
+    outputs: tuple[str, ...],
+    stray: Callable[..., object] | None = None,
+) -> tuple[Outcome, Outcome]:
+    """Runs `module.<name>` for each name, or `stray`, on both, with `k=a`."""
+
+    def pick(module: types.ModuleType) -> list[Any]:
+        return [stray if stray is not None else getattr(module, n) for n in outputs]
+
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module)
+    fnloom_builder = fnloom.Builder().with_modules(fnloom_module)
+    results: list[Outcome] = []
+    for builder, module in (
+        (hamilton.with_config({"k": "a"}), hamilton_module),
+        (fnloom_builder.with_config({"k": "a"}), fnloom_module),
+    ):
+        try:
+            built = builder.build()
+            result = built.execute(pick(module), inputs={"x": 1})
+        except Exception as error:  # noqa: BLE001  # the exception class is compared
+            results.append(Outcome(None, type(error).__name__))
+        else:
+            results.append(Outcome(dict(result), None))
+    return results[0], results[1]
+
+
+@pytest.mark.deliberate("Q30")
+def test_q30_an_extract_function_is_its_producer_on_both_sides() -> None:
+    """Both map an `@extract_fields` function to its producer (H5.3c)."""
+    hamilton, ours = _q30_outcomes(*_q30_pair("extract"), ("produced",))
+    assert hamilton == Outcome({"produced": {"f1": 10, "f2": "s"}}, None)
+    assert ours == hamilton
+
+
+@pytest.mark.deliberate("Q30")
+def test_q30_functions_no_node_comes_from_raise_value_error_on_both_sides() -> None:
+    """A foreign function, a lambda and an unselected variant: `ValueError` each.
+
+    Hamilton's message is wrong ("materializer", H5.3e) or unhelpful, and its
+    unselected variant is "Unknown nodes" (H5.3d); fnloom names the function and why.
+    """
+    hamilton_module, fnloom_module = _q30_pair("absent")
+    foreign = make_module(
+        "differential_q30_foreign", "def stray(x: int) -> int:\n    return x\n"
+    )
+    for stray in (foreign.stray, lambda: 1):
+        hamilton, ours = _q30_outcomes(hamilton_module, fnloom_module, ("base",), stray)
+        assert hamilton == Outcome(None, "ValueError")
+        assert ours == hamilton
+    hamilton, ours = _q30_outcomes(hamilton_module, fnloom_module, ("variant__b",))
+    assert hamilton == Outcome(None, "ValueError")
+    assert ours == hamilton
+
+
+@pytest.mark.deliberate("Q30")
+def test_q30_a_submodule_function_is_refused_by_hamilton_and_found_by_identity() -> (
+    None
+):
+    """Hamilton refuses a function of a submodule of a package it was given (H5.3f).
+
+    fnloom has no package-wide discovery: it matches the function against the nodes of
+    the module it was given, and accepts it when that module is the submodule.
+    """
+    sub = make_module("q30pkg.sub", "def from_sub(x: int) -> int:\n    return x + 1\n")
+    package = make_module("q30pkg", "from q30pkg.sub import from_sub\n")
+    assert run_hamilton([package], [sub.from_sub], {"x": 1}) == Outcome(
+        None, "ValueError"
+    )
+    assert run_hamilton([package], ["from_sub"], {"x": 1}) == Outcome(
+        {"from_sub": 2}, None
+    )
+    assert run_fnloom([sub], [sub.from_sub], {"x": 1}) == Outcome({"from_sub": 2}, None)
+    # The same function, through a package that holds only an import of it, is no node.
+    with pytest.raises(ValueError, match="has no nodes"):
+        fnloom.build(package)
 
 
 @pytest.mark.deliberate("Q31")
@@ -352,6 +523,7 @@ def test_q40_union_producer_feeds_object() -> None:
         ("int | None", "object"),
         ("Optional[int]", "object"),
         ("int | str", "object"),
+        ("type[int] | None", "object"),
     ]
     for produced, required in edges:
         assert hamilton_type(produced, required) is False, produced
@@ -1559,7 +1731,7 @@ SHARED: dict[str, int] = {{"a": 1}}
 def p() -> dict:
     return SHARED
 
-@extract_fields({{"c": int}}, fill_with=None)
+@extract_fields({{"c": int | None}}, fill_with=None)
 def q() -> dict:
     return {{}}
 """
@@ -2237,4 +2409,1218 @@ def test_q69_an_async_row_is_awaited() -> None:
         "scaled": 6,
         "shifted": 4,
         "plain": 2,
+    }
+
+
+_HAMILTON_PATH_ORDER = """
+import json
+import sys
+
+from hamilton import driver
+
+sys.path.insert(0, sys.argv[1])
+import diamond
+
+built = driver.Builder().with_modules(diamond).build()
+path = built.what_is_the_path_between("a", "join")
+print(json.dumps([node.name for node in path]))
+"""
+
+
+@pytest.mark.deliberate("Q70")
+def test_q70_inspection() -> None:
+    """Hamilton's path order follows the hash seed and its errors name one name."""
+    module = load_fixture("diamond")
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    built = fnloom.build(module)
+    # Hamilton: a set's order, which a hash seed changes; fnloom: one topological order.
+    orders = {
+        seed: subprocess.run(  # noqa: S603  # our own interpreter and script
+            [sys.executable, "-c", _HAMILTON_PATH_ORDER, str(FIXTURES)],
+            env={
+                **os.environ,
+                "PYTHONHASHSEED": seed,
+                "HAMILTON_AUTOLOAD_EXTENSIONS": "0",
+            },
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for seed in ("0", "1", "2", "3", "4", "5")
+    }
+    assert len(set(orders.values())) > 1
+    assert built.what_is_the_path_between("a", "join") == [
+        "a",
+        "root",
+        "left",
+        "right",
+        "join",
+    ]
+    # Hamilton names the first unknown endpoint only; fnloom names both.
+    with pytest.raises(ValueError, match="Upstream node nope not found") as caught:
+        hamilton.what_is_the_path_between("nope", "nada")
+    assert "nada" not in str(caught.value)
+    with pytest.raises(ValueError, match="'nada', 'nope'"):
+        built.what_is_the_path_between("nope", "nada")
+    # Hamilton lists a module given twice twice; fnloom lists it once.
+    # Hamilton builds a module given twice only with `allow_module_overrides`.
+    twice = (
+        hamilton_driver.Builder()
+        .with_modules(module, module)
+        .allow_module_overrides()
+        .build()
+    )
+    assert twice.graph_modules == (module, module)
+    assert fnloom.Builder().with_modules(module, module).build().modules == (module,)
+
+
+_Q71_SOURCE = """
+def a(x: int) -> int:
+    return x + 1
+
+
+def c(x: int) -> int:
+    return x * 2
+
+
+def profit(revenue: int, cost: int = 3) -> int:
+    return revenue - cost
+"""
+
+
+@pytest.mark.deliberate("Q71")
+def test_q71_validate() -> None:
+    """Hamilton raises one kind of problem at a time; fnloom returns every line."""
+    module = make_module("differential_q71", _Q71_SOURCE)
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    built = fnloom.build(module)
+    # Hamilton takes `overrides` before `inputs`, positionally; fnloom's are keywords.
+    assert list(inspect.signature(hamilton.validate_execution).parameters) == [
+        "final_vars",
+        "overrides",
+        "inputs",
+    ]
+    keywords = inspect.signature(built.validate).parameters
+    assert [keywords[n].kind for n in ("inputs", "overrides")] == [
+        inspect.Parameter.KEYWORD_ONLY
+    ] * 2
+    # A valid request: Hamilton returns `None`, fnloom an empty list.
+    assert hamilton.validate_execution(["a"], inputs={"x": 1}) is None
+    assert built.validate(["a"], inputs={"x": 1}) == []
+    # A missing input: Hamilton names every consumer and raises; fnloom names `a`.
+    with pytest.raises(ValueError, match=r"for nodes: \['a', 'c'\]\.$"):
+        hamilton.validate_execution(["a"])
+    assert built.validate(["a"]) == ["missing inputs: 'x' (needed by 'a')"]
+    # A misspelled input key: ignored by Hamilton, with no suggestion anywhere.
+    with pytest.raises(ValueError, match="Required input revenue") as caught:
+        hamilton.validate_execution(["profit"], inputs={"revenu": 1})
+    assert "revenu " not in str(caught.value)
+    assert "mean" not in str(caught.value)
+    assert built.validate(["profit"], inputs={"revenu": 1}) == [
+        "missing inputs: 'revenue' (needed by 'profit') (did you mean 'revenu'?)",
+        "unknown inputs: 'revenu' (did you mean 'revenue'?)",
+    ]
+    # An unknown output hides the input's wrong type in Hamilton; fnloom lists both.
+    with pytest.raises(ValueError, match=r"^Unknown nodes \[prfit\]") as unknown:
+        hamilton.validate_execution(["a", "prfit"], inputs={"x": "s"})
+    assert "mismatch" not in str(unknown.value)
+    assert built.validate(["a", "prfit"], inputs={"x": "s"}) == [
+        "unknown outputs: 'prfit' (did you mean 'profit'?)",
+        "x: expected int, got str",
+    ]
+    # A function `execute` accepts: Hamilton's validation refuses it, fnloom's reads it.
+    assert hamilton.execute([module.a], inputs={"x": 1}) == {"a": 2}
+    with pytest.raises(TypeError, match="expected str instance, function found"):
+        hamilton.validate_execution([module.a], inputs={"x": 1})
+    assert built.validate([module.a], inputs={"x": 1}) == []
+
+
+_Q75_SOURCE = """
+def a(x: int) -> int:
+    return x + 1
+
+
+def profit(revenu: int, cost: int = 3) -> int:
+    return revenu - cost
+
+
+def revenue() -> int:
+    return 5
+"""
+
+
+_Q72_SOURCE = """
+def fa(x: int) -> int:
+    return x + 1
+
+
+def fb(fa: int) -> int:
+    return fa * 2
+
+
+def _helper(x: int) -> int:
+    return x
+"""
+
+
+@pytest.mark.deliberate("Q72")
+def test_q72_graphs_from_functions() -> None:
+    """Hamilton copies functions into a registered module; fnloom uses them as is."""
+    from hamilton import ad_hoc_utils  # noqa: PLC0415  # only this test needs it
+
+    module = make_module("differential_q72_functions", _Q72_SOURCE)
+    # Hamilton: a copy of each function, sharing its code and globals, in a new
+    # module registered in sys.modules.
+    before = set(sys.modules)
+    temporary = ad_hoc_utils.create_temporary_module(
+        module.fa, module.fb, module_name="differential_q72_temporary"
+    )
+    assert set(sys.modules) - before == {"differential_q72_temporary"}
+    assert sys.modules["differential_q72_temporary"] is temporary
+    assert temporary.fa is not module.fa
+    assert temporary.fa.__code__ is module.fa.__code__
+    assert temporary.fa.__globals__ is module.fa.__globals__
+    assert temporary.fb.__module__ == "differential_q72_temporary"
+    assert module.fb.__module__ == "differential_q72_functions"
+    hamilton = hamilton_driver.Builder().with_modules(temporary).build()
+    assert hamilton.execute([temporary.fb], inputs={"x": 1}) == {"fb": 4}
+    # The node is the copy, so the original function is refused in `final_vars`.
+    with pytest.raises(ValueError, match="not in a module given to the materializer"):
+        hamilton.execute([module.fb], inputs={"x": 1})
+    # A private name is refused.
+    with pytest.raises(ValueError, match="functions that start with '_' are reserved"):
+        ad_hoc_utils.create_temporary_module(module._helper)  # noqa: SLF001  # the private function Hamilton refuses
+    # A lambda is accepted; unannotated, the build fails on its return annotation.
+    bare = ad_hoc_utils.create_temporary_module(
+        lambda x: x, module_name="differential_q72_bare_lambda"
+    )
+    with pytest.raises(ValueError, match="Missing type hint for return value"):
+        hamilton_driver.Builder().with_modules(bare).build()
+    # Annotated, its node is named `<lambda>`.
+    annotated = cast("Any", lambda x: x)
+    annotated.__annotations__ = {"x": int, "return": int}
+    named_lambda = ad_hoc_utils.create_temporary_module(
+        annotated, module_name="differential_q72_lambda"
+    )
+    lambda_driver = hamilton_driver.Builder().with_modules(named_lambda).build()
+    assert {v.name for v in lambda_driver.list_available_variables()} == {
+        "<lambda>",
+        "x",
+    }
+    # fnloom: the functions themselves, nothing copied or registered.
+    before = set(sys.modules)
+    driver = (
+        fnloom.Builder()
+        .with_functions(module.fa, module.fb, module._helper)  # noqa: SLF001  # given on purpose
+        .build()
+    )
+    assert set(sys.modules) == before
+    assert driver.modules == ()
+    assert driver.nodes["fb"].origin is module.fb
+    assert driver.nodes["fb"].module == "differential_q72_functions"
+    # The original in `final_vars` means its node, and a private name is accepted.
+    assert driver.execute([module.fb, "_helper"], inputs={"x": 1}) == {
+        "fb": 4,
+        "_helper": 1,
+    }
+    # A lambda is refused, annotated or not, unless named.
+    for lam in (lambda x: x, annotated):
+        with pytest.raises(ValueError, match="has no name a node can take"):
+            fnloom.Builder().with_functions(lam)
+    named = fnloom.Builder().with_functions(fnloom.node(annotated, name="same"))
+    assert named.build().execute(["same"], inputs={"x": 5}) == {"same": 5}
+
+
+_Q73_SOURCE = """
+from typing import TYPE_CHECKING
+
+from {exclude} import {name}
+from {other} import imported
+
+if TYPE_CHECKING:
+    from decimal import Decimal
+
+__all__ = ["public_one", "reader", "imported", "LIMIT", "_helper", "listed_marked"]
+
+LIMIT = 3
+
+
+def public_one(x: int) -> int:
+    return x
+
+
+def not_in_all(x: int) -> int:
+    return x
+
+
+def _helper(x: int) -> int:
+    return x
+
+
+@{name}
+def legacy(x: "Decimal") -> "Decimal":
+    return x
+
+
+@{name}
+def listed_marked(x: int) -> int:
+    return x
+
+
+def reader(legacy: int, not_in_all: int) -> int:
+    return legacy + not_in_all
+"""
+
+_Q73_VARIANTS = """
+{import_}
+
+__all__ = ["price__eu"]
+
+
+@{when}(region="eu")
+def price__eu(x: int) -> int:
+    return x
+
+
+@{when}(region="us")
+def price__us(x: int) -> int:
+    return x * 2
+"""
+
+_Q73_STACKED = """
+from {exclude} import {name}
+from {tag} import tag
+
+
+@{name}
+@tag(kind="a")
+def above(x: int) -> int:
+    return x
+
+
+@tag(kind="b")
+@{name}
+def below(x: int) -> int:
+    return x
+
+
+def kept(x: int) -> int:
+    return x
+"""
+
+
+def _q73_nodes(driver: hamilton_driver.Driver) -> set[str]:
+    """The names Hamilton lists for `driver`, inputs included."""
+    return {variable.name for variable in driver.list_available_variables()}
+
+
+@pytest.mark.deliberate("Q73")
+def test_q73_all_and_exclude() -> None:
+    """Hamilton ignores `__all__`, and its exclude works bare; fnloom honours both."""
+    make_module(
+        "differential_q73_other", "def imported(x: int) -> int:\n    return x\n"
+    )
+    hamilton_module = make_module(
+        "differential_q73_hamilton",
+        _Q73_SOURCE.format(
+            exclude="hamilton.function_modifiers",
+            name="hamilton_exclude",
+            other="differential_q73_other",
+        ),
+    )
+    fnloom_module = make_module(
+        "differential_q73_fnloom",
+        _Q73_SOURCE.format(
+            exclude="fnloom", name="exclude", other="differential_q73_other"
+        ),
+    )
+    # Hamilton: `__all__` is ignored, so `not_in_all` is a node; the excluded
+    # function, with an unresolvable annotation, is not, listed or not.
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    names = _q73_nodes(hamilton)
+    assert {"public_one", "not_in_all", "reader"} <= names
+    assert "legacy" in names  # an input of `reader`, not a node
+    assert "listed_marked" not in names  # exclude beats a listing
+    assert "_helper" not in names  # a listing never makes a private function a node
+    assert "imported" not in names  # re-exports and constants are not nodes
+    assert "LIMIT" not in names
+    assert hamilton.execute(["not_in_all"], inputs={"x": 1}) == {"not_in_all": 1}
+    # fnloom: only `public_one` and `reader` are nodes; the other two are inputs.
+    built = fnloom.build(fnloom_module)
+    assert built.node_names() == ["legacy", "not_in_all", "public_one", "reader", "x"]
+    assert not {"public_one", "reader"} - set(built.nodes)
+    assert {"legacy", "not_in_all"} <= set(built.inputs())
+    assert not {"listed_marked", "_helper", "imported", "LIMIT"} & set(
+        built.node_names()
+    )
+    with pytest.raises(ValueError, match=r"missing inputs: 'legacy'.*") as left_out:
+        built.execute(["reader"], inputs={"not_in_all": 1})
+    assert (
+        "'legacy' is a function in module 'differential_q73_fnloom' "
+        "marked @exclude and not listed in its __all__"
+    ) in str(left_out.value)
+    with pytest.raises(ValueError, match=r"missing inputs: 'not_in_all'") as unlisted:
+        built.execute(["reader"], inputs={"legacy": 1})
+    assert (
+        "'not_in_all' is a function in module 'differential_q73_fnloom' "
+        "not listed in its __all__"
+    ) in str(unlisted.value)
+
+
+@pytest.mark.deliberate("Q73")
+def test_q73_exclude_forms_and_stacking() -> None:
+    """The bare form returns the function, the called form works, and order is free."""
+
+    def fresh_hamilton(x: int) -> int:
+        return x
+
+    def fresh_bare(x: int) -> int:
+        return x
+
+    def fresh_called(x: int) -> int:
+        return x
+
+    # Hamilton's is an instance that only works bare, and returns the function.
+    assert not isinstance(hamilton_exclude, type)
+    assert hamilton_exclude(fresh_hamilton) is fresh_hamilton
+    with pytest.raises(
+        TypeError, match=r"missing 1 required positional argument: 'fn'"
+    ):
+        hamilton_exclude()  # the call under test
+    assert fnloom.exclude(fresh_bare) is fresh_bare
+    assert fnloom.exclude()(fresh_called) is fresh_called
+    # Stacked with `@tag` either way round, both exclude.
+    hamilton_stacked = make_module(
+        "differential_q73_stack_hamilton",
+        _Q73_STACKED.format(
+            exclude="hamilton.function_modifiers",
+            name="hamilton_exclude",
+            tag="hamilton.function_modifiers",
+        ),
+    )
+    fnloom_stacked = make_module(
+        "differential_q73_stack_fnloom",
+        _Q73_STACKED.format(exclude="fnloom", name="exclude", tag="fnloom"),
+    )
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_stacked).build()
+    assert _q73_nodes(hamilton) == {"kept", "x"}
+    assert fnloom.build(fnloom_stacked).node_names() == ["kept", "x"]
+
+
+@pytest.mark.deliberate("Q73")
+def test_q73_config_variants_are_listed_by_attribute_name() -> None:
+    """Hamilton picks `price__us` though `__all__` omits it; fnloom does not."""
+    hamilton_module = make_module(
+        "differential_q73_variant_hamilton",
+        _Q73_VARIANTS.format(
+            import_="from hamilton.function_modifiers import config",
+            when="config.when",
+        ),
+    )
+    fnloom_module = make_module(
+        "differential_q73_variant_fnloom",
+        _Q73_VARIANTS.format(import_="import fnloom", when="fnloom.config.when"),
+    )
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(hamilton_module)
+        .with_config({"region": "us"})
+        .build()
+    )
+    assert hamilton.execute(["price"], inputs={"x": 2}) == {"price": 4}
+    # Listed as `price__eu`, that variant is the only one considered.
+    eu = fnloom.Builder().with_modules(fnloom_module).with_config({"region": "eu"})
+    assert eu.build().execute(["price"], inputs={"x": 2}) == {"price": 2}
+    us = fnloom.Builder().with_modules(fnloom_module).with_config({"region": "us"})
+    with pytest.raises(ValueError, match=r"no variant of 'price'") as unmatched:
+        us.build().execute(["price"], inputs={"x": 2})
+    assert (
+        "'price__us' (node 'price') is a function in module "
+        "'differential_q73_variant_fnloom' not listed in its __all__"
+    ) in str(unmatched.value)
+
+
+@pytest.mark.deliberate("Q73")
+def test_q73_empty_module_reasons() -> None:
+    """Hamilton builds a module with every function excluded; fnloom says why not."""
+    hamilton_module = make_module(
+        "differential_q73_empty_hamilton",
+        "from hamilton.function_modifiers import hamilton_exclude\n\n__all__ = []\n\n\n"
+        "@hamilton_exclude\ndef both(x: int) -> int:\n    return x\n\n\n"
+        "def unlisted(x: int) -> int:\n    return x\n",
+    )
+    # `unlisted` is a node for Hamilton, which ignores `__all__`.
+    assert "unlisted" in _q73_nodes(
+        hamilton_driver.Builder().with_modules(hamilton_module).build()
+    )
+    fnloom_module = make_module(
+        "differential_q73_empty_fnloom",
+        "import fnloom\n\n__all__ = []\n\n\n"
+        "@fnloom.exclude\ndef both(x: int) -> int:\n    return x\n\n\n"
+        "@fnloom.exclude\ndef marked(x: int) -> int:\n    return x\n\n\n"
+        "def unlisted(x: int) -> int:\n    return x\n",
+    )
+    with pytest.raises(ValueError, match=r"has no nodes") as empty:
+        fnloom.build(fnloom_module)
+    message = str(empty.value)
+    assert "'both' is marked @exclude and not listed in its __all__" in message
+    assert "'unlisted' is not listed in its __all__" in message
+
+
+@pytest.mark.deliberate("Q73")
+def test_q73_final_vars_identity_refuses_an_excluded_function() -> None:
+    """Hamilton maps an excluded function to its name; fnloom decides by identity."""
+    source_first = "def total(x: int) -> int:\n    return x * 2\n"
+    source_second = (
+        "{import_}\n\n\n@{name}\ndef total(x: int) -> int:\n    return x * 3\n"
+        "\n\ndef other(x: int) -> int:\n    return x\n"
+    )
+    h_first = make_module("differential_q73_id_h1", source_first)
+    h_second = make_module(
+        "differential_q73_id_h2",
+        source_second.format(
+            import_="from hamilton.function_modifiers import hamilton_exclude",
+            name="hamilton_exclude",
+        ),
+    )
+    f_first = make_module("differential_q73_id_f1", source_first)
+    f_second = make_module(
+        "differential_q73_id_f2",
+        source_second.format(import_="import fnloom", name="fnloom.exclude"),
+    )
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(h_first, h_second)
+        .allow_module_overrides()
+        .build()
+    )
+    assert hamilton.execute([h_second.total], inputs={"x": 2}) == {"total": 4}
+    built = fnloom.Builder().with_modules(f_first, f_second).build()
+    assert built.execute([f_first.total], inputs={"x": 2}) == {"total": 4}
+    with pytest.raises(ValueError, match=r"not the function behind node 'total'"):
+        built.execute([f_second.total], inputs={"x": 2})
+
+
+@pytest.mark.deliberate("Q73")
+def test_q73_malformed_all_names_every_module_sorted() -> None:
+    """Hamilton builds a malformed `__all__`; fnloom lists each module, sorted."""
+    bad = "__all__ = {}\n\n\ndef a(x: int) -> int:\n    return x\n"
+    hamilton_modules = [
+        make_module("differential_q73_bad_h_zed", bad.format("'a'")),
+        make_module("differential_q73_bad_h_alpha", bad.format("[1]")),
+    ]
+    hamilton_driver.Builder().with_modules(
+        *hamilton_modules
+    ).allow_module_overrides().build()
+    zed = make_module("differential_q73_bad_zed", bad.format("'a'"))
+    alpha = make_module("differential_q73_bad_alpha", bad.format("[1]"))
+    with pytest.raises(TypeError) as malformed:
+        fnloom.Builder().with_modules(zed, alpha).build()
+    message = str(malformed.value)
+    assert "__all__ must be a list or tuple of str" in message
+    assert message.index("'differential_q73_bad_alpha'") < message.index(
+        "'differential_q73_bad_zed'"
+    )
+
+
+_Q74_FIRST = """
+def dup() -> int:
+    return 1
+
+
+def uses_dup(dup: int) -> int:
+    return dup + 100
+
+
+def only_a(x: int) -> int:
+    return x
+"""
+
+_Q74_SUBDAG = """
+from hamilton.function_modifiers import subdag
+
+import differential_q74_first
+
+
+@subdag(differential_q74_first, inputs={{}}, config={{}})
+def sub(only_a: int) -> int:
+    return only_a
+"""
+
+
+def _q74_dependencies(driver: hamilton_driver.Driver) -> dict[str, list[str]]:
+    """Each Hamilton node's required dependencies, sorted, by name."""
+    return {
+        variable.name: sorted(variable.required_dependencies)
+        for variable in driver.list_available_variables()
+    }
+
+
+@pytest.mark.deliberate("Q74")
+def test_q74_namespaces_and_no_module_overrides() -> None:
+    """Hamilton namespaces only by `@subdag` and overrides last-wins; fnloom neither."""
+    first = make_module("differential_q74_first", _Q74_FIRST)
+    second = make_module("differential_q74_second", "def dup() -> int:\n    return 2\n")
+    # Hamilton: `with_modules` takes modules only, and no builder method namespaces.
+    assert list(inspect.signature(hamilton_driver.Builder.with_modules).parameters) == [
+        "self",
+        "modules",
+    ]
+    assert not [
+        name
+        for name in dir(hamilton_driver.Builder)
+        if "namespace" in name or "prefix" in name
+    ]
+    # Hamilton: a name two modules define fails the build...
+    with pytest.raises(ValueError, match="Cannot define function dup more than once"):
+        hamilton_driver.Builder().with_modules(first, second).build()
+    # ...unless overrides are on: the later module's function wins, for every reader.
+    for order, dup in (((first, second), 2), ((second, first), 1)):
+        hamilton = (
+            hamilton_driver.Builder()
+            .with_modules(*order)
+            .allow_module_overrides()
+            .build()
+        )
+        assert hamilton.execute(["dup", "uses_dup"]) == {
+            "dup": dup,
+            "uses_dup": dup + 100,
+        }
+    # Hamilton: one module given twice is one set of nodes, overrides on: no reuse.
+    twice = (
+        hamilton_driver.Builder()
+        .with_modules(first, first)
+        .allow_module_overrides()
+        .build()
+    )
+    assert {v.name for v in twice.list_available_variables()} == {
+        "dup",
+        "uses_dup",
+        "only_a",
+        "x",
+    }
+    # Hamilton: `@subdag` names its nodes `<function>.<name>`; inside, `uses_dup`
+    # reads the subdag's `dup`, and `only_a` the plain input `x`.
+    subdag_module = make_module("differential_q74_subdag", _Q74_SUBDAG.format())
+    subdag = hamilton_driver.Builder().with_modules(subdag_module).build()
+    subdag_dependencies = _q74_dependencies(subdag)
+    assert subdag_dependencies["sub.uses_dup"] == ["sub.dup"]
+    assert subdag_dependencies["sub.only_a"] == ["x"]
+    # fnloom: `namespace=` gives the module's nodes the same names, read the same way.
+    driver = fnloom.Builder().with_modules(first, namespace="sub").build()
+    assert driver.node_names() == ["sub.dup", "sub.only_a", "sub.uses_dup", "x"]
+    assert set(driver.node_names()) < set(subdag_dependencies)
+    assert driver.nodes["sub.uses_dup"].dependencies == ("sub.dup",)
+    assert driver.nodes["sub.only_a"].dependencies == ("x",)
+    assert driver.execute(["sub.uses_dup", "sub.only_a"], inputs={"x": 3}) == (
+        subdag.execute(["sub.uses_dup", "sub.only_a"], inputs={"x": 3})
+    )
+    # fnloom: a name the namespace doesn't define reads the plain node.
+    outer = (
+        fnloom.Builder()
+        .with_modules(second)
+        .with_modules(
+            make_module(
+                "differential_q74_reader",
+                "def reads(dup: int) -> int:\n    return dup\n",
+            ),
+            namespace="ns",
+        )
+        .build()
+    )
+    assert outer.nodes["ns.reads"].dependencies == ("dup",)
+    assert outer.execute(["ns.reads"]) == {"ns.reads": 2}
+    # fnloom: one module under two namespaces is two sets of nodes.
+    reused = (
+        fnloom.Builder()
+        .with_modules(first, namespace="a")
+        .with_modules(first, namespace="b")
+        .build()
+    )
+    assert reused.execute(["a.uses_dup", "b.uses_dup"]) == {
+        "a.uses_dup": 101,
+        "b.uses_dup": 101,
+    }
+    # fnloom: nothing overrides; a name two modules define fails the build.
+    assert not hasattr(fnloom.Builder, "allow_module_overrides")
+    with pytest.raises(ValueError, match="node 'dup' is defined in both"):
+        fnloom.Builder().with_modules(first, second).build()
+
+
+@pytest.mark.deliberate("Q75")
+def test_q75_strict_overrides_and_declared_inputs() -> None:
+    """Hamilton refuses an unsupplied overridden input, and builds a misspelled one."""
+    module = make_module("differential_q75", _Q75_SOURCE)
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    plain = fnloom.Builder().with_modules(module)
+    # An override of an unsupplied input: Hamilton refuses, fnloom's default does not.
+    with pytest.raises(ValueError, match="Required input x not provided"):
+        hamilton.execute(["a"], overrides={"x": 10})
+    assert plain.build().execute(["a"], overrides={"x": 10}) == {"a": 11}
+    # Opt in, and fnloom refuses too; supplied as well, both run.
+    strict = plain.with_strict_overrides().build()
+    with pytest.raises(ValueError, match="override of input 'x' refused"):
+        strict.execute(["a"], overrides={"x": 10})
+    assert hamilton.execute(["a"], inputs={"x": 1}, overrides={"x": 10}) == {"a": 11}
+    assert strict.execute(["a"], inputs={"x": 1}, overrides={"x": 10}) == {"a": 11}
+    # A misspelled parameter builds in Hamilton and is an input nothing supplies.
+    assert "revenu" in {v.name for v in hamilton.list_available_variables()}
+    declared = plain.with_declared_inputs("cost", "x")
+    with pytest.raises(ValueError, match=r"undeclared input 'revenu' \(did you mean"):
+        declared.build()
+    assert declared.with_declared_inputs("revenu").build().execute(
+        ["a"], inputs={"x": 1}
+    ) == {"a": 2}
+
+
+_Q76_SHADOWED = """
+def cost() -> int:
+    return 100
+
+
+{opt_out}def uses_cost(cost: int = 3) -> int:
+    return cost
+"""
+
+_Q76_DIFFERING = """
+{opt_out}def opt1(shared: int = 1) -> int:
+    return shared
+
+
+{opt_out}def opt2(shared: int = 2) -> int:
+    return shared
+"""
+
+
+@pytest.mark.deliberate("Q76")
+def test_q76_shadowed_and_differing_defaults() -> None:
+    """Hamilton lets a node replace a default and each consumer keep its own."""
+    shadowed = make_module("differential_q76_s", _Q76_SHADOWED.format(opt_out=""))
+    hamilton = hamilton_driver.Builder().with_modules(shadowed).build()
+    # The node replaces the default, and a supplied input is ignored (H5.6c).
+    assert hamilton.execute(["uses_cost"]) == {"uses_cost": 100}
+    assert hamilton.execute(["uses_cost"], inputs={"cost": 1}) == {"uses_cost": 100}
+    with pytest.raises(ValueError, match=r"parameter 'cost' of 'uses_cost'.*replaces"):
+        fnloom.build(shadowed)
+    # The opt-out restores Hamilton's behaviour: the node wins.
+    out_s = _Q76_SHADOWED.format(opt_out="@fnloom.defaults(shadowed=('cost',))\n")
+    allowed = make_module("differential_q76_s2", "import fnloom\n\n" + out_s)
+    assert fnloom.build(allowed).execute(["uses_cost"]) == {"uses_cost": 100}
+    # Two consumers, two defaults: each keeps its own in Hamilton (H5.6d).
+    differing = make_module("differential_q76_d", _Q76_DIFFERING.format(opt_out=""))
+    hamilton = hamilton_driver.Builder().with_modules(differing).build()
+    assert hamilton.execute(["opt1", "opt2"]) == {"opt1": 1, "opt2": 2}
+    assert hamilton.execute(["opt1", "opt2"], inputs={"shared": 9}) == {
+        "opt1": 9,
+        "opt2": 9,
+    }
+    with pytest.raises(ValueError, match="differing defaults: input 'shared'"):
+        fnloom.build(differing)
+    out_d = _Q76_DIFFERING.format(opt_out="@fnloom.defaults(differing=('shared',))\n")
+    allowed = make_module("differential_q76_d2", "import fnloom\n\n" + out_d)
+    driver = fnloom.build(allowed)
+    assert driver.execute(["opt1", "opt2"]) == {"opt1": 1, "opt2": 2}
+    assert driver.execute(["opt1", "opt2"], inputs={"shared": 9}) == {
+        "opt1": 9,
+        "opt2": 9,
+    }
+
+
+_Q77_SOURCE = """
+from {library} import parameterize, source, value
+
+
+@parameterize(r1={{"p": value(1), "s": source("src")}})
+def f(p: int, s: int) -> int:
+    return p + s
+{reader}"""
+
+# Each library, and the module it takes `parameterize`, `source` and `value` from.
+_Q77_LIBRARIES = {"hamilton": "hamilton.function_modifiers", "fnloom": "fnloom"}
+
+_Q77_READER = """
+
+def g(p: int) -> int:
+    return p * 100
+"""
+
+
+@pytest.mark.deliberate("Q77")
+def test_q77_a_value_bound_name_nothing_reads() -> None:
+    """Hamilton drops an input for a `value()`-bound name; fnloom refuses it (Q4)."""
+    alone = {
+        library: make_module(
+            f"differential_q77_{library}",
+            _Q77_SOURCE.format(library=module, reader=""),
+        )
+        for library, module in _Q77_LIBRARIES.items()
+    }
+    inputs = {"src": 1, "p": 99}
+    hamilton = hamilton_driver.Builder().with_modules(alone["hamilton"]).build()
+    assert hamilton.execute(["r1"], inputs=inputs) == {"r1": 2}
+    assert hamilton.execute(["r1"], inputs={"src": 1}, overrides={"p": 99}) == {"r1": 2}
+    # Even a wrong-typed one (H5.4e).
+    wrong = {"src": 1, "p": "not an int"}
+    assert hamilton.execute(["r1"], inputs=wrong) == {"r1": 2}
+    assert hamilton.validate_execution(["r1"], inputs=wrong) is None
+    built = fnloom.build(alone["fnloom"])
+    with pytest.raises(ValueError, match="'p'"):
+        built.execute(["r1"], inputs=wrong)
+    with pytest.raises(ValueError, match="'p'"):
+        built.execute(["r1"], inputs=inputs)
+    with pytest.raises(ValueError, match="'p'"):
+        built.execute(["r1"], inputs={"src": 1}, overrides={"p": 99})
+    # Another node reads the name: a real input, fed to that node alone, in both.
+    shared = {
+        library: make_module(
+            f"differential_q77_read_{library}",
+            _Q77_SOURCE.format(library=module, reader=_Q77_READER),
+        )
+        for library, module in _Q77_LIBRARIES.items()
+    }
+    expected = {"r1": 2, "g": 9900}
+    hamilton = hamilton_driver.Builder().with_modules(shared["hamilton"]).build()
+    assert hamilton.execute(["r1", "g"], inputs=inputs) == expected
+    assert (
+        fnloom.build(shared["fnloom"]).execute(["r1", "g"], inputs=inputs) == expected
+    )
+
+
+@pytest.mark.deliberate("Q78")
+@pytest.mark.parametrize("fixture", ["chain", "optional"])
+def test_q78_unsupplied_input_as_an_output(fixture: str) -> None:
+    """Hamilton returns `None` for an unsupplied input, even one with a default."""
+    module = load_fixture(fixture)
+    requested = "a" if fixture == "chain" else "factor"
+    assert run_hamilton([module], [requested]) == Outcome({requested: None}, None)
+    assert run_fnloom([module], [requested]) == Outcome(None, "ValueError")
+    with pytest.raises(ValueError, match=rf"missing inputs: '{requested}'"):
+        fnloom.build(module).execute([requested])
+
+
+@pytest.mark.deliberate("Q79")
+def test_q79_none_passes_only_types_that_admit_it() -> None:
+    """Hamilton passes `None` for every input type; fnloom where the type admits it."""
+    refused = [declared for declared, _ in _pairs("Q79")]
+    assert refused == [
+        "int",
+        "float",
+        "bool",
+        "str",
+        "Base",
+        "Child",
+        "list",
+        "list[int]",
+        "dict[str, int]",
+        "tuple[int, ...]",
+        "Sequence",
+        "Sequence[int]",
+        "int | str",
+        "Literal[1, 2]",
+        "Annotated[int, 'm']",
+        "Protocol",
+        "runtime Protocol",
+        "NewType(int)",
+    ]
+    for declared in refused:
+        assert hamilton_value(declared, "None") is True, declared
+        assert fnloom_value(declared, "None") is False, declared
+    for declared in ("Optional[int]", "int | None", "object", "Any", "TypeVar"):
+        assert hamilton_value(declared, "None") is True, declared
+        assert fnloom_value(declared, "None") is True, declared
+    module = make_module(
+        "differential_q79",
+        """
+from typing import Literal, TypeVar
+
+RAN: list[str] = []
+Bound = TypeVar("Bound", bound=int | None)
+Either = TypeVar("Either", int, None)
+
+def plain(x: int) -> object:
+    RAN.append("plain")
+    return x
+
+def optional(y: int | None) -> object:
+    return y
+
+def nothing(z: None) -> object:
+    return z
+
+def literal(w: Literal[None]) -> object:
+    return w
+
+def bound(b: Bound) -> object:
+    return b
+
+def constrained(c: Either) -> object:
+    return c
+""",
+    )
+    assert run_hamilton([module], ["plain"], {"x": None}) == Outcome(
+        {"plain": None}, None
+    )
+    assert module.RAN == ["plain"]
+    module.RAN.clear()
+    assert run_fnloom([module], ["plain"], {"x": None}) == Outcome(None, "ValueError")
+    assert module.RAN == []
+    for output, name in (
+        ("optional", "y"),
+        ("nothing", "z"),
+        ("literal", "w"),
+        ("bound", "b"),
+        ("constrained", "c"),
+    ):
+        expected = Outcome({output: None}, None)
+        assert run_hamilton([module], [output], {name: None}) == expected, output
+        assert run_fnloom([module], [output], {name: None}) == expected, output
+
+
+@pytest.mark.deliberate("Q80")
+def test_q80_fixed_tuples_check_length_and_items() -> None:
+    """Hamilton refuses every fixed-length tuple; fnloom checks length and items."""
+    module = make_module(
+        "differential_q80",
+        """
+def pair(p: tuple[int, str]) -> object:
+    return p
+
+def empty(e: tuple[()]) -> object:
+    return e
+""",
+    )
+    refused = Outcome(None, "ValueError")
+    for output, name, right in (("pair", "p", (1, "a")), ("empty", "e", ())):
+        assert run_hamilton([module], [output], {name: right}) == refused, output
+        assert run_fnloom([module], [output], {name: right}) == Outcome(
+            {output: right}, None
+        )
+    for output, name, wrong in (
+        ("pair", "p", ("a", 1)),
+        ("pair", "p", (1,)),
+        ("empty", "e", (1,)),
+    ):
+        assert run_hamilton([module], [output], {name: wrong}) == refused, wrong
+        assert run_fnloom([module], [output], {name: wrong}) == refused, wrong
+
+
+_Q81_SOURCE = """
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from decimal import Decimal
+
+def rate() -> "Decimal":
+    raise AssertionError("never run")
+
+def price(rate: "Decimal") -> object:
+    return rate
+
+def loose(rate: Any) -> object:
+    return rate
+
+def converted(given: "Decimal") -> object:
+    return given
+
+def anything() -> Any:
+    return 1
+
+def takes(anything: "Decimal") -> object:
+    return anything
+"""
+
+
+@pytest.mark.deliberate("Q81")
+def test_q81_unresolved_annotations_build_as_opaque_types() -> None:
+    """Hamilton raises `NameError`, naming no node; fnloom builds (H5.10a)."""
+    module = make_module("differential_q81", _Q81_SOURCE)
+    with pytest.raises(NameError, match=r"^name 'Decimal' is not defined$") as raised:
+        hamilton_driver.Builder().with_modules(module).build()
+    assert not any(name in str(raised.value) for name in ("rate", "price", "converted"))
+    built = fnloom.build(module)
+    unresolved = fnloom_types.Unresolved("Decimal")
+    assert repr(unresolved) == "unresolved 'Decimal'"
+    assert built.nodes["rate"].type == unresolved
+    # The same text, and `Any`, are fed by it: both edges built.
+    assert built.what_is_the_path_between("rate", "price") == ["rate", "price"]
+    assert built.what_is_the_path_between("rate", "loose") == ["rate", "loose"]
+    # And from `Any`: a node returning `Any` feeds it, and runs unchecked.
+    assert built.what_is_the_path_between("anything", "takes") == ["anything", "takes"]
+    assert built.execute(["takes"]) == {"takes": 1}
+    for value in (1, None):
+        with pytest.raises(
+            TypeError, match=r"^given: .*import what it names at run time"
+        ):
+            built.execute(["converted"], inputs={"given": value})
+        with pytest.raises(
+            TypeError, match=r"^rate: .*import what it names at run time"
+        ):
+            built.execute(["price"], overrides={"rate": value})
+    other = make_module(
+        "differential_q81_other",
+        _Q81_SOURCE + "\ndef counted(rate: int) -> object:\n    return rate\n",
+    )
+    with pytest.raises(NameError):
+        hamilton_driver.Builder().with_modules(other).build()
+    with pytest.raises(
+        ValueError,
+        match=r"^counted\.rate requires int but rate returns unresolved 'Decimal'",
+    ):
+        fnloom.build(other)
+
+
+_Q82_HEAD = (
+    "from {library} import (\n"
+    "    group, parameterize, parameterize_sources, parameterize_values,\n"
+    "    source, value)\n"
+)
+_Q82_CASES = {
+    "unknown": '''
+@parameterize(a={"p": value(1)})
+def f(p: int) -> int:
+    """has {ghost} here"""
+    return p
+''',
+    "brace": '''
+@parameterize(a={"p": value(1)})
+def f(p: int) -> int:
+    """stray } here"""
+    return p
+''',
+    "group": '''
+@parameterize(a={"xs": group(source("q"), value(3))})
+def f(xs: list[int]) -> int:
+    """has {xs} here"""
+    return 1
+''',
+    "positional": '''
+@parameterize(a={"p": value(1)})
+def f(p: int) -> int:
+    """has {0} here"""
+    return p
+''',
+    "default": """
+@parameterize(a={"xs": group(source("p"), source("q"))})
+def f(xs: list[int] = [7]) -> int:  # noqa: B006
+    return sum(xs)
+""",
+    "one": """
+@parameterize(a=({"p": value(1)},))
+def f(p: int) -> int:
+    return p
+""",
+    "three": """
+@parameterize(a=({"p": value(1)}, "d", "extra"))
+def f(p: int) -> int:
+    return p
+""",
+    "number": """
+@parameterize(a=({"p": value(1)}, 5))
+def f(p: int) -> int:
+    return p
+""",
+    "source": """
+@parameterize_sources(a=dict(p=5))
+def f(p: int) -> int:
+    return p
+""",
+    "empty": """
+@parameterize_values("p", {})
+def f(p: int) -> int:
+    return p
+""",
+    "key": """
+@parameterize_values("p", {("a", "b", "c"): 1})
+def f(p: int) -> int:
+    return p
+""",
+    "listed": """
+@parameterize(a={"xs": group(source("q"))})
+def f(xs: int) -> int:
+    return 1
+""",
+}
+
+
+def _q82_decorate(library: str) -> dict[str, ModuleType | tuple[str, str]]:
+    """Each case as `library` takes it: its module, or the error's class and text."""
+    head = _Q82_HEAD.format(library=library)
+    results: dict[str, ModuleType | tuple[str, str]] = {}
+    for label, body in _Q82_CASES.items():
+        try:
+            results[label] = make_module(f"q82_{library}_{label}", head + body)
+        except Exception as error:  # noqa: BLE001  # the class and text are what is compared
+            results[label] = (type(error).__name__, str(error))
+    return results
+
+
+def _refused(outcome: ModuleType | tuple[str, str]) -> tuple[str, str]:
+    """The exception class and text of a case that raised."""
+    assert isinstance(outcome, tuple)
+    return outcome
+
+
+def _decorated(outcome: ModuleType | tuple[str, str]) -> ModuleType:
+    """The module of a case that decorated without error."""
+    assert isinstance(outcome, types.ModuleType)
+    return outcome
+
+
+@pytest.mark.deliberate("Q82")
+def test_q82_parameterize_sugar_is_checked_when_decorating() -> None:
+    """Hamilton prints, drops or fails late; fnloom refuses when decorating."""
+    hamilton = _q82_decorate("hamilton.function_modifiers")
+    ours = _q82_decorate("fnloom")
+
+    def hamilton_graph(label: str) -> hamilton_driver.Driver:
+        return (
+            hamilton_driver.Builder().with_modules(_decorated(hamilton[label])).build()
+        )
+
+    # A placeholder the row lacks: Hamilton prints the bare key.
+    assert hamilton_graph("unknown").graph.nodes["a"].documentation == "has ghost here"
+    kind, text = _refused(ours["unknown"])
+    assert kind == "ValueError"
+    assert "row 'a': placeholder {ghost} is not 'output_name'" in text
+    # A stray brace is a ValueError in both, but only fnloom names the row.
+    kind, text = _refused(hamilton["brace"])
+    assert (kind, "row" in text) == ("ValueError", False)
+    kind, text = _refused(ours["brace"])
+    assert (kind, "row 'a':" in text) == ("ValueError", True)
+    kind, text = _refused(hamilton["positional"])
+    assert (kind, "positional fields" in text, "row" in text) == (
+        "ValueError",
+        True,
+        False,
+    )
+    kind, text = _refused(ours["positional"])
+    assert (kind, "positional fields" in text, "row 'a':" in text) == (
+        "ValueError",
+        True,
+        True,
+    )
+    # A group prints as its name in Hamilton, as its items joined in fnloom.
+    assert hamilton_graph("group").graph.nodes["a"].documentation == "has xs here"
+    built = fnloom.build(_decorated(ours["group"]))
+    assert built.nodes["a"].doc == "has q, 3 here"
+    # A tuple row of 1 item is a raw IndexError, one of 3 drops the extra, and a
+    # non-str doc is kept; fnloom refuses all three with a TypeError.
+    assert _refused(hamilton["one"])[0] == "IndexError"
+    assert _refused(ours["one"])[0] == "TypeError"
+    assert hamilton_graph("three").graph.nodes["a"].documentation == "d"
+    assert _refused(ours["three"])[0] == "TypeError"
+    assert hamilton_graph("number").graph.nodes["a"].documentation == int("5")
+    assert _refused(ours["number"])[0] == "TypeError"
+    # A non-str source: Hamilton fails when the graph is used, fnloom when decorating.
+    built_source = hamilton_graph("source")
+    with pytest.raises(TypeError, match="expected str instance, int found"):
+        built_source.execute(["a"], inputs={"5": 1})
+    kind, text = _refused(ours["source"])
+    assert (kind, "a source is a str, got int" in text) == ("TypeError", True)
+    # An empty assigned_output builds no node in Hamilton and is refused by fnloom.
+    assert list(hamilton_graph("empty").graph.nodes) == []
+    assert _refused(ours["empty"])[0] == "ValueError"
+    # A key of 3 items: a raw unpacking error against a clear refusal.
+    assert _refused(hamilton["key"]) == (
+        "ValueError",
+        "too many values to unpack (expected 2, got 3)",
+    )
+    kind, text = _refused(ours["key"])
+    assert (kind, "must be a (name, doc) tuple" in text) == ("TypeError", True)
+    # A group source is optional when the parameter has a default, so a partly
+    # supplied group is a raw KeyError; fnloom requires it and names the input.
+    optional = hamilton_graph("default")
+    assert optional.graph.nodes["a"].input_types["q"][1].name == "OPTIONAL"
+    with pytest.raises(KeyError, match="q"):
+        optional.execute(["a"], inputs={"p": 1})
+    required = fnloom.build(_decorated(ours["default"]))
+    assert required.inputs()["q"].required
+    with pytest.raises(ValueError, match="missing inputs: 'q'"):
+        required.execute(["a"], inputs={"p": 1})
+    assert required.execute(["a"], inputs={"p": 1, "q": 2}) == {"a": 3}
+    # A mis-annotated group parameter is listed twice by Hamilton, once by fnloom.
+    assert "xs (<class 'int'>), xs (<class 'int'>)" in _refused(hamilton["listed"])[1]
+    once = _refused(ours["listed"])[1]
+    assert "'xs' (int) needs list[X] for its group" in once
+    assert once.count("'xs'") == 1
+
+
+_Q83_BEFORE = """
+def a(x: int) -> int:
+    return x + 1
+
+
+def b(a: int) -> int:
+    return a * 10
+"""
+
+_Q83_AFTER = """
+def a(x: int) -> int:
+    return x + 1000
+
+
+def b(a: int) -> int:
+    return a * 10
+
+
+def c(b: int) -> int:
+    return b + 1
+"""
+
+
+@pytest.mark.deliberate("Q83")
+def test_q83_rebuild_after_reload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both keep a driver's code across a reload; only fnloom builds it again."""
+    monkeypatch.syspath_prepend(str(tmp_path))
+    # No bytecode, so the rewrite is never read from a stale cache.
+    monkeypatch.setattr(sys, "dont_write_bytecode", True)
+    path = tmp_path / "q83_reloaded.py"
+    path.write_text(_Q83_BEFORE, encoding="utf-8")
+    module = importlib.import_module("q83_reloaded")
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    store = fnloom.MemoryCache()
+    ours = fnloom.Builder().with_modules(module).with_cache(store).build()
+    old_a = module.a
+    assert hamilton.execute(["b"], inputs={"x": 1}) == {"b": 20}
+    assert ours.execute(["b"], inputs={"x": 1}) == {"b": 20}
+
+    def version() -> object:
+        found = [n for n in hamilton.list_available_variables() if n.name == "a"]
+        return found[0].version
+
+    before = version()
+    path.write_text(_Q83_AFTER, encoding="utf-8")
+    # Hamilton's version reads the edited file before any reload; fnloom's code
+    # version is the built one, so its store still hits.
+    assert version() != before
+    assert ours.explain_cache(["a"], inputs={"x": 1})["a"].status == "hit"
+    importlib.reload(module)
+    assert module.a is not old_a
+
+    # Both run the old code, and know no node the edit added.
+    assert hamilton.execute(["b"], inputs={"x": 1}) == {"b": 20}
+    assert ours.execute(["b"], inputs={"x": 1}) == {"b": 20}
+    with pytest.raises(ValueError, match=r"Unknown nodes \[c\] requested"):
+        hamilton.execute(["c"], inputs={"x": 1})
+    with pytest.raises(ValueError, match="unknown outputs: 'c'"):
+        ours.execute(["c"], inputs={"x": 1})
+    # The reloaded function: Hamilton maps its name to the old node; fnloom refuses.
+    assert hamilton.execute([module.a], inputs={"x": 1}) == {"a": 2}
+    with pytest.raises(ValueError, match="is not the function behind node 'a'"):
+        ours.execute([module.a], inputs={"x": 1})
+
+    # Only a new Builder builds Hamilton again; `rebuild` does it for fnloom.
+    assert not hasattr(hamilton, "rebuild")
+    fresh = hamilton_driver.Builder().with_modules(module).build()
+    assert fresh.execute(["c"], inputs={"x": 1}) == {"c": 10011}
+    rebuilt = ours.rebuild()
+    assert rebuilt.explain_cache(["a"], inputs={"x": 1})["a"].status == "miss"
+    assert rebuilt.execute(["c"], inputs={"x": 1}) == {"c": 10011}
+    assert rebuilt.execute([module.a], inputs={"x": 1}) == {"a": 1001}
+    built_async = fnloom.Builder().with_modules(module).build_async()
+    assert not hasattr(hamilton_async.AsyncDriver, "rebuild")
+    assert asyncio.run(built_async.rebuild().execute(["c"], inputs={"x": 1})) == {
+        "c": 10011
     }

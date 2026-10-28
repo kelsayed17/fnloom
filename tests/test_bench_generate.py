@@ -2,10 +2,11 @@
 
 import inspect
 import sys
+import typing
 from typing import TYPE_CHECKING
 
 import pytest
-from benches import async_
+from benches import async_, builds
 from benches.generate import (
     discard,
     generated,
@@ -137,6 +138,36 @@ def test_extract_shape_has_one_producer_and_n_consumers_in_both_spellings() -> N
         assert built.execute(names, inputs=inputs) == expected
 
 
+TYPED = 30
+
+
+def test_types_shape_declares_the_three_kinds_and_matches_its_closed_form() -> None:
+    """One function over `Optional[int]`, fixed tuple and `list[int]` inputs, in turn.
+
+    Hamilton's spelling declares the tuples as a bare `tuple`, since it refuses every
+    value of a fixed-length tuple type; both runtimes compute the closed form.
+    """
+    outputs, inputs = make_request("types", TYPED)
+    expected = make_expected("types", TYPED)
+    assert expected == {"total": sum(range(TYPED)) - sum(range(3, TYPED, 6))}
+    assert inputs["x3"] is None
+    assert inputs["x1"] == (1, "s", 0.5)
+    assert inputs["x2"] == [2]
+    with generated("types", TYPED) as module:
+        hints = typing.get_type_hints(module.total)
+        assert [hints[f"x{i}"] for i in range(3)] == [
+            int | None,
+            tuple[int, str, float],
+            list[int],
+        ]
+        assert fnloom.build(module).execute(outputs, inputs=inputs) == expected
+    with generated("types", TYPED, spelling="hamilton") as module:
+        assert typing.get_type_hints(module.total)["x1"] is tuple
+        built = hamilton_driver.Builder().with_modules(module).build()
+        names: list[str | Callable[..., object] | hamilton_driver.Variable] = [*outputs]
+        assert built.execute(names, inputs=inputs) == expected
+
+
 @pytest.mark.parametrize("nodes", ["async", "sync"])
 @pytest.mark.parametrize("runtime", ["hamilton", "fnloom-thread", "fnloom-inline"])
 def test_async_benchmark_samples_every_runtime(
@@ -149,3 +180,15 @@ def test_async_benchmark_samples_every_runtime(
     assert taken.error is None
     assert taken.first_ms is not None
     assert taken.run_ms is not None
+
+
+def test_builds_benchmark_times_every_way_of_building() -> None:
+    """The functions benchmark gives one row per way, each with a positive time."""
+    rows = builds.measure("chain", 20)
+    assert [row.build for row in rows] == [
+        "fnloom modules",
+        "fnloom functions",
+        "hamilton temporary module",
+    ]
+    assert all(row.build_ms > 0 for row in rows)
+    assert not [name for name in sys.modules if name.startswith("bench_temporary_")]

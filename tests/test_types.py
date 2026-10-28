@@ -1,6 +1,7 @@
 """Tests for `value_matches` and `type_matches`, fnloom's own answers."""
 
 import collections.abc
+import types
 from typing import (
     Annotated,
     Any,
@@ -58,9 +59,9 @@ DECLARATIONS: list[object] = [
 
 
 @pytest.mark.parametrize("declared", DECLARATIONS)
-def test_none_fits_every_declaration(declared: object) -> None:
-    """`None` passes the check whatever the declaration (Hamilton KEEP)."""
-    assert value_matches(declared, None) is True
+def test_none_fits_no_declaration_that_does_not_admit_it(declared: object) -> None:
+    """`None` fails each of these, none of which admits it (Q79; Hamilton passes it)."""
+    assert value_matches(declared, None) is False
 
 
 def test_subclass_fits_its_base_and_not_the_reverse() -> None:
@@ -254,7 +255,11 @@ def test_plain_class_is_only_a_class_isinstance_accepts() -> None:
     assert plain_class(Annotated[int, "m"]) is int
     assert plain_class(list) is list
     assert plain_class(list[int]) is None
-    assert plain_class(int | None) is None
+    assert plain_class(int | None) == (int, types.NoneType)
+    assert plain_class(Annotated[Price | None, "m"]) == (float, types.NoneType)
+    assert plain_class(None) is types.NoneType
+    assert plain_class(int | list[int]) is None
+    assert plain_class(int | Plain) is None
     assert plain_class(Any) is None
     assert plain_class(Plain) is None
 

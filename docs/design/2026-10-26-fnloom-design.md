@@ -241,3 +241,10 @@ language: an earlier Rust port of numba kernels showed no compute speedup betwee
   and `build_async(sync_nodes=...)`; and it fixes Hamilton's config, extract and async problems as register rows
   Q56–Q69 (config never a node, refused misuse and ambiguity, checked and non-mutating extraction, sync nodes off the
   loop, cancellation on failure, checked async requests, async caching and awaited async rows).
+- **2026-10-28:** Plan 5 adds public names §5 did not list: on both drivers `inputs()`, `outputs()`, `modules`,
+  `what_is_the_path_between`, `validate` and `rebuild()`; on `Builder` `with_functions`, `with_modules(namespace=)`,
+  `with_strict_overrides`, `with_declared_inputs`, `without_override_type_checks`, `with_deep_type_checks` and
+  `with_numeric_widening`; and `fnloom.node`, `NodeSpec`, `InputView`, `NodeView.namespace`, `exclude`, `defaults`,
+  `group`, `Group`, `parameterize_sources`, `parameterize_values`, `value_matches` and `type_matches`. Numeric
+  widening returns as an opt-in in the front end, and array shape, dtype and length contracts stay out of core (§8).
+  Hamilton's wiring, types and inspection problems become register rows Q70–Q83.

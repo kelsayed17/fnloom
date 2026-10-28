@@ -5,12 +5,13 @@ import pickle
 import sys
 import types
 from concurrent.futures import ProcessPoolExecutor
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
 import fnloom
 import picklable_config_nodes
+import picklable_functions
 import picklable_nodes
 from fnloom import Builder, DiskCache, Driver, MemoryCache, PreparedPlan, build
 
@@ -212,3 +213,303 @@ def test_a_pickled_disk_cache_keeps_its_formats(tmp_path: Path) -> None:
     again = _round_trip(store)
     assert again.formats == store.formats
     assert again.get(b"\x01" * 32, format=again.formats["text"]) == "hello"
+
+
+def test_settings_survive_pickling() -> None:
+    """Strict overrides, declared inputs and the override opt-out are carried."""
+    builder = (
+        Builder()
+        .with_modules(picklable_nodes)
+        .with_strict_overrides()
+        .with_declared_inputs("a")
+        .with_declared_inputs("b")
+    )
+    for again in (_round_trip(builder), copy.deepcopy(builder)):
+        driver = again.build()
+        with pytest.raises(ValueError, match="override of input 'a' refused"):
+            driver.execute(["total"], inputs={"b": 1}, overrides={"a": 1})
+        undeclared = again.with_declared_inputs("zzz")
+        with pytest.raises(ValueError, match="declared name 'zzz'"):
+            undeclared.build()
+    # The built drivers carry them too, through a driver's own pickling and copy.
+    for driver in (_round_trip(builder.build()), copy.deepcopy(builder.build())):
+        with pytest.raises(ValueError, match="override of input 'a' refused"):
+            driver.execute(["total"], inputs={"b": 1}, overrides={"a": 1})
+    async_again = _round_trip(builder.build_async())
+    with pytest.raises(ValueError, match="refused"):
+        async_again.prepare(["total"], inputs={"b": 1}, overrides={"a": 1})
+    assert copy.copy(builder.build()).validate(
+        ["total"], inputs={"b": 1}, overrides={"a": 1}
+    )
+
+
+def test_override_opt_out_survives_pickling() -> None:
+    """`without_override_type_checks` is kept by a pickled builder and driver."""
+    builder = Builder().with_modules(picklable_nodes).without_override_type_checks()
+    for again in (_round_trip(builder), copy.deepcopy(builder)):
+        driver = again.build()
+        assert driver.execute(["total"], inputs=INPUTS, overrides={"doubled": 2.5})
+        with pytest.raises(ValueError, match="a: expected int, got str"):
+            driver.execute(["total"], inputs={"a": "s", "b": 1})
+    loaded = _round_trip(builder.build())
+    assert loaded.execute(["total"], inputs=INPUTS, overrides={"doubled": 2.5})
+    plain = _round_trip(Builder().with_modules(picklable_nodes).build())
+    with pytest.raises(ValueError, match="doubled: expected"):
+        plain.execute(["total"], inputs=INPUTS, overrides={"doubled": 2.5})
+
+
+def _function_builder() -> Builder:
+    """A builder of functions alone, plain, decorated, a static method and specs."""
+    return (
+        Builder()
+        .with_functions(picklable_functions.doubled, picklable_functions.total)
+        .with_functions(
+            picklable_functions.Holder.offset,
+            fnloom.node(
+                picklable_functions.scaled,
+                name="tenfold",
+                bind={"value": fnloom.source("total"), "factor": fnloom.value(10)},
+            ),
+        )
+        .with_strict_overrides()
+    )
+
+
+def test_pickling_by_qualified_name() -> None:
+    """A builder of functions pickles them by module and qualified name, not code."""
+    builder = _function_builder()
+    data = pickle.dumps(builder)
+    # References, not code: the functions' names are in the pickle, their code is not.
+    assert b"picklable_functions" in data
+    assert picklable_functions.scaled.__code__.co_code not in data
+    for again in (_round_trip(builder), copy.deepcopy(builder)):
+        driver = again.build()
+        assert driver.modules == ()
+        assert driver.nodes["tenfold"].origin is picklable_functions.scaled
+        assert driver.nodes["offset"].origin is picklable_functions.Holder.offset
+        assert dict(driver.nodes["total"].tags) == {"kind": "sum"}
+        assert driver.execute(["tenfold", "offset"], inputs=INPUTS) == {
+            "tenfold": 70,
+            "offset": 8,
+        }
+        # The other settings came along.
+        with pytest.raises(ValueError, match="override of input 'a' refused"):
+            driver.execute(["total"], inputs={"b": 1}, overrides={"a": 1})
+    for driver in (
+        _round_trip(builder.build()),
+        copy.deepcopy(builder.build()),
+        copy.copy(builder.build()),
+    ):
+        assert driver.execute(["tenfold"], inputs=INPUTS) == {"tenfold": 70}
+    async_again = _round_trip(builder.build_async())
+    assert async_again.node_names() == builder.build().node_names()
+    # A spec pickles alone, as its parts.
+    spec = _round_trip(fnloom.node(picklable_functions.doubled, name="d"))
+    assert spec.fn is picklable_functions.doubled
+    assert spec.name == "d"
+    assert dict(spec.bind) == {}
+
+
+def test_a_local_function_is_refused_by_name() -> None:
+    """A function not importable by its qualified name is a `TypeError` naming it."""
+
+    def local(a: int) -> int:
+        return a
+
+    square = cast("Any", lambda a: a * a)
+    square.__annotations__ = {"a": int, "return": int}
+    builder = (
+        Builder()
+        .with_functions(picklable_functions.doubled, local)
+        .with_functions(fnloom.node(square, name="square"))
+    )
+    driver = builder.build()
+    expected = (
+        "cannot pickle: "
+        "function 'test_pickling.test_a_local_function_is_refused_by_name.<locals>"
+        ".<lambda>' is not importable by its qualified name, so it cannot be loaded "
+        "again; "
+        "function 'test_pickling.test_a_local_function_is_refused_by_name.<locals>"
+        ".local' is not importable by its qualified name, so it cannot be loaded again"
+    )
+    for target in (builder, driver):
+        with pytest.raises(TypeError) as raised:
+            pickle.dumps(target)
+        assert str(raised.value) == expected
+        with pytest.raises(TypeError, match="is not importable by its qualified name"):
+            copy.deepcopy(target)
+    with pytest.raises(TypeError, match=r"^cannot pickle: function .*\.local' is not"):
+        pickle.dumps(fnloom.node(local, name="x"))
+    # A module and a function together: both named, sorted.
+    handmade = types.ModuleType("pickling_handmade_functions")
+    exec("def f(a: int) -> int:\n    return a\n", handmade.__dict__)  # noqa: S102  # building a fixture module
+    with pytest.raises(TypeError) as both:
+        pickle.dumps(Builder().with_modules(handmade).with_functions(local))
+    assert str(both.value).startswith("cannot pickle: function ")
+    assert "; module 'pickling_handmade_functions' is not importable" in str(both.value)
+
+
+def test_a_function_shadowed_in_its_module_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A function whose qualified name now finds another object is refused."""
+    builder = Builder().with_functions(picklable_functions.doubled)
+    monkeypatch.setattr(picklable_functions, "doubled", lambda a: a)
+    with pytest.raises(
+        TypeError, match=r"'picklable_functions\.doubled' is not importable"
+    ):
+        pickle.dumps(builder)
+
+
+def _execute_tenfold(driver: Driver, inputs: dict[str, int]) -> dict[str, object]:
+    return driver.execute(["tenfold"], inputs=inputs)
+
+
+def test_a_driver_of_functions_runs_in_a_process_pool() -> None:
+    """Workers import the functions again by name and rebuild the driver."""
+    driver = _function_builder().build()
+    many = [{"a": n, "b": 1} for n in range(3)]
+    with ProcessPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(_execute_tenfold, [driver] * len(many), many))
+    assert results == [{"tenfold": (2 * n + 1) * 10} for n in range(3)]
+
+
+def test_loading_a_function_that_moved_names_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every way a function fails to load is one `cannot load function` message."""
+    data = pickle.dumps(Builder().with_functions(picklable_functions.doubled))
+    spec = pickle.dumps(fnloom.node(picklable_functions.doubled, name="d"))
+    shown = "cannot load function 'picklable_functions.doubled': "
+    with monkeypatch.context() as patch:
+        patch.delattr(picklable_functions, "doubled")
+        for pickled in (data, spec):
+            with pytest.raises(TypeError) as missing:
+                pickle.loads(pickled)  # noqa: S301  # our own pickle
+            assert str(missing.value) == (
+                f"{shown}'picklable_functions' has no 'doubled'"
+            )
+    with monkeypatch.context() as patch:
+        patch.setattr(picklable_functions, "doubled", int)
+        with pytest.raises(TypeError) as not_a_function:
+            pickle.loads(data)  # noqa: S301  # our own pickle
+        assert str(not_a_function.value) == (f"{shown}class 'int' is not a function")
+    with monkeypatch.context() as patch:
+        patch.setitem(sys.modules, "picklable_functions", None)
+        with pytest.raises(TypeError) as unimportable:
+            pickle.loads(data)  # noqa: S301  # our own pickle
+        assert str(unimportable.value) == (
+            f"{shown}module 'picklable_functions' does not import"
+        )
+
+    # A name rebound to another function is used as found, as pickle does.
+    def rebound(a: int) -> int:
+        return a * 100
+
+    rebound.__name__ = "doubled"
+    with monkeypatch.context() as patch:
+        patch.setattr(picklable_functions, "doubled", rebound)
+        loaded = cast("Builder", pickle.loads(data))  # noqa: S301  # our own pickle
+        assert loaded.build().execute(["doubled"], inputs={"a": 2}) == {"doubled": 200}
+
+
+def _every_setting() -> Builder:
+    """A builder with every setting off its default, and a cache store."""
+    return (
+        Builder()
+        .with_modules(picklable_nodes)
+        .with_modules(picklable_nodes, namespace="ns")
+        .with_modules(picklable_config_nodes)
+        .with_functions(
+            fnloom.node(
+                picklable_functions.scaled,
+                name="tenfold",
+                bind={"value": fnloom.source("total"), "factor": fnloom.value(10)},
+            )
+        )
+        .with_config({"mode": "b"})
+        .without_override_type_checks()
+        .with_strict_overrides()
+        .with_declared_inputs("a", "b")
+        .with_deep_type_checks()
+        .with_numeric_widening()
+        .with_cache(MemoryCache(max_entries=7))
+    )
+
+
+def _state(driver: Driver) -> tuple[object, ...]:
+    """Everything a driver's builder decides, public and private, store by bounds."""
+    cache = driver._cache  # noqa: SLF001  # the settings under test
+    store = None if cache is None else cache.store
+    return (
+        driver.modules,
+        dict(driver.inputs()),
+        driver.outputs(),
+        dict(driver.nodes),
+        dict(driver.config),
+        driver._check_inputs,  # noqa: SLF001  # the settings under test
+        driver._check_overrides,  # noqa: SLF001  # the settings under test
+        driver._strict_overrides,  # noqa: SLF001  # the settings under test
+        driver._rules,  # noqa: SLF001  # the settings under test
+        dict(driver._unmatched),  # noqa: SLF001  # the settings under test
+        dict(driver._left_out),  # noqa: SLF001  # the settings under test
+        type(store),
+        store.__reduce__() if store is not None else None,
+        None if cache is None else dict(cache.keys),
+    )
+
+
+@pytest.mark.parametrize(
+    "copier",
+    [lambda driver: driver, _round_trip, copy.copy, copy.deepcopy],
+    ids=["itself", "pickle", "copy", "deepcopy"],
+)
+def test_rebuild_keeps_every_setting(copier: Any) -> None:  # noqa: ANN401  # each copier returns its argument's type
+    """`rebuild` is a fresh `build` of the same builder, after any copy too."""
+    builder = _every_setting()
+    fresh = builder.build()
+    rebuilt = copier(fresh).rebuild()
+    assert isinstance(rebuilt, Driver)
+    assert rebuilt is not fresh
+    assert _state(rebuilt) == _state(fresh)
+    assert rebuilt.modules == (picklable_nodes, picklable_config_nodes)
+    assert rebuilt.execute(["tenfold", "scale"], inputs={"a": 2, "b": 1}) == {
+        "tenfold": 50,
+        "scale": 20,
+    }
+    # The store is the builder's own, unless a copy rebuilt it from its bounds.
+    stores = [d._cache.store for d in (rebuilt, fresh) if d._cache]  # noqa: SLF001  # the store under test
+    assert len(stores) == 2  # noqa: PLR2004  # one store each
+    assert (stores[0] is stores[1]) == (copier not in {_round_trip, copy.deepcopy})
+    with pytest.raises(ValueError, match="override of input 'a' refused"):
+        rebuilt.execute(["total"], inputs={"b": 1}, overrides={"a": 1})
+    assert rebuilt.execute(
+        ["total"], inputs={"a": 2, "b": 1}, overrides={"doubled": 2.5}
+    ) == {"total": 3.5}
+    # Input checks stay on, override checks off.
+    with pytest.raises(ValueError, match="a: expected int, got str"):
+        rebuilt.execute(["total"], inputs={"a": "s", "b": 1})
+    # Rebuilding again is rebuilding the same builder.
+    assert _state(rebuilt.rebuild()) == _state(fresh)
+
+
+@pytest.mark.parametrize(
+    "copier",
+    [lambda driver: driver, _round_trip, copy.copy, copy.deepcopy],
+    ids=["itself", "pickle", "copy", "deepcopy"],
+)
+def test_async_rebuild_keeps_every_setting(copier: Any) -> None:  # noqa: ANN401  # each copier returns its argument's type
+    """`AsyncDriver.rebuild` keeps `sync_nodes` and every builder setting."""
+    builder = _every_setting()
+    fresh = builder.build_async(sync_nodes="inline")
+    rebuilt = copier(fresh).rebuild()
+    assert isinstance(rebuilt, fnloom.AsyncDriver)
+    assert rebuilt is not fresh
+    assert rebuilt._sync_nodes == "inline"  # noqa: SLF001  # the setting under test
+    assert _state(rebuilt._driver) == _state(fresh._driver)  # noqa: SLF001  # the settings under test
+    assert rebuilt.modules == fresh.modules
+    assert rebuilt.inputs() == fresh.inputs()
+    assert rebuilt.outputs() == fresh.outputs()
+    assert rebuilt.rebuild()._sync_nodes == "inline"  # noqa: SLF001  # the setting under test
+    threaded = copier(builder.build_async()).rebuild()
+    assert threaded._sync_nodes == "thread"  # noqa: SLF001  # the setting under test

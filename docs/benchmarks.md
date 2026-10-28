@@ -7,7 +7,7 @@ and at running a prepared plan, so a row where it's reliably slower counts as a 
 
 <div class="grid cards" markdown>
 
--   :lucide-repeat:{ .lg .fl-icon } **2.5× to 24× faster repeat runs**
+-   :lucide-repeat:{ .lg .fl-icon } **2× to 24× faster repeat runs**
 
     Running a prepared plan again on the plain graphs, wherever both finish. A 1,000-node layered graph: 4.35 ms
     in Hamilton, 0.21 ms in fnloom. With `@extract_fields`, where Hamilton's cost grows faster than the graph, up to
@@ -15,12 +15,12 @@ and at running a prepared plan, so a row where it's reliably slower counts as a 
 
 -   :lucide-hammer:{ .lg .fl-icon } **Every graph builds faster**
 
-    At least 1.35× faster on every graph, the least on 10 extracted fields, and 41× on 10,000 `@parameterize` rows
-    (5.3 s against 0.13 s).
+    At least 1.17× faster on every graph, the least on `types` with 100 parameters, counting each build marked †
+    as re-measured one fresh process per sample; 41× on 10,000 `@parameterize` rows (5.3 s against 0.13 s).
 
 -   :lucide-infinity:{ .lg .fl-icon } **Runs what Hamilton can't**
 
-    Hamilton raises `RecursionError` on 5 of the 20 graphs. fnloom runs all of them, and checks every answer.
+    Hamilton raises `RecursionError` on 5 of the 24 graphs. fnloom runs all of them, and checks every answer.
 
 -   :lucide-gauge:{ .lg .fl-icon } **Microseconds per run**
 
@@ -41,10 +41,10 @@ sample.
 | chain | 100 | 1.904 / 1.986 / 0.531 † | 0.326 / 0.054 / 0.025 | 0.295 / 0.015 / 0.014 | 0.023 / 0.009 |
 | chain | 1,000 | 18.5 / 7.367 / 5.518 | `RecursionError` / 0.326 / 0.215 | `RecursionError` / 0.159 / 0.139 | 0.176 / 0.060 |
 | chain | 10,000 | 207.5 / 63.4 / 58.7 | `RecursionError` / 3.254 / 2.035 | `RecursionError` / 1.339 / 1.345 | 1.786 / 0.492 |
-| fan_in | 10 | 0.152 / 0.052 / 0.025 | 0.067 / 0.037 / 0.012 | 0.034 / 0.002 / 0.001 | 0.015 / 0.006 |
-| fan_in | 100 | 0.323 / 0.156 / 0.144 | 0.295 / 0.099 / 0.041 | 0.266 / 0.015 / 0.011 | 0.066 / 0.026 |
-| fan_in | 1,000 | 3.024 / 1.467 / 1.245 | 2.777 / 0.932 / 0.593 | 2.733 / 0.312 / 0.269 | 0.597 / 0.308 |
-| fan_in | 10,000 | 66.1 / 17.3 / 16.4 | 42.2 / 26.4 / 20.1 | 43.4 / 17.2 / 17.2 | 7.550 / 6.642 |
+| fan_in | 10 | 0.196 / 0.264 / 0.063 † | 0.095 / 0.057 / 0.015 | 0.038 / 0.003 / 0.002 | 0.028 / 0.009 |
+| fan_in | 100 | 0.375 / 0.390 / 0.175 † | 0.323 / 0.133 / 0.056 | 0.277 / 0.018 / 0.014 | 0.089 / 0.038 |
+| fan_in | 1,000 | 3.013 / 1.689 / 2.727 | 2.923 / 1.184 / 0.673 | 2.606 / 0.335 / 0.298 | 0.650 / 0.329 |
+| fan_in | 10,000 | 25.8 / 31.7 / 13.5 † | 44.2 / 29.9 / 24.9 | 43.8 / 21.8 / 21.3 | 7.547 / 3.410 |
 | layered | 10 | 0.323 / 0.120 / 0.163 | 0.068 / 0.047 / 0.024 | 0.039 / 0.003 / 0.002 | 0.015 / 0.007 |
 | layered | 100 | 2.201 / 0.748 / 0.628 | 0.434 / 0.067 / 0.032 | 0.397 / 0.019 / 0.020 | 0.037 / 0.018 |
 | layered | 1,000 | 21.6 / 7.219 / 7.502 | 4.757 / 0.374 / 0.269 | 4.353 / 0.209 / 0.184 | 0.270 / 0.088 |
@@ -57,30 +57,75 @@ sample.
 | extract | 100 | 2.679 / 1.310 / 1.232 | 1.228 / 0.137 / 0.106 | 1.176 / 0.061 / 0.060 | 0.060 / 0.036 |
 | extract | 1,000 | 65.3 / 12.7 / 11.4 | 68.4 / 1.115 / 0.919 | 65.8 / 0.602 / 0.597 | 0.480 / 0.350 |
 | extract | 10,000 | 4,520.7 / 208.3 / 179.0 | 6,161.3 / 12.9 / 10.3 | 6,372.9 / 6.385 / 6.304 | 5.770 / 3.424 |
+| types | 10 | 0.207 / 0.147 / 0.079 | 0.082 / 0.061 / 0.011 | 0.038 / 0.003 / 0.002 | 0.029 / 0.007 |
+| types | 100 | 0.512 / 0.438 / 0.403 | 0.332 / 0.138 / 0.052 | 0.296 / 0.030 / 0.012 | 0.092 / 0.030 |
+| types | 1,000 | 4.634 / 3.840 / 4.947 | 3.151 / 1.187 / 0.629 | 3.087 / 0.484 / 0.309 | 0.645 / 0.301 |
+| types | 10,000 | 114.6 / 41.5 / 37.9 | 51.8 / 32.4 / 26.1 | 50.3 / 23.8 / 22.0 | 8.712 / 3.385 |
 
-Measured on an Apple M2 Pro with 16 GB, macOS 27.0, CPython 3.14.9, `apache-hamilton==1.90.0`, and a release build
-of the extension, on 2026-10-27; the `extract` rows on 2026-10-28.
+Measured on an Apple M2 Pro with 16 GB, macOS 27.0, `apache-hamilton==1.90.0`, and a release build of the extension.
+The `chain`, `layered` and `rows` rows were measured on 2026-10-27, with the interpreter recorded then as CPython
+3.14.9; the `extract` and `types` rows on 2026-10-28 with CPython 3.14.8. The `fan_in` row was measured again on
+2026-10-28 with CPython 3.14.8, all three runtimes in one session (`python -m benches.run fan_in`).
 
 **`extract`** is one `@extract_fields` producer returning a dict of `n` int fields, each read by its own consumer,
 with every consumer requested. fnloom checks each field against its type on every run, with input checks on or off
 (Q61), and still runs 8.6 to 998 times faster than Hamilton's `execute`, which checks none. Hamilton's cost grows
 faster than `n`: 65.8 ms at 1,000 fields, and 6.4 s at 10,000.
 
+**`types`** is `fan_in` over typed inputs: one function whose `n` parameters are declared, in turn, `Optional[int]`
+(every other one given `None`), `tuple[int, str, float]` and `list[int]`. fnloom checks each tuple's length and items
+(Q80), and `None` against the type (Q79). Hamilton refuses every value of a fixed-length tuple type, so its module
+declares those parameters as a bare `tuple`, which it checks with one `isinstance`. Each type's check is worked out
+once, when the plan is prepared: `Optional[int]` is one `isinstance` against `(int, NoneType)`, a `list` for
+`list[int]` passes on its class, and a tuple checks its three items. Steady execution is 2.1 to 13 times faster than
+Hamilton's `execute`, the least at 10,000 parameters, where, as for `fan_in`, the one call with 10,000 keyword
+arguments is most of the cost. The checks cost about 0.18 ms per 1,000 inputs.
+
+**Deep checks and widening** are opt-ins (see
+[Deep checks and numeric widening](running.md#deep-checks-and-numeric-widening)). The `types` shape was timed with
+each on, checks on, alongside the default, as runtimes `fnloom (deep)` and `fnloom (widen)` of `benches.run` (medians
+of three runs, ms, on 2026-10-28; default / deep / widening):
+
+| n | steady execute | prepare |
+| ---: | --- | --- |
+| 10 | 0.004 / 0.004 / 0.003 | 0.035 / 0.035 / 0.027 |
+| 100 | 0.029 / 0.034 / 0.030 | 0.084 / 0.081 / 0.077 |
+| 1,000 | 0.469 / 0.518 / 0.481 | 0.629 / 0.641 / 0.615 |
+| 10,000 | 23.2 / 23.6 / 23.3 | 8.066 / 7.734 / 7.464 |
+
+The default stays within noise of the table above. Deep checks cost about 0.05 ms per 1,000 inputs here, each list
+holding one item: a `list[int]` of exactly the class checks its items in a loop of `isinstance` calls, made when the
+plan is prepared. The cost grows with the items read: a `list[float]` of 100,000 items takes about 2.6 ms, and a
+`list[tuple[int, str]]` of 100,000 about 31 ms. An item that is itself a collection of collections, or meets a union or
+an alias, is walked question by question and costs more per item (over 200,000 items each):
+
+| deep check of | per item |
+| --- | ---: |
+| `list[list[int]]` | 2.3 µs |
+| `list[list[list[int]]]` | 5.3 µs |
+| `list[list[list[int]] \| None]` | 8.3 µs |
+| `type Tree = list[Tree] \| int` | 13.7 µs |
+
+A check that fits reads each part the value shares once, even on a cycle, never once per path; a check that fails may
+read shared parts more than once. Widening costs nothing on a value that fits without it.
+
 **Steady execution**, the cost of running a prepared plan again, is where fnloom differs most. With checks on, it's
-2.5 to 24 times faster than Hamilton's `execute` on the first four shapes wherever both finish, and 8.6 to 998 times
+2.0 to 24 times faster than Hamilton's `execute` on the first four shapes wherever both finish, and 8.6 to 998 times
 on `extract`, because the plan is compiled once and each run is a loop over its steps in Rust. The low end is
-`fan_in` at 10,000 parameters (2.5×), where one Python call with 10,000 keyword arguments is most of the cost for
+`fan_in` at 10,000 parameters (2.0×), where one Python call with 10,000 keyword arguments is most of the cost for
 both.
 
 **Input checks are close to free.** The gap between the two fnloom figures is within noise: steady execution with
-checks on and off differs by at most 0.05 ms on every graph. A check against a plain class such as `int` is compiled
-once per plan into one `isinstance` call. Only generics, unions and the like take the general path.
+checks on and off differs by at most 0.04 ms on every graph of the first five shapes but two at 10,000: `fan_in`,
+21.8 against 21.3 ms (2%), and `extract`, 6.385 against 6.304 ms (1%). A check against a plain class such as `int`,
+or a union of them such as `int | None`, is compiled once per plan into one `isinstance` call. A generic or a fixed
+tuple gets a check made once per plan too, and only a value it can't settle by class takes the general path.
 
 ### Where Hamilton raises
 
 Hamilton builds the 1,000- and 10,000-node chains, the 10,000-node layered graph and the 1,000- and 10,000-row `rows`
 graphs, then raises `RecursionError` on the first `execute`: its graph walk recurses once per level of depth. fnloom
-runs all 20 cases, with checks on and off, and every answer it gives is checked against the shape's closed form.
+runs all 24 cases, with checks on and off, and every answer it gives is checked against the shape's closed form.
 
 ### Build: re-measured
 
@@ -100,6 +145,15 @@ goes first, on a release build, timing only the build call (medians, ms, Hamilto
 | fan_in | 1,000 | 4.271 / 1.581 | fnloom faster (was 4.290 / 4.491) |
 | fan_in | 10,000 | 32.6 / 17.5 | fnloom faster (was 33.0 / 49.8) |
 
+The `fan_in` builds the table marks † after its 2026-10-28 re-measure were measured the same way that day, with CPython
+3.14.8:
+
+| shape | n | Hamilton / fnloom | verdict |
+| --- | ---: | --- | --- |
+| fan_in | 10 | 0.149 / 0.121 | fnloom faster |
+| fan_in | 100 | 0.355 / 0.241 | fnloom faster |
+| fan_in | 10,000 | 26.7 / 15.1 | fnloom faster |
+
 No build is reliably slower. The checks-on and checks-off builds do the same build work, since input checks run per
 run, so their differences in the table (for example rows 10,000, 128.1 against 60.9 ms) are noise.
 
@@ -111,6 +165,34 @@ again unchanged, and skips plain classes when it looks for type aliases; an inpu
 without comparing consumers; an undocumented module-level function skips the search for an inherited docstring; and
 an input's `NodeView` is made when `Driver.nodes` first reads it, while the input checks read each input's type
 without making its view.
+
+### Building from functions
+
+`Builder.with_functions` builds the same graph as `with_modules` from the module's functions given one by one (Q72).
+`benches/builds.py` times both, and Hamilton's nearest way, `ad_hoc_utils.create_temporary_module` and a build of it, on
+a release build, median of nine builds each, interleaved in one process (ms):
+
+| shape | n | `with_modules` | `with_functions` | Hamilton, temporary module |
+| --- | ---: | ---: | ---: | ---: |
+| chain | 1,000 | 5.428 | 5.914 | 16.2 |
+| rows | 1,000 | 4.614 | 4.651 | 50.9 |
+
+Measured on the machine above, on 2026-10-28. Giving the functions costs under a tenth more than scanning the module:
+each function is checked once, when it is given, and then scanned as a module's function is.
+
+### Building with namespaces
+
+`benches/builds.py` also builds the 1,000-node `layered` graph two ways: as one module, and as ten modules of 100 nodes,
+each under its own namespace, `ns0` to `ns9`, all reading the one input `seed` (Q74). Same machine and release build,
+median of nine builds each, interleaved in one process (ms):
+
+| shape | n | one module | 10 namespaces |
+| --- | ---: | ---: | ---: |
+| layered | 1,000 | 6.326 | 6.798 |
+
+Measured on 2026-10-28. Namespaces cost under a tenth more: every parameter of a namespaced node reads a node of its
+namespace under a dotted name, so the core passes it under the parameter's own keyword, one rename per edge. The
+namespace's names are found once, before any node is made, so each parameter is bound in the same pass as without one.
 
 ### Per run
 
@@ -254,7 +336,7 @@ uv run python -m benches.run > bench.jsonl 2> bench.stderr
 uv run python -m benches.run extract > extract.jsonl 2> bench.stderr   # only the shapes named
 ```
 
-It prints 60 JSON lines to stdout (`shape`, `n`, `runtime`, `input_checks`, `build_ms`,
+It prints 72 JSON lines to stdout (`shape`, `n`, `runtime`, `input_checks`, `build_ms`,
 `first_execute_ms`, `steady_execute_ms`, `prepare_ms`, `error`, `error_phase`).
 Hamilton prints a help banner to stderr whenever it raises, hence the second redirect.
 Each runtime's answer is checked against the shape's closed form, and a
@@ -306,6 +388,9 @@ All times use `time.perf_counter_ns`, in milliseconds. Graph generation is not t
 - `rows`: one function with `n` `@parameterize` rows, each sourcing the row before it, the first sourcing the input
   `seed`. The module is generated in Hamilton's spelling for Hamilton and in fnloom's for fnloom.
 - `extract`: one `@extract_fields` producer returning a dict of `n` int fields, each read by its own consumer.
+- `types`: one function with `n` input parameters, declared in turn `Optional[int]`, `tuple[int, str, float]` and
+  `list[int]`, summing the int in each. Hamilton's module declares the tuples as a bare `tuple`, since it refuses
+  every value of a fixed-length tuple type.
 
 ## The instruction-count gate
 

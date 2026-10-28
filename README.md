@@ -155,7 +155,8 @@ uv run maturin develop --release
 **Pre-alpha.** Done so far:
 
 - ✅ The Rust core and the native Python path
-- ✅ `@parameterize`, `@tag`, graph inspection and type checks
+- ✅ `@parameterize` and its sugar, `@tag`, `@exclude`, graph inspection, `validate` and type checks
+- ✅ Graphs from plain functions, namespaces, `rebuild()`, and one driver shared between threads
 - ✅ [Result caching](https://kelsayed17.github.io/fnloom/caching/), in memory or on disk
 - ✅ `@config.when*`, `@extract_fields`, `@extract_columns`, and an async driver that caches too
 - 🔜 Adapters and result builders, then visualisation

@@ -9,9 +9,100 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Added
 
+- `Driver.rebuild()` and `AsyncDriver.rebuild()` build a new driver from the same builder, with its modules, functions,
+  namespaces, config, cache store and every setting, and `sync_nodes` for the async driver. After `importlib.reload`,
+  the new driver runs the edited code and, with a shared store, misses on the edited node; the old driver keeps its
+  code, as Hamilton's does. A driver made from a native graph raises `TypeError` (Q83).
+- One `Driver` shared between threads is a documented guarantee: `execute`, `prepare`, `validate`, `explain_cache`,
+  inspection and `PreparedPlan.run` are safe to call at once, on the default and free-threaded builds, and a stress
+  test of 16 threads over one cached driver pins it. A user's own mutable values, and nodes that mutate their inputs,
+  are not covered.
+- A function in `final_vars` means the node it makes in this driver, matched by identity with `NodeView.origin`, never
+  by name, in `execute`, `prepare`, `validate` and `explain_cache`, on both drivers; the result is keyed by name. An
+  `@extract_*` function means its producer. A function that makes several nodes, such as a `@parameterize` function,
+  is a `TypeError` listing them, unless one is named like the function; a function no node comes from is a
+  `ValueError` naming it and why. Hamilton maps every function to its `__name__` (Q30).
+- `@parameterize` sugar. A row may be `(bindings, doc)`, the doc used as written; otherwise the function's docstring is
+  a template filled per row (`{output_name}`, each bound parameter), and a placeholder the row lacks is a `ValueError`
+  when decorating, where Hamilton prints the bare key. `fnloom.group(*deps)` and `group(**deps)` bind a parameter to a
+  list or dict built from `source()` and `value()` items. `parameterize_sources(**rows)` and
+  `parameterize_values(parameter, assigned_output)` are the shorthands. Misuse of any is refused when decorating, each
+  offender listed once (Q82).
+- `Builder.with_functions(*items)` builds from functions, plain or decorated, without a module: nothing is copied and
+  nothing is registered in `sys.modules`. `fnloom.node(fn, *, name=None, bind=None)` makes one node from a function,
+  named and bound with `source()` and `value()` without decorating it, and returns a `fnloom.NodeSpec`. A lambda needs
+  `name=`. Builders and drivers of functions pickle them by module and qualified name (Q72).
+- `Builder.with_modules(*modules, namespace="ns")` names each node of those modules `ns.<name>`, so one module can be
+  used under several namespaces. Inside a namespace, a parameter reads the namespace's own node when one is defined,
+  and otherwise the plain name; inputs are never namespaced. `NodeView.namespace` says which namespace a node is in.
+  Names still clash as before: there is no `allow_module_overrides` (Q74).
+- `Driver.inputs()` and `outputs()`, `Driver.modules` and `Driver.what_is_the_path_between(a, b)`, on `AsyncDriver` too,
+  with `fnloom.InputView`. The path includes both ends and is in topological order, ties broken by name, on every hash
+  seed; its error names every unknown node (Q70). An unsupplied input requested as an output stays a `ValueError`
+  (Q78).
+- `Driver.validate(final_vars, *, inputs=None, overrides=None)`, on `AsyncDriver` too (not a coroutine), returns every
+  problem `execute` would raise for a request, one sorted line each, and runs nothing: unknown outputs, inputs and
+  overrides, missing inputs (naming only the consumers the request needs), input and override types, and outputs no
+  config variant gave, and functions in `final_vars` no node comes from. Every unknown name in an error now ends in
+  `(did you mean 'x'?)` when a node is close to it; in `validate`, a missing input also names the closest supplied
+  name that is no node of the graph (Q71).
+- `Builder.with_strict_overrides()` refuses an override of an input that isn't also supplied, as Hamilton does, and
+  `Builder.with_declared_inputs(*names)` fails the build for any input of the graph not declared and any declared name
+  that is no input, each naming the closest node (Q75). Both are off by default. `Builder.without_override_type_checks()`
+  skips only the override type checks, keeping input checks on, for overriding a node with a value of another type
+  such as `nan` (Q22). All three survive pickling, copying and `build_async`.
+- `Builder.with_deep_type_checks()` checks every item of a `list`, `set`, `tuple[T, ...]` or other standard
+  collection, every key and value of a mapping, and nested collections' items, iteratively; an iterator, or a value of
+  any class but a standard collection's, is never read in full. `Builder.with_numeric_widening()` lets an `int` (not a
+  `bool`) or a numpy integer or floating scalar fit `float`, and a numpy integer scalar fit `int`, without importing
+  numpy. Both apply to inputs, overrides, extracted fields and
+  `validate`, not to edges, and survive pickling, copying and `build_async`. `fnloom.value_matches` takes `deep=` and
+  `widen=` to answer the same way.
+- `fnloom.value_matches(declared, value)` and `fnloom.type_matches(produced, expected)`, the checks `execute` runs on
+  each input, override and extracted field and `build` runs on each edge, are public. Their docstrings state the
+  rules, as Hamilton's `htypes.check_input_type` is public too.
+- An input or override naming a parameter that only `value()` bindings supply is refused as an unknown name, as any
+  input nothing reads is (Q4, Q5); Hamilton drops it, even a wrong-typed one. When another node reads the name, the
+  caller's value feeds that node alone and the `value()` rows keep their constant (Q77). Documented and tested; no
+  behaviour changed.
+- `@fnloom.exclude`, bare or called, keeps a public function out of the graph and returns it unchanged. Hamilton's
+  `@hamilton_exclude` works bare only. An excluded function's annotations are never read, so it needs none (Q73).
 - CodSpeed benchmarks of the Python run path in `benchmarks/` (`uv run pytest benchmarks`): prepared runs on every
   generated shape, repeated `Driver.execute`, cached runs, the async driver, extraction, config and `Builder.build`.
   CI runs them once on every pull request, and measures them under CodSpeed when `CODSPEED_ENABLED` is set.
+
+### Changed
+
+- **Breaking:** a module that defines `__all__` now makes nodes of only the functions it names. Hamilton ignores
+  `__all__`, and so did fnloom, so a function the module left out stops being a node, and anything reading its name
+  now sees an input. A function listed by its attribute name, `price__eu` for a `@config` variant, is the one
+  considered. To keep a function as a node, add its name to `__all__`, or remove `__all__`. An `__all__` that is not a
+  list or tuple of `str` is a `TypeError` at build. A missing input named like a function `__all__` or `@exclude` left
+  out now says so, and so does the error for a module with no nodes (Q73).
+- **Breaking:** the build refuses a parameter with a default that reads a computed node, and an input that two
+  consumers give different defaults. Hamilton lets the node replace the default, and each consumer keep its own. One
+  `ValueError` lists every case, sorted, naming the parameter, the node or the other consumers, and the opt-out. To
+  keep the behaviour, write `@fnloom.defaults(shadowed=("cost",))` on the consumer, and
+  `@fnloom.defaults(differing=("shared",))` on each consumer of the input but one; or rename the node, or make the
+  defaults equal (Q76). `@fnloom.defaults` is new, and records names only.
+- **Breaking:** `None` passes an input, override or extracted-field check only when the type admits it: `Optional[T]`,
+  `T | None`, `object`, `Any`, `None`, `Literal[None]`, or a `TypeVar` that is free or whose bound or a constraint
+  admits it. Hamilton passes `None` for every type, and so did fnloom, so `None` for `x: int` is now a `ValueError`
+  before anything runs: `x: expected int, got NoneType`. Annotate the parameter `x: int | None` (a default of `None`
+  does not make it optional), or stop passing `None` (Q79).
+- **Breaking:** a fixed-length tuple type, `tuple[int, str]` or `tuple[()]`, now checks a value's length and each item
+  with the same rules, nested tuples included. Before, any tuple fitted; Hamilton refuses every one. `tuple[int, ...]`
+  and bare `tuple` are unchanged (Q80).
+- **Breaking:** a `@parameterize` function's docstring is now a template, filled per row with `str.format_map`. In 0.2.0
+  each row used it as written, so a docstring with braces, such as `"""Returns {"count": n}."""`, now raises a
+  `ValueError` naming the row when the module is imported. Escape literal braces as `{{` and `}}`, or give the row its
+  doc as `(bindings, doc)`, which is used as written. Hamilton fails on the same docstring when decorating (Q82).
+- An annotation naming something that does not exist at run time, such as a name imported only under
+  `TYPE_CHECKING`, no longer fails the build with `NameError`. It becomes an opaque type, `unresolved 'Decimal'`, with
+  its text as written; an alias over such a name and a `TypedDict` field type do too. An edge matches it only from or
+  to the same text or `Any`, and fails the build, naming the text, otherwise. A value checked against it raises a
+  `TypeError` saying to import it at run time. Code that caught the `NameError` at build should instead import the
+  names its annotations use, or catch the `TypeError` where a value is checked (Q81).
 
 ## [0.2.0] - 2026-10-28
 

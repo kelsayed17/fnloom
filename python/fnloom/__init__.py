@@ -7,16 +7,23 @@ from fnloom._config import Condition, config
 from fnloom._core import UnfingerprintableError
 from fnloom._decorators import (
     CachePolicy,
+    Group,
     Source,
     Value,
     cache,
+    defaults,
+    exclude,
+    group,
     parameterize,
+    parameterize_sources,
+    parameterize_values,
     source,
     tag,
     value,
 )
 from fnloom._extract import extract_columns, extract_fields
 from fnloom._fingerprint import fingerprint, register_fingerprint
+from fnloom._functions import NodeSpec, node
 from fnloom._stores import (
     MISSING,
     CacheStore,
@@ -25,7 +32,8 @@ from fnloom._stores import (
     Format,
     MemoryCache,
 )
-from fnloom._view import NodeView, Param
+from fnloom._types import type_matches, value_matches
+from fnloom._view import InputView, NodeView, Param
 from fnloom.driver import (
     AsyncDriver,
     AsyncPreparedPlan,
@@ -50,7 +58,10 @@ __all__ = [
     "DiskCache",
     "Driver",
     "Format",
+    "Group",
+    "InputView",
     "MemoryCache",
+    "NodeSpec",
     "NodeView",
     "Param",
     "PreparedPlan",
@@ -60,12 +71,20 @@ __all__ = [
     "build",
     "cache",
     "config",
+    "defaults",
+    "exclude",
     "extract_columns",
     "extract_fields",
     "fingerprint",
+    "group",
+    "node",
     "parameterize",
+    "parameterize_sources",
+    "parameterize_values",
     "register_fingerprint",
     "source",
     "tag",
+    "type_matches",
     "value",
+    "value_matches",
 ]

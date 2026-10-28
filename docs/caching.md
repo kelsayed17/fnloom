@@ -62,7 +62,7 @@ outcomes = driver.explain_cache(["relative_spread"], inputs={"bid": 99.0, "ask":
 
 A key covers a node's code as well as its inputs, so an edit to the function, to a helper it calls or to a constant
 it reads misses too. The code is read when the driver is built, never per run: **rebuild the driver after editing
-code** ([Code versions](#code-versions)).
+code**, with `driver.rebuild()` ([Code versions](#code-versions)).
 
 ### On the async driver
 

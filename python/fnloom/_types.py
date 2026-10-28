@@ -3,13 +3,19 @@
 The answers agree with Hamilton 1.90.0 over the matrix of design §10, except
 where the quirk register says fnloom differs (Q37 to Q45). Forms outside the
 matrix are unsupported: they get an answer, but no promise of Hamilton's.
+`Rules` holds the opt-ins, deep checks and numeric widening, which Hamilton has
+not; an annotation that did not resolve at build is `Unresolved` (Q81).
 """
 
 import abc
+import annotationlib
 import collections.abc
+import dataclasses
+import functools
+import re
 import types
 import typing
-from typing import Annotated, Any, Literal, NewType, TypeVar, Union
+from typing import Annotated, Any, Literal, NewType, TypeVar, Union, Unpack
 
 # Each group: a declared kind in it takes any value of the group, and then the
 # value's first element is checked against the declaration's first argument.
@@ -24,7 +30,187 @@ _BY_KIND: frozenset[type] = frozenset(
 )
 
 
-def _alias_value(annotation: object) -> object | None:
+@dataclasses.dataclass(frozen=True, slots=True)
+class Unresolved:
+    """An annotation that did not evaluate at build: a named, opaque type (Q81).
+
+    `name` is the annotation as written, such as `"decimal.Decimal"` for a name
+    imported only under `TYPE_CHECKING`. It feeds and is fed by an annotation of
+    the same text, and by `Any`, and no other type; no value fits it, and a check
+    of a value against it raises `UnresolvedError`.
+    """
+
+    name: str
+
+    @typing.override
+    def __repr__(self) -> str:
+        return f"unresolved {self.name!r}"
+
+
+class UnresolvedError(TypeError):
+    """A value was checked against an `Unresolved` annotation, which none can fit."""
+
+    def __init__(self, unresolved: Unresolved) -> None:
+        """Says that `unresolved` cannot check a value, and how to make it resolve."""
+        self.unresolved = unresolved
+        super().__init__(
+            f"cannot check a value against {unresolved!r}: it did not resolve when "
+            "the graph was built; import what it names at run time, not only under "
+            "TYPE_CHECKING"
+        )
+
+
+@dataclasses.dataclass(frozen=True, slots=True)
+class Rules:
+    """The opt-in rules a value check follows on top of the default, shallow ones.
+
+    `deep` checks every item of a standard collection, nested ones included,
+    where the default reads at most the first. `widen` lets an `int` (not a
+    `bool`) and a numpy integer or floating scalar fit `float`, and a numpy
+    integer scalar fit `int`.
+    """
+
+    deep: bool = False
+    widen: bool = False
+
+
+SHALLOW = Rules()
+"""The default rules: Hamilton's shallow checks, no widening."""
+
+
+# A `ForwardRef` as `repr` shows it inside a generic, for `written`.
+_FORWARD_REF = re.compile(r"ForwardRef\('((?:[^'\\]|\\.)*)'[^)]*\)")
+
+
+def written(annotation: object) -> str:
+    """`annotation` as text, each unresolved name in it as written."""
+    if isinstance(annotation, annotationlib.ForwardRef):
+        return annotation.__forward_arg__
+    return _FORWARD_REF.sub(r"\1", annotationlib.type_repr(annotation))
+
+
+def opaque(annotation: object) -> object:
+    """`annotation`, or `Unresolved` with its text when a name in it did not resolve.
+
+    A string stands for a name that was never evaluated, so it is `Unresolved` too.
+    """
+    if isinstance(annotation, str):
+        return Unresolved(annotation)
+    if unresolvable(annotation):
+        return Unresolved(written(annotation))
+    return annotation
+
+
+def _parts(current: object, seen: set[int]) -> list[object] | None:
+    """The annotations `current` is made of, or `None` when a name in it is unresolved.
+
+    A PEP 695 alias is made of its value, read once (`seen` holds those read); a
+    `TypeVar` has its bound and constraints read here, once (see `_limits`).
+    `Annotated` metadata is no type: only the annotated type is a part.
+    """
+    if isinstance(current, annotationlib.ForwardRef):
+        return None
+    if isinstance(current, list | tuple):
+        return list(typing.cast("collections.abc.Sequence[object]", current))
+    parts: list[object] = []
+    if isinstance(current, typing.TypeAliasType):
+        if id(current) in seen:
+            return parts
+        seen.add(id(current))
+        try:
+            parts.append(current.__value__)
+        except NameError, AttributeError:
+            return None
+    elif isinstance(current, TypeVar):
+        _limits(current)
+    origin = typing.get_origin(current)
+    args = typing.get_args(current)
+    parts.extend(args[:1] if origin is Annotated else args)
+    if origin is not None:
+        parts.append(origin)
+    return parts
+
+
+def unresolvable(annotation: object) -> bool:
+    """Whether some name in `annotation` did not resolve, nested or through an alias.
+
+    A `ForwardRef` left by evaluating it, or a PEP 695 alias whose value raises
+    `NameError` or `AttributeError` when read, is such a name (Q44, Q81). Each
+    `TypeVar`'s bound and constraints are read too, once, so a run never
+    evaluates one. `Annotated` metadata is never read.
+    """
+    seen: set[int] = set()
+    pending = [annotation]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, type):
+            # A class, the common case, holds no name.
+            continue
+        if (parts := _parts(current, seen)) is None:
+            return True
+        pending.extend(parts)
+    return False
+
+
+def resolved_hints(owner: object, *, extras: bool = True) -> dict[str, Any]:
+    """`typing.get_type_hints(owner)`, an annotation that does not resolve `Unresolved`.
+
+    An annotation naming something that does not exist at run time, such as a
+    name imported only under `TYPE_CHECKING`, or an alias over one, becomes
+    `Unresolved` with its text as written, and the others are evaluated as usual
+    (Q81). `extras` keeps `Annotated` metadata.
+    """
+    try:
+        hints = typing.get_type_hints(owner, include_extras=extras)
+    except NameError, AttributeError:
+        hints = typing.get_type_hints(
+            owner, include_extras=extras, format=annotationlib.Format.FORWARDREF
+        )
+    for key, hint in hints.items():
+        if unresolvable(hint):
+            hints[key] = Unresolved(written(hint))
+    return hints
+
+
+def _evaluated(
+    evaluate: collections.abc.Callable[[annotationlib.Format], object], *, many: bool
+) -> object:
+    """A lazily evaluated `TypeVar` part; one naming what does not exist `Unresolved`.
+
+    With `many`, the part is a tuple of constraints, each made `Unresolved` alone.
+    """
+    value = annotationlib.call_evaluate_function(
+        evaluate, annotationlib.Format.FORWARDREF
+    )
+    if many:
+        parts = typing.cast("tuple[object, ...]", value)
+        return tuple(
+            Unresolved(written(part)) if unresolvable(part) else part for part in parts
+        )
+    return Unresolved(written(value)) if unresolvable(value) else value
+
+
+@functools.lru_cache(maxsize=256)
+def _limits(typevar: TypeVar) -> tuple[object, tuple[object, ...]]:
+    """`typevar`'s bound and constraints, each read once.
+
+    A PEP 695 `TypeVar` (`def f[U: Decimal](x: U)`) evaluates them only when first
+    read, so a name in them that does not resolve would raise then, at run. Read
+    here, at build, such a part is `Unresolved` (Q81) instead.
+    """
+    try:
+        return typevar.__bound__, typevar.__constraints__
+    except NameError, AttributeError:
+        pass
+    if (evaluate := typevar.evaluate_constraints) is not None:
+        constraints = typing.cast("tuple[object, ...]", _evaluated(evaluate, many=True))
+        return None, constraints
+    if (evaluate := typevar.evaluate_bound) is not None:
+        return _evaluated(evaluate, many=False), ()
+    return None, ()
+
+
+def _alias_value(annotation: object) -> object | None:  # noqa: PLR0911  # one return per form
     """What a PEP 695 alias names (Q44), or `None` when `annotation` is no alias.
 
     `type Price = float` names `float`. A subscripted generic alias, `Pair[int]`
@@ -47,7 +233,23 @@ def _alias_value(annotation: object) -> object | None:
         return args[params.index(aliased)]
     if getattr(aliased, "__parameters__", None) != params:
         return None
-    return aliased[args]
+    try:
+        hash((aliased, args))
+    except TypeError:
+        # An unhashable part, such as `Annotated` metadata: substituted afresh on
+        # each reading, so only the walk's budget ends a cycle through it.
+        return aliased[args]
+    return _substituted(aliased, args)
+
+
+@functools.lru_cache(maxsize=256)
+def _substituted(aliased: object, args: tuple[object, ...]) -> object:
+    """`aliased[args]`, the same object on every reading of one generic alias.
+
+    The value walk tells a cycle by the identity of the type it asks about, so a
+    recursive generic alias (`type S[T] = Sequence[S[T]]`) must read as one object.
+    """
+    return typing.cast("typing.Any", aliased)[args]
 
 
 def _strip(annotation: object) -> object:
@@ -76,36 +278,6 @@ def stripped(annotation: object) -> object:
     return _strip(annotation)
 
 
-def read_aliases(annotation: object) -> None:
-    """Evaluates the value of every PEP 695 alias in `annotation`, nested or not.
-
-    An alias's value is evaluated only when first read, so a name in it that does
-    not resolve raises then: reading them all at build raises that `NameError` or
-    `AttributeError` once, where the build can name the annotation (Q44).
-    """
-    if isinstance(annotation, type):
-        # A class, the common case, holds no alias.
-        return
-    seen: set[int] = set()
-    pending = [annotation]
-    while pending:
-        current = pending.pop()
-        if isinstance(current, type):
-            continue
-        if isinstance(current, list | tuple):
-            pending.extend(typing.cast("collections.abc.Sequence[object]", current))
-            continue
-        if isinstance(current, typing.TypeAliasType):
-            if id(current) in seen:
-                continue
-            seen.add(id(current))
-            pending.append(current.__value__)
-        pending.extend(typing.get_args(current))
-        origin = typing.get_origin(current)
-        if origin is not None:
-            pending.append(origin)
-
-
 def _is_union(annotation: object) -> bool:
     return typing.get_origin(annotation) in {Union, types.UnionType}
 
@@ -118,38 +290,200 @@ def _element_args(annotation: object) -> tuple[object, ...]:
     return args
 
 
-# The (element type, string) questions already being asked in one check. A
-# string's first item is a string, so under a recursive alias (`type Tree =
-# list[Tree]`) the same question comes round again; it is answered `False`.
-type _Asked = tuple[tuple[object, str], ...]
+def _fixed_items(declared: object) -> tuple[object, ...] | None:
+    """The item types of a fixed-length tuple type, or `None` for any other tuple type.
 
-
-def _first_fits(element: object, value: object, asked: _Asked) -> bool:
-    """Whether the first item of the collection `value` fits `element`.
-
-    An empty collection always fits.
+    `tuple[()]` has no items. `tuple[T, ...]`, a bare `typing.Tuple` and a tuple with
+    an unpacked part (`tuple[int, *tuple[str, ...]]`, `tuple[*Ts]`) have no fixed
+    length, so they are no fixed tuple.
     """
+    if declared is typing.Tuple:  # noqa: UP006  # the bare typing spelling has no items
+        return None
+    items = typing.get_args(declared)
+    if items[1:] == (...,):
+        return None
+    for item in items:
+        if getattr(item, "__unpacked__", False) or typing.get_origin(item) is Unpack:
+            return None
+    return items
+
+
+# --- The value walk -------------------------------------------------------------
+#
+# Whether a value fits a type is a tree of questions: a union asks whether any
+# member fits the value (an OR-group), a fixed tuple whether every item fits its
+# type (an AND-group), a sequence whether its first item fits the element type (an
+# AND-group of one). `_expand` answers one question, or turns it into the group of
+# questions it depends on; `_walk` evaluates the tree with a stack of its own,
+# never by recursion, so no value is too deep and no annotation too nested.
+
+
+@dataclasses.dataclass(slots=True)
+class _Group:
+    """The questions one question depends on: any of them (`any_`), or all of them.
+
+    `descends` when the questions are about the value's items, not the value.
+    """
+
+    any_: bool
+    questions: list[tuple[object, object]]
+    descends: bool = False
+
+
+@dataclasses.dataclass(slots=True)
+class _Frame:
+    """A group being evaluated: its next question, and its own pair while it is open.
+
+    `descents` counts the steps into an item between the first question and this
+    one, so a repeated question tells whether the value changed on the way.
+    `serial` numbers the frame in the order frames open, so open frames' serials
+    rise up the stack. `low` is the lowest serial of an open question its answer
+    has consulted so far: its own serial while it consulted none. `mark` is how
+    many provisional answers there were when it opened (see `_Answers`). `asked`
+    is the question's type and value, kept alive while their ids key answers.
+    `doubt` is the lowest serial of an open question assumed not to fit (a cycle
+    through types alone, or a string met again) that a failing answer under it
+    has rested on: its own serial while none has.
+    """
+
+    group: _Group
+    pair: _Pair
+    descents: int
+    serial: int
+    low: int
+    doubt: int
+    mark: int
+    asked: tuple[object, object]
+    next: int = 0
+
+    def consult(self, serial: int, *, fits: bool) -> None:
+        """Rests the answer on open question `serial`, assumed to fit or not."""
+        self.low = min(self.low, serial)
+        if not fits:
+            self.doubt = min(self.doubt, serial)
+
+    def hand_on(self, parent: _Frame, *, fits: bool) -> None:
+        """Gives `parent`, which asked it, what this closed frame's answer rests on.
+
+        Only a failing answer's doubt is handed on: a parent fails only through
+        the questions it asked that failed.
+        """
+        parent.low = min(parent.low, self.low)
+        if not fits:
+            parent.doubt = min(parent.doubt, self.doubt)
+
+
+type _Pair = tuple[int, int | str]
+"""A question's key: its type by identity, its value by identity, a string by value.
+
+A one-character string above U+00FF is a new object each time it is read from a
+string, so a string is compared by equality, or the walk would never see it again.
+"""
+
+
+def _pair(declared: object, value: object) -> _Pair:
+    return (id(declared), value if type(value) is str else id(value))
+
+
+WALK_BUDGET = 10_000
+"""How many groups may be open about one value at once before a check gives up.
+
+A legitimate value reaches only its type's nesting there: a union's member about
+the same value, an alias's value, a cyclic value's item met again. A value of any
+size or depth stays far below it, since each new item is a new value. A cycle the
+walk cannot see by its keys, such as a type made afresh on each reading, piles
+groups onto one value without end, and ends here with a `TypeError`.
+"""
+
+_SHOWN = 200
+"""How many characters of a type an error shows; a longer one ends in `...`."""
+
+
+def _origin_name(origin: object) -> str:
+    """How a generic's origin is written: `list`, `collections.abc.Sequence`, ..."""
+    name = getattr(origin, "__qualname__", None) or getattr(origin, "__name__", None)
+    if not isinstance(name, str):
+        return repr(origin)
+    module = getattr(origin, "__module__", "builtins")
+    if isinstance(origin, typing.TypeAliasType) or module == "builtins":
+        return name
+    return f"{module}.{name}"
+
+
+def _shown(declared: object) -> str:
+    """`repr(declared)`, cut to `_SHOWN` characters, ending in `...` when cut.
+
+    A type that shares its parts (`T = tuple[T1, T1]`, nested) has a `repr`
+    exponential in its depth, so the text is written part by part, with a stack,
+    and stops once it is long enough; a short type gets its own `repr`.
+    """
+    parts: list[str] = []
+    size = 0
+    pending: list[object] = [declared]
+    while pending and size <= _SHOWN:
+        current = pending.pop()
+        if isinstance(current, str):
+            text = current
+        elif isinstance(current, list):
+            # A parameter list, as `Callable[[X], int]` has: written item by item.
+            items = typing.cast("list[object]", current)
+            text = "["
+            joined = [part for item in items for part in (", ", item)][1:]
+            pending.extend(reversed([*joined, "]"]))
+        elif not (args := typing.get_args(current)) or isinstance(current, type):
+            # A class by its name, `int` or `collections.abc.Sized`, as `repr` of
+            # a generic writes it.
+            text = annotationlib.type_repr(current)
+        else:
+            joined: list[object] = []
+            for arg in args:
+                joined.extend((", ", arg))
+            if _is_union(current):
+                joined = [" | " if part == ", " else part for part in joined[1:]]
+                text = ""
+            else:
+                text = f"{_origin_name(typing.get_origin(current))}["
+                joined = [*joined[1:], "]"]
+            pending.extend(reversed(joined))
+        parts.append(text)
+        size += len(text)
+    if not pending and size <= _SHOWN:
+        return repr(declared)
+    return "".join(parts)[: _SHOWN - 3] + "..."
+
+
+type _Expanded = bool | _Group
+
+
+def _first_item(element: object, value: object) -> _Expanded:
+    """The question about the first item of the collection `value`; `True` if empty."""
     for item in typing.cast("collections.abc.Iterable[object]", value):
-        if isinstance(item, str):
-            if (element, item) in asked:
-                return False
-            asked = (*asked, (element, item))
-        return _fits(element, item, asked)
+        return _Group(any_=False, questions=[(element, item)], descends=True)
     return True
 
 
-def _fits_generic(
-    declared: object, origin: object, value: object, asked: _Asked
-) -> bool:
-    """A parameterized collection: its kind, then at most its first element.
+def _expand_generic(  # noqa: PLR0911  # one return per form
+    declared: object, origin: object, value: object
+) -> _Expanded:
+    """A parameterized collection: its kind, then at most its items' questions.
 
-    Only a sequence or an iterable has its first element checked; another
-    abstract collection, or a callable, is checked by its kind alone (Q45).
+    A fixed-length tuple asks about each item (Q80); otherwise only a sequence or
+    an iterable asks about its first item, and another abstract collection or a
+    callable is checked by its kind alone (Q45).
     """
+    if origin is tuple:
+        if not isinstance(value, tuple):
+            return False
+        if (items := _fixed_items(declared)) is not None:
+            if len(value) != len(items):
+                return False
+            return _Group(
+                any_=False,
+                questions=list(zip(items, value, strict=True)),
+                descends=True,
+            )
     if type(value) is origin:
         return True
-    if origin is tuple and not isinstance(value, tuple):
-        return False
     if isinstance(value, collections.abc.Iterator):
         # Never look inside an iterator: reading its first item would consume it,
         # so it is checked by its kind alone (Q43).
@@ -159,23 +493,48 @@ def _fits_generic(
             if not isinstance(value, group):
                 return False
             args = _element_args(declared)
-            return not args or _first_fits(args[0], value, asked)
+            return not args or _first_item(args[0], value)
     return origin in _BY_KIND and isinstance(value, typing.cast("type", origin))
 
 
-def _fits(declared: object, value: object, asked: _Asked = ()) -> bool:  # noqa: PLR0911  # one return per form
-    declared = _strip(declared)
-    if declared is Any or isinstance(declared, TypeVar):
+def _expand_typevar(typevar: TypeVar, value: object) -> _Expanded:
+    """Whether `value` fits `typevar`, or the questions that decide it for `None`.
+
+    Any value but `None` fits, as in Hamilton; `None` fits a free `TypeVar`, or one
+    whose bound, or one of whose constraints, admits it (Q79).
+    """
+    if value is not None:
         return True
+    bound, constraints = _limits(typevar)
+    if constraints:
+        return _Group(any_=True, questions=[(c, None) for c in constraints])
+    return bound is None or _Group(any_=False, questions=[(bound, None)])
+
+
+def _expand(declared: object, value: object) -> _Expanded:  # noqa: PLR0911  # one return per form
+    """The answer to whether `value` fits `declared`, or the questions it depends on.
+
+    This is the one place the shallow rules live: `_walk` only evaluates them.
+    """
+    declared = _strip(declared)
+    if declared is Any:
+        return True
+    if isinstance(declared, TypeVar):
+        return _expand_typevar(declared, value)
+    if declared is None:
+        # `None` written as a type, as `get_type_hints` would read it: `NoneType`.
+        return value is None
     if isinstance(declared, NewType):
-        return _fits(declared.__supertype__, value, asked)
+        return _Group(any_=False, questions=[(declared.__supertype__, value)])
     if _is_union(declared):
-        return any(_fits(member, value, asked) for member in typing.get_args(declared))
+        return _Group(
+            any_=True, questions=[(m, value) for m in typing.get_args(declared)]
+        )
     origin = typing.get_origin(declared)
     if origin is Literal:
         return value in typing.get_args(declared)
     if origin is not None:
-        return _fits_generic(declared, origin, value, asked)
+        return _expand_generic(declared, origin, value)
     if not isinstance(declared, type):
         return False
     try:
@@ -186,29 +545,555 @@ def _fits(declared: object, value: object, asked: _Asked = ()) -> bool:  # noqa:
         return typing.is_typeddict(declared) and isinstance(value, dict)
 
 
-def value_matches(declared: object, value: object) -> bool:
+type _Expand = collections.abc.Callable[[object, object], _Expanded]
+"""One rule set's answer to a question, or the group of questions it depends on."""
+
+
+class _Open:
+    """How many groups are open about each value, against the walk's budget.
+
+    Keyed as a pair's value is. Past `budget` groups about one value, a cycle no
+    key can see (see `WALK_BUDGET`), it raises `TypeError`.
+    """
+
+    __slots__ = ("_budget", "_declared", "_held")
+
+    def __init__(self, declared: object, budget: int) -> None:
+        self._declared = declared
+        self._budget = budget
+        self._held: dict[int | str, int] = {}
+
+    def open(self, key: int | str) -> None:
+        """Counts a group opened about value `key`; `TypeError` past the budget."""
+        held = self._held.get(key, 0) + 1
+        if held > self._budget:
+            msg = (
+                f"value too cyclic to check against {_shown(self._declared)}: "
+                f"more than {self._budget:,} groups open about one value"
+            )
+            raise TypeError(msg)
+        self._held[key] = held
+
+    def close(self, key: int | str) -> None:
+        """Forgets one group about value `key`, now answered."""
+        if (held := self._held[key] - 1) == 0:
+            del self._held[key]
+        else:
+            self._held[key] = held
+
+
+class _Answers:
+    """The answers one walk keeps, so a part a value shares is not read once per path.
+
+    An answer that consulted no question still open below its own (its lowlink,
+    `low`, is not below its own serial) is final: kept for the rest of the walk.
+
+    A `False` is final too when every open question below its own that it rests
+    on was assumed to fit (its `doubt` is not below its own serial). The walk is
+    monotone in what it assumes of open questions, and none is assumed more than
+    to fit, so an answer that fails under that assumption fails under any, as
+    in the greatest fixpoint the walk computes. A `False` that rests on an open
+    question assumed not to fit (a cycle through types alone, or a string met
+    again) is not kept, as asked elsewhere that question may fit. Only a
+    string's own characters reach such a `False` in a question that read items,
+    since an item read always changes the value.
+
+    Inside a cycle, a `True` that rests on open questions fitting is provisional
+    (a greatest-fixpoint memo): reused while those questions stay open. When a
+    question closes `False`, final or not, every provisional answer made since
+    it opened is dropped, as it may have assumed that question fits; a lowlink
+    names only the lowest question an answer rests on, so one that rests on
+    this question cannot be told from one that rests only on questions below
+    it. A dropped answer is asked again against the kept `False`.
+    When the cycle's first question, whose lowlink is its own, closes `True`,
+    the provisional answers made since it opened become final. A provisional
+    answer's lowlink names a question that may since have closed; `_redirect`
+    maps a closed question's serial to its own lowlink, toward one still open.
+
+    Only a question that read items is kept: a union about the same value is
+    cheap to ask again, and keeping it too would double the memory. With
+    `enabled` false nothing is kept, the walk as it is with no answers reused.
+    """
+
+    __slots__ = (
+        "_enabled",
+        "_final",
+        "_held",
+        "_order",
+        "_provisional",
+        "_redirect",
+        "_serial",
+    )
+
+    def __init__(self, held: _Open, *, enabled: bool = True) -> None:
+        """Starts with no answers; keeps none unless `enabled`.
+
+        `held` counts the groups open about each value, as frames open and close.
+        """
+        self._held = held
+        self._enabled = enabled
+        self._final: dict[_Pair, tuple[bool, object, object]] = {}
+        self._provisional: dict[_Pair, tuple[int, object, object]] = {}
+        self._order: list[_Pair] = []
+        self._redirect: dict[int, int] = {}
+        self._serial = 0
+
+    def frame(
+        self, group: _Group, pair: _Pair, descents: int, asked: tuple[object, object]
+    ) -> _Frame:
+        """A frame opening for `pair`, numbered after every frame opened before it.
+
+        `TypeError` past the budget of groups open about one value (see `_Open`).
+        """
+        self._held.open(pair[1])
+        self._serial += 1
+        serial = self._serial
+        return _Frame(
+            group, pair, descents, serial, serial, serial, len(self._order), asked
+        )
+
+    def get(self, pair: _Pair, asking: _Frame) -> bool | None:
+        """`pair`'s answer or `None`; `asking` takes what a provisional one rests on."""
+        if (final := self._final.get(pair)) is not None:
+            return final[0]
+        if (provisional := self._provisional.get(pair)) is not None:
+            asking.consult(self._open(provisional[0]), fits=True)
+            return True
+        return None
+
+    def _open(self, serial: int) -> int:
+        """The open question `serial` rests on, following closed ones' lowlinks."""
+        chain: list[int] = []
+        while (lower := self._redirect.get(serial)) is not None:
+            chain.append(serial)
+            serial = lower
+        for passed in chain:
+            self._redirect[passed] = serial
+        return serial
+
+    def close(self, frame: _Frame, answer: bool, parent: _Frame) -> None:  # noqa: FBT001  # the frame's answer
+        """Keeps or drops answers as `frame` closes; `parent` takes its lowlink."""
+        self._held.close(frame.pair[1])
+        root = frame.low >= frame.serial
+        # A root's lowlink is its own serial or above, so its parent's stays.
+        frame.hand_on(parent, fits=answer)
+        if not self._enabled:
+            return
+        kept = frame.group.descends
+        if not answer:
+            for pair in self._order[frame.mark :]:
+                del self._provisional[pair]
+            del self._order[frame.mark :]
+            if kept and frame.doubt >= frame.serial:
+                self._final[frame.pair] = (False, *frame.asked)
+        elif root:
+            for pair in self._order[frame.mark :]:
+                _, *asked = self._provisional.pop(pair)
+                self._final[pair] = (True, asked[0], asked[1])
+            del self._order[frame.mark :]
+            if kept:
+                self._final[frame.pair] = (True, *frame.asked)
+        else:
+            self._redirect[frame.serial] = frame.low
+            if kept:
+                self._provisional[frame.pair] = (frame.low, *frame.asked)
+                self._order.append(frame.pair)
+
+
+def _walk(  # noqa: C901, PLR0912  # one loop, its branches the walk's states
+    declared: object,
+    value: object,
+    expand: _Expand = _expand,
+    budget: int = WALK_BUDGET,
+    *,
+    reuse: bool = True,
+) -> bool:
+    """Whether `value` fits `declared`, by the rules of `expand`, with no recursion.
+
+    `expand` answers one (type, value) question or names the group it depends on;
+    this evaluates the groups depth first with an explicit stack, stopping a group
+    as soon as its answer is known.
+
+    A question already open further up the stack (the same type object, about the
+    same value object or an equal string) is a cycle:
+
+    - **Through the value's items** (a list holding itself): it fits, so a cyclic
+      value ends.
+    - **Through types alone** (`type X = X | int`), with no step into an item on
+      the way: it does not fit, so a union falls to its other members.
+    - **A string**, whose first item is a string again: it does not fit, as a
+      recursive alias never ends in one.
+
+    A question that read items, answered once, is not asked again in the same
+    walk, so a value that shares its parts (`l = [l2, l2]`, nested), on a cycle
+    or not, is read once per part, not once per path: see `_Answers`, which
+    `reuse` false turns off, to compare against. A check failing on a cycle may
+    read a fitting part again, once per failing part it was first read under,
+    and a failing string again each time it is met.
+
+    Past `budget` groups open about one value (see `WALK_BUDGET`), a cycle no key
+    can see, it raises `TypeError` naming the type. A value that does not fit
+    because an `Unresolved` type was asked about raises `UnresolvedError` (Q81).
+    """
+    answer = expand(declared, value)
+    if isinstance(answer, bool):
+        if not answer and type(declared) is Unresolved:
+            raise UnresolvedError(declared)
+        return answer
+    stack = [_Frame(answer, _pair(declared, value), 0, 0, 0, 0, 0, (declared, value))]
+    # Each open question's descents and serial.
+    open_pairs = {stack[0].pair: (0, 0)}
+    # Made when a second group opens: a walk of one group reuses nothing.
+    answers: _Answers | None = None
+    held = _Open(declared, budget)
+    held.open(stack[0].pair[1])
+    finished: bool | None = None
+    unresolved: Unresolved | None = None
+    while True:
+        frame = stack[-1]
+        group = frame.group
+        if finished is not None and finished is group.any_:
+            # An OR-group with a fitting question, or an AND-group with a failing one.
+            answer = finished
+        elif frame.next == len(group.questions):
+            # Every question asked: an OR-group found none fit, an AND-group all.
+            answer = not group.any_
+        else:
+            question, item = group.questions[frame.next]
+            frame.next += 1
+            pair = _pair(question, item)
+            descents = frame.descents + group.descends
+            if (before := open_pairs.get(pair)) is not None:
+                finished = descents > before[0] and type(item) is not str
+                frame.consult(before[1], fits=finished)
+                continue
+            if answers is not None and (known := answers.get(pair, frame)) is not None:
+                finished = known
+                continue
+            expanded = expand(question, item)
+            if isinstance(expanded, bool):
+                if not expanded and type(question) is Unresolved:
+                    unresolved = question
+                finished = expanded
+                continue
+            if answers is None:
+                answers = _Answers(held, enabled=reuse)
+            stack.append(answers.frame(expanded, pair, descents, (question, item)))
+            open_pairs[pair] = (descents, stack[-1].serial)
+            finished = None
+            continue
+        stack.pop()
+        del open_pairs[frame.pair]
+        if not stack:
+            if not answer and unresolved is not None:
+                raise UnresolvedError(unresolved)
+            return answer
+        typing.cast("_Answers", answers).close(frame, answer, stack[-1])
+        finished = answer
+
+
+def _fits(declared: object, value: object) -> bool:
+    """Whether `value` fits `declared`: the shallow walk every check uses."""
+    return _walk(declared, value)
+
+
+# --- Opt-in rules: numeric widening and deep checks ----------------------------
+
+
+@functools.lru_cache(maxsize=256)
+def _numpy_kind(cls: type) -> str | None:
+    """`"integer"` or `"floating"` for a numpy scalar class of that kind, else `None`.
+
+    Read from the class's bases by module and name, so numpy is never imported. A
+    `timedelta64`, which numpy counts as an integer, is neither.
+    """
+    kind: str | None = None
+    for base in cls.__mro__:
+        if getattr(base, "__module__", None) != "numpy":
+            continue
+        if base.__name__ == "timedelta64":
+            return None
+        if base.__name__ in {"integer", "floating"}:
+            kind = kind or base.__name__
+    return kind
+
+
+def _widened(classes: tuple[type, ...], value: object) -> bool:
+    """Whether numeric widening lets `value` fit one of `classes`, which it does not.
+
+    An `int`, not a `bool`, and a numpy integer or floating scalar fit `float`; a
+    numpy integer scalar fits `int`. Widening composes: what fits `int` fits
+    `float`.
+    """
+    cls = type(value)
+    if float in classes and (
+        (isinstance(value, int) and not isinstance(value, bool))
+        or _numpy_kind(cls) is not None
+    ):
+        return True
+    return int in classes and _numpy_kind(cls) == "integer"
+
+
+def _widens(classes: Classes) -> tuple[type, ...] | None:
+    """`classes` as a tuple when widening changes their answer, else `None`."""
+    members = classes if isinstance(classes, tuple) else (classes,)
+    return members if int in members or float in members else None
+
+
+def _plain_matcher(classes: Classes, *, widen: bool) -> Matcher:
+    """`isinstance` against `classes`, and with `widen` the numeric widening too."""
+    if widen and (members := _widens(classes)) is not None:
+        return lambda value: isinstance(value, classes) or _widened(members, value)
+    return _isinstance_of(classes)
+
+
+def _widening(expand: _Expand) -> _Expand:
+    """`expand`, with numeric widening of a declared `int` or `float` (decision 12f)."""
+
+    def widened(declared: object, value: object) -> _Expanded:
+        answer = expand(declared, value)
+        if answer is not False:
+            return answer
+        declared = _strip(declared)
+        return (declared is int or declared is float) and _widened((declared,), value)
+
+    return widened
+
+
+# The origins whose items a deep check reads: the standard collections, never an
+# iterator or a generator, and never `type[T]`, whose value is a class.
+_DEEP_MODULES = frozenset({"builtins", "collections", "collections.abc"})
+# The modules of the value classes a deep check reads: `list`, `dict`, `deque`...
+_DEEP_VALUES = frozenset({"builtins", "collections"})
+
+
+def _reads_items(origin: type) -> bool:
+    return (
+        origin.__module__ in _DEEP_MODULES
+        and origin is not type
+        and issubclass(origin, collections.abc.Iterable)
+        and not issubclass(origin, collections.abc.Iterator)
+    )
+
+
+def _reads_value(value: object) -> bool:
+    """Whether a deep check reads `value`'s items: a standard collection's only.
+
+    Any other value, such as a class of the caller's own that is iterable, may be
+    endless or costly to read, so it keeps the shallow rules.
+    """
+    return type(value).__module__ in _DEEP_VALUES
+
+
+def _kind_fits(origin: type, value: object) -> bool:
+    """Whether `value` is of the kind a generic of `origin` takes, items aside.
+
+    The shallow check's kinds: exactly the class, else any of a sequence or an
+    iterable family for one of it, else an instance of another abstract
+    collection (Q45).
+    """
+    if type(value) is origin:
+        return True
+    for group in (_SEQUENCES, _ITERABLES):
+        if origin in group:
+            return isinstance(value, group)
+    return origin in _BY_KIND and isinstance(value, origin)
+
+
+@functools.lru_cache(maxsize=256)
+def _cached_plain(declared: object) -> Classes | None:
+    return plain_class(declared)
+
+
+def _item_classes(declared: object) -> Classes | None:
+    """`plain_class(declared)`, made once per hashable type."""
+    try:
+        return _cached_plain(declared)
+    except TypeError:
+        # An unhashable annotation, such as `Annotated[int, []]`.
+        return plain_class(declared)
+
+
+class _Deep:
+    """The deep rules' expansion (decision 12d), with numeric widening or without.
+
+    A standard collection, one whose value class is from `builtins` or
+    `collections`, asks about every item: each item of a `list`, `set`,
+    `tuple[T, ...]` or other iterable, each key and value of a mapping, and a
+    nested collection's items in turn. An item type that is flat, a plain class
+    or a fixed tuple of them, is checked in a loop, with no question per item.
+    Everything else, an iterator included, which is never read (Q43), answers as
+    the shallow rules.
+    """
+
+    __slots__ = ("_matchers", "_shallow", "_widen")
+
+    def __init__(self, *, widen: bool) -> None:
+        """The deep rules, widening numbers too with `widen`."""
+        self._widen = widen
+        self._shallow = _widening(_expand) if widen else _expand
+        # Each flat item type's check, by type, made on first use.
+        self._matchers: dict[object, Matcher | None] = {}
+
+    def _plain(self, declared: object) -> Matcher | None:
+        """The check of a flat item type, made once, or `None` for another type."""
+        try:
+            return self._matchers[declared]
+        except KeyError:
+            pass
+        except TypeError:
+            # An unhashable annotation, such as `Annotated[int, []]`.
+            return self._made(declared)
+        made = self._matchers[declared] = self._made(declared)
+        return made
+
+    def _made(self, declared: object) -> Matcher | None:
+        """`isinstance` for a plain class; each item's, for a fixed tuple of them."""
+        if (classes := plain_class(declared)) is not None:
+            return _plain_matcher(classes, widen=self._widen)
+        declared = _strip(declared)
+        if typing.get_origin(declared) is not tuple:
+            return None
+        items = _fixed_items(declared)
+        if items is None or any(plain_class(item) is None for item in items):
+            return None
+        return _tuple_matcher(items, Rules(deep=True, widen=self._widen))
+
+    def _all_of(
+        self, element: object, items: collections.abc.Iterable[object]
+    ) -> _Expanded:
+        if (matches := self._plain(element)) is not None:
+            return all(map(matches, items))
+        return _Group(
+            any_=False, questions=[(element, item) for item in items], descends=True
+        )
+
+    def _mapping(
+        self, key: object, item: object, value: collections.abc.Mapping[object, object]
+    ) -> _Expanded:
+        keys, items = self._plain(key), self._plain(item)
+        if keys is not None and items is not None:
+            return all(keys(k) and items(v) for k, v in value.items())
+        questions: list[tuple[object, object]] = []
+        for k, v in value.items():
+            questions.extend(((key, k), (item, v)))
+        return _Group(any_=False, questions=questions, descends=True)
+
+    def _fixed(self, items: tuple[object, ...], value: tuple[object, ...]) -> _Expanded:
+        if len(value) != len(items):
+            return False
+        checks = [self._plain(item) for item in items]
+        if all(check is not None for check in checks):
+            return all(
+                typing.cast("Matcher", check)(item)
+                for check, item in zip(checks, value, strict=True)
+            )
+        return _Group(
+            any_=False, questions=list(zip(items, value, strict=True)), descends=True
+        )
+
+    def _items(self, declared: object, origin: type, value: object) -> _Expanded:
+        """A collection of a kind `origin` takes: the questions about its items."""
+        args = _element_args(declared)
+        if not args:
+            return True
+        if (
+            len(args) == 2  # noqa: PLR2004  # a key and a value type
+            and issubclass(origin, collections.abc.Mapping)
+            and isinstance(value, collections.abc.Mapping)
+        ):
+            pairs = typing.cast("collections.abc.Mapping[object, object]", value)
+            return self._mapping(args[0], args[1], pairs)
+        if len(args) == 1:
+            items = typing.cast("collections.abc.Iterable[object]", value)
+            return self._all_of(args[0], items)
+        return True
+
+    def __call__(self, declared: object, value: object) -> _Expanded:
+        """Whether `value` fits `declared`, or the questions it depends on."""
+        declared = _strip(declared)
+        origin = typing.get_origin(declared)
+        if (
+            not isinstance(origin, type)
+            or _is_union(declared)
+            or isinstance(value, collections.abc.Iterator)
+            or not _reads_items(origin)
+            or not _reads_value(value)
+        ):
+            return self._shallow(declared, value)
+        if origin is tuple:
+            if not isinstance(value, tuple):
+                return False
+            if (items := _fixed_items(declared)) is not None:
+                return self._fixed(items, typing.cast("tuple[object, ...]", value))
+            if typing.get_args(declared)[1:] != (...,):
+                # A bare `Tuple`, or one with an unpacked part: shallow.
+                return self._shallow(declared, value)
+        if not _kind_fits(origin, value):
+            return False
+        return self._items(declared, origin, value)
+
+
+@functools.cache
+def _expander(rules: Rules) -> _Expand:
+    """The expansion `rules` check by: `_expand` itself for the default rules."""
+    if rules.deep:
+        return _Deep(widen=rules.widen)
+    return _widening(_expand) if rules.widen else _expand
+
+
+def value_matches(
+    declared: object, value: object, *, deep: bool = False, widen: bool = False
+) -> bool:
     """Whether `value`, supplied as an input or override, fits the `declared` type.
 
-    `None` fits every declaration, as in Hamilton. A parameterized collection is
-    checked by its kind and, for a sequence or set, by its first element only;
-    a value whose class is exactly the declared one (a `list` for `list[int]`)
-    is checked by its class alone, its items unread.
+    This is the check `execute` runs on every input, override and extracted field.
+
+    - **`None`** fits only a type that admits it (Q79): `Optional[T]`, `T | None`,
+      `object`, `Any`, `None` itself, `Literal[None]`, and a `TypeVar` that is
+      free or whose bound or one of whose constraints admits it. Hamilton passes
+      `None` for every type.
+    - **A class** fits by `isinstance`, so a subclass fits; `bool` fits `int`, and
+      `int` does not fit `float`.
+    - **Unions, `Literal`, `Annotated`, `NewType` and PEP 695 aliases** answer per
+      member, by value, as the bare type, as the supertype and as the aliased type.
+    - **A `TypeVar`** takes every value but `None`, which it takes as above.
+    - **A fixed-length tuple** (`tuple[int, str]`) takes a tuple of that length whose
+      items each fit, nested tuples included (Q80); `tuple[()]` takes only `()`.
+    - **A parameterized collection** is otherwise checked by its kind and, for a
+      sequence or set, by its first element only; a value whose class is exactly
+      the declared one (a `list` for `list[int]`, a `tuple` for `tuple[int, ...]`)
+      is checked by its class alone, its items unread. Other `collections.abc`
+      generics are checked by kind, and an iterator is never read.
+    - **An annotation that did not resolve at build** (`Unresolved`, Q81) fits no
+      value: checking one raises `UnresolvedError`, a `TypeError`.
+
+    `deep` and `widen` apply the opt-in rules of `Builder.with_deep_type_checks()`
+    and `Builder.with_numeric_widening()`: every item of a standard collection is
+    checked, nested ones too, and an `int` or numpy integer or floating scalar
+    fits `float`, and a numpy integer scalar `int`. A cycle no check can see,
+    past `WALK_BUDGET` groups open about one value, raises `TypeError`.
     """
-    return value is None or _fits(declared, value)
+    if not deep and not widen:
+        return _fits(declared, value)
+    return _walk(declared, value, _expander(Rules(deep=deep, widen=widen)))
 
 
-def plain_class(declared: object) -> type | None:
-    """The class `isinstance` checks `declared` against, or `None` when it is no class.
+type Classes = type | tuple[type, ...]
+"""What `isinstance` checks against: one class, or a tuple of them for a union."""
 
-    For a returned class, `value_matches(declared, value)` is `value is None or
-    isinstance(value, cls)` for every value, so a check compiled once per plan can
-    skip the general walk. `Any`, a generic, and a class of any metaclass but
-    `type` and `abc.ABCMeta`, protocols included (Q42), are not plain classes.
-    """
+type Matcher = collections.abc.Callable[[object], bool]
+"""One type's check, worked out beforehand: `value_matches`'s answer for a value."""
+
+
+def _one_class(declared: object) -> type | None:
+    """The class `isinstance` checks `declared` against, or `None` for no class."""
     if type(declared) is type:
         # A class of the plain metaclass: no alias, no generic, no protocol.
         return declared
     declared = _strip(declared)
+    if declared is None:
+        return types.NoneType
     if declared is Any or not isinstance(declared, type):
         return None
     if typing.get_origin(declared) is not None:
@@ -218,6 +1103,175 @@ def plain_class(declared: object) -> type | None:
     if type(declared) not in {type, abc.ABCMeta}:
         return None
     return declared
+
+
+def plain_class(declared: object) -> Classes | None:
+    """What `isinstance` checks `declared` against, or `None` when that is no check.
+
+    For a returned class or tuple of classes, `value_matches(declared, value)` is
+    `isinstance(value, cls)` for every value, `None` included, so a check compiled
+    once per plan can skip the general walk. A union of plain classes, `int | None`
+    among them, is the tuple of its members. `Any`, a generic, and a class of any
+    metaclass but `type` and `abc.ABCMeta`, protocols included (Q42), are not plain
+    classes, and nor is a union with such a member.
+    """
+    if type(declared) is type:
+        return declared
+    declared = _strip(declared)
+    if not _is_union(declared):
+        return _one_class(declared)
+    members: list[type] = []
+    for member in typing.get_args(declared):
+        if (cls := _one_class(member)) is None:
+            return None
+        members.append(cls)
+    return tuple(members)
+
+
+def _isinstance_of(classes: Classes) -> Matcher:
+    return lambda value: isinstance(value, classes)
+
+
+def _item_matcher(declared: object, rules: Rules = SHALLOW) -> Matcher:
+    """`isinstance` against a plain class, else the general walk, for one item type.
+
+    A nested fixed tuple takes the general walk, which reads nested tuples with a
+    stack, so preparing a check never recurses over an annotation's depth.
+    """
+    if (classes := plain_class(declared)) is not None:
+        return _plain_matcher(classes, widen=rules.widen)
+    if rules == SHALLOW:
+        return functools.partial(_fits, declared)
+    return functools.partial(_walk, declared, expand=_expander(rules))
+
+
+def _tuple_matcher(items: tuple[object, ...], rules: Rules = SHALLOW) -> Matcher:
+    """The check of a fixed-length tuple of `items`, each item's check made once."""
+    checks = tuple(_item_matcher(item, rules) for item in items)
+    size = len(checks)
+
+    def matches(value: object) -> bool:
+        if not isinstance(value, tuple) or len(value) != size:
+            return False
+        for check, item in zip(
+            checks, typing.cast("tuple[object, ...]", value), strict=True
+        ):
+            if not check(item):
+                return False
+        return True
+
+    return matches
+
+
+def check_of(
+    declared: object, rules: Rules = SHALLOW
+) -> tuple[Classes | None, Matcher]:
+    """`declared`'s plain classes (see `plain_class`), and its check, made once.
+
+    The check answers as `value_matches(declared, value)`, under `rules`, for
+    every value. A plan's checks are made when it is prepared, so a run reads no
+    annotation: a plain class or union of them is one `isinstance`, a fixed tuple
+    checks its length and each item's own check, and, under the default rules, a
+    generic takes a value of exactly its class at once. Any other type, or value,
+    takes the general walk.
+
+    The classes are `None` when `rules` widen them (an `int` for `float`), so a
+    caller checking by `isinstance` alone uses the check instead.
+    """
+    if (classes := plain_class(declared)) is not None:
+        if rules.widen and _widens(classes) is not None:
+            return None, _plain_matcher(classes, widen=True)
+        return classes, _isinstance_of(classes)
+    declared = _strip(declared)
+    origin = typing.get_origin(declared)
+    if origin is tuple and (items := _fixed_items(declared)) is not None:
+        return None, _tuple_matcher(items, rules)
+    if rules != SHALLOW:
+        return None, _ruled_matcher(declared, origin, rules)
+    if isinstance(origin, type) and not _is_union(declared):
+        # The general walk's first answer for a generic: its exact class fits. Not
+        # for a union, whose origin `types.UnionType` is a class too: a value of
+        # it, such as `int | str`, is no member of the union.
+        exact = origin
+
+        def matches(value: object) -> bool:
+            return type(value) is exact or _fits(declared, value)
+
+        return None, matches
+    return None, functools.partial(_fits, declared)
+
+
+def _ruled_matcher(declared: object, origin: object, rules: Rules) -> Matcher:
+    """`check_of`'s check of a type that is no plain class or fixed tuple, by `rules`.
+
+    Deep checks never take a value by its class alone: they read a `list`'s
+    items too. Widening alone keeps the shortcut, as it changes no collection.
+    """
+    walk = functools.partial(_walk, declared, expand=_expander(rules))
+    if not isinstance(origin, type) or _is_union(declared):
+        return walk
+    exact = origin
+    if not rules.deep:
+        return lambda value: type(value) is exact or walk(value)
+    if (items := _deep_items(declared, origin, rules)) is None:
+        return walk
+    # A value of exactly the class: its items checked in a loop, with no walk.
+    return lambda value: items(value) if type(value) is exact else walk(value)
+
+
+def _deep_items(declared: object, origin: type, rules: Rules) -> Matcher | None:
+    """For a collection of plain-class items, the check of a value of its class.
+
+    `list[int]`, `tuple[int, ...]` and `dict[str, int]` check each item, or key
+    and value, by `isinstance`; `None` for another type, which the walk checks.
+    """
+    args = _element_args(declared)
+    if not _reads_items(origin) or (origin is tuple and len(args) != 1):
+        return None
+    plain = [_item_classes(arg) for arg in args]
+    if not args or any(classes is None for classes in plain):
+        return None
+    checks = [
+        _plain_matcher(typing.cast("Classes", classes), widen=rules.widen)
+        for classes in plain
+    ]
+    if len(checks) == 1:
+        item = checks[0]
+        return lambda value: all(
+            map(item, typing.cast("collections.abc.Iterable[object]", value))
+        )
+    if len(checks) == 2 and issubclass(origin, collections.abc.Mapping):  # noqa: PLR2004  # a key and a value type
+        key, item = checks
+
+        def mapping(value: object) -> bool:
+            pairs = typing.cast("collections.abc.Mapping[object, object]", value)
+            return all(key(k) and item(v) for k, v in pairs.items())
+
+        return mapping
+    return None
+
+
+def checks_of(
+    declared_types: collections.abc.Iterable[object], rules: Rules = SHALLOW
+) -> list[tuple[Classes | None, Matcher]]:
+    """`check_of` under `rules` for each type, made once for each distinct type.
+
+    The checks made are kept for this call only, so checks under other rules are
+    never mixed up with them.
+    """
+    make = check_of if rules == SHALLOW else functools.partial(check_of, rules=rules)
+    made: dict[object, tuple[Classes | None, Matcher]] = {}
+    checks: list[tuple[Classes | None, Matcher]] = []
+    for declared in declared_types:
+        try:
+            check = made[declared]
+        except KeyError:
+            check = made[declared] = make(declared)
+        except TypeError:
+            # An unhashable annotation, such as `Annotated[int, []]`: made each time.
+            check = make(declared)
+        checks.append(check)
+    return checks
 
 
 def _subclass(produced: object, required: object) -> bool:
@@ -247,33 +1301,42 @@ def _generic_matches(produced: object, required: object) -> bool:
     )
 
 
-def type_matches(produced: object, required: object) -> bool:  # noqa: PLR0911  # one return per form
-    """Whether a node returning `produced` may feed a parameter annotated `required`.
+def type_matches(produced: object, expected: object) -> bool:  # noqa: PLR0911  # one return per form
+    """Whether a node returning `produced` may feed a parameter annotated `expected`.
 
-    An `Any` producer or parameter matches anything; a `TypeVar` matches only
-    itself; a union producer matches when every member does, and a union parameter
-    when one member does. A `Literal` producer answers as its values' types and a
-    `NewType` as its supertype. Generics match by kind, and by their arguments
-    when both sides name them.
+    This is the edge check `build` runs on every parameter another node feeds.
+
+    - **Same type or a subclass** matches; `bool` feeds `int`, and `int` does not
+      feed `float`.
+    - **`Any`** on either side matches anything; a **`TypeVar`** matches only itself.
+    - **A union producer** matches when every member does, so `int | None` feeds
+      `object`; **a union parameter** when one member does, so `int` feeds
+      `int | None`. `None` is a type like any other here: `int | None` does not feed
+      `int`.
+    - **A `Literal` producer** answers as its values' types, **a `NewType`** as its
+      supertype, and `Annotated` and PEP 695 aliases as the type they name.
+    - **Generics** match by kind, and by their arguments when both sides name them;
+      `tuple[T, ...]` feeds `Sequence[T]`, and `tuple[int, str]` feeds
+      `tuple[int, str]` and bare `tuple`, not `tuple[int, ...]`.
     """
-    if produced == required:
+    if produced == expected:
         return True
     # Stripped first, so `Annotated[Any, ...]` and an alias of `Any` answer as `Any`.
-    produced, required = _strip(produced), _strip(required)
+    produced, expected = _strip(produced), _strip(expected)
     if produced is Any:
         return True
-    if isinstance(produced, TypeVar) or isinstance(required, TypeVar):
-        return produced == required
-    if required is Any or produced == required:
+    if isinstance(produced, TypeVar) or isinstance(expected, TypeVar):
+        return produced == expected
+    if expected is Any or produced == expected:
         return True
     if isinstance(produced, NewType):
-        return type_matches(produced.__supertype__, required)
+        return type_matches(produced.__supertype__, expected)
     if typing.get_origin(produced) is Literal:
-        return all(type_matches(type(v), required) for v in typing.get_args(produced))
+        return all(type_matches(type(v), expected) for v in typing.get_args(produced))
     if _is_union(produced):
-        return all(type_matches(m, required) for m in typing.get_args(produced))
-    if _is_union(required):
-        return any(type_matches(produced, m) for m in typing.get_args(required))
-    if isinstance(required, NewType) or typing.get_origin(required) is Literal:
+        return all(type_matches(m, expected) for m in typing.get_args(produced))
+    if _is_union(expected):
+        return any(type_matches(produced, m) for m in typing.get_args(expected))
+    if isinstance(expected, NewType) or typing.get_origin(expected) is Literal:
         return False
-    return _generic_matches(produced, required)
+    return _generic_matches(produced, expected)

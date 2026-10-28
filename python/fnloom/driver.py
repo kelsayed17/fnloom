@@ -5,28 +5,52 @@ import importlib
 import inspect
 import sys
 import threading
+import typing
 
 # Imported for real, not under TYPE_CHECKING: the public signatures annotate with
 # them, and `inspect.signature` resolves those annotations at run time.
 from collections.abc import Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from types import MappingProxyType, ModuleType
-from typing import Any, Literal, Protocol, override
+from typing import Any, Literal, NoReturn, Protocol, TypedDict, Unpack, override
 
 from fnloom import _async, _core, _types
 from fnloom._caching import Cache, CacheOutcome, CacheRun
 from fnloom._decorators import Source
-from fnloom._scan import NodeDef, core_inputs, resolve, scan
+from fnloom._defaults import default_problems
+from fnloom._extract import is_generated
+from fnloom._functions import (
+    FunctionReference,
+    FunctionSource,
+    NodeSpec,
+    checked_functions,
+    from_references,
+    function_of,
+    references,
+    unimportable,
+)
+from fnloom._namespaces import checked_namespace
+from fnloom._requests import ABSENT, requested, suggest
+from fnloom._requests import output_names as _requested_names
+from fnloom._scan import LeftOut, NodeDef, core_inputs, resolve, scan
 from fnloom._stores import CacheStore
-from fnloom._view import NodeView, NodeViews, node_views
+from fnloom._view import (
+    InputView,
+    NodeView,
+    NodeViews,
+    node_views,
+    output_names,
+    topological,
+)
 
 type _PlanKey = tuple[tuple[str, ...], frozenset[str], frozenset[str]]
 # A request's final_vars (a list or tuple, copied), its input and override names,
 # and its plan.
 type _LastRequest = tuple[Sequence[str], frozenset[str], frozenset[str], PreparedPlan]
-# A checked name, its declared type, and the class `isinstance` checks it against
-# when the type is a plain class (`None` for any other type).
-type _Check = tuple[str, object, type | None]
+# A checked name, its declared type, the classes `isinstance` checks it against
+# when the type is a plain class or a union of them (`None` for any other type),
+# and the type's check, made when the plan is prepared (`_types.check_of`).
+type _Check = tuple[str, object, _types.Classes | None, _types.Matcher]
 
 # How many compiled plans a driver keeps; the least recently used one goes first.
 PLAN_CACHE_SIZE = 128
@@ -57,6 +81,10 @@ class _GraphLike(Protocol):
         """Returns the nodes that depend on the named nodes."""
         ...
 
+    def between(self, a: str, b: str) -> list[str]:
+        """Returns the nodes strictly between `a` and `b`, endpoints excluded."""
+        ...
+
     def prepare(
         self, outputs: list[str], inputs: list[str], overrides: list[str]
     ) -> _core.Plan:
@@ -69,29 +97,22 @@ class _Request:
 
     @staticmethod
     def check(
-        final_vars: Sequence[str],
+        final_vars: Sequence[str | Callable[..., object]],
+        views: NodeViews,
         inputs: Mapping[str, object] | None,
         overrides: Mapping[str, object] | None,
+        unmatched: Mapping[str, str],
     ) -> _PlanKey:
-        """The outputs, copied, and the input and override names of a request.
+        """The outputs as names, and the input and override names of a request.
 
-        `TypeError` for a bare `str`, or an output that is not a `str` (Q6). The
-        names are checked against the graph when the plan is compiled.
+        A function becomes its node's name (Q30). `TypeError` for a bare `str`
+        (Q6), or an output that is neither a name nor a function. The names are
+        checked against the graph when the plan is compiled, unless a function
+        in `final_vars` is refused: `unmatched`, each output no variant gave by
+        its line, then lets that error name every other culprit too.
         """
-        return (_check_final_vars(final_vars), _names(inputs), _names(overrides))
-
-
-def _check_final_vars(final_vars: Sequence[str]) -> tuple[str, ...]:
-    if isinstance(final_vars, str):
-        msg = "final_vars must be a sequence of names, not a single str"
-        raise TypeError(msg)
-    # Copied before checking, so a one-shot iterator is read once and not exhausted.
-    names = tuple(final_vars)
-    for item in names:
-        if not isinstance(item, str):
-            msg = f"final_vars items must be str, got {type(item).__name__}"
-            raise TypeError(msg)
-    return names
+        names = _requested_names(final_vars, views, unmatched)
+        return (names, _names(inputs), _names(overrides))
 
 
 # No names, made once: calling `frozenset[str]` costs more than the check it serves.
@@ -131,23 +152,66 @@ def _difference(kind: str, prepared: frozenset[str], given: frozenset[str]) -> s
     return f"{kind} {sorted(given)} differ from the prepared {sorted(prepared)}"
 
 
+class _UnresolvedLine(str):
+    """A mismatch line for a value checked against an `Unresolved` type (Q81)."""
+
+    __slots__ = ()
+
+
+def _raise_mismatches(lines: list[str]) -> NoReturn:
+    """Raises every mismatch line, sorted, in one error.
+
+    A `TypeError` when some value was checked against an annotation that did not
+    resolve (Q81), else a `ValueError`.
+    """
+    msg = "\n".join(sorted(lines))
+    if any(isinstance(line, _UnresolvedLine) for line in lines):
+        raise TypeError(msg)
+    raise ValueError(msg)
+
+
 def _mismatches(checks: Sequence[_Check], values: Mapping[str, object]) -> list[str]:
-    """A line for each checked value that does not fit its declared type."""
+    """A line for each checked value that does not fit its declared type.
+
+    A value checked against an annotation that did not resolve gets an
+    `_UnresolvedLine` saying to import it at run time (Q81).
+    """
     found: list[str] = []
-    for name, declared, cls in checks:
+    for name, declared, cls, matches in checks:
         value = values[name]
-        if value is None:
-            continue
+        # A plain class answers for `None` too: `isinstance(None, int)` is False,
+        # and only `object`, `NoneType` and a union with it take it (Q79).
         if cls is not None:
             if isinstance(value, cls):
                 continue
-        elif _types.value_matches(declared, value):
-            continue
+        else:
+            try:
+                if matches(value):
+                    continue
+            except _types.UnresolvedError as error:
+                found.append(_UnresolvedLine(f"{name}: {error}"))
+                continue
         found.append(
             f"{name}: expected {inspect.formatannotation(declared)}, "
-            f"got {inspect.formatannotation(type(value))}"
+            f"got {inspect.formatannotation(type(value))}{_inside(declared, value)}"
         )
     return found
+
+
+def _inside(declared: object, value: object) -> str:
+    """What failed when `value`'s class is `declared`'s own: its length, or an item.
+
+    Empty when the class itself does not fit, which the line already says.
+    """
+    origin = typing.get_origin(declared)
+    if not isinstance(origin, type) or not isinstance(value, origin):
+        return ""
+    if origin is tuple and isinstance(value, tuple):
+        args = typing.get_args(declared)
+        variadic = len(args) == 2 and args[1] is Ellipsis  # noqa: PLR2004  # `tuple[X, ...]`
+        if not variadic and len(value) != len(args):
+            return " (its length does not fit)"
+    return " (an item does not fit)"
 
 
 def _edge_mismatches(functions: Mapping[str, NodeView]) -> list[str]:
@@ -164,12 +228,37 @@ def _edge_mismatches(functions: Mapping[str, NodeView]) -> list[str]:
             upstream = functions.get(p.binding.name)
             if upstream is None or _types.type_matches(upstream.type, p.annotation):
                 continue
-            found.append(
-                f"{view.name}.{p.name} requires "
+            shown = p.name if p.slot is None else f"{p.name}[{p.slot!r}]"
+            line = (
+                f"{view.name}.{shown} requires "
                 f"{inspect.formatannotation(p.annotation)} but {upstream.name} "
                 f"returns {inspect.formatannotation(upstream.type)}"
             )
+            if isinstance(p.annotation, _types.Unresolved) or isinstance(
+                upstream.type, _types.Unresolved
+            ):
+                # An unresolved annotation matches only the same text and `Any`.
+                line += "; import what the unresolved annotation names at run time"
+            found.append(line)
     return sorted(found)
+
+
+def _input_views(views: NodeViews) -> dict[str, InputView]:
+    """Every input of `views`, by name in name order, with its consumers."""
+    required: dict[str, bool] = {}
+    consumers: dict[str, list[str]] = {}
+    for view in views.functions.values():
+        for name, needed in core_inputs(view.params):
+            if name in views.functions:
+                continue
+            required[name] = required.get(name, False) or needed
+            consumers.setdefault(name, []).append(view.name)
+    return {
+        name: InputView(
+            name, views.type_of(name), required[name], tuple(sorted(consumers[name]))
+        )
+        for name in sorted(consumers)
+    }
 
 
 class PreparedPlan:
@@ -194,8 +283,9 @@ class PreparedPlan:
         `plan` is the native plan, or the `CacheRun` over it when the driver has
         a cache: either is called with values already checked. `checks` are the
         input and the override checks each run applies: the supplied names whose
-        values are checked, each with its declared type and, for a plain class,
-        the class `isinstance` checks it against.
+        values are checked, each with its declared type, the classes `isinstance`
+        checks it against when it is a plain class or a union of them, and its
+        check, worked out when the plan was prepared.
         """
         self._plan = plan
         self._outputs = tuple(dict.fromkeys(outputs))
@@ -237,8 +327,9 @@ class PreparedPlan:
 
         `ValueError` too, listing each one, when an input the plan reads or an
         override does not fit its node's type (unless the driver was built
-        without input type checks). The result holds each requested output once,
-        in the order first requested.
+        without input type checks); a `TypeError` instead when one of them is
+        checked against an annotation that did not resolve at build (Q81). The
+        result holds each requested output once, in the order first requested.
         """
         given_inputs, given_overrides = self._checked(inputs, overrides)
         values = self._plan.run(given_inputs, given_overrides)
@@ -285,7 +376,7 @@ class PreparedPlan:
             mismatches = _mismatches(self._input_checks, given_inputs)
             mismatches += _mismatches(self._override_checks, given_overrides)
             if mismatches:
-                raise ValueError("\n".join(sorted(mismatches)))
+                _raise_mismatches(mismatches)
         return given_inputs, given_overrides
 
 
@@ -304,21 +395,36 @@ class Driver:
     pickle.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913  # keyword-only switches, one per builder setting
         self,
         graph: _GraphLike,
         nodes: Mapping[str, NodeView] | None = None,
         *,
         check_inputs: bool = True,
+        check_overrides: bool = True,
+        strict_overrides: bool = False,
         cache: Cache | None = None,
         config: Mapping[str, object] | None = None,
+        rules: _types.Rules = _types.SHALLOW,
     ) -> None:
         """Wraps a native graph; `Builder` is the way to make one from modules.
 
         `config` is the config the graph was built with, kept read-only.
+        `check_overrides` is whether overrides are type checked too (it has no
+        effect without `check_inputs`), and `strict_overrides` refuses an override
+        of an input that is not supplied (Q75). `rules` are the opt-in rules the
+        input and override checks follow: deep checks and numeric widening.
         """
         self._graph = graph
+        # The modules it was built from, each once: `Builder` sets them.
+        self._modules: tuple[ModuleType, ...] = ()
+        # Made on first use and kept: a graph with many inputs pays only if asked.
+        self._inputs: Mapping[str, InputView] | None = None
+        self._outputs: list[str] | None = None
         self._check_inputs = check_inputs
+        self._check_overrides = check_overrides
+        self._strict_overrides = strict_overrides
+        self._rules = rules
         self._cache = cache
         self._config = (
             config
@@ -327,6 +433,8 @@ class Driver:
         )
         # Each node no `@config.when*` variant gave, with why: see `prepare`.
         self._unmatched: Mapping[str, str] = {}
+        # Each function `@exclude` or `__all__` left out, with why: see `_hints`.
+        self._left_out: Mapping[str, Sequence[str]] = {}
         self._nodes = (
             nodes if isinstance(nodes, NodeViews) else NodeViews(nodes or {}, {})
         )
@@ -350,6 +458,25 @@ class Driver:
             raise TypeError(msg)
         return Builder.build, (self._builder,)
 
+    def rebuild(self) -> Driver:
+        """A new driver, built again from this driver's builder (Q83).
+
+        The same as `build` on that builder: its modules, functions, namespaces,
+        config, cache store and every setting. A module is scanned again, so after
+        `importlib.reload` the new driver runs the edited code, and its code
+        versions are read again, so a shared store misses on an edited node. This
+        driver keeps the code it was built with. A function given to
+        `with_functions` is the object given, so give a reloaded one to a new
+        builder. `TypeError` for a driver made from a native graph.
+        """
+        if self._builder is None:
+            msg = (
+                "cannot rebuild a Driver made from a native graph; "
+                "make it with Builder or build to rebuild it"
+            )
+            raise TypeError(msg)
+        return self._builder.build()
+
     def __copy__(self) -> Driver:
         """A driver over the same graph, store and settings, with no compiled plans.
 
@@ -360,11 +487,16 @@ class Driver:
             self._graph,
             self._nodes,
             check_inputs=self._check_inputs,
+            check_overrides=self._check_overrides,
+            strict_overrides=self._strict_overrides,
             cache=self._cache,
             config=self._config,
+            rules=self._rules,
         )
+        copied._modules = self._modules
         copied._builder = self._builder
         copied._unmatched = self._unmatched
+        copied._left_out = self._left_out
         return copied
 
     @property
@@ -381,12 +513,15 @@ class Driver:
 
     def prepare(
         self,
-        final_vars: Sequence[str],
+        final_vars: Sequence[str | Callable[..., object]],
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
     ) -> PreparedPlan:
-        """Returns the plan for this request shape, compiling it on first use."""
+        """Returns the plan for this request shape, compiling it on first use.
+
+        A function in `final_vars` means its node (Q30); see `output_names`.
+        """
         last = self._last
         if (
             last is not None
@@ -398,7 +533,9 @@ class Driver:
             and _keys(overrides) == last[2]
         ):
             return last[3]
-        key = _Request.check(final_vars, inputs, overrides)
+        key = _Request.check(
+            final_vars, self._nodes, inputs, overrides, self._unmatched
+        )
         with self._plans_lock:
             prepared = self._plans.pop(key, None)
             if prepared is None:
@@ -408,9 +545,9 @@ class Driver:
                 del self._plans[next(iter(self._plans))]
             # A list is copied, so a list changed after this call is not a repeat.
             if type(final_vars) is list:
-                self._last = (list(final_vars), key[1], key[2], prepared)
+                self._last = (list(key[0]), key[1], key[2], prepared)
             elif type(final_vars) is tuple:
-                self._last = (final_vars, key[1], key[2], prepared)
+                self._last = (key[0], key[1], key[2], prepared)
         return prepared
 
     def _compile(self, key: _PlanKey) -> PreparedPlan:
@@ -424,18 +561,21 @@ class Driver:
             if unknown := sorted(
                 {n for n in outputs if n not in self._unmatched and n not in known}
             ):
-                lines.append(f"unknown outputs: {', '.join(map(repr, unknown))}")
+                lines.append(_unknown("outputs", unknown, self._graph.node_names()))
             raise ValueError("\n".join(lines))
         try:
             plan = self._graph.prepare(
                 list(outputs), sorted(input_names), sorted(override_names)
             )
         except ValueError as error:
-            hint = _config_hint(str(error), self._config)
-            if hint is None:
+            msg = "\n".join(self._explained(str(error), key))
+            if msg == str(error):
                 raise
-            msg = f"{error}\n{hint}"
             raise ValueError(msg) from None
+        if self._strict_overrides and (
+            refused := self._unsupplied_overrides(plan, input_names, override_names)
+        ):
+            raise ValueError(_strict(refused))
         checks = self._checks(plan, override_names) if self._check_inputs else ((), ())
         runnable: _Runnable = plan
         if self._cache is not None:
@@ -454,21 +594,238 @@ class Driver:
         Only an input a step reads is checked, as Hamilton; every override is.
         """
         read = sorted(node for node, action in plan.steps() if action == "use_input")
-        return self._declared(read), self._declared(sorted(override_names))
+        overrides = override_names if self._check_overrides else ()
+        return self._declared(read), self._declared(sorted(overrides))
+
+    def _unsupplied_overrides(
+        self,
+        plan: _core.Plan,
+        input_names: AbstractSet[str],
+        override_names: AbstractSet[str],
+    ) -> dict[str, list[str]]:
+        """Each overridden input the request does not supply, with who needs it (Q75).
+
+        Hamilton's rule: an override never supplies an input, so one naming an
+        input is refused when a node the plan computes requires that input and it
+        is not in `input_names`. An input nothing computed requires, such as an
+        output itself, is not refused.
+        """
+        functions = self._nodes.functions
+        candidates = {
+            n for n in override_names if n in self._nodes and n not in functions
+        } - input_names
+        if not candidates:
+            return {}
+        readers: dict[str, list[str]] = {}
+        for node, action in plan.steps():
+            view = functions.get(node)
+            if action != "compute" or view is None:
+                continue
+            for name, needed in core_inputs(view.params):
+                if needed and name in candidates:
+                    readers.setdefault(name, []).append(node)
+        return {name: sorted(readers[name]) for name in sorted(readers)}
 
     def _declared(self, names: list[str]) -> tuple[_Check, ...]:
-        """Each of `names` with its node's type; a name with no view goes unchecked."""
+        """Each of `names` with its node's type; a name with no view goes unchecked.
+
+        Each distinct type's check is made once (`_types.checks_of`), here, when a
+        plan is prepared.
+        """
         # By type, not view: the views of many inputs are never made at all.
+        typed = [(n, self._nodes.type_of(n)) for n in names if n in self._nodes]
+        checks = _types.checks_of((declared for _, declared in typed), self._rules)
         return tuple(
-            (n, declared, _types.plain_class(declared))
-            for n in names
-            if n in self._nodes
-            for declared in (self._nodes.type_of(n),)
+            (n, declared, classes, matches)
+            for (n, declared), (classes, matches) in zip(typed, checks, strict=True)
         )
+
+    def _explained(self, message: str, key: _PlanKey) -> list[str]:
+        """The lines of the core's error `message` for request `key`, with suggestions.
+
+        The core's message only says which kind of problem it is: the names are
+        worked out here from the request and the views, and the line is rebuilt in
+        the core's format, each unknown name with the closest node (Q71). When the
+        rebuilt line, without suggestions, is not the core's, the core's is kept.
+        A missing input gets a line for each config key it names (Q56); `execute`
+        never suggests one, since a supplied name that is no input is raised first.
+        """
+        for kind in ("outputs", "inputs", "overrides"):
+            if message.startswith(f"unknown {kind}: "):
+                names = self._unknown_names(kind, key)
+                if names and _unknown(kind, names, ()) == message:
+                    return [_unknown(kind, names, list(self._nodes))]
+                return [message]
+        return [message, *self._hints(message)]
+
+    def _hints(self, line: str) -> list[str]:
+        """The lines explaining a missing input in `line`: config keys, left out."""
+        hints: list[str] = []
+        if (hint := _config_hint(line, self._config)) is not None:
+            hints.append(hint)
+        if line.startswith(_MISSING):
+            hints += _left_out_hints(line, self._left_out)
+        return hints
+
+    def _unknown_names(self, kind: str, key: _PlanKey) -> list[str]:
+        """The names of request `key` of `kind` the graph lacks, sorted.
+
+        An output or override is unknown when it is no node; an input when it is
+        no input of the graph.
+        """
+        outputs, input_names, override_names = key
+        if kind == "inputs":
+            functions = self._nodes.functions
+            return sorted(
+                n for n in input_names if n not in self._nodes or n in functions
+            )
+        names = outputs if kind == "outputs" else override_names
+        return sorted({n for n in names if n not in self._nodes})
+
+    def _missing_entries(
+        self, plan: _core.Plan, outputs: Sequence[str], supplied: AbstractSet[str]
+    ) -> list[tuple[str, str]]:
+        """Each input missing from a request, as the core lists it, by name.
+
+        `plan` was compiled with every input of the graph supplied: an input it
+        reads that the request does not supply is missing when it was requested,
+        or a computed node of the plan reads it by a required edge, as the core's
+        `'x' (requested as an output, needed by 'a', 'b')`.
+        """
+        steps = plan.steps()
+        functions = self._nodes.functions
+        readers: dict[str, list[str]] = {}
+        for node, action in steps:
+            view = functions.get(node)
+            if action != "compute" or view is None:
+                continue
+            for name, needed in core_inputs(view.params):
+                if needed:
+                    readers.setdefault(name, []).append(node)
+        wanted = set(outputs)
+        entries: list[tuple[str, str]] = []
+        unsupplied = (n for n, a in steps if a == "use_input" and n not in supplied)
+        for name in sorted(unsupplied):
+            reasons = ["requested as an output"] if name in wanted else []
+            if consumers := sorted(readers.get(name, ())):
+                reasons.append(f"needed by {', '.join(f"'{c}'" for c in consumers)}")
+            if reasons:
+                entries.append((name, f"'{name}' ({', '.join(reasons)})"))
+        return entries
+
+    def validate(
+        self,
+        final_vars: Sequence[str | Callable[..., object]],
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+    ) -> list[str]:
+        """Every problem `execute` would raise for this request, one line each (Q71).
+
+        Runs nothing, and keeps no plan. The lines are sorted, and empty when the
+        request is valid; each is the line `execute` raises for that problem on
+        its own. They cover functions in `final_vars` no node comes from (Q30);
+        unknown outputs, inputs and overrides; missing inputs, naming only the
+        consumers this request plans; the types of the input and override values
+        (unless the driver was built without input type checks); and outputs no
+        `@config.when*` variant gave.
+
+        Only `validate` suggests a name for a missing input: the closest supplied
+        name that is no node of the graph. `execute` raises that unknown input
+        first, on its own.
+
+        A malformed request raises: `TypeError` for a bare `str`, an item of
+        `final_vars` that is neither a name nor a function, or a function that
+        makes several nodes, as `execute` raises it; and `TypeError` for `inputs`
+        or `overrides` that is not a mapping, naming both when both are not, which
+        `execute` refuses too.
+        """
+        wrong: list[str] = []
+        for kind, values in (("inputs", inputs), ("overrides", overrides)):
+            if values is not None and not isinstance(values, Mapping):
+                wrong.append(
+                    f"{kind} must be a mapping of names to values, "
+                    f"got {type(values).__name__}"
+                )
+        if wrong:
+            raise TypeError("; ".join(wrong))
+        outputs, absent_functions = requested(final_vars, self._nodes, self._unmatched)
+        key: _PlanKey = (outputs, _names(inputs), _names(overrides))
+        _, input_names, override_names = key
+        wanted = list(dict.fromkeys(outputs))
+        lines = [ABSENT + culprit for culprit in absent_functions]
+        lines += [
+            self._unmatched[n] for n in sorted(set(wanted) & self._unmatched.keys())
+        ]
+        # An output no variant gave has its own line; an input or override named
+        # like one is unknown, as `execute` says.
+        unknown = {
+            kind: self._unknown_names(kind, key)
+            for kind in ("outputs", "inputs", "overrides")
+        }
+        unknown["outputs"] = [n for n in unknown["outputs"] if n not in self._unmatched]
+        nodes = list(self._nodes)
+        lines += [
+            _unknown(kind, names, nodes) for kind, names in unknown.items() if names
+        ]
+        planned = [n for n in wanted if n in self._nodes]
+        supplied = input_names.difference(unknown["inputs"])
+        overridden = override_names.difference(unknown["overrides"])
+        plan: _core.Plan | None
+        try:
+            plan = self._graph.prepare(planned, sorted(supplied), sorted(overridden))
+        except ValueError as error:
+            plan, line = self._missing_line(
+                str(error), (planned, supplied, overridden), input_names
+            )
+            lines.append(line)
+            lines += self._hints(line)
+        if plan is not None and self._strict_overrides:
+            refused = self._unsupplied_overrides(plan, input_names, overridden)
+            lines += _strict(refused).splitlines() if refused else []
+        if self._check_inputs and plan is not None:
+            read = sorted(
+                node
+                for node, action in plan.steps()
+                if action == "use_input" and node in supplied
+            )
+            lines += _mismatches(self._declared(read), inputs or _NO_VALUES)
+            if self._check_overrides:
+                lines += _mismatches(
+                    self._declared(sorted(overridden)), overrides or _NO_VALUES
+                )
+        # Plain `str`s: an `_UnresolvedLine` only picks the error class to raise.
+        return sorted(str.__str__(line) for line in lines)
+
+    def _missing_line(
+        self,
+        message: str,
+        request: tuple[list[str], frozenset[str], frozenset[str]],
+        input_names: frozenset[str],
+    ) -> tuple[_core.Plan | None, str]:
+        """The plan with every input supplied, and the missing-input line.
+
+        `message` is the core's error for `request`, whose names are all known. The
+        line is rebuilt from the plan, each input with the closest supplied name
+        that is no node (Q71); when the rebuilt line, without suggestions, is not
+        the core's, or the plan can't be made, it is `message` unchanged.
+        """
+        planned, supplied, overridden = request
+        functions = self._nodes.functions
+        every = supplied | {n for n in self._nodes if n not in functions}
+        try:
+            plan = self._graph.prepare(planned, sorted(every), sorted(overridden))
+        except ValueError:
+            return None, message
+        entries = self._missing_entries(plan, planned, supplied)
+        if not entries or _missing(entries, ()) != message:
+            return plan, message
+        strangers = sorted(n for n in input_names if n not in self._nodes)
+        return plan, _missing(entries, strangers)
 
     def execute(
         self,
-        final_vars: Sequence[str],
+        final_vars: Sequence[str | Callable[..., object]],
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
@@ -476,13 +833,17 @@ class Driver:
         """Computes `final_vars`, reusing the cached plan for the same request shape.
 
         The result holds each requested output once, in the order first requested.
+        A function in `final_vars` stands for the node it makes in this driver,
+        matched by identity (Q30): the result is still keyed by the node's name.
+        `TypeError` when it makes several nodes, as a `@parameterize` function does,
+        and `ValueError` when it makes none.
         """
         plan = self.prepare(final_vars, inputs=inputs, overrides=overrides)
         return plan.run(inputs=inputs, overrides=overrides)
 
     def explain_cache(
         self,
-        final_vars: Sequence[str],
+        final_vars: Sequence[str | Callable[..., object]],
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
@@ -512,6 +873,64 @@ class Driver:
     def nodes(self) -> Mapping[str, NodeView]:
         """Every node, inputs included, by name: read-only, iterating in name order."""
         return self._nodes
+
+    @property
+    def modules(self) -> tuple[ModuleType, ...]:
+        """The modules the graph was built from, each once, in build order (Q70).
+
+        Hamilton's `graph_modules` keeps a module given twice. A function a later
+        `Builder.with_functions` adds is no module, so it is not listed.
+        """
+        return self._modules
+
+    def inputs(self) -> Mapping[str, InputView]:
+        """Every input of the graph by name, in name order, with its consumers (Q70).
+
+        An input is a name no node produces. Each `InputView` has its type, whether
+        some consumer requires it, and its consumers, sorted. Read-only, and made
+        once.
+        """
+        if self._inputs is None:
+            self._inputs = MappingProxyType(_input_views(self._nodes))
+        return self._inputs
+
+    def outputs(self) -> list[str]:
+        """The nodes no other node reads, sorted (Q70).
+
+        Inputs are never outputs: each is read by the node that makes it an input.
+        """
+        if self._outputs is None:
+            self._outputs = output_names(self._nodes)
+        return list(self._outputs)
+
+    def what_is_the_path_between(self, upstream: str, downstream: str) -> list[str]:
+        """Returns every node on a path from `upstream` to `downstream` (Q70).
+
+        Both endpoints are included. An input can be `upstream`, but is
+        `downstream` only when both are that input, since nothing feeds an input.
+        The order is topological, ties broken by name, so it never depends on
+        `PYTHONHASHSEED`. Empty when `downstream` doesn't depend on `upstream`;
+        `[upstream]` when they're the same node. `ValueError` names every unknown
+        endpoint, sorted; `TypeError` names each that is not a `str`.
+        """
+        wrong: list[str] = []
+        for role, end in (("upstream", upstream), ("downstream", downstream)):
+            if not isinstance(end, str):
+                wrong.append(
+                    f"node names must be str, got {type(end).__name__} for {role}"
+                )
+        if wrong:
+            raise TypeError("; ".join(wrong))
+        ends = {upstream, downstream}
+        if unknown := sorted(n for n in ends if n not in self._nodes):
+            msg = f"unknown nodes: {', '.join(map(repr, unknown))}"
+            raise ValueError(msg)
+        if upstream == downstream:
+            return [upstream]
+        if downstream not in set(self._graph.downstream_of([upstream])):
+            return []
+        between = self._graph.between(upstream, downstream)
+        return topological({upstream, downstream, *between}, self._nodes)
 
     def what_is_upstream_of(self, *names: str) -> list[str]:
         """Returns the named nodes and every node they depend on, sorted."""
@@ -615,6 +1034,19 @@ class AsyncDriver:
             raise TypeError(msg)
         return _build_async_again, (self._builder, self._sync_nodes)
 
+    def rebuild(self) -> AsyncDriver:
+        """A new driver, built again from this driver's builder and `sync_nodes`.
+
+        See `Driver.rebuild`. `TypeError` for a driver made from a `Driver`.
+        """
+        if self._builder is None:
+            msg = (
+                "cannot rebuild an AsyncDriver made from a Driver; "
+                "make it with Builder.build_async to rebuild it"
+            )
+            raise TypeError(msg)
+        return self._builder.build_async(sync_nodes=self._sync_nodes)
+
     def __copy__(self) -> AsyncDriver:
         """A driver over the same graph and settings, with no compiled plans."""
         copied = AsyncDriver(
@@ -633,6 +1065,23 @@ class AsyncDriver:
         """Every node, inputs included, by name; see `Driver.nodes`."""
         return self._driver.nodes
 
+    @property
+    def modules(self) -> tuple[ModuleType, ...]:
+        """The modules the graph was built from; see `Driver.modules`."""
+        return self._driver.modules
+
+    def inputs(self) -> Mapping[str, InputView]:
+        """Every input of the graph; see `Driver.inputs`."""
+        return self._driver.inputs()
+
+    def outputs(self) -> list[str]:
+        """The nodes no other node reads, sorted; see `Driver.outputs`."""
+        return self._driver.outputs()
+
+    def what_is_the_path_between(self, upstream: str, downstream: str) -> list[str]:
+        """The nodes between two, inclusive; see `Driver.what_is_the_path_between`."""
+        return self._driver.what_is_the_path_between(upstream, downstream)
+
     def node_names(self) -> list[str]:
         """Returns every node name, sorted."""
         return self._driver.node_names()
@@ -647,7 +1096,7 @@ class AsyncDriver:
 
     def prepare(
         self,
-        final_vars: Sequence[str],
+        final_vars: Sequence[str | Callable[..., object]],
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
@@ -674,9 +1123,22 @@ class AsyncDriver:
             prepared._async = plan  # noqa: SLF001  # this driver's own plan
         return plan
 
+    def validate(
+        self,
+        final_vars: Sequence[str | Callable[..., object]],
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+    ) -> list[str]:
+        """Every problem of this request, sorted; see `Driver.validate` (Q71).
+
+        Synchronous: it runs nothing, so there is nothing to await.
+        """
+        return self._driver.validate(final_vars, inputs=inputs, overrides=overrides)
+
     async def execute(
         self,
-        final_vars: Sequence[str],
+        final_vars: Sequence[str | Callable[..., object]],
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
@@ -692,7 +1154,7 @@ class AsyncDriver:
 
     def explain_cache(
         self,
-        final_vars: Sequence[str],
+        final_vars: Sequence[str | Callable[..., object]],
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
@@ -718,13 +1180,39 @@ def _prepare_async_again(driver: AsyncDriver, key: _PlanKey) -> AsyncPreparedPla
     )
 
 
+# How the core's missing-input error starts.
+_MISSING = "missing inputs: "
+
+
+def _unknown(kind: str, names: Sequence[str], candidates: Sequence[str]) -> str:
+    """The core's `unknown <kind>: 'a', 'b'` line, each name with its suggestion."""
+    listed = ", ".join(f"'{name}'{suggest(name, candidates)}" for name in names)
+    return f"unknown {kind}: {listed}"
+
+
+def _missing(entries: Sequence[tuple[str, str]], candidates: Sequence[str]) -> str:
+    """The core's missing-input line for `entries`, each with its suggestion (Q71)."""
+    listed = "; ".join(text + suggest(name, candidates) for name, text in entries)
+    return _MISSING + listed
+
+
+def _strict(refused: Mapping[str, Sequence[str]]) -> str:
+    """The strict-overrides error: a line per overridden input not supplied (Q75)."""
+    return "\n".join(
+        f"override of input '{name}' refused: not supplied, though needed by "
+        f"{', '.join(f"'{c}'" for c in refused[name])} "
+        "(supply it in inputs= too; strict overrides are on)"
+        for name in sorted(refused)
+    )
+
+
 def _config_hint(message: str, config: Mapping[str, object]) -> str | None:
     """A line for a missing-input error naming config keys, or `None` (Q56).
 
     A missing input is listed as `'name' (`, which no other part of the message
     is: a consumer is followed by `,` or `)`.
     """
-    if not config or not message.startswith("missing inputs: "):
+    if not config or not message.startswith(_MISSING):
         return None
     keys = [key for key in sorted(config) if f"'{key}' (" in message]
     if not keys:
@@ -741,6 +1229,20 @@ def _config_hint(message: str, config: Mapping[str, object]) -> str | None:
     )
 
 
+def _left_out_hints(message: str, left_out: Mapping[str, Sequence[str]]) -> list[str]:
+    """A line for each missing input in `message` that is a function left out (Q73).
+
+    The name of a function `@exclude` marks, or a module's `__all__` does not list,
+    is a missing input like any other name: this says why it is not a node.
+    """
+    return [
+        line
+        for name in sorted(left_out)
+        if f"'{name}' (" in message
+        for line in left_out[name]
+    ]
+
+
 def _checked_config(config: object) -> dict[str, object]:
     """A copy of `config`; `TypeError` for a non-mapping or a key that is no `str`."""
     if not isinstance(config, Mapping):
@@ -752,6 +1254,41 @@ def _checked_config(config: object) -> dict[str, object]:
         msg = f"config keys must be str, got: {', '.join(not_str)}"
         raise TypeError(msg)
     return {str(k): v for k, v in given.items()}
+
+
+def _checked_names(names: Sequence[object]) -> tuple[str, ...]:
+    """`names` once each, sorted; `TypeError` naming every item that is no `str`."""
+    strings = {n for n in names if isinstance(n, str)}
+    if bad := sorted({type(n).__name__ for n in names if not isinstance(n, str)}):
+        msg = f"declared input names must be str, got: {', '.join(bad)}"
+        raise TypeError(msg)
+    return tuple(sorted(strings))
+
+
+def _undeclared(views: NodeViews, declared: Sequence[str]) -> list[str]:
+    """A line for each input not declared and each declared name no input is (Q75).
+
+    Each name gains the closest node or declared name. Sorted.
+    """
+    functions = views.functions
+    needed = {
+        name
+        for view in functions.values()
+        for name, _ in core_inputs(view.params)
+        if name not in functions
+    }
+    candidates = [*views, *declared]
+    lines = [
+        f"undeclared input '{name}'{suggest(name, candidates)}"
+        for name in sorted(needed.difference(declared))
+    ]
+    lines += [
+        f"declared name '{name}' is not an input of the graph"
+        f"{suggest(name, candidates)}"
+        for name in declared
+        if name not in needed
+    ]
+    return sorted(lines)
 
 
 def _unmatched_edges(nodes: Sequence[NodeDef], unmatched: Mapping[str, str]) -> str:
@@ -800,52 +1337,143 @@ def _checked_modules(modules: Sequence[object]) -> tuple[ModuleType, ...]:
     return tuple(checked)
 
 
-def _importable_name(module: ModuleType) -> str:
-    """`module`'s name, which imports it; `TypeError` when it does not."""
-    name = module.__name__
-    if sys.modules.get(name) is not module:
-        msg = (
-            f"cannot pickle: module {name!r} is not importable by its name, "
-            "so it cannot be loaded again"
+def _checked_namespaces(
+    namespaces: Sequence[object], count: int
+) -> tuple[str | None, ...]:
+    """Each module's namespace, one per module; `None` for each when none is given.
+
+    `ValueError` when `namespaces` is given with another length than `count`, the
+    number of modules; each is checked as `with_modules` checks its `namespace`.
+    """
+    if not namespaces:
+        return (None,) * count
+    lines: set[str] = set()
+    malformed = False
+    if len(namespaces) != count:
+        lines.add(
+            f"namespaces must hold one per module: {_counted(count, 'module')}, "
+            f"{_counted(len(namespaces), 'namespace')}"
         )
-        raise TypeError(msg)
-    return name
+    checked: list[str | None] = []
+    for namespace in namespaces:
+        try:
+            checked.append(checked_namespace(namespace))
+        except (TypeError, ValueError) as error:
+            lines.add(str(error))
+            malformed = malformed or isinstance(error, TypeError)
+    if lines:
+        msg = "; ".join(sorted(lines))
+        raise TypeError(msg) if malformed else ValueError(msg)
+    return tuple(checked)
 
 
-def _builder_of(
+def _counted(count: int, noun: str) -> str:
+    """`count` and `noun`, plural unless it is one: `1 module`, `2 modules`."""
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+def _unimportable_module(module: ModuleType) -> str | None:
+    """Why `module` cannot be imported again by its name, or `None` when it can."""
+    name = module.__name__
+    if sys.modules.get(name) is module:
+        return None
+    return (
+        f"module {name!r} is not importable by its name, so it cannot be loaded again"
+    )
+
+
+def _builder_of(  # noqa: PLR0913, PLR0917  # pickle passes each part positionally
     names: tuple[str, ...],
-    check_inputs: bool,  # noqa: FBT001  # pickle passes arguments positionally
+    settings: _Settings,
     store: CacheStore | None,
     config: Mapping[str, object] | None = None,
+    functions: tuple[FunctionReference, ...] = (),
+    namespaces: tuple[str | None, ...] = (),
 ) -> Builder:
-    """A pickled builder, its modules imported again by name."""
+    """A pickled builder, its modules imported again by name, its functions too.
+
+    `namespaces` holds each module's namespace, in order, or is empty for none.
+    """
     modules = tuple(importlib.import_module(name) for name in names)
-    return Builder(modules, check_inputs=check_inputs, store=store, config=config)
+    return Builder(
+        modules,
+        namespaces=namespaces,
+        store=store,
+        config=config,
+        functions=from_references(functions),
+        **settings,
+    )
+
+
+class _Changes(TypedDict, total=False):
+    """The switches a `Builder._with` call replaces."""
+
+    check_inputs: bool
+    check_overrides: bool
+    strict_overrides: bool
+    declared_inputs: tuple[str, ...]
+    deep_type_checks: bool
+    numeric_widening: bool
+
+
+class _Settings(TypedDict):
+    """A builder's switches, which pickling and copying carry as one value."""
+
+    check_inputs: bool
+    check_overrides: bool
+    strict_overrides: bool
+    declared_inputs: tuple[str, ...]
+    deep_type_checks: bool
+    numeric_widening: bool
 
 
 class Builder:
-    """Accumulates modules, then builds a `Driver`; methods return new builders.
+    """Accumulates modules and functions, then builds a `Driver`.
 
-    A builder pickles as the names of its modules, which must import them, its
-    type-check setting, its config and its store, which must pickle too.
+    Its methods return new builders. A builder pickles as the names of its
+    modules, which must import them, each module's namespace, the module and
+    qualified name of each function `with_functions` gave it, which must find it
+    again, its settings, its config and its store, which must pickle too.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913  # keyword-only switches, one per builder setting
         self,
         modules: tuple[ModuleType, ...] = (),
         *,
+        namespaces: Sequence[str | None] = (),
+        functions: Sequence[FunctionSource] = (),
         check_inputs: bool = True,
+        check_overrides: bool = True,
+        strict_overrides: bool = False,
+        declared_inputs: Sequence[str] = (),
+        deep_type_checks: bool = False,
+        numeric_widening: bool = False,
         store: CacheStore | None = None,
         config: Mapping[str, object] | None = None,
     ) -> None:
         """Starts with the given modules (none by default), checking input types.
 
-        `store`, when given, caches the results of the driver's runs in it.
+        `namespaces` holds each module's namespace, in order, or is empty when
+        none has one (see `with_modules`); a `ValueError` when it is given with
+        another length, or holds a bad namespace.
+        `functions` are the node sources of `with_functions`. `store`, when
+        given, caches the results of the driver's runs in it.
         `config`, copied, selects `@config.when*` variants (see `with_config`).
-        `TypeError` when an item of `modules` is not a module.
+        The other settings are those of `without_input_type_checks`,
+        `without_override_type_checks`, `with_strict_overrides`,
+        `with_declared_inputs`, `with_deep_type_checks` and
+        `with_numeric_widening`. `TypeError` when an item of `modules` is not a
+        module, or of `declared_inputs` is not a `str`; see `with_functions` for
+        the errors `functions` raises.
         """
         self._modules = _checked_modules(modules)
+        self._namespaces = _checked_namespaces(namespaces, len(self._modules))
+        self._functions = checked_functions(functions)
         self._check_inputs = check_inputs
+        self._check_overrides = check_overrides
+        self._strict_overrides = strict_overrides
+        self._declared_inputs = _checked_names(declared_inputs)
+        self._rules = _types.Rules(deep=deep_type_checks, widen=numeric_widening)
         self._store = store
         # Never changed once made: `with_config` makes a new dict.
         self._config: dict[str, object] = (
@@ -857,34 +1485,117 @@ class Builder:
         self,
     ) -> tuple[
         Callable[..., Builder],
-        tuple[tuple[str, ...], bool, CacheStore | None, dict[str, object]],
+        tuple[
+            tuple[str, ...],
+            _Settings,
+            CacheStore | None,
+            dict[str, object],
+            tuple[FunctionReference, ...],
+            tuple[str | None, ...],
+        ],
     ]:
-        """The modules' names and the settings, imported again on load."""
-        names = tuple(_importable_name(module) for module in self._modules)
-        return _builder_of, (names, self._check_inputs, self._store, self._config)
+        """The modules' names and namespaces, the functions' references, the settings.
+
+        Imported again on load. `TypeError` naming every module and function that
+        would not be found again, sorted.
+        """
+        found = [
+            *(_unimportable_module(module) for module in self._modules),
+            *(unimportable(function_of(item)) for item in self._functions),
+        ]
+        if problems := sorted({problem for problem in found if problem is not None}):
+            msg = f"cannot pickle: {'; '.join(problems)}"
+            raise TypeError(msg)
+        names = tuple(module.__name__ for module in self._modules)
+        return _builder_of, (
+            names,
+            self._settings(),
+            self._store,
+            self._config,
+            references(self._functions),
+            self._namespaces,
+        )
+
+    def _settings(self) -> _Settings:
+        """This builder's switches, which `_builder_of` makes a builder from."""
+        return {
+            "check_inputs": self._check_inputs,
+            "check_overrides": self._check_overrides,
+            "strict_overrides": self._strict_overrides,
+            "declared_inputs": self._declared_inputs,
+            "deep_type_checks": self._rules.deep,
+            "numeric_widening": self._rules.widen,
+        }
 
     def _with(
         self,
         modules: tuple[ModuleType, ...] | None = None,
         *,
-        check_inputs: bool | None = None,
+        namespaces: tuple[str | None, ...] | None = None,
+        functions: tuple[FunctionSource, ...] | None = None,
         store: CacheStore | None = None,
         config: Mapping[str, object] | None = None,
+        **settings: Unpack[_Changes],
     ) -> Builder:
-        """A new builder: this one's settings, each given one replaced."""
-        return Builder(
+        """A new builder: this one's settings, each given one replaced.
+
+        `functions`, when given, are already checked, as this builder's are, so
+        they are set rather than checked again: adding functions one call at a
+        time stays linear in checks.
+        """
+        built = Builder(
             self._modules if modules is None else modules,
-            check_inputs=self._check_inputs if check_inputs is None else check_inputs,
+            namespaces=self._namespaces if namespaces is None else namespaces,
             store=self._store if store is None else store,
             config=self._config if config is None else config,
+            **{**self._settings(), **settings},
         )
+        # Already checked, by this builder or `with_functions`.
+        built._functions = self._functions if functions is None else functions
+        return built
 
-    def with_modules(self, *modules: ModuleType) -> Builder:
+    def with_modules(
+        self, *modules: ModuleType, namespace: str | None = None
+    ) -> Builder:
         """Returns a new builder with `modules` appended to this one's.
 
-        `TypeError` when an item is not a module, such as a function.
+        With `namespace`, a non-empty dotted identifier path such as `"eu"` or
+        `"a.b"`, each node of `modules` is named `namespace.<name>` (Q74). Inside
+        the namespace a parameter, or a `source("x")`, reads `namespace.x` when
+        some module given under that namespace defines `x`, and otherwise `x`
+        itself: a node given without a namespace, or an input. Inputs are never
+        namespaced. A module may be given under several namespaces, making
+        separate nodes from the same functions in each.
+
+        `TypeError` when an item is not a module, such as a function, or when
+        `namespace` is neither a `str` nor `None`; `ValueError` for a `str` that
+        is not a dotted identifier path.
         """
-        return self._with((*self._modules, *modules))
+        checked = checked_namespace(namespace)
+        return self._with(
+            (*self._modules, *modules),
+            namespaces=(*self._namespaces, *(checked,) * len(modules)),
+        )
+
+    def with_functions(self, *items: Callable[..., object] | NodeSpec) -> Builder:
+        """Returns a new builder with `items` appended to this one's functions (Q72).
+
+        Each item is a function, plain or decorated, which makes the nodes it would
+        make in a module, named by its `__name__`, or a `fnloom.node(...)` spec.
+        Nothing is copied and no module is made or registered: a node's module is
+        its function's own `__module__`, and `Driver.modules` lists only modules.
+        Cumulative and ordered, after the modules; the same function or spec given
+        twice counts once, and so does a function a module given to this builder
+        also holds, plain, parameterized or a variant. A node name a module or
+        another item also defines is the build's usual duplicate error.
+
+        Raises one error naming every item that is refused, sorted: a `TypeError`
+        when some item is no Python function or spec (a module, a class, a
+        `functools.partial`, a callable instance), else a `ValueError` for a lambda
+        or other function whose name is no identifier (give it `fnloom.node(fn,
+        name=...)`) and for a function marked `@exclude`.
+        """
+        return self._with(functions=(*self._functions, *checked_functions(items)))
 
     def with_config(self, config: Mapping[str, object]) -> Builder:
         """Returns a new builder with `config` merged into a copy of this one's.
@@ -900,8 +1611,71 @@ class Builder:
         """Returns a new builder whose driver skips input and override type checks.
 
         Edge checks, between a node and the parameters it feeds, stay on (Q10).
+        To skip only the override checks, use `without_override_type_checks`.
         """
         return self._with(check_inputs=False)
+
+    def without_override_type_checks(self) -> Builder:
+        """Returns a new builder whose driver skips override type checks only (Q22).
+
+        Input checks stay on, and so do edge checks. For overriding a node with a
+        value of another type, such as `nan` for an `int` node, while still
+        refusing a badly typed input.
+        """
+        return self._with(check_overrides=False)
+
+    def with_strict_overrides(self) -> Builder:
+        """Returns a new builder whose driver refuses an unsupplied overridden input.
+
+        An override naming an input is refused, as Hamilton refuses it, unless the
+        input is supplied in `inputs` too and some node the request plans needs it
+        (Q75). Settled when a request shape is prepared, never per run. The default
+        stays Q7's pass-through.
+        """
+        return self._with(strict_overrides=True)
+
+    def with_declared_inputs(self, *names: str) -> Builder:
+        """Returns a new builder that must declare every input of its graph (Q75).
+
+        Cumulative: names given again are added. Building fails, with one sorted
+        `ValueError`, for an input of the graph not declared, and for a declared
+        name that is no input, each naming the closest node or declared name. A
+        misspelled parameter or `source(...)` is therefore a build error.
+        """
+        return self._with(declared_inputs=(*self._declared_inputs, *names))
+
+    def with_deep_type_checks(self) -> Builder:
+        """Returns a new builder whose checks read every item of a collection.
+
+        Only a value of a standard class (`list`, `dict`, `set`, `tuple`,
+        `deque`, ...) has its items read; any other value, such as an iterable
+        class of your own, keeps the default checks, so an endless one is never
+        read to its end.
+
+        By default a `list[int]` input is checked by its class alone, and a
+        sequence or set of another class by its first item, as Hamilton does.
+        With deep checks, every item of a `list`, `set`, `tuple[T, ...]` and other
+        standard collection is checked, each key and value of a `dict` or other
+        mapping, and nested collections' items in turn, without recursion. An
+        iterator is still never read (Q43). They apply to inputs, overrides,
+        extracted fields and `validate`; edge checks compare types, not values,
+        and are unchanged. A run pays for every item it reads.
+        """
+        return self._with(deep_type_checks=True)
+
+    def with_numeric_widening(self) -> Builder:
+        """Returns a new builder whose checks let a number stand for a wider one.
+
+        An `int` (not a `bool`) and a numpy integer or floating scalar fit
+        `float`, and a numpy integer scalar fits `int`; Hamilton refuses all of
+        them. numpy is recognised by the value's class, never imported. It
+        applies to inputs, overrides, extracted fields and `validate`, wherever
+        a check reads a value: the value itself, a fixed tuple's items, the first
+        item a shallow check reads, and with deep checks every item. Edge checks
+        are unchanged: a node returning `int` still does not feed a `float`
+        parameter.
+        """
+        return self._with(numeric_widening=True)
 
     def with_cache(self, store: CacheStore) -> Builder:
         """Returns a new builder whose driver caches every node's result in `store`.
@@ -926,20 +1700,22 @@ class Builder:
         and why each of its functions was skipped: defined in another module (a
         re-export), or private.
 
-        Annotations are evaluated here: a name that does not resolve raises its
-        `NameError` (`AttributeError` for a missing attribute), with a note naming
-        the node. Every edge is type checked: a node whose return type a parameter
-        it feeds does not accept fails the build, with one `ValueError` listing
-        every such parameter.
+        Annotations are evaluated here: one naming something that does not exist
+        at run time, such as a name imported only under `TYPE_CHECKING`, is kept
+        as an opaque `unresolved` type, which matches only the same text and `Any`
+        on an edge, and fails any value check with a `TypeError` (Q81). Every
+        edge is type checked: a node whose return type a parameter it feeds does
+        not accept fails the build, with one `ValueError` listing every such
+        parameter.
 
         The config selects one `@config.when*` variant per node. Two matching
         variants, or a node that a node reads and that no variant or
         `@config.default` gives, are a `ValueError` naming each (Q57, Q58).
         """
-        nodes, views, graph, unmatched = self._scanned(awaits=False)
+        nodes, views, graph, unmatched, left_out = self._scanned(awaits=False)
         # Called here, so a `CacheWarning` points at the caller's `build`.
         cache = None if self._store is None else Cache.of(self._store, nodes)
-        return self._driver(graph, views, unmatched, cache)
+        return self._driver(graph, views, unmatched, left_out, cache)
 
     def build_async(
         self, *, sync_nodes: Literal["thread", "inline"] = "thread"
@@ -958,11 +1734,11 @@ class Builder:
         or that a failure cancels, stores nothing. Store calls run on the loop.
         """
         checked = _async.checked_sync_nodes(sync_nodes)
-        nodes, views, graph, unmatched = self._scanned(awaits=True)
+        nodes, views, graph, unmatched, left_out = self._scanned(awaits=True)
         # Called here, so a `CacheWarning` points at the caller's `build_async`.
         cache = None if self._store is None else Cache.of(self._store, nodes)
         built = AsyncDriver(
-            self._driver(graph, views, unmatched, cache),
+            self._driver(graph, views, unmatched, left_out, cache),
             {node.name: node for node in nodes},
             sync_nodes=checked,
         )
@@ -971,14 +1747,21 @@ class Builder:
 
     def _scanned(
         self, *, awaits: bool
-    ) -> tuple[list[NodeDef], NodeViews, _core.Graph, dict[str, str]]:
+    ) -> tuple[list[NodeDef], NodeViews, _core.Graph, dict[str, str], LeftOut]:
         """The checked nodes, their views and graph; see `build`.
 
-        Also why each node no variant gave is absent. With `awaits`, an
+        Also why each node no variant gave is absent, and each function `@exclude` or
+        `__all__` left out. With `awaits`, an
         `async def` is a node too.
         """
-        scanned = scan(self._modules, self._config, awaits=awaits)
-        nodes = resolve(scanned.nodes)
+        scanned = scan(
+            self._modules,
+            self._config,
+            awaits=awaits,
+            functions=self._functions,
+            namespaces=self._namespaces,
+        )
+        nodes = resolve(scanned.nodes, self._rules)
         unmatched = scanned.unmatched
         if unmatched:
             # A field of a forward-referenced `TypedDict` is first known resolved.
@@ -986,17 +1769,26 @@ class Builder:
             unmatched = {n: why for n, why in unmatched.items() if n not in names}
             if absent := _unmatched_edges(nodes, unmatched):
                 raise ValueError(absent)
-        views = node_views(nodes)
+        views = node_views(
+            nodes, frozenset(node.name for node in nodes if is_generated(node))
+        )
         graph = _graph_of(nodes)
         if mismatches := _edge_mismatches(views.functions):
             raise ValueError("\n".join(mismatches))
-        return nodes, views, graph, unmatched
+        if problems := default_problems(nodes):
+            raise ValueError("\n".join(problems))
+        if self._declared_inputs and (
+            refused := _undeclared(views, self._declared_inputs)
+        ):
+            raise ValueError("\n".join(refused))
+        return nodes, views, graph, unmatched, scanned.left_out
 
     def _driver(
         self,
         graph: _core.Graph,
         views: NodeViews,
         unmatched: dict[str, str],
+        left_out: LeftOut,
         cache: Cache | None,
     ) -> Driver:
         """This builder's driver over a scanned graph."""
@@ -1004,10 +1796,15 @@ class Builder:
             graph,
             views,
             check_inputs=self._check_inputs,
+            check_overrides=self._check_overrides,
+            strict_overrides=self._strict_overrides,
             cache=cache,
             config=MappingProxyType(self._config),
+            rules=self._rules,
         )
+        driver._modules = tuple(dict.fromkeys(self._modules))  # noqa: SLF001  # the builder's own driver
         driver._unmatched = unmatched  # noqa: SLF001  # the builder's own driver
+        driver._left_out = left_out  # noqa: SLF001  # the builder's own driver
         driver._builder = self  # noqa: SLF001  # the builder's own driver
         return driver
 

@@ -1,6 +1,8 @@
 # Roadmap: ahead of Hamilton everywhere
 
-**Status:** draft for maintainer review, 2026-10-28. Nothing below is built.
+**Status:** in progress, 2026-10-28. Plans 1–4, the Plan 4 follow-up and Plan 3 are merged and released in 0.2.0.
+Plan 5 is on its own branch, in review; a row below marked done or fixed in Plan 5 describes that branch. Plans 6 and
+later are not built.
 
 **Goal:** for every capability Hamilton 1.90.0 offers, fnloom has an equivalent that is at least as good, or a
 written decision explaining why it doesn't. "At least as good" means: same intent; behaviour proven differentially
@@ -23,13 +25,13 @@ and the design's change log takes a row when the item is approved.
 
 | Hamilton | What it gives | fnloom plan |
 |---|---|---|
-| `list_available_variables()` | every node with its type, tags and whether it is an input | Plan 5: `Driver.nodes` already holds all of this. Plan 5 adds `Driver.inputs()` and `Driver.outputs()` (*new*) for the two common questions |
-| `validate_inputs(...)`, `validate_execution(...)` | check a request without running it | Plan 5: `prepare(...)` already validates names. Plan 5 adds `validate(...)` (*new*), which also runs the type checks and returns every problem rather than the first |
-| `what_is_the_path_between(a, b)` | nodes on any path from `a` to `b` | Plan 5 (design §5 lists "between") |
+| `list_available_variables()` | every node with its type, tags and whether it is an input | Done in Plan 5: `Driver.nodes` holds all of this, and `Driver.inputs()` and `Driver.outputs()` (*new*) answer the two common questions (Q70) |
+| `validate_inputs(...)`, `validate_execution(...)` | check a request without running it | Done in Plan 5: `Driver.validate(...)` (*new*) runs the name and type checks and returns every problem rather than the first, with a suggestion for each misspelled name (Q71) |
+| `what_is_the_path_between(a, b)` | nodes on any path from `a` to `b` | Done in Plan 5: in topological order on every hash seed, naming every unknown endpoint (Q70) |
 | `display_all_functions`, `display_upstream_of`, `display_downstream_of`, `visualize_path_between`, `visualize_execution` | graphviz drawings | Plan 7: DOT text with no dependency; `graphviz` optional for rendering |
 | `materialize`, `validate_materialization`, `visualize_materialization` | write outputs through data savers | Not planned. A design §2 non-goal: the hooks of Plan 6 let a user write outputs in a post-graph hook |
 | `raw_execute`, `export_execution` | execute without a result builder; export a run's graph | Plan 6 (result builders), Plan 7 (export) |
-| `config`, `graph_modules`, `adapter` | what the driver was built from | `config` done in Plan 3: `Driver.config`, a read-only copy (Q56). Plan 5 (`modules`), Plan 6 (hooks) |
+| `config`, `graph_modules`, `adapter` | what the driver was built from | `config` done in Plan 3: `Driver.config`, a read-only copy (Q56). `modules` done in Plan 5: each module once (Q70). Plan 6 (hooks) |
 | `has_cycles` | report a cycle | Not needed: fnloom refuses a cycle at build, naming it (Q27) |
 | `AsyncDriver` | `async def` nodes | Done in Plan 3: `Builder.build_async()`, with caching (Q11–Q13, Q65–Q69) |
 
@@ -39,7 +41,7 @@ and the design's change log takes a row when the item is approved.
 |---|---|
 | `@config.when`, `.when_not`, `.when_in`, `.when_not_in`; `Builder.with_config` | Done in Plan 3, with `@config.default` and `name=` on all four forms (Q56–Q60) |
 | `@extract_fields`, `@extract_columns` | Done in Plan 3 (Q61–Q64) |
-| `@parameterize` row as `(bindings, docstring)`; `group(...)`; `parameterize_sources`, `parameterize_values` | Plan 5 (design §5 v1.x "parameterize sugar") |
+| `@parameterize` row as `(bindings, docstring)`; `group(...)`; `parameterize_sources`, `parameterize_values` | Done in Plan 5, checked when decorating (Q82) |
 | `@check_output`, `@check_output_custom` | Plan 8 ("output validators") |
 | `@pipe_input`, `@pipe_output`, `@mutate`, `@step` | Plan 8 ("step injection") |
 | `@inject`, `@resolve` | Plan 8 ("dependency injection by config") |
@@ -55,13 +57,13 @@ and the design's change log takes a row when the item is approved.
 | Dynamic execution (`Parallelizable`, `Collect`) | Its own design first (design §2: "the first deferral to design next"), then Plan 10. Free-threaded 3.14t is the target for running nodes in parallel |
 | Plugin ecosystem (dask, ray, spark, pandera, mlflow, UI, tracker) | Not planned (design §2 non-goal). Plan 6's hooks make each one writable outside fnloom |
 | A failing node logs its inputs | Plan 6: fnloom notes the node's name on the exception today. A failure hook (*new*) gets the node's name and its inputs, and logging them is one hook |
-| A function in `final_vars` | Plan 5: lifts Q30 |
+| A function in `final_vars` | Done in Plan 5: matched by identity, never by name (Q30) |
 
 ### Behaviour where Hamilton's stricter rule has users
 
 | Hamilton | fnloom today | Plan |
 |---|---|---|
-| An override naming an input that wasn't supplied is refused | Accepted: an override can supply a missing input (Q7) | Plan 5: keep Q7, and add `Builder.with_strict_overrides()` (*new*), an opt-in that refuses it with Hamilton's rule. A user who relies on the refusal shouldn't have to re-implement it |
+| An override naming an input that wasn't supplied is refused | Accepted: an override can supply a missing input (Q7) | Done in Plan 5: Q7 kept, and `Builder.with_strict_overrides()` (*new*) is an opt-in that refuses it with Hamilton's rule (Q75) |
 
 ### Performance
 
@@ -73,7 +75,7 @@ and the design's change log takes a row when the item is approved.
 
 | Item | Plan |
 |---|---|
-| `value_matches` and `type_matches` (`fnloom._types`), the input and edge checks | Plan 5 (*new*): export them, so a caller can check a value the way `execute` will. Hamilton's `htypes.check_input_type` is public |
+| `value_matches` and `type_matches` (`fnloom._types`), the input and edge checks | Done in Plan 5 (*new*): `fnloom.value_matches` and `fnloom.type_matches`, so a caller can check a value the way `execute` will. Hamilton's `htypes.check_input_type` is public |
 
 ## Hamilton's problems, and what fnloom does about each
 
@@ -104,11 +106,11 @@ behind); **n/a** (fnloom has no such feature yet; the plan builds it without the
 | An input or override name that is not in the graph is ignored; an input naming a computed node is dropped | fixed | Q4, Q5: refused by name |
 | Node names come from `fn.__name__`, so an alias or a factory-made function collides, and an undecorated wrapper renames the node | fixed | fnloom uses the attribute name |
 | Hamilton scans submodules and counts re-exported functions as nodes; the same module passed twice collides | fixed | fnloom takes a module's own functions, and deduplicates |
-| A typo in a parameter name or a `source("...")` string becomes a new required input, not an error | same | Plan 5: `Builder.with_declared_inputs(...)`, an opt-in that refuses any input not declared, naming the closest node |
-| A default on a parameter silently makes an input optional, and adding a node of that name anywhere silently replaces the default; two functions with different defaults for one input pass | same | Plan 5: build-time error when a node shadows a default, or when defaults for one input differ (opt-out per parameter) |
-| Every public helper in a module becomes a node, and its parameters phantom inputs; the escape hatch `@hamilton_exclude` is barely documented | same | Plan 5: `@exclude`, honour `__all__` when a module defines it, and a build warning for a node nothing consumes |
-| One flat namespace per driver: two modules can't define the same node, one input name has one type driver-wide, and Hamilton's opt-in override is last-wins, which mis-wires silently | fixed (clearer refusal) / missing opt-in | Plan 5: explicit namespacing (`Builder.with_modules(..., prefix=)` or a namespace argument) instead of last-wins |
-| A graph can only be written as Python functions in importable modules: no graph from a list of functions (#1268), and none from data without generating code | n/a | Plan 5: `Builder.with_functions(*fns)` with a stable synthetic module name; a public node-definition API over the core's generic graph |
+| A typo in a parameter name or a `source("...")` string becomes a new required input, not an error | fixed (Plan 5, opt-in) | `Builder.with_declared_inputs(...)` refuses any input not declared, naming the closest node (Q75); every unknown or missing name in an error suggests the closest one (Q71) |
+| A default on a parameter silently makes an input optional, and adding a node of that name anywhere silently replaces the default; two functions with different defaults for one input pass | fixed (Plan 5) | A build-time error when a node shadows a default, or when defaults for one input differ, with `@defaults(...)` as the per-parameter opt-out (Q76) |
+| Every public helper in a module becomes a node, and its parameters phantom inputs; the escape hatch `@hamilton_exclude` is barely documented | fixed (Plan 5) | `@exclude`, bare or called, and `__all__` honoured when a module defines it (Q73). No warning for a node nothing consumes: a graph's outputs are exactly such nodes, so `Driver.outputs()` lists them instead (plan 5, decision 6) |
+| One flat namespace per driver: two modules can't define the same node, one input name has one type driver-wide, and Hamilton's opt-in override is last-wins, which mis-wires silently | fixed (Plan 5) | `Builder.with_modules(..., namespace="ns")` names a module's nodes `ns.<name>`; nothing is last-wins (Q74) |
+| A graph can only be written as Python functions in importable modules: no graph from a list of functions (#1268), and none from data without generating code | fixed (Plan 5) | `Builder.with_functions(*fns)` uses the functions themselves, with no synthetic module, and `fnloom.node(fn, name=, bind=)` is the node-definition API (Q72). A serialised, data-only format waits for Plan 7's export |
 | `@parameterize` nodes exist only in the built graph, invisible to static tools | fixed | `NodeView.origin` and `module` (Q34) |
 | Inspection returns a mix of node objects and names, includes config entries as inputs, and has no topological order (#1293, #836) | fixed | `Driver.nodes`, names, topological order (Q26, Q28) |
 | Execution order depends on the order of outputs and parameters | fixed | Q26 |
@@ -119,16 +121,16 @@ behind); **n/a** (fnloom has no such feature yet; the plan builds it without the
 | Problem | Status | Fix |
 |---|---|---|
 | No `py.typed`; decorators erase signatures | fixed | Q1 |
-| Annotations resolve at build, so a name imported only under `TYPE_CHECKING` raises `NameError` from inside `build` (it reads like a library bug, and linters that move imports break builds) | same | Plan 5: read annotations with `annotationlib`'s forward-reference format; an unresolved name becomes a named opaque type that matches only itself and `Any`, and the build reports it if a check needs it |
-| Every parameter and the return must be annotated | same, clearer message | Keep; document |
-| `Any` on one consumer absorbs a concrete type on another, so a shared input goes unchecked (#1180) | same | Plan 5: unify to the most specific annotation; `Any` never widens a typed input |
-| `None` passes every input check | same | Plan 5: `None` only for `Optional`, `object` or `Any` (register row) |
-| Fixed-length `tuple[int, str]` rejects a correct value (#1749 on the output side); fnloom accepts any tuple without checking length or items | fixed (no false refusal), partial | Plan 5: check a fixed-length tuple's length and items |
-| Container checks are shallow (`dict[str, ndarray]` is "a dict"; lists by their first item) | same, deliberately | Plan 5: keep shallow by default (cost); an opt-in deep check |
+| Annotations resolve at build, so a name imported only under `TYPE_CHECKING` raises `NameError` from inside `build` (it reads like a library bug, and linters that move imports break builds) | fixed (Plan 5) | An unresolved name builds as an opaque `unresolved` type that matches only its own text and `Any`; a value check against it says to import it at run time (Q81) |
+| Every parameter and the return must be annotated | same, deliberately, with a clearer message | Kept: every edge is typed where it is declared, and the build's `ValueError` names the function. Documented in [What is refused](../writing-nodes.md#what-is-refused) |
+| `Any` on one consumer absorbs a concrete type on another, so a shared input goes unchecked (#1180) | n/a: not a 1.90.0 behaviour (H5.10b); both check the shared input as the concrete type | Pinned by the KEEP test `test_any_and_int_consumers_check_the_input_as_int` in `tests/differential/test_semantics.py` |
+| `None` passes every input check | fixed (Plan 5) | `None` passes only a type that admits it: `Optional`, `object`, `Any`, `None` and their kin (Q79) |
+| Fixed-length `tuple[int, str]` rejects a correct value (#1749 on the output side); fnloom accepts any tuple without checking length or items | fixed (Plan 5) | A fixed-length tuple's length and items are checked (Q80) |
+| Container checks are shallow (`dict[str, ndarray]` is "a dict"; lists by their first item) | same, deliberately | Shallow by default, for its cost; `Builder.with_deep_type_checks()` (Plan 5) is the opt-in that checks every item of a standard collection |
 | `list[Any]` is not a wildcard on edges; exact matching refuses `str \| None` into `str`, `TypedDict` in a union crashes the build, protocols are refused | fixed | Q39–Q42, Q45 |
 | `tuple[T, ...]`, `NewType`, PEP 695 aliases, `Literal`, `Annotated`, `Mapping`/`Callable`, iterators | fixed | Q37–Q45 |
-| Numpy scalars refused for `int`/`float`; `int` refused for `float`; 2-D or float32 arrays and mismatched lengths flow into wrong answers | same (register: not yet decided) | Plan 5: an opt-in numeric policy (`Builder.with_numeric_inputs(...)`: widening, `ndim`/`dtype` contracts, length groups), so users stop re-writing it around `execute` |
-| Overrides bypass type checks, and can change a node's type | fixed | Q22 |
+| Numpy scalars refused for `int`/`float`; `int` refused for `float`; 2-D or float32 arrays and mismatched lengths flow into wrong answers | fixed (opt-in widening); contracts deferred | `Builder.with_numeric_widening()` (Plan 5) lets an `int` stand for `float` and numpy scalars for `int` and `float`. `ndim`, `dtype` and length contracts stay in the register's "Not yet decided": they came from one consumer's workloads (plan 5, decision 12f) |
+| Overrides bypass type checks, and can change a node's type | fixed, with an opt-out | Q22; `Builder.without_override_type_checks()` (Plan 5) skips only the override checks |
 | An adapter implementing the input check replaces the default instead of adding to it; the async path checks no inputs | n/a (adapter); fixed (async, Plan 3) | Plan 6: hooks add to the default check. The async driver checks inputs like the sync one (Q67) |
 | An `Any` producer, or a node returning the wrong type, is never checked at run | same | Plan 6: an opt-in output check, done right on the types where Hamilton's crashes (#1738, #1749) |
 
@@ -141,9 +143,9 @@ behind); **n/a** (fnloom has no such feature yet; the plan builds it without the
 | A failing node's inputs are logged by Hamilton, not by fnloom | worse | Plan 6: a failure hook receives the node and its inputs |
 | A node can't skip (no early return); "don't compute" must be encoded as data | same | Design question for Plan 10: a typed "absent" outcome a node can return, which its consumers either accept as optional or skip on |
 | Validation errors (`DataValidationError`) are not `ValueError`, and `importance="warn"` is the default | n/a | Plan 8: validator errors subclass `ValueError`; fail is the default |
-| A Driver used from several threads works but is untested (#54); one cache "last run" is shared across threads | same | Plan 5: a documented thread-safety guarantee with a stress test on the default and free-threaded builds |
-| A module edit after `reload` is not seen by an existing driver | same | Plan 5: `Driver.rebuild()`; the cache already versions code (Q48) |
-| Unsupplied input requested as an output returns `None` when nothing reads it | — | Check, then register row |
+| A Driver used from several threads works but is untested (#54); one cache "last run" is shared across threads | fixed (Plan 5) | A documented guarantee ([Threads](../running.md#threads)) with a stress test of 16 threads sharing one cached driver, on the default and free-threaded builds (`tests/test_threads.py`); no cache state is shared between runs |
+| A module edit after `reload` is not seen by an existing driver | fixed (Plan 5) | `Driver.rebuild()` and `AsyncDriver.rebuild()` build again with every setting and see the edit; an existing driver keeps its code, as Hamilton's does, and the cache versions code (Q83, Q48) |
+| Unsupplied input requested as an output returns `None` when nothing reads it | fixed (Plan 5) | Refused: `missing inputs: 'x' (requested as an output)` (Q78) |
 
 ### Config, decorators and results
 
@@ -155,7 +157,7 @@ behind); **n/a** (fnloom has no such feature yet; the plan builds it without the
 | Decorator stacking order is ignored, and collisions name the wrong decorator (#1163) | fixed so far | Done for config and extract in Plan 3: stacked in any order, and two matching variants name both functions (Q58). Plan 8 does the same for its decorators |
 | `@extract_columns` is a pandas registry (polars after a plugin, which autoload-off disables), with missing columns found only at run; `@extract_fields` checks no types and drops extra keys | fixed (Plan 3) | A generic split over any value with `__getitem__`, with no registry or plugin; fields type-checked on every run; extra names refused; `fill_with` never mutates. A missing column is still found at run, when the value first exists, and the error names the columns the producer returned (Q61–Q64) |
 | `@check_output` is pandas-only; `@check_output_custom` sees only the output and renames the node | n/a | Plan 8: validators over any type, seeing inputs and output, without renaming |
-| `@parameterize` + `value()` silently drops a caller's value for that parameter | — | Plan 5: refuse an input or override naming a `value()`-bound parameter |
+| `@parameterize` + `value()` silently drops a caller's value for that parameter | already refused (Q4, Q5); documented (Q77) | An input or override naming a parameter only `value()` binds is refused as unknown (Q77) |
 | `@pipe_output` can't share work between steps; optional parameters leak in as inputs | n/a | Plan 8 |
 | Two adapters can't implement the same lifecycle method (cache + graceful errors, result builder + type-check opt-out); a raising hook skips the others; hook signatures are checked only at run | n/a | Plan 6: any number of hooks per event, run in a defined order, signatures checked when attached (Q23, Q24) |
 | `execute` returns different types depending on the adapter; the legacy constructor returns a pandas frame that broadcasts scalars | fixed | Q19: always a dict |

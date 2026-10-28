@@ -12,7 +12,7 @@ from hamilton import driver as hamilton_driver
 import fnloom
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from types import ModuleType
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -57,7 +57,7 @@ def load_fixture(name: str) -> ModuleType:
 
 def run_hamilton(
     modules: Sequence[ModuleType],
-    outputs: Sequence[str],
+    outputs: Sequence[str | Callable[..., object]],
     inputs: Mapping[str, object] | None = None,
     overrides: Mapping[str, object] | None = None,
 ) -> Outcome:
@@ -76,7 +76,7 @@ def run_hamilton(
 
 def run_fnloom(
     modules: Sequence[ModuleType],
-    outputs: Sequence[str],
+    outputs: Sequence[str | Callable[..., object]],
     inputs: Mapping[str, object] | None = None,
     overrides: Mapping[str, object] | None = None,
 ) -> Outcome:

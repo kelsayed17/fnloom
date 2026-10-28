@@ -86,16 +86,22 @@ def test_wrong_input_type_is_a_value_error_listing_every_bad_input() -> None:
     ]
 
 
-def test_none_input_passes() -> None:
-    """`None` fits every declared type, as in Hamilton."""
+def test_none_input_passes_only_where_admitted() -> None:
+    """`None` fits `int | None` but not `int`; Hamilton passes it for both (Q79)."""
     module = make_module(
         "checks_none",
         """
-def f(a: int) -> bool:
+def f(a: int | None) -> bool:
     return a is None
+
+def g(b: int) -> bool:
+    return b is None
 """,
     )
-    assert build(module).execute(["f"], inputs={"a": None}) == {"f": True}
+    driver = build(module)
+    assert driver.execute(["f"], inputs={"a": None}) == {"f": True}
+    with pytest.raises(ValueError, match=r"^b: expected int, got NoneType$"):
+        driver.execute(["g"], inputs={"b": None})
 
 
 def test_unread_input_is_not_checked() -> None:
@@ -144,40 +150,56 @@ def c(b: list[int]) -> int:
 
 
 def test_checks_are_compiled_once_per_plan(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A plain class is checked by `isinstance` alone; any other type, once per run."""
-    calls: list[tuple[object, object]] = []
-    real = _types.value_matches
+    """Each type's check is prepared with the plan; a run reads no annotation.
 
-    def spy(declared: object, value: object) -> bool:
-        calls.append((declared, value))
-        return real(declared, value)
+    A plain class is one `isinstance`, and a generic takes a value of exactly its
+    class without the general walk, which only a value of another class needs.
+    """
+    prepared: list[object] = []
+    walked: list[tuple[object, object]] = []
+    real_check_of, real_fits = _types.check_of, _types._fits  # noqa: SLF001  # spying on the walk
 
-    monkeypatch.setattr(_types, "value_matches", spy)
+    def spy_check_of(declared: object) -> tuple[_types.Classes | None, _types.Matcher]:
+        prepared.append(declared)
+        return real_check_of(declared)
+
+    def spy_fits(declared: object, value: object) -> bool:
+        walked.append((declared, value))
+        return real_fits(declared, value)
+
+    monkeypatch.setattr(_types, "check_of", spy_check_of)
+    monkeypatch.setattr(_types, "_fits", spy_fits)
     driver = build(make_module("checks_compiled", CHAIN))
     plan = driver.prepare(["c"], inputs={"a": 0})
+    assert prepared == [int]
     for value in (1, 2, 3):
         assert plan.run(inputs={"a": value}) == {"c": (value + 1) * 2}
     with pytest.raises(ValueError, match=r"^a: expected int, got str$"):
         plan.run(inputs={"a": "x"})
-    assert calls == []
     overridden = driver.prepare(["c"], overrides={"b": 0})
     with pytest.raises(ValueError, match=r"^b: expected int, got str$"):
         overridden.run(overrides={"b": "x"})
-    assert calls == []
+    assert prepared == [int, int]
+    assert walked == []
     generic = build(make_module("checks_compiled_generic", GENERIC_CHAIN))
     plan = generic.prepare(["c"], inputs={"a": []})
+    assert prepared == [int, int, list[int]]
     for value in ([1], [2]):
         assert plan.run(inputs={"a": value}) == {"c": 1}
-    assert calls == [(list[int], [1]), (list[int], [2])]
+    assert walked == []
+    assert plan.run(inputs={"a": (1,)}) == {"c": 1}
+    assert walked == [(list[int], (1,))]
+    assert prepared == [int, int, list[int]]
     unchecked = (
         Builder()
         .with_modules(make_module("checks_compiled_off", GENERIC_CHAIN))
         .without_input_type_checks()
         .build()
     )
-    calls.clear()
-    unchecked.execute(["c"], inputs={"a": ["x"]})
-    assert calls == []
+    prepared.clear()
+    walked.clear()
+    unchecked.execute(["c"], inputs={"a": ("x",)})
+    assert (prepared, walked) == ([], [])
 
 
 def test_bad_input_and_bad_override_fail_together_in_one_sorted_message() -> None:

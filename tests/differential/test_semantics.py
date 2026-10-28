@@ -146,6 +146,31 @@ def test_lineage_queries_name_the_same_nodes(
     assert lineage_fnloom([module], direction, names) == hamilton
 
 
+@pytest.mark.parametrize(
+    ("upstream", "downstream", "expected"),
+    [
+        ("root", "join", {"root", "left", "right", "join"}),
+        ("a", "join", {"a", "root", "left", "right", "join"}),
+        ("root", "left", {"root", "left"}),
+        ("join", "root", set()),
+        ("left", "right", set()),
+        ("a", "a", {"a"}),
+        ("join", "join", {"join"}),
+    ],
+)
+def test_path_between_has_the_same_nodes(
+    upstream: str, downstream: str, expected: set[str]
+) -> None:
+    """Endpoints are included, an input is an endpoint, and no path is empty."""
+    module = load_fixture("diamond")
+    built = hamilton_driver.Builder().with_modules(module).build()
+    hamilton = {n.name for n in built.what_is_the_path_between(upstream, downstream)}
+    assert hamilton == expected
+    path = fnloom.build(module).what_is_the_path_between(upstream, downstream)
+    assert set(path) == expected
+    assert len(path) == len(expected)
+
+
 SCANNED = {
     "underscore": "def _hidden(a: int) -> int:\n    return a\n"
     "def f(a: int) -> int:\n    return a\n",
@@ -240,25 +265,6 @@ def test_node_types_match_hamilton(fixture: str) -> None:
     assert views["log"].type is type(None)
 
 
-def test_unresolvable_annotation_same_class() -> None:
-    """A name imported only under `TYPE_CHECKING` fails the build the same way."""
-    module = make_module(
-        "differential_unresolvable",
-        """
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from decimal import Decimal
-
-def price(rate: Decimal) -> int:
-    return 1
-""",
-    )
-    hamilton = nodes_hamilton([module])
-    assert hamilton == Nodes(None, "NameError")
-    assert nodes_fnloom([module]) == hamilton
-
-
 _PROTOCOL_PRODUCERS = [
     "int",
     "float",
@@ -279,6 +285,27 @@ _INT_SUPERTYPES = [
     "int | str",
     "Annotated[int, 'm']",
 ]
+# Every matrix type that does not admit `None`, which Hamilton passes for all (Q79).
+_REFUSING_NONE = [
+    "int",
+    "float",
+    "bool",
+    "str",
+    "Base",
+    "Child",
+    "list",
+    "list[int]",
+    "dict[str, int]",
+    "tuple[int, ...]",
+    "Sequence",
+    "Sequence[int]",
+    "int | str",
+    "Literal[1, 2]",
+    "Annotated[int, 'm']",
+    "Protocol",
+    "runtime Protocol",
+    "NewType(int)",
+]
 DELIBERATE: dict[tuple[str, str], str] = {
     ("tuple[int, ...]", "(1, 2)"): "Q37",
     ("tuple[int, ...]", "Sequence[int]"): "Q37",
@@ -289,8 +316,10 @@ DELIBERATE: dict[tuple[str, str], str] = {
     ("int | None", "object"): "Q40",
     ("Optional[int]", "object"): "Q40",
     ("int | str", "object"): "Q40",
+    ("type[int] | None", "object"): "Q40",
     ("Annotated[int, 'm']", "True"): "Q41",
     **dict.fromkeys(((p, "Protocol") for p in _PROTOCOL_PRODUCERS), "Q42"),
+    **dict.fromkeys(((d, "None") for d in _REFUSING_NONE), "Q79"),
 }
 """Matrix pairs where fnloom differs on purpose, each mapped to its register row.
 
@@ -368,6 +397,44 @@ def g(a: Child) -> int:
     assert fnloom.build(module).nodes["a"].type is hamilton
 
 
+_ANY_AND_INT = {
+    "int first": "def a(x: int) -> int:\n    return x\n\n"
+    "def b(x: Any) -> int:\n    return 1\n",
+    "Any first": "def b(x: Any) -> int:\n    return 1\n\n"
+    "def a(x: int) -> int:\n    return x\n",
+}
+
+
+@pytest.mark.parametrize("order", list(_ANY_AND_INT))
+def test_any_and_int_consumers_check_the_input_as_int(order: str) -> None:
+    """`int` and `Any` consumers of one input check it as `int`, in either order.
+
+    Hamilton 1.90.0 does too (H5.10b), so `Any` never widens a typed input: a `str`
+    is refused even when only the `Any` consumer is requested.
+    """
+    module = make_module(
+        f"differential_any_int_{order.split(maxsplit=1)[0].lower()}",
+        "from typing import Any\n\n" + _ANY_AND_INT[order],
+    )
+    (hamilton,) = (
+        node.type
+        for node in hamilton_driver.Builder()
+        .with_modules(module)
+        .build()
+        .list_available_variables()
+        if node.name == "x"
+    )
+    assert hamilton is int
+    assert fnloom.build(module).nodes["x"].type is int
+    for outputs in (["b"], ["a", "b"]):
+        wrong = run_hamilton([module], outputs, {"x": "s"})
+        assert wrong == Outcome(None, "ValueError"), outputs
+        assert run_fnloom([module], outputs, {"x": "s"}) == wrong, outputs
+    right = run_hamilton([module], ["b"], {"x": 1})
+    assert right == Outcome({"b": 1}, None)
+    assert run_fnloom([module], ["b"], {"x": 1}) == right
+
+
 def test_edge_mismatch_same_exception_class() -> None:
     """A node returning `str` feeding an `int` parameter fails both builds."""
     module = make_module(
@@ -398,8 +465,19 @@ def test_a_compiled_plain_class_check_agrees_with_value_matches() -> None:
         if cls is None:
             continue
         for value_id, value in VALUES.items():
-            compiled = value is None or isinstance(value, cls)
+            compiled = isinstance(value, cls)
             assert compiled is _types.value_matches(annotation, value), (
+                declared,
+                value_id,
+            )
+
+
+def test_a_prepared_check_agrees_with_value_matches() -> None:
+    """Over the matrix, the check prepared once per type answers as `value_matches`."""
+    for declared, annotation in TYPES.items():
+        _, matches = _types.check_of(annotation)
+        for value_id, value in VALUES.items():
+            assert matches(value) is _types.value_matches(annotation, value), (
                 declared,
                 value_id,
             )
@@ -852,3 +930,136 @@ def test_async_driver_computes_the_same_values() -> None:
         builder = fnloom.Builder().with_modules(module)
         driver = builder.build_async(sync_nodes=sync_nodes)
         assert asyncio.run(runs(driver)) == expected
+
+
+@pytest.mark.parametrize(
+    ("outputs", "inputs", "overrides"),
+    [
+        (["c"], {"a": 1}, {"a": 5}),
+        (["c"], {}, {"a": 5}),
+        (["a"], {}, {"a": 5}),
+        (["c"], {}, {"b": 10}),
+        (["c"], {}, {"c": 7}),
+    ],
+)
+def test_strict_overrides_behave_as_hamilton(
+    outputs: list[str], inputs: dict[str, object], overrides: dict[str, object]
+) -> None:
+    """With strict overrides, an unsupplied overridden input is refused as in Hamilton.
+
+    Hamilton's rule (H5.5): an override only prunes below the overridden node, so
+    an input is refused when a node the plan computes needs it and it is not supplied.
+    """
+    module = load_fixture("chain")
+    hamilton = run_hamilton([module], outputs, inputs, overrides)
+    strict = fnloom.Builder().with_modules(module).with_strict_overrides().build()
+    try:
+        values = strict.execute(outputs, inputs=inputs, overrides=overrides)
+        outcome = Outcome(dict(values), None)
+    except Exception as error:  # noqa: BLE001  # the exception class is the thing being compared
+        outcome = Outcome(None, type(error).__name__)
+    assert outcome == hamilton
+
+
+_SUGAR_GRAPH = """
+{imports}
+
+@parameterize(
+    literal=({{"p": value(1)}}, "kept {{as}} written {{p}}"),
+    silent=({{"p": value(2)}}, None),
+    templated={{"p": source("up")}},
+    constant={{"p": value(4.5)}},
+)
+def rows(p: int) -> int:
+    \"\"\"{{output_name}} reads {{p}}.\"\"\"
+    return int(p) + 100
+
+
+@parameterize_sources(low=dict(p="a"), high=dict(p="b"))
+def picked(p: int, q: int = 5) -> int:
+    \"\"\"Row {{output_name}} takes {{p}}.\"\"\"
+    return p * q
+
+
+@parameterize_values("p", {{("one", "the first"): 1, ("two", None): 2}})
+def fixed(p: int) -> int:
+    \"\"\"Never shown.\"\"\"
+    return p * 10
+
+
+@parameterize(
+    listed={{"xs": group(source("a"), value(3), source("b"))}},
+    single={{"xs": group(source("b"))}},
+)
+def collected(xs: list[int]) -> list[int]:
+    return [*xs, len(xs)]
+
+
+@parameterize(
+    keyed={{"ys": group(first=source("a"), fixed=value(3), second=source("b"))}}
+)
+def mapped(ys: dict[str, int]) -> dict[str, int]:
+    return {{**ys, "n": len(ys)}}
+
+
+def up(a: int) -> int:
+    return a + 1
+"""
+_SUGAR_IMPORTS = (
+    "from {library}.function_modifiers import (\n"
+    "    group, parameterize, parameterize_sources, parameterize_values, source, value)"
+)
+
+
+def test_parameterize_sugar_values_docs_and_groups_match_hamilton() -> None:
+    """Row tuples, templated docs, shorthands and `group` agree with Hamilton (H5.4)."""
+    hamilton_module = make_module(
+        "semantics_sugar_h",
+        _SUGAR_GRAPH.format(imports=_SUGAR_IMPORTS.format(library="hamilton")),
+    )
+    module = make_module(
+        "semantics_sugar_f",
+        _SUGAR_GRAPH.format(
+            imports=_SUGAR_IMPORTS.format(library="fnloom").replace(
+                ".function_modifiers", ""
+            )
+        ),
+    )
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    built = fnloom.build(module)
+    names = sorted(
+        {
+            "literal",
+            "silent",
+            "templated",
+            "constant",
+            "low",
+            "high",
+            "one",
+            "two",
+            "listed",
+            "single",
+            "keyed",
+        }
+    )
+    assert sorted(set(names) - set(built.node_names())) == []
+    inputs = {"a": 2, "b": 3}
+    expected = hamilton.execute(cast("Any", names), inputs=inputs)
+    assert expected["listed"] == [2, 3, 3, 3]
+    assert expected["keyed"] == {"first": 2, "fixed": 3, "second": 3, "n": 3}
+    assert dict(built.execute(names, inputs=inputs)) == dict(expected)
+    # Docs: a row's own doc verbatim, the function's templated otherwise.
+    docs = {n: hamilton.graph.nodes[n].documentation for n in names}
+    assert docs["literal"] == "kept {as} written {p}"
+    assert docs["silent"] is None
+    assert docs["templated"] == "templated reads up."
+    assert docs["constant"] == "constant reads 4.5."
+    assert docs["low"] == "Row low takes a."
+    assert docs["two"] is None
+    assert {n: built.nodes[n].doc for n in names} == docs
+    # A group's sources are inputs of the element type, `int`, not `list[int]`.
+    hamilton_types = {n: v.input_types for n, v in hamilton.graph.nodes.items()}
+    assert hamilton_types["listed"]["a"][0] is int
+    assert built.nodes["a"].type is int
+    assert built.nodes["b"].type is int
+    assert built.nodes["listed"].dependencies == ("a", "b")

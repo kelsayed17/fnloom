@@ -7,7 +7,7 @@ use fnloom_core::node::{Dependency, InputSpec, NodeId, NodeSpec};
 use fnloom_core::plan::Request;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::PyString;
+use pyo3::types::{PyDict, PyString};
 use pyo3::{PyTraverseError, PyVisit};
 
 use crate::errors::value_error;
@@ -42,9 +42,6 @@ pub struct Graph {
 /// Renamed inputs by consumer id, each consumer's sorted by input id.
 type RenamesById = Vec<Vec<(NodeId, Py<PyString>)>>;
 
-/// Each renaming node's renames, by its name: input name to the keyword it is passed as.
-type Renames = BTreeMap<String, BTreeMap<String, String>>;
-
 #[pymethods]
 impl Graph {
     /// Builds a graph from `(name, [(param, required)], tags, fn)` tuples.
@@ -54,7 +51,11 @@ impl Graph {
     /// cycle, or naming a rename of a node or input the graph does not have.
     #[new]
     #[pyo3(signature = (nodes, renames = None))]
-    fn new(py: Python<'_>, nodes: Vec<NodeTuple>, renames: Option<Renames>) -> PyResult<Self> {
+    fn new(
+        py: Python<'_>,
+        nodes: Vec<NodeTuple>,
+        renames: Option<&Bound<'_, PyDict>>,
+    ) -> PyResult<Self> {
         let specs = nodes.into_iter().map(node_spec).collect();
         let graph = CoreGraph::build(specs).map_err(value_error)?;
         let keywords = graph
@@ -62,7 +63,7 @@ impl Graph {
             .iter()
             .map(|node| PyString::intern(py, &node.name).unbind())
             .collect();
-        let renames = renamed(py, &graph, renames.unwrap_or_default())?;
+        let renames = renamed(&graph, renames)?;
         Ok(Self {
             core: graph,
             keywords,
@@ -188,25 +189,52 @@ fn as_strs(names: &[String]) -> Vec<&str> {
     names.iter().map(String::as_str).collect()
 }
 
-/// The renames by consumer id, each sorted by input id, with interned keywords.
-fn renamed(py: Python<'_>, graph: &PyCoreGraph, renames: Renames) -> PyResult<RenamesById> {
+/// The renames by consumer id, each sorted by input id.
+///
+/// `renames` maps each renaming node's name to a dict of input name to the keyword
+/// it is passed as. A keyword is kept as the `str` given: a parameter name read off a
+/// code object, which Python has already interned. Names are read without copying.
+/// `TypeError` for a name or keyword that is not a `str`, or a value that is not a
+/// dict; `ValueError` naming every unknown node, sorted.
+fn renamed(graph: &PyCoreGraph, renames: Option<&Bound<'_, PyDict>>) -> PyResult<RenamesById> {
     let mut by_id: RenamesById = Vec::new();
     by_id.resize_with(graph.nodes().len(), Vec::new);
-    let id_of = |name: &str| {
-        graph
-            .id_of(name)
-            .ok_or_else(|| PyValueError::new_err(format!("rename of unknown node '{name}'")))
+    let Some(renames) = renames else {
+        return Ok(by_id);
     };
-    for (consumer, inputs) in renames {
-        let consumer = id_of(&consumer)?;
-        let mut entries = inputs
-            .into_iter()
-            .map(|(input, keyword)| Ok((id_of(&input)?, PyString::intern(py, &keyword).unbind())))
-            .collect::<PyResult<Vec<_>>>()?;
-        entries.sort_by_key(|&(id, _)| id);
-        if let Some(slot) = by_id.get_mut(consumer.index()) {
-            *slot = entries;
+    let mut unknown = BTreeSet::new();
+    for (consumer, inputs) in renames.iter() {
+        let consumer = consumer.cast::<PyString>()?.to_str()?;
+        let inputs = inputs.cast::<PyDict>()?;
+        let mut entries = Vec::with_capacity(inputs.len());
+        for (input, keyword) in inputs.iter() {
+            let input = input.cast::<PyString>()?.to_str()?;
+            let keyword = keyword.cast_into::<PyString>()?.unbind();
+            match graph.id_of(input) {
+                Some(id) => entries.push((id, keyword)),
+                None => {
+                    unknown.insert(input.to_owned());
+                }
+            }
         }
+        entries.sort_by_key(|&(id, _)| id);
+        match graph.id_of(consumer) {
+            Some(id) => {
+                if let Some(slot) = by_id.get_mut(id.index()) {
+                    *slot = entries;
+                }
+            }
+            None => {
+                unknown.insert(consumer.to_owned());
+            }
+        }
+    }
+    if !unknown.is_empty() {
+        let listed: Vec<String> = unknown.iter().map(|name| format!("'{name}'")).collect();
+        return Err(PyValueError::new_err(format!(
+            "rename of unknown nodes: {}",
+            listed.join(", ")
+        )));
     }
     Ok(by_id)
 }

@@ -37,6 +37,20 @@ driver.execute(["label", "total"], inputs={"price": 2.5, "quantity": 4})
 # -> {'label': '10.00 EUR', 'total': 10.0}
 ```
 
+You can also pass a function instead of its name. It means the node the function makes in this driver, and the
+result is still keyed by the node's name:
+
+```python
+driver.execute([pricing.label], inputs={"price": 2.5, "quantity": 4})
+# -> {'label': '10.00 EUR'}
+```
+
+fnloom matches the function itself, never its name. An `@extract_fields` function means its producer, not its fields.
+A function that makes several nodes raises a `TypeError` listing them, so pass their names, unless one of them is
+named like the function, as an alias or a `@parameterize` row can be: that one is its node. A function that makes
+none, such as one from another module, an unselected `@config` variant or a lambda, raises a `ValueError`. A request
+lists every such problem at once.
+
 Only the nodes your outputs need will run. You must supply every required input on the way, and every name you pass
 must be a node in the graph. A misspelled input is an error, never a value that's quietly ignored.
 
@@ -52,6 +66,44 @@ driver.execute(["label"], overrides={"total": 100.0})
 
 An override can name any node, whether a function or an input. It wins over a supplied input of the same name, and
 it fills in for a required input you didn't supply.
+
+### Strict overrides
+
+Hamilton refuses an override of an input that you haven't also supplied, because it only cuts off what is upstream of
+an overridden node. To get that rule, build with `with_strict_overrides()`. The refusal names every such input,
+sorted, with the nodes that need it. It is settled when the request is prepared, never on a run of a prepared plan:
+
+```python
+strict = fnloom.Builder().with_modules(pricing).with_strict_overrides().build()
+strict.execute(
+    ["total"], inputs={"price": 2.0, "quantity": 3}, overrides={"price": 5.0}
+)
+# -> {'total': 15.0}
+strict.execute(["total"], inputs={"quantity": 3}, overrides={"price": 5.0})
+# raises ValueError: override of input 'price' refused: not supplied, though needed by 'total' (supply it in inputs= too; strict overrides are on)
+```
+
+An input that no node the request computes needs, such as an output asked for itself, is never refused. `validate`
+reports it as a line too.
+
+### Declared inputs
+
+`with_declared_inputs(*names)` makes the build fail for any input of the graph that you haven't declared, and for any
+declared name that isn't an input. A misspelled parameter, or a misspelled `source("...")`, is otherwise a new input
+that nothing supplies. Each culprit gets the closest node or declared name, and every one is listed in one sorted
+message. Calling it again adds names:
+
+```python
+declared = (
+    fnloom.Builder().with_modules(pricing).with_declared_inputs("price", "quantty")
+)
+try:
+    declared.build()
+except ValueError as error:
+    lines = str(error).splitlines()
+lines
+# -> ["declared name 'quantty' is not an input of the graph (did you mean 'quantity'?)", "undeclared input 'currency'", "undeclared input 'discount' (did you mean 'discounted'?)", "undeclared input 'quantity' (did you mean 'quantty'?)"]
+```
 
 ## Prepared plans
 
@@ -75,6 +127,36 @@ they differ.
 
     `execute` keeps the 128 most recently used plans, keyed by the outputs and the input and override names. Repeated
     calls of the same shape skip compiling, so `prepare` mostly saves you the cache lookup.
+
+## Validate
+
+`validate` checks a request the way `execute` would, but runs nothing. It returns every problem as one line, sorted,
+and an empty list when the request would run:
+
+```python
+driver.validate(["label"], inputs={"price": 1.5, "quantity": 2})
+# -> []
+driver.validate(
+    ["labl", "total"], inputs={"price": "cheap", "quantity": 2, "quantty": 3}
+)
+# -> ["price: expected float, got str", "unknown inputs: 'quantty' (did you mean 'quantity'?)", "unknown outputs: 'labl' (did you mean 'label'?)"]
+driver.validate(["total"], inputs={"price": 1.5, "quantty": 3})
+# -> ["missing inputs: 'quantity' (needed by 'total') (did you mean 'quantty'?)", "unknown inputs: 'quantty' (did you mean 'quantity'?)"]
+```
+
+Each line is the line `execute` raises for that problem on its own, so `validate` reports what `execute` would, all
+at once instead of one kind at a time. It covers unknown outputs, inputs and overrides; missing inputs; the types of
+input and override values; and outputs no `@config.when*` variant gave. A missing input names only the nodes this
+request needs it for, and a function in `final_vars` that no node comes from gets the line `execute` raises for it.
+A malformed request still raises a `TypeError`, as does `inputs` or `overrides` that isn't a mapping:
+
+```python
+driver.validate("label")
+# raises TypeError: final_vars must be a sequence of names, not a single str
+```
+
+`prepare` only reads the names of the inputs, so it accepts values that `validate` reports; the checks run when the
+plan runs. `AsyncDriver.validate` is the same method, and isn't a coroutine.
 
 ## Type checks
 
@@ -140,11 +222,19 @@ driver.execute(["total"], inputs={"price": "2.5", "quantity": 4})
 
 A few rules worth knowing:
 
-- `None` fits every type.
+- `None` fits only a type that admits it: `Optional[T]`, `T | None`, `object`, `Any`, `None` itself, and a `TypeVar`
+  that is free or whose bound or a constraint admits it. Hamilton lets `None` through for every type, so the node
+  then fails on its own (Q79). A default of `None` doesn't make a parameter optional: annotate it `T | None` to pass
+  `None`.
 - An input you supply but the plan never reads isn't checked. Every override is, even one for a node the plan never
   reaches.
 - The checks a plan needs are worked out once, when it's prepared, so a run only checks values. Checking against a
   plain class like `int` costs one `isinstance` call.
+
+```python
+driver.execute(["total"], inputs={"price": None, "quantity": 4})
+# raises ValueError: price: expected float, got NoneType
+```
 
 ### What the checks understand
 
@@ -155,12 +245,14 @@ A few rules worth knowing:
 | Unions, `Optional`, `Literal` | Against each member or value |
 | `Annotated[T, ...]` | As `T`; metadata never changes the answer |
 | `NewType` | As its supertype |
-| `TypeVar` | Anything fits; on an edge it matches only itself |
+| `TypeVar` | Anything but `None` fits; `None` fits a free one, or one whose bound or a constraint admits it. On an edge it matches only itself |
 | A `runtime_checkable` protocol | `isinstance` |
 | A PEP 695 alias (`type Price = float`) | As what it names |
 | `list`, `dict`, `tuple` and other plain classes | `isinstance` |
-| `list[T]`, `tuple[T, ...]`, `Sequence[T]`, `set[T]`, `Iterable[T]` | A value of exactly the declared class (a `list` for `list[T]`) by class only, so `["a"]` fits `list[int]`. Any other value by kind, plus its first element |
-| `dict[K, V]` | By class only: the value's class must be exactly `dict` |
+| `tuple[int, str]`, `tuple[()]` and other fixed-length tuples | A tuple of that length whose items each fit, nested tuples included; `tuple[()]` takes only `()` (Q80) |
+| `list[T]`, `tuple[T, ...]`, `Sequence[T]`, `set[T]`, `Iterable[T]` | A value of exactly the declared class (a `list` for `list[T]`) by class only, so `["a"]` fits `list[int]`. Any other value by kind, plus its first element. Every item with [deep checks](#deep-checks-and-numeric-widening) |
+| `dict[K, V]` | By class only: the value's class must be exactly `dict`. Every key and value with deep checks |
+| An annotation that didn't resolve at build, such as `Decimal` imported only under `TYPE_CHECKING` | No value fits: a `TypeError` saying to import it at run time (Q81). See [Annotations](writing-nodes.md#annotations) |
 | Other `collections.abc` generics (`Mapping[str, int]`, `Callable[[int], int]`, ...) | By kind only, so any `dict` fits `Mapping[str, int]` |
 | An iterator | By kind only. It's never read, so no items are lost |
 
@@ -169,9 +261,80 @@ uses its type parameters in the order it declares them. One that reorders them i
 alias inside another generic's arguments is compared as written too, so a node returning `list[float]` doesn't feed a
 `list[Price]` parameter.
 
+Both checks are public: `fnloom.value_matches(declared, value)` answers as the input check, and
+`fnloom.type_matches(produced, expected)` as the edge check.
+
+```python
+fnloom.value_matches(tuple[int, str], (1, "a")), fnloom.value_matches(int, None)
+# -> (True, False)
+fnloom.type_matches(int, int | None)
+# -> True
+```
+
+### Deep checks and numeric widening
+
+Two opt-ins make the value checks stricter or looser. Both apply to inputs, overrides, extracted fields and
+[`validate`](#validate), and both are carried by `build_async`, pickling and copying. Edge checks compare types, not
+values, so neither changes them.
+
+```python
+# file: baskets.py
+def basket_total(prices: list[float]) -> float:
+    """The sum of every price in the basket."""
+    return sum(prices)
+```
+
+`Builder.with_deep_type_checks()` checks every item of a `list`, `set`, `tuple[T, ...]` or other standard
+collection, every key and value of a `dict` or other mapping, and the items of nested collections in turn, however deep,
+without recursion. An iterator is still never read (Q43). By default a `list` passes `list[float]` on its class alone,
+as in Hamilton:
+
+```python
+import baskets
+
+fnloom.build(baskets).validate(["basket_total"], inputs={"prices": [1.5, "2"]})
+# -> []
+deep = fnloom.Builder().with_modules(baskets).with_deep_type_checks().build()
+deep.validate(["basket_total"], inputs={"prices": [1.5, "2"]})
+# -> ['prices: expected list[float], got list (an item does not fit)']
+```
+
+A deep check reads every item on every run, so it costs time in proportion to the value: about 2.6 ms for a list of
+100,000 floats (see [Benchmarks](benchmarks.md)). An item whose type is a plain class costs one `isinstance` call. Only
+a value of a standard class (`list`, `dict`, `set`, `tuple`, `deque`, ...) has its items read: any other value, such
+as an iterable class of your own, keeps the default checks, so an endless one is never read to its end. A subclass of
+a standard collection, such as a `list` subclass of your own, is checked by the default rules too. A value of any size
+or depth is read in full. A check that fits reads each part the value shares, such as one list held in two places,
+once, on a cycle or not, never once per path. A check that fails may read shared parts more than once. A check gives
+up only when more than 10,000 of its questions are open about one value at once, which only a cycle no check can see,
+such as a type made afresh on each reading, reaches.
+
+`Builder.with_numeric_widening()` lets an `int` (but not a `bool`) and a numpy integer or floating scalar fit
+`float`, and a numpy integer scalar fit `int`. Hamilton refuses them all, as fnloom does by default. numpy is
+recognised from the value's class and never imported. Widening applies wherever a check reads a value: the value
+itself, a fixed tuple's items and the first item a default check reads. Every item of a collection is read only with
+deep checks:
+
+```python
+widening = fnloom.Builder().with_modules(pricing).with_numeric_widening().build()
+widening.execute(["total"], inputs={"price": 2, "quantity": 4})
+# -> {'total': 8}
+both = (
+    fnloom.Builder()
+    .with_modules(baskets)
+    .with_deep_type_checks()
+    .with_numeric_widening()
+    .build()
+)
+both.execute(["basket_total"], inputs={"prices": [1, 2.5]})
+# -> {'basket_total': 3.5}
+```
+
+`fnloom.value_matches(declared, value, deep=True, widen=True)` answers as a driver with both settings.
+
 ### Unsupported annotations
 
-Anything else refuses every value except `None`. Two examples are a plain protocol (one not marked
+Anything else refuses every value. Two examples are a plain protocol (one not marked
 `runtime_checkable`), and a `dict` subclass, such as an `OrderedDict`, for `dict[str, int]`.
 Either annotate with a supported form, or build with `Builder.without_input_type_checks()`:
 
@@ -181,8 +344,17 @@ lenient.execute(["total"], inputs={"price": 2, "quantity": 4})
 # -> {'total': 8}
 ```
 
-The opt-out turns off only the input and override checks. Edge checks stay on: they cost nothing per run, and a graph
-whose edges disagree is a bug whatever you supply.
+To skip only the override checks, build with `Builder.without_override_type_checks()`. Input checks stay on, so an
+override of another type, such as `float("nan")` for an `int` node, runs while a badly typed input is still refused:
+
+```python
+sentinel = fnloom.Builder().with_modules(pricing).without_override_type_checks().build()
+sentinel.execute(["label"], overrides={"total": float("nan")})["label"]
+# -> 'nan EUR'
+```
+
+The `without_input_type_checks()` opt-out turns off both the input and override checks. Edge checks stay on: they
+cost nothing per run, and a graph whose edges disagree is a bug whatever you supply.
 
 ## Execution order
 
@@ -202,6 +374,47 @@ driver.what_is_downstream_of("total")
 ```
 
 Each query returns sorted names, including the nodes you named. `node_names()` lists every node, inputs included.
+
+`what_is_the_path_between(upstream, downstream)` returns every node on a path from one to the other, both included.
+The upstream end may be an input; the downstream end is one only when both ends are that input, since nothing feeds an
+input. The order is topological, with ties broken by name, so it's the same on every run:
+
+```python
+driver.what_is_the_path_between("price", "label")
+# -> ['price', 'total', 'discounted', 'label']
+driver.what_is_the_path_between("label", "price")
+# -> []
+driver.what_is_the_path_between("total", "total")
+# -> ['total']
+driver.what_is_the_path_between("prise", "lable")
+# raises ValueError: unknown nodes: 'lable', 'prise'
+```
+
+No path, as when you ask in the wrong direction, is an empty list. An unknown name raises a `ValueError` naming every
+unknown end, sorted. The async driver has the same method.
+
+## Inputs and outputs
+
+`driver.inputs()` maps each input to an `InputView`, in name order: its `type`, whether some consumer `required` it,
+and its `consumers`, sorted. `driver.outputs()` lists the nodes nothing reads, sorted: the usual `final_vars`.
+
+```python
+driver.inputs()["discount"] == fnloom.InputView(
+    "discount", float, required=False, consumers=("discounted",)
+)
+# -> True
+driver.inputs()["price"].required
+# -> True
+list(driver.inputs())
+# -> ['currency', 'discount', 'price', 'quantity']
+driver.outputs()
+# -> ['label']
+driver.modules == (pricing,)
+# -> True
+```
+
+An input is required when any consumer has no default for it, so `currency` is optional here. `driver.modules` holds
+the modules the graph was built from, each once, in the order you gave them. The async driver has all three.
 
 ## Inspecting a graph
 
@@ -224,7 +437,9 @@ view.doc
 ```
 
 `origin` is the function the node came from, `module` is its module's name, and `tags` are the ones you wrote with
-`@tag`. An input has no function, so its `origin`, `module` and `doc` are `None` and its `params` are empty. Its `type`
+`@tag`. `namespace` is the one its module was given under, or `None`
+([Namespaces](writing-nodes.md#namespaces)). An input has no function, so its `origin`, `module`, `doc` and
+`namespace` are `None` and its `params` are empty. Its `type`
 is the annotation of the parameters that read it:
 
 ```python
@@ -238,8 +453,8 @@ The view is made once, when the graph is built, and annotations are evaluated th
 
 - a module using `from __future__ import annotations` gives the same types as one without it;
 - an annotation can name a class defined further down the module;
-- a name that doesn't resolve, such as one imported only under `TYPE_CHECKING`, fails the build with its `NameError`
-  and a note naming the node and the parameter;
+- a name that doesn't resolve, such as one imported only under `TYPE_CHECKING`, builds as an opaque `unresolved` type
+  (Q81); see [Annotations](writing-nodes.md#annotations);
 - if two functions annotate the same input with types that disagree, the build raises a `ValueError` naming the input
   and each function.
 
@@ -247,8 +462,10 @@ The view is made once, when the graph is built, and annotations are evaluated th
 
 A driver pickles, and copies with `copy.deepcopy`, so you can hand it to a `concurrent.futures.ProcessPoolExecutor`
 or any other tool that pickles its arguments. It is pickled as the recipe it was built from: the names of its
-modules, whether it checks input types, its config, and its cache store. Loading it imports those modules by name
-and builds the driver again, so its compiled plans don't travel; each process compiles its own.
+modules and their namespaces, the functions given to `with_functions`, by module and qualified name, every setting,
+its config, and its cache store. Loading it
+imports those modules by name and builds the driver again, so its compiled plans don't travel; each process compiles
+its own.
 
 ```python
 import pickle
@@ -265,6 +482,50 @@ again.execute(["total"], inputs={"price": 2.0, "quantity": 3})
   rebuilt driver.
 - A `DiskCache` reopens the same directory, so worker processes share its entries with you. A `MemoryCache` comes
   back empty, with the same bounds: its entries belong to the process that stored them.
+
+## Threads
+
+One driver can be shared by any number of threads, on the default build and on the free-threaded `3.14t`, where
+fnloom keeps the GIL off. A run keeps its values to itself, and never writes to the `inputs` or `overrides` you pass.
+These are safe to call from several threads at once:
+
+- on a `Driver`: `execute`, `prepare`, `validate`, `explain_cache`, and the inspection methods: `nodes`, `inputs()`,
+  `outputs()`, `modules`, `what_is_the_path_between` and the lineage methods;
+- `PreparedPlan.run`, on one plan shared between threads;
+- a `Builder`, whose methods return new builders, its `build`, and `rebuild`;
+- `MemoryCache` and `DiskCache`, so a cached driver can be shared too.
+
+An `AsyncDriver`'s synchronous methods, `prepare`, `validate` and inspection, are the `Driver`'s, and as safe.
+
+fnloom can't make your own code safe:
+
+- **Your values.** A mutable value you pass, such as a list, is shared by every thread you pass it to, and a cached
+  result is shared by every run that hits it.
+- **Nodes that mutate.** A node that changes its arguments, or a module global, races with every other run that
+  reads them.
+- **Your store.** A store of your own must be safe to call from several threads at once
+  ([Stores](caching.md#stores)).
+
+## Rebuilding after an edit
+
+A driver keeps the functions it was built with. After `importlib.reload` it still runs the old code, as Hamilton's
+does. `rebuild()` builds a new driver from the same builder, with every setting, its config and its cache store, so it
+sees the reloaded module (Q83):
+
+```python
+fresh = driver.rebuild()
+fresh.execute(["total"], inputs={"price": 2.0, "quantity": 3})
+# -> {'total': 6.0}
+```
+
+- The old driver is unchanged, and keeps running its old code until you drop it.
+- Code versions are read again, so with a shared cache store the edited node, and everything downstream of it,
+  misses on the new driver ([Code versions](caching.md#code-versions)).
+- A function given to `with_functions` is the object you gave. After a reload, give the new one to a new builder. When
+  the builder has the function's module too, `rebuild` raises a `ValueError` saying the function given to
+  `with_functions` is stale after a reload.
+- `AsyncDriver.rebuild()` keeps `sync_nodes` too. A driver made from a native graph has no builder, and raises a
+  `TypeError`.
 
 ## Exceptions from your functions
 

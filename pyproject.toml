@@ -67,6 +67,10 @@ testpaths = ["tests", "scripts"]
 # and "scripts" lets scripts/test_bench_gate.py import the script it tests.
 pythonpath = ["tests", ".", "scripts"]
 addopts = ["-ra", "--strict-markers", "--strict-config"]
+# Hamilton's own `datetime.utcnow()` call, deprecated on 3.12+; fnloom's code warns nothing.
+filterwarnings = [
+    "ignore:datetime.datetime.utcnow\\(\\) is deprecated:DeprecationWarning:hamilton",
+]
 
 [tool.ruff]
 target-version = "py314"

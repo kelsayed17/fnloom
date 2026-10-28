@@ -35,6 +35,109 @@ fnloom.build(orders).node_names()
 # -> ['quantity', 'units']
 ```
 
+## Keeping a function out
+
+A public function that isn't meant to be a node, such as a helper, can be kept out in two ways (Q73).
+
+**`@fnloom.exclude`** marks one function. It works bare or called, `@fnloom.exclude()`, and only records the mark: the
+function is returned unchanged, so you can still call it, and it stacks with the other decorators in either order. An
+excluded function is never read, so it may omit its annotations. Hamilton's `@hamilton_exclude` raises when called.
+
+```python
+# file: pricing.py
+import fnloom
+
+
+@fnloom.exclude
+def round_cents(value: float) -> float:
+    """A public helper the graph doesn't need to know about."""
+    return round(value, 2)
+
+
+def price(cost: float) -> float:
+    return round_cents(cost * 1.2)
+```
+
+```python
+import fnloom
+import pricing
+
+fnloom.build(pricing).node_names()
+# -> ['cost', 'price']
+pricing.round_cents(1.239)
+# -> 1.24
+```
+
+**`__all__`** limits a module to the functions it names. Hamilton ignores `__all__`; fnloom honours it, which is a
+breaking change for a module that defines one and relied on the rest becoming nodes. Names it lists that aren't
+functions the module defines, such as re-exports and constants, are ignored, and listing a private function doesn't
+make it a node. `@fnloom.exclude` wins when a function is both listed and marked.
+
+```python
+# file: public_api.py
+import fnloom
+
+__all__ = ["revenue", "margin"]
+
+
+def revenue(units: int) -> int:
+    return units * 10
+
+
+def margin(revenue: int) -> int:
+    return revenue // 4
+
+
+def scratch(units: int) -> int:
+    """Not listed: not a node."""
+    return units
+```
+
+```python
+import fnloom
+import public_api
+
+fnloom.build(public_api).node_names()
+# -> ['margin', 'revenue', 'units']
+```
+
+`__all__` is read as the attribute names a module defines, so a `@fnloom.config.when` variant `price__eu` has to be
+listed as `price__eu` to be considered at all. An `__all__` that is not a list or tuple of `str` is a `TypeError` at
+build, naming every such module.
+
+When something reads the name of a function that was left out, it's a missing input, and the error adds a line saying
+why the name isn't a node:
+
+```python
+# file: reports.py
+import fnloom
+
+__all__ = ["summary"]
+
+
+def discount(rate: float) -> float:
+    return rate / 2
+
+
+def summary(discount: float) -> float:
+    return discount
+```
+
+```python
+import fnloom
+import reports
+
+try:
+    fnloom.build(reports).execute(["summary"])
+except ValueError as error:
+    hint = str(error).splitlines()[-1]
+hint
+# -> "'discount' is a function in module 'reports' not listed in its __all__"
+```
+
+A function `@fnloom.exclude` marked gets `marked @exclude` in place of `not listed in its __all__`. A module whose
+functions are all left out has no nodes, and the build says so, giving each function's reason.
+
 ## Inputs
 
 A parameter that doesn't name any function becomes an **input** node, whose value comes from the caller. Above,
@@ -73,18 +176,166 @@ driver.execute(["greeting"], inputs={"name": "Ada", "punctuation": "."})
     A default only makes an edge optional when the parameter reads an input. If a parameter with a default names
     another function, it still reads that function's value.
 
+## Defaults the build refuses
+
+A default only applies to an input nobody supplies. Two patterns make a default surprising, and Hamilton accepts
+both. fnloom refuses them when you build (Q76), each with one `ValueError` that lists every case, sorted.
+
+**A node shadows the default.** A parameter with a default that reads a node, by its own name or through
+`source("...")`, takes the node's value. The default is never used, and an input of that name is ignored:
+
+```python
+# file: surcharge.py
+def fee() -> int:
+    return 100
+
+
+def total(fee: int = 3) -> int:
+    """The author meant `3` unless the caller supplied a fee."""
+    return fee
+```
+
+```python
+import fnloom
+import surcharge
+
+fnloom.build(surcharge)
+# raises ValueError: shadowed default: parameter 'fee' of 'total' has a default, but it reads the node 'fee', which replaces it; rename one, or let the node win with @fnloom.defaults(shadowed=('fee',)) on 'total'
+```
+
+A `value()` binding has no edge, so a node of that name doesn't shadow it.
+
+**Two consumers disagree.** Each consumer keeps its own default when the input isn't supplied, but one input then reads
+as two different values, and the same one for both when it is supplied:
+
+```python
+# file: windows.py
+def short_window(days: int = 7) -> int:
+    return days
+
+
+def long_window(days: int = 30) -> int:
+    return days
+```
+
+```python
+import fnloom
+import windows
+
+fnloom.build(windows)
+# raises ValueError: differing defaults: input 'days' has different defaults in 'long_window' (parameter 'days') = 30, 'short_window' (parameter 'days') = 7; make them equal, or write @fnloom.defaults(differing=(<parameter>,)) on each of these consumers but one
+```
+
+Defaults are compared with `==`, and two NaNs are equal. An unclear comparison counts as different: a result that
+isn't a `bool` (numpy's scalar bool is one), as numpy arrays give, an error, or two objects without `__eq__` that
+aren't the same object. A consumer without a default has
+none to differ from.
+
+**Opting out.** When you mean it, say so on the consumer with `@fnloom.defaults`, naming the parameters:
+
+```python
+# file: windows_ok.py
+import fnloom
+
+
+def fee() -> int:
+    return 100
+
+
+@fnloom.defaults(shadowed=("fee",))
+def total(fee: int = 3) -> int:
+    return fee
+
+
+@fnloom.defaults(differing=("days",))
+def short_window(days: int = 7) -> int:
+    return days
+
+
+def long_window(days: int = 30) -> int:
+    return days
+```
+
+```python
+import fnloom
+import windows_ok
+
+driver = fnloom.build(windows_ok)
+driver.execute(["total", "short_window", "long_window"])
+# -> {'total': 100, 'short_window': 7, 'long_window': 30}
+driver.execute(["short_window", "long_window"], inputs={"days": 14})
+# -> {'short_window': 14, 'long_window': 14}
+```
+
+- With `shadowed`, the node wins, as it does in Hamilton.
+- With `differing`, each consumer keeps its default. A consumer that opts out leaves the comparison, so naming the input
+  on every consumer but one is enough: above, `long_window` is alone.
+- `@defaults` only records names, so it stacks with the other decorators in any order and returns the function itself.
+  Applying it twice merges the names.
+- A name that isn't a parameter with a default is a `ValueError` when the decorator is applied, listing every such name.
+
 ## Annotations
 
 Every parameter and every return value needs a type annotation, so each edge in the graph is typed where it's
 declared. fnloom then checks edges, inputs and overrides against them; see [Type checks](running.md#type-checks).
+Annotate what a parameter really takes. A parameter that may be `None` needs `T | None` (or `Optional[T]`), even with
+a default of `None`: `None` passed for `x: int` is refused (Q79). A fixed-length tuple, `tuple[int, str]`, is checked
+by its length and each item (Q80).
 
 Annotations are evaluated when the graph is built, as in Hamilton. String annotations
 (`from __future__ import annotations`) and forward references to a class further down the module are fine.
 
+An annotation naming something that doesn't exist at run time, such as a class imported only under
+`if TYPE_CHECKING:` (as ruff's `TC003` rule suggests), still builds. Hamilton raises `NameError` instead (Q81). The
+annotation becomes an opaque type, shown as `unresolved 'Decimal'`, with its text as written:
+
+```python
+# file: rates.py
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from decimal import Decimal
+
+
+def rate() -> "Decimal":
+    """The exchange rate."""
+    raise NotImplementedError
+
+
+def converted(rate: "Decimal") -> "Decimal":
+    """Fed by `rate`: the same unresolved text on both ends."""
+    return rate
+
+
+def checked(amount: "Decimal") -> "Decimal":
+    """Reads an input whose type didn't resolve."""
+    return amount
+```
+
+```python
+import fnloom
+import rates
+
+driver = fnloom.build(rates)
+repr(driver.nodes["rate"].type)
+# -> "unresolved 'Decimal'"
+driver.execute(["checked"], inputs={"amount": 1})
+# raises TypeError: amount: cannot check a value against unresolved 'Decimal': it did not resolve when the graph was built; import what it names at run time, not only under TYPE_CHECKING
+```
+
+It surfaces only where a check needs it:
+
+- **Edges:** an edge matches it only from or to an annotation of the same text, or `Any`. Any other edge with it fails
+  the build, naming the text.
+- **Values:** an input or override checked against it raises a `TypeError` saying to import the name at run time. A
+  node never asked for is never checked, and `without_input_type_checks()` skips the check. An input two nodes share
+  is checked as its merged type, the narrower of their annotations, so an unresolved one wins over `Any` and is
+  checked even for the `Any` consumer.
+
 !!! warning "Keep annotation imports real"
 
-    Every name in an annotation must exist at run time. If you move an import under `if TYPE_CHECKING:` (as ruff's
-    `TC003` rule suggests), the build raises that name's `NameError`, with a note naming the node and the parameter.
+    An unresolved annotation can't check a value. If a node's inputs should be checked, import the names its
+    annotations use at run time, not only under `TYPE_CHECKING`.
 
 ## Modules together
 
@@ -121,6 +372,196 @@ A few details:
   builder safely.
 - Passing the same module twice adds its nodes once.
 - Defining the same name in two different modules is a `ValueError` naming both.
+
+## Namespaces
+
+`Builder.with_modules(*modules, namespace="eu")` names each node of those modules `eu.<name>`, so one module can be
+used more than once in a graph (Q74). A namespace is a dotted path of identifiers, such as `"eu"` or `"shop.eu"`:
+
+```python
+# file: regional.py
+def net(gross: float, tax_rate: float) -> float:
+    """The price without tax."""
+    return gross / (1 + tax_rate)
+
+
+def tax_rate() -> float:
+    """This region's tax rate, 20%."""
+    return 0.2
+```
+
+```python
+# file: totals.py
+def tax_rate() -> float:
+    """The default tax rate, 10%."""
+    return 0.1
+
+
+def both(eu_net: float, us_net: float) -> tuple[float, float]:
+    """Each region's net price."""
+    return (eu_net, us_net)
+```
+
+Inside a namespace, a parameter reads the namespace's own node when one of its modules defines that name, and
+otherwise the plain name: a node given without a namespace, or an input. Here `eu.net` reads `eu.tax_rate`, which
+shadows the plain `tax_rate` for readers inside `eu` only. An input is never namespaced, so both copies of `net` read
+the one input `gross`:
+
+```python
+import fnloom
+import regional
+import totals
+
+driver = (
+    fnloom.Builder()
+    .with_modules(totals)
+    .with_modules(regional, namespace="eu")
+    .with_modules(regional, namespace="us")
+    .build()
+)
+driver.node_names()
+# -> ['both', 'eu.net', 'eu.tax_rate', 'eu_net', 'gross', 'tax_rate', 'us.net', 'us.tax_rate', 'us_net']
+driver.nodes["eu.net"].dependencies
+# -> ('eu.tax_rate', 'gross')
+driver.nodes["eu.net"].namespace
+# -> 'eu'
+list(driver.inputs())
+# -> ['eu_net', 'gross', 'us_net']
+driver.execute(["eu.net", "tax_rate"], inputs={"gross": 12.0})
+# -> {'eu.net': 10.0, 'tax_rate': 0.1}
+```
+
+A node outside reads a namespaced node by its full name, with `source(...)` in a `@parameterize` row or
+`fnloom.node(fn, bind=...)`, since a parameter name can't hold a dot:
+
+```python
+import fnloom
+import regional
+import totals
+
+driver = (
+    fnloom.Builder()
+    .with_modules(regional, namespace="eu")
+    .with_modules(regional, namespace="us")
+    .with_functions(
+        fnloom.node(
+            totals.both,
+            bind={"eu_net": fnloom.source("eu.net"), "us_net": fnloom.source("us.net")},
+        )
+    )
+    .build()
+)
+driver.execute(["both"], inputs={"gross": 12.0})
+# -> {'both': (10.0, 10.0)}
+```
+
+A few details:
+
+- A parameter can't read another namespace's node: a parameter `net` in namespace `us` reads `us.net` or the plain
+  `net`, never `eu.net`. Naming the full name in `source("eu.net")` reads that node from another namespace too, unless
+  the namespace it's written in has a node of its own named `eu.net` (in full, `us.eu.net`), which it reads instead.
+- Every name a namespaced module makes is prefixed: `@config` variants, `@parameterize` rows and extracted fields. Each
+  namespace selects its own `@config` variant, and the errors, `validate`, `inputs()`, `outputs()`,
+  `what_is_the_path_between` and suggestions all use full names.
+- The same module under the same namespace twice counts once. Under two namespaces, the same function makes a node in
+  each, so passing the function in `final_vars` is a `TypeError` naming both nodes: pass a name instead.
+- Names clash as they do without namespaces, and nothing overrides: a `@parameterize` row named `"eu.net"` in a module
+  given without a namespace is a build error naming both definitions. Hamilton's `allow_module_overrides()` silently
+  keeps the later module's function instead.
+- Cache keys use the full node name, and each function keeps one code version. `with_functions` takes no
+  `namespace=`.
+
+## Graphs without modules
+
+`Builder.with_functions` builds from functions directly, with no module to scan (Q72). Each function makes the nodes it
+would make in a module, named by its `__name__`, and keeps its decorators, so `@tag`, `@parameterize`, `@config.when*`,
+`@extract_fields` and `@cache` all work:
+
+```python
+# file: scoring.py
+import fnloom
+
+
+def raw(points: int) -> int:
+    return points * 10
+
+
+@fnloom.tag(owner="games")
+def bonus(raw: int) -> int:
+    return raw + 5
+
+
+def _scaled(raw: int, factor: int) -> int:
+    return raw * factor
+```
+
+```python
+import sys
+
+import fnloom
+import scoring
+
+modules_before = set(sys.modules)
+driver = fnloom.Builder().with_functions(scoring.raw, scoring.bonus).build()
+driver.execute(["bonus"], inputs={"points": 2})
+# -> {'bonus': 25}
+driver.nodes["bonus"].module
+# -> 'scoring'
+driver.modules
+# -> ()
+set(sys.modules) == modules_before
+# -> True
+```
+
+Nothing is copied and no module is made: each node is the function itself, so its module, cache key and code version
+are the function's own, and the function in `final_vars` means its node. Hamilton's `create_temporary_module` copies
+the functions into a module it registers in `sys.modules`.
+
+**`fnloom.node(fn, *, name=None, bind=None)`** makes one node from a function, named and bound without decorating it.
+`bind` takes `source(...)` and `value(...)`, as a `@parameterize` row does, and is checked the same way. One function
+can make several nodes, each from its own `node(...)`, and a function given on purpose may have a private name:
+
+```python
+import fnloom
+import scoring
+
+driver = (
+    fnloom.Builder()
+    .with_functions(
+        scoring.raw,
+        fnloom.node(scoring._scaled, name="doubled", bind={"factor": fnloom.value(2)}),
+        fnloom.node(scoring._scaled, name="tripled", bind={"factor": fnloom.value(3)}),
+    )
+    .build()
+)
+driver.execute(["doubled", "tripled"], inputs={"points": 1})
+# -> {'doubled': 20, 'tripled': 30}
+```
+
+A node's name must be an identifier, so a dotted name such as `"ns.score"` is refused. A lambda has no name a node
+can take, so it needs `name=`:
+
+```python
+import fnloom
+
+fnloom.Builder().with_functions(lambda points: points)
+# raises ValueError: function '<lambda>' has no name a node can take: give it one with fnloom.node(fn, name=...)
+```
+
+A few details:
+
+- `with_functions` is cumulative, like `with_modules`, and mixes with it: nodes are matched by name across both, and a
+  name defined twice, in a module and among the functions, is the usual duplicate error. The same function counts
+  once, whether it's given twice or also found in a module given to the builder.
+- Only a Python function is accepted. For a `functools.partial`, give the function with `bind=`; wrap a callable
+  instance in a `def`.
+- A function marked `@exclude` is refused rather than dropped, since you gave it on purpose. A module's `__all__` only
+  decides what that module's scan finds, so it doesn't apply.
+- A driver built this way pickles when each function is importable by its module and qualified name: defined at the
+  top of a module, or in a class there. A local function or a lambda is a `TypeError` naming it when pickled.
+  Loading finds each function again by that name, as pickle does: if the name now holds a different function, that
+  one is used, and if it holds nothing or something else, loading raises `TypeError: cannot load function 'm.f': …`.
+  A driver that is already running keeps the functions it was built with.
 
 ## One function, several nodes
 
@@ -170,6 +611,144 @@ driver.execute(
 
 The decorator returns the function unchanged, so you can still call it directly, and type checkers still see its
 signature.
+
+### Docs for each row
+
+A row's node takes the function's docstring as a template, filled in per row with `str.format_map`: `{output_name}` is
+the row's name, and each parameter the row binds is a source's name or a value's own value, so a format spec such as
+`{limit:.1f}` works. A `group(...)` parameter shows its items joined: `x, 3` for a list, `k=x, j=3` for a dict. Write a
+literal brace as `{{` or `}}`. A function without a docstring gives `None` for every row.
+
+A placeholder the row lacks, a positional field such as `{}` or `{0}`, or a stray brace is a `ValueError` naming the row
+and the placeholder, when the decorator is applied. Hamilton prints a missing placeholder as the bare key (Q82).
+
+To give a row its own doc, write the row as `(bindings, doc)`. The doc is used as written, never templated, and `None`
+means no doc at all, not the function's. A tuple of any other length, or a doc that is not a `str`, is a `TypeError`.
+
+```python
+# file: limits.py
+from fnloom import parameterize, source, value
+
+
+@parameterize(
+    low={"limit": value(10)},
+    high={"limit": source("high_limit")},
+    custom=({"limit": value(50)}, "Written as is: {limit} stays braced."),
+    quiet=({"limit": value(99)}, None),
+)
+def above(readings: list[int], limit: int) -> int:
+    """{output_name}: readings over {limit}."""
+    return sum(reading > limit for reading in readings)
+```
+
+```python
+import fnloom
+import limits
+
+driver = fnloom.build(limits)
+{name: driver.nodes[name].doc for name in ["low", "high", "custom", "quiet"]}
+# -> {'low': 'low: readings over 10.', 'high': 'high: readings over high_limit.', 'custom': 'Written as is: {limit} stays braced.', 'quiet': None}
+```
+
+```python
+from fnloom import parameterize, value
+
+
+def bad(limit: int) -> int:
+    """Over {limit}, or {ceiling}."""
+    return limit
+
+
+parameterize(low={"limit": value(10)})(bad)
+# raises ValueError: the docstring of 'bad' is a template for each row's doc: row 'low': placeholder {ceiling} is not 'output_name' or a parameter the row binds; write a literal brace as {{ or }}, or give the row its own doc with (bindings, doc)
+```
+
+### Lists and dicts: `group`
+
+`group(...)` binds one parameter to a list or a dict built from several sources and values. Positional items make a list,
+for a parameter annotated `list[X]`; keywords make a dict, for one annotated `dict[str, X]`. `Optional` of either is
+fine.
+
+```python
+# file: bundles.py
+from fnloom import group, parameterize, source, value
+
+
+@parameterize(
+    scores={"parts": group(source("math"), value(10), source("art"))},
+    named={"marks": group(math=source("math"), bonus=value(10))},
+)
+def bundle(parts: list[int] = [], marks: dict[str, int] = {}) -> object:
+    return parts or marks
+```
+
+```python
+import fnloom
+import bundles
+
+driver = fnloom.build(bundles)
+driver.execute(["scores", "named"], inputs={"math": 7, "art": 9})
+# -> {'scores': [7, 10, 9], 'named': {'math': 7, 'bonus': 10}}
+driver.nodes["math"].type is int
+# -> True
+```
+
+- **Each call builds a fresh list or dict.** A `value(...)` item is the same object every time, as `value()` is
+  everywhere.
+- **Each `source` is an ordinary input,** or node, typed by the element: `list[int]` makes it an `int`. It is
+  required, even when the parameter has a default, since a group is never partly built; Hamilton makes it optional and
+  then fails with a `KeyError` when one is missing.
+- **`NodeView.params`** lists one `Param` per item, with the item's place in `slot`: its index in a list, or its key
+  in a dict.
+- **Misuse is refused when decorating,** each offender listed once, in one message:
+    - a parameter not annotated as `list[X]` or `dict[str, X]`. A string annotation, as `from __future__ import
+      annotations` makes every one, is read then too. One that is only a name defined further down the module, quoted
+      or not, is checked at build instead, once it resolves, with the same message. A name that never resolves, such
+      as one imported only under `TYPE_CHECKING`, is refused at build, since its shape can't be read (Q81); inside
+      `list[...]` or `dict[str, ...]` it is fine, and each item is typed `unresolved`;
+    - positional and keyword items mixed, an empty `group()`, a nested `group`, or a bare string.
+- `fnloom.node(fn, bind=...)` takes a `group(...)` as a `@parameterize` row does.
+
+### Shorthands
+
+`parameterize_sources` is `@parameterize` with every binding a `source`, and `parameterize_values` is one parameter
+bound to a constant per node, each with its own doc:
+
+```python
+# file: shorthands.py
+from fnloom import parameterize_sources, parameterize_values
+
+
+@parameterize_sources(west=dict(rate="west_rate"), east=dict(rate="east_rate"))
+def price(rate: float, base: float = 100.0) -> float:
+    """{output_name} price at {rate}."""
+    return base * rate
+
+
+@parameterize_values("tax", {("low_tax", "A low tax."): 0.1, ("high_tax", None): 0.3})
+def taxed(tax: float, base: float = 100.0) -> float:
+    return base * (1 + tax)
+```
+
+```python
+import fnloom
+import shorthands
+
+driver = fnloom.build(shorthands)
+driver.execute(["west", "high_tax"], inputs={"west_rate": 1.5})
+# -> {'west': 150.0, 'high_tax': 130.0}
+driver.nodes["west"].doc
+# -> 'west price at west_rate.'
+driver.nodes["low_tax"].doc
+# -> 'A low tax.'
+```
+
+- **`parameterize_sources`** takes a `str` for each source, refused otherwise when decorating; Hamilton fails later with
+  a raw `TypeError`. No row may be empty.
+- **`parameterize_values`** takes a mapping of `(name, doc)` keys to values; a doc may be `None`, and a name may appear
+  once. An empty mapping is refused; Hamilton builds no node.
+- All three compose with `@config`, `@extract_fields` (one row only), `@tag`, `@cache`, `@defaults` and namespaces, and
+  each row is checked as a `@parameterize` row is.
 
 ## Config
 

@@ -79,6 +79,7 @@ TYPES: dict[str, object] = {
     "runtime Protocol": Checkable,
     "TypeVar": T,
     "NewType(int)": Count,
+    "type[int] | None": type[int] | None,
 }
 
 VALUES: dict[str, object] = {
@@ -94,6 +95,9 @@ VALUES: dict[str, object] = {
     "object()": object(),
     "Base()": Base(),
     "Child()": Child(),
+    # Classes and union objects as values; ids that are no type id, as keys must not be.
+    "the class int": int,
+    "the union int | str": int | str,
 }
 
 type Answer = bool | str

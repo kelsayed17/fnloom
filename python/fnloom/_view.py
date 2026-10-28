@@ -1,5 +1,6 @@
 """Read-only descriptions of a built graph's nodes."""
 
+import heapq
 import inspect
 
 # `Callable` is imported for real: `NodeView`'s signature annotates with it, and
@@ -15,6 +16,7 @@ from fnloom._types import type_matches
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
+    from collections.abc import Set as AbstractSet
 
     from fnloom._scan import NodeDef
 
@@ -26,12 +28,17 @@ class Param:
     `name` is the function's own parameter. A plain parameter is bound to
     `Source(name)`. `required` is False when the parameter has a default and is
     bound to a source; a `Value`-bound parameter is always supplied, so required.
+    A `group(...)` parameter is one `Param` per item, each with the parameter's
+    `name`, its `slot` (the item's index in a list, or its key in a dict) and the
+    group's element type as `annotation`; every item is required. `slot` is `None`
+    for any other parameter.
     """
 
     name: str
     binding: Source | Value
     required: bool
     annotation: object
+    slot: int | str | None = None
 
 
 @dataclass(frozen=True)
@@ -44,7 +51,9 @@ class NodeView:
     function's declaration order and are empty for an input. `tags` are the ones
     written with `@tag`, read-only. `config` holds the conditions of the
     `@config.when*` variant that is the node, sorted by key; it is empty for an
-    input, a plain function and a `@config.default`.
+    input, a plain function and a `@config.default`. `namespace` is the one the
+    node's module was given under, and `None` for an input, which is never
+    namespaced, and for a node of a module given without one (Q74).
     """
 
     name: str
@@ -56,6 +65,7 @@ class NodeView:
     tags: Mapping[str, str]
     doc: str | None
     config: tuple[Condition, ...] = ()
+    namespace: str | None = None
 
     @property
     def dependencies(self) -> tuple[str, ...]:
@@ -65,6 +75,54 @@ class NodeView:
                 {p.binding.name for p in self.params if isinstance(p.binding, Source)}
             )
         )
+
+
+@dataclass(frozen=True, slots=True)
+class InputView:
+    """One input of a built graph: a name no node produces, and who reads it.
+
+    `type` is the narrowest annotation of the parameters that read it, as
+    `NodeView.type` is for an input. `required` is True when some consumer
+    needs it, and False when every consumer has a default for it. `consumers`
+    are the nodes that read it, each once, sorted.
+    """
+
+    name: str
+    type: object
+    required: bool
+    consumers: tuple[str, ...]
+
+
+def output_names(views: NodeViews) -> list[str]:
+    """The function nodes no node reads, sorted: what a run is usually asked for."""
+    read = {dep for view in views.functions.values() for dep in view.dependencies}
+    return sorted(name for name in views.functions if name not in read)
+
+
+def topological(names: set[str], views: NodeViews) -> list[str]:
+    """`names` in dependency order, ties broken by name; no recursion.
+
+    Only the edges between `names` count. An input has no dependencies.
+    """
+    waiting: dict[str, int] = {}
+    readers: dict[str, list[str]] = {}
+    for name in names:
+        view = views.functions.get(name)
+        deps = () if view is None else [d for d in view.dependencies if d in names]
+        waiting[name] = len(deps)
+        for dep in deps:
+            readers.setdefault(dep, []).append(name)
+    ready = [name for name, count in waiting.items() if count == 0]
+    heapq.heapify(ready)
+    ordered: list[str] = []
+    while ready:
+        name = heapq.heappop(ready)
+        ordered.append(name)
+        for reader in readers.get(name, ()):
+            waiting[reader] -= 1
+            if waiting[reader] == 0:
+                heapq.heappush(ready, reader)
+    return ordered
 
 
 class _Consumer(NamedTuple):
@@ -150,11 +208,21 @@ class NodeViews(Mapping[str, NodeView]):
     """
 
     def __init__(
-        self, functions: Mapping[str, NodeView], inputs: Mapping[str, object]
+        self,
+        functions: Mapping[str, NodeView],
+        inputs: Mapping[str, object],
+        generated: AbstractSet[str] | None = None,
     ) -> None:
-        """Holds the function nodes' views, and each input's type by name."""
+        """Holds the function nodes' views, and each input's type by name.
+
+        `generated` names the nodes made from a function's output, such as an
+        extracted field: they are not what their function stands for in a request.
+        When not given, they are the nodes reading a node of the same function.
+        """
         self._functions = functions
         self._inputs = inputs
+        self._generated = generated
+        self._owners: Mapping[int, tuple[str, ...]] | None = None
         self._made: dict[str, NodeView] = {}
         self._names: list[str] | None = None
 
@@ -163,6 +231,44 @@ class NodeViews(Mapping[str, NodeView]):
         if (view := self._functions.get(name)) is not None:
             return view.type
         return self._inputs[name]
+
+    @property
+    def owners(self) -> Mapping[int, tuple[str, ...]]:
+        """The nodes each function stands for, by `id` of the function, sorted.
+
+        A function is matched by identity, never by name. The nodes of an
+        `@extract_*` function stand for its producer alone, and a `@parameterize`
+        function's are its rows. Made on first use, then shared and never changed.
+        """
+        owners = self._owners
+        if owners is None:
+            built: dict[int, list[str]] = {}
+            generated = self._generated
+            if generated is None:
+                generated = self._derived_generated()
+            for name, view in self._functions.items():
+                if view.origin is not None and name not in generated:
+                    built.setdefault(id(view.origin), []).append(name)
+            owners = {key: tuple(sorted(names)) for key, names in built.items()}
+            # Two threads may both build it: the two are equal, and one is kept.
+            self._owners = owners
+        return owners
+
+    def _derived_generated(self) -> frozenset[str]:
+        """The nodes that read a node of their own function: its extracted fields.
+
+        A function cannot read itself, so only a field of its output does.
+        """
+        functions = self._functions
+        return frozenset(
+            name
+            for name, view in functions.items()
+            if any(
+                (producer := functions.get(dep)) is not None
+                and producer.origin is view.origin
+                for dep in view.dependencies
+            )
+        )
 
     @property
     def functions(self) -> Mapping[str, NodeView]:
@@ -222,11 +328,14 @@ def _doc(fn: Callable[..., object]) -> str | None:
     return inspect.getdoc(fn)
 
 
-def node_views(nodes: Sequence[NodeDef]) -> NodeViews:
+def node_views(
+    nodes: Sequence[NodeDef], generated: AbstractSet[str] = frozenset()
+) -> NodeViews:
     """The views of `nodes` and of the inputs they read, read-only, sorted by name.
 
     `nodes` carry resolved annotations. `ValueError` when two of an input's
-    consumers declare types that match neither way.
+    consumers declare types that match neither way. `generated` names the nodes
+    made from a function's output, such as extracted fields.
     """
     # Positional, every field in order: a view is made per node, so it is kept cheap.
     functions = {
@@ -238,9 +347,10 @@ def node_views(nodes: Sequence[NodeDef]) -> NodeViews:
             node.module,
             node.params,
             _read_only(node.tags),
-            _doc(node.origin) if node.doc is None else node.doc,
+            node.doc if node.doc is not None or node.documented else _doc(node.origin),
             node.config,
+            node.namespace,
         )
         for node in nodes
     }
-    return NodeViews(functions, _input_types(nodes))
+    return NodeViews(functions, _input_types(nodes), generated)

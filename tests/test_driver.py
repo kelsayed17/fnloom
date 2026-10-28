@@ -56,6 +56,10 @@ class SpyGraph:
         """Delegates."""
         return self.graph.downstream_of(names)
 
+    def between(self, a: str, b: str) -> list[str]:
+        """Delegates."""
+        return self.graph.between(a, b)
+
     def prepare(
         self, outputs: list[str], inputs: list[str], overrides: list[str]
     ) -> _core.Plan:
@@ -321,8 +325,12 @@ def test_a_none_input_counts_as_supplied() -> None:
 
 
 def test_a_none_override_counts_as_supplied() -> None:
-    """A `None` override replaces the node, and its upstream is not needed."""
-    driver = build(make_module("drv_none_override", CHAIN.replace("b * 2", "b")))
+    """A `None` override replaces the node, and its upstream is not needed.
+
+    The node is declared `int | None`: `None` passes only a type admitting it (Q79).
+    """
+    source = CHAIN.replace("b * 2", "b").replace("int", "int | None")
+    driver = build(make_module("drv_none_override", source))
     assert driver.execute(["c"], overrides={"b": None}) == {"c": None}
 
 
@@ -352,8 +360,11 @@ def test_public_api_is_exported() -> None:
         "DiskCache",
         "Driver",
         "Format",
+        "Group",
+        "InputView",
         "MISSING",
         "MemoryCache",
+        "NodeSpec",
         "NodeView",
         "Param",
         "PreparedPlan",
@@ -363,12 +374,20 @@ def test_public_api_is_exported() -> None:
         "build",
         "cache",
         "config",
+        "defaults",
+        "exclude",
         "extract_columns",
         "extract_fields",
         "fingerprint",
+        "group",
+        "node",
         "parameterize",
+        "parameterize_sources",
+        "parameterize_values",
         "register_fingerprint",
         "source",
         "tag",
+        "type_matches",
         "value",
+        "value_matches",
     ]
