@@ -10,7 +10,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Final, override
+from typing import TYPE_CHECKING, Final, override
 
 from fnloom import _core
 
@@ -19,6 +19,9 @@ from fnloom import _core
 from fnloom._caching import CacheOutcome
 from fnloom._scan import by_parameter
 from fnloom._view import NodeView
+
+if TYPE_CHECKING:
+    from fnloom._caching import Begun
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -298,11 +301,12 @@ class Dispatch:
         self,
         hooks: Hooks,
         views: Views,
-        outcomes: Mapping[str, CacheOutcome] | None,
+        outcomes: dict[str, CacheOutcome] | None,
     ) -> None:
         """A run of `hooks`, reporting the nodes of `views`.
 
         `outcomes` are the nodes' cache outcomes, `None` on a driver with no cache.
+        A cached run fills it, level by level, as `loaded` hears of each level.
         """
         self._hooks = hooks
         self._views = views
@@ -319,6 +323,29 @@ class Dispatch:
     def observers(self) -> tuple[_core.ObserverBase, ...]:
         """What the core run is given: one observer when node events are wanted."""
         return (_Forward(self),) if self._hooks.nodes else ()
+
+    @property
+    def refused(self) -> bool:
+        """Whether a hook has raised in this run, so the value just in is dropped."""
+        return bool(self._errors)
+
+    def loaded(self, begun: Begun) -> None:
+        """Takes a cached run level's outcomes, and reports its hits, in plan order.
+
+        Each hit gets `before_node` and `after_node`, with no inputs, since nothing
+        upstream was loaded, and its loaded value as its result.
+        """
+        outcomes = self.outcomes
+        reported = begun.outcomes
+        if outcomes is None or reported is None:
+            msg = "a cached run's level was reported to an uncached run's dispatcher"
+            raise RuntimeError(msg)
+        outcomes.update(reported)
+        hits = begun.hits
+        for name in begun.loaded:
+            outcome = reported[name]
+            self.node_started(name, None, outcome)
+            self.node_ended(name, None, outcome, hits[name], None)
 
     def _raised(self, found: list[BaseException]) -> None:
         """Records an event's hook errors, then raises them, if any."""

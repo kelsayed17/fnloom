@@ -101,14 +101,15 @@ event by position, so a new field never breaks a hook.
     - `inputs` and `overrides`: the values given.
     - `nodes`: the nodes this run will report, in the order it reports them. That is the order they run in
       ([Execution order](running.md#execution-order)), which never changes from one run to the next. It's empty when a
-      value check fails, since no node runs.
+      value check fails, since no node runs. On a driver with a cache, it lists the hits first
+      ([With a cache](#with-a-cache)).
 - **`NodeStart`**
     - `run_id`
     - `node`: the node's [`NodeView`](running.md#inspecting-a-graph), with its name, tags, type and function.
     - `inputs`: the keyword arguments its function gets from other nodes and inputs, by parameter name. A parameter
       left to its default is absent, and so is one bound to a `value()`. A `group(...)` parameter is the list or dict
       the function gets.
-    - `cache`: the node's cache outcome; `None` on a driver with no cache.
+    - `cache`: the node's [cache outcome](caching.md#explaining-a-run); `None` on a driver with no cache.
 - **`NodeEnd`**: `NodeStart`'s fields, plus:
     - `ok`: whether the node returned.
     - `result`: what it returned; `None` unless `ok`.
@@ -228,8 +229,54 @@ A driver's hooks travel with it. `copy.copy` and `rebuild()` keep the same hook 
 pickle, such as an instance of a class defined inside a function, makes the driver fail to pickle, with pickle's own
 error.
 
-`build_async` keeps the hooks too, and `AsyncDriver.hooks` lists them. On a driver with a cache, a run reports the
-nodes it computes: a node loaded from the store reports nothing yet, and `cache` is `None`.
+`build_async` keeps the hooks too, and `AsyncDriver.hooks` lists them.
+
+## With a cache
+
+On a driver [with a cache](caching.md), every node event carries the node's `CacheOutcome` as `cache`: `hit`, `miss`
+or `uncacheable`, with the reason [`explain_cache`](caching.md#explaining-a-run) gives.
+
+- A node loaded from the store gets a `before_node` and an `after_node`, as a node that runs does, so a hook that pairs
+  them still pairs. Its `inputs` are `None`, since nothing upstream of it is loaded, and its `result` is the loaded
+  value.
+- The hits report first, in plan order, since they are loaded before any node runs. Then the nodes the run computes
+  report, as they would without a cache.
+- A node only the hits need doesn't run, so it reports nothing.
+- `RunStart.nodes` lists exactly the nodes the run reports, hits first. When a `recompute` node's result keys the nodes
+  that read it, it runs before anything else is looked up, and which of the other nodes hit is known only after it
+  ran. It and the nodes it needs report first, and `nodes` lists them, then every other node the run could report.
+- A node whose `after_node` raises is not stored: its value is discarded.
+
+```python
+class Outcomes(fnloom.Hook):
+    def __init__(self) -> None:
+        self.seen: list[tuple[str, object, object, object]] = []
+
+    def after_node(self, event: fnloom.NodeEnd) -> None:
+        self.seen.append((event.node.name, event.cache, event.inputs, event.result))
+
+
+outcomes = Outcomes()
+cached = (
+    fnloom.Builder()
+    .with_modules(orders)
+    .with_cache(fnloom.MemoryCache())
+    .with_hooks(outcomes)
+    .build()
+)
+cached.execute(["total"], inputs={"price": 2.5, "quantity": 4})
+# -> {'total': 14.5}
+[(name, cache.status) for name, cache, _, _ in outcomes.seen]
+# -> [('subtotal', 'miss'), ('shipping', 'miss'), ('total', 'miss')]
+outcomes.seen.clear()
+cached.execute(["total"], inputs={"price": 2.5, "quantity": 4})
+# -> {'total': 14.5}
+[(name, tuple(cache), inputs, result) for name, cache, inputs, result in outcomes.seen]
+# -> [('total', ('hit', None), None, 14.5)]
+```
+
+Hamilton fires the hooks of a hit, and of every node upstream of it, as if they ran, with nothing saying they didn't
+(Q85). An `AsyncDriver` fires the same events as a `Driver` does.
 
 ## On the async driver
 

@@ -1,6 +1,7 @@
 """The user-facing `Builder`, `Driver`, `PreparedPlan`, and their async forms."""
 
 import copy
+import functools
 import importlib
 import inspect
 import sys
@@ -401,7 +402,9 @@ class _HookedPlan(PreparedPlan):
     A run checks its names first, which fires nothing, then fires `before_run`,
     raises a failed value check, runs, and fires `after_run` (decision 4). The
     values are checked before `before_run`, which then lists no nodes when they
-    fail, since none will run; their error is raised after it.
+    fail, since none will run; their error is raised after it. A cached run
+    looks its hits up before `before_run`, which lists them first, then reports
+    each hit and each node it runs with its cache outcome (decision 7).
     """
 
     def __init__(  # noqa: PLR0913  # the prepared plan's parts, and its hooks
@@ -429,11 +432,19 @@ class _HookedPlan(PreparedPlan):
     ) -> dict[str, object]:
         """Runs the plan as `PreparedPlan.run` does, firing the hooks' events."""
         given_inputs, given_overrides, mismatches = self._opened(inputs, overrides)
-        dispatch = _hooks.Dispatch(self._hooks, self._views, None)
+        plan = self._plan
+        cached = isinstance(plan, CacheRun)
+        dispatch = _hooks.Dispatch(self._hooks, self._views, {} if cached else None)
         error: BaseException | None = None
         try:
-            self._start(dispatch, given_inputs, given_overrides, mismatches)
-            values = self._plan.run(given_inputs, given_overrides, dispatch.observers())
+            if mismatches:
+                self._refuse_values(dispatch, given_inputs, given_overrides, mismatches)
+            start = self._starter(dispatch, given_inputs, given_overrides)
+            if isinstance(plan, CacheRun):
+                values = plan.hooked(given_inputs, given_overrides, dispatch, start)
+            else:
+                start(self._views.names)
+                values = plan.run(given_inputs, given_overrides, dispatch.observers())
         except BaseException as caught:  # noqa: BLE001  # raised by `end`, after `after_run`
             error = caught
         else:
@@ -454,7 +465,7 @@ class _HookedPlan(PreparedPlan):
         """The inputs and overrides as dicts, once their names fit, and mismatches.
 
         The value checks are worked out here, so `RunStart.nodes` is empty when
-        they fail and no node will run (R5); `_start` raises them after
+        they fail and no node will run (R5); `_refuse_values` raises them after
         `before_run`, as Hamilton raises them.
         """
         given_inputs = inputs if type(inputs) is dict else _as_dict(inputs)
@@ -470,18 +481,29 @@ class _HookedPlan(PreparedPlan):
             mismatches += _mismatches(self._override_checks, given_overrides)
         return given_inputs, given_overrides, mismatches
 
-    def _start(
+    def _starter(
+        self,
+        dispatch: _hooks.Dispatch,
+        inputs: dict[str, Any],
+        overrides: dict[str, Any],
+    ) -> Callable[[tuple[str, ...]], None]:
+        """What fires `before_run`, given the nodes the run reports.
+
+        Those are the plan's, `self._views.names`, unless the run is cached: then
+        they are known once its hits are (decision 7).
+        """
+        return functools.partial(dispatch.start, self._outputs, inputs, overrides)
+
+    def _refuse_values(
         self,
         dispatch: _hooks.Dispatch,
         inputs: dict[str, Any],
         overrides: dict[str, Any],
         mismatches: list[str],
-    ) -> None:
-        """Fires `before_run`, then raises the value checks' `mismatches`, if any."""
-        nodes = () if mismatches else self._views.names
-        dispatch.start(self._outputs, inputs, overrides, nodes)
-        if mismatches:
-            _raise_mismatches(mismatches)
+    ) -> NoReturn:
+        """Fires `before_run` with no nodes, since none will run, then raises."""
+        dispatch.start(self._outputs, inputs, overrides, ())
+        _raise_mismatches(mismatches)
 
 
 class Driver:
@@ -1187,14 +1209,23 @@ class _HookedAsyncPlan(AsyncPreparedPlan):
         """Runs as `AsyncPreparedPlan.run` does, firing the hooks' events."""
         prepared = self._hooked
         given_inputs, given_overrides, mismatches = prepared._opened(inputs, overrides)  # noqa: SLF001  # the plan this wraps
-        dispatch = _hooks.Dispatch(prepared._hooks, prepared._views, None)  # noqa: SLF001  # the plan this wraps
         schedule = self._schedule
+        cached = isinstance(schedule, _async.CachedSchedule)
+        hooks, views = prepared._hooks, prepared._views  # noqa: SLF001  # the plan this wraps
+        dispatch = _hooks.Dispatch(hooks, views, {} if cached else None)
         error: BaseException | None = None
         try:
-            prepared._start(dispatch, given_inputs, given_overrides, mismatches)  # noqa: SLF001  # the plan this wraps
+            if mismatches:
+                prepared._refuse_values(  # noqa: SLF001  # the plan this wraps
+                    dispatch, given_inputs, given_overrides, mismatches
+                )
+            start = prepared._starter(dispatch, given_inputs, given_overrides)  # noqa: SLF001  # the plan this wraps
             if isinstance(schedule, _async.CachedSchedule):
-                values = await schedule.run(given_inputs, given_overrides, dispatch)
+                values = await schedule.hooked(
+                    given_inputs, given_overrides, dispatch, start
+                )
             else:
+                start(views.names)
                 values = await schedule.hooked(given_inputs, given_overrides, dispatch)
         except BaseException as caught:  # noqa: BLE001  # raised by `end`, after `after_run`
             error = caught

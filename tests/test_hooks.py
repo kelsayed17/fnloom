@@ -654,7 +654,7 @@ def test_a_driver_without_hooks_has_none() -> None:
 
 
 def test_a_cached_driver_fires_the_events_of_the_nodes_it_runs() -> None:
-    """With a cache, the nodes the run computes report; a second run computes none."""
+    """With a cache, the nodes the run computes report; then the hit reports alone."""
     hook = Recorder()
     module = make_module("hooked_cached", GRAPH)
     driver = (
@@ -672,7 +672,13 @@ def test_a_cached_driver_fires_the_events_of_the_nodes_it_runs() -> None:
     ]
     hook.log.clear()
     assert driver.execute(["c"], inputs={"x": 1}) == {"c": 40}
-    assert _stages(hook.log) == [("before_run", None), ("after_run", None)]
+    # Only the hit reports, as one (Q85); `a` and `b` only fed it.
+    assert _stages(hook.log) == [
+        ("before_run", None),
+        ("before_node", "c"),
+        ("after_node", "c"),
+        ("after_run", None),
+    ]
 
 
 def test_hook_methods_get_the_event_positionally() -> None:

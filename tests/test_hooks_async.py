@@ -462,7 +462,7 @@ def test_async_prepared_plan_runs_fire_the_hooks() -> None:
 
 
 def test_a_cached_async_driver_fires_the_events_of_the_nodes_it_runs() -> None:
-    """With a cache, the nodes the run computes report; a second run computes none."""
+    """With a cache, the nodes the run computes report; then the hit reports alone."""
     hook = Recorder()
     module = make_module("hooked_async_cached", GRAPH)
     driver = (
@@ -476,7 +476,13 @@ def test_a_cached_async_driver_fires_the_events_of_the_nodes_it_runs() -> None:
     assert [n for stage, n in _stages(hook) if stage == "after_node"] == ["a", "b", "c"]
     hook.log.clear()
     assert _run(driver.execute(["c"], inputs={"x": 1})) == {"c": 40}
-    assert _stages(hook) == [("before_run", None), ("after_run", None)]
+    # Only the hit reports, as one (Q85); `a` and `b` only fed it.
+    assert _stages(hook) == [
+        ("before_run", None),
+        ("before_node", "c"),
+        ("after_node", "c"),
+        ("after_run", None),
+    ]
 
 
 GROUPED = """

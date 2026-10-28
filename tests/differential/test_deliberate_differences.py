@@ -3718,6 +3718,83 @@ def test_q84_typed_events_checked_when_attached() -> None:
         fnloom.Builder().with_hooks(AwaitingHook())
 
 
+# Each node records that it ran in another module, found by name, so no code
+# version reads a mutable global.
+_Q85_GRAPH = """
+def a(x: int) -> int:
+    __import__("differential_q85_log").RAN.append("a")
+    return x + 1
+
+
+def b(a: int) -> int:
+    __import__("differential_q85_log").RAN.append("b")
+    return a * 2
+"""
+
+
+@pytest.mark.deliberate("Q85")
+def test_q85_cache_outcomes_on_node_events(tmp_path: Path) -> None:
+    """Hamilton fires hit nodes' hooks as if they ran; fnloom reports each outcome."""
+    ran = cast("list[str]", make_module("differential_q85_log", "RAN = []").RAN)
+    module = _file_module(tmp_path / "src", "differential_q85", _Q85_GRAPH)
+    log: list[HookEntry] = []
+    hook = HamiltonRecorder("H", log)
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_cache(path=tmp_path / "hamilton")
+        .with_adapters(hook)
+        .build()
+    )
+    assert hamilton.execute(["b"], inputs={"x": 1}) == {"b": 4}
+    first, first_calls = list(log), list(hook.calls)
+    log.clear()
+    hook.calls.clear()
+    ran.clear()
+    assert hamilton.execute(["b"], inputs={"x": 1}) == {"b": 4}
+    # No node ran, yet every node, `a` upstream of the hit too, reports as if it had,
+    # with the same arguments and result, and nothing saying it was a hit.
+    assert ran == []
+    assert log == first
+    nodes = [i for i, (_, stage, _) in enumerate(log) if stage.endswith("_node")]
+    for i in nodes:
+        for key in ("node_name", "node_kwargs", "result", "success"):
+            assert hook.calls[i].get(key) == first_calls[i].get(key)
+        assert not [key for key in hook.calls[i] if "cache" in key]
+
+    ours = FnloomRecorder("F", [])
+    built = (
+        fnloom.Builder()
+        .with_modules(module)
+        .with_cache(DiskCache(tmp_path / "fnloom"))
+        .with_hooks(ours)
+        .build()
+    )
+    assert built.execute(["b"], inputs={"x": 1}) == {"b": 4}
+    miss = CacheOutcome("miss", None)
+    assert [(e.node.name, e.cache) for e in ours.events[1:-1]] == [
+        ("a", miss),
+        ("a", miss),
+        ("b", miss),
+        ("b", miss),
+    ]
+    ours.events.clear()
+    ran.clear()
+    assert built.execute(["b"], inputs={"x": 1}) == {"b": 4}
+    # Only the hit reports, paired, with no inputs and its loaded value.
+    assert ran == []
+    start, hit_start, hit_end, end = ours.events
+    assert start.nodes == end.nodes == ("b",)
+    hit = CacheOutcome("hit", None)
+    assert (hit_start.node.name, hit_start.inputs, hit_start.cache) == ("b", None, hit)
+    assert (hit_end.inputs, hit_end.cache, hit_end.ok, hit_end.result) == (
+        None,
+        hit,
+        True,
+        4,
+    )
+
+
 class _Raising(HamiltonRecorder):
     """A Hamilton recorder that raises in one stage, after logging it.
 

@@ -11,7 +11,8 @@ A cached plan runs through `CachedSchedule`: `CacheRun.begin` finds the hits, th
 walk runs the core plan it returns, and `CacheRun.finish` stores each value as its
 node succeeds, so a node that fails, or that a failure cancels, stores nothing. The
 `recompute` nodes something reads run first, on the loop too, so an `async def` one
-is awaited. Every store call runs on the loop's thread.
+is awaited. Every store call runs on the loop's thread. With hooks, each level
+reports its hits before its walk, as the sync driver's cached run does.
 
 A run with hooks goes through `_HookedRun`, chosen per plan by the driver, so a run
 without hooks runs exactly the walk below. Its events go through the run's
@@ -215,14 +216,11 @@ class CachedSchedule:
         self,
         inputs: dict[str, object],
         overrides: dict[str, object],
-        dispatch: Dispatch | None = None,
     ) -> dict[str, object]:
         """Every planned node's value, by name, the hits loaded, the rest stored.
 
         The nested runs of `recompute` nodes go first, innermost first, each
         walked on the loop: a loop, not a recursion, however deep they nest.
-        `dispatch`, when given, hears of the nodes the outermost run computes, as
-        the sync driver's cached run reports them.
         """
         levels = [self._cache_run]
         while (inner := levels[-1].nested) is not None:
@@ -241,12 +239,58 @@ class CachedSchedule:
             )
             schedule = self._schedule(begun.plan)
             on_value = functools.partial(level.finish, begun)
-            if dispatch is not None and level is self._cache_run:
-                known = await schedule.hooked(
-                    inputs, begun.overrides, dispatch, on_value
+            known = await schedule.run(inputs, begun.overrides, on_value)
+        return known
+
+    async def hooked(
+        self,
+        inputs: dict[str, object],
+        overrides: dict[str, object],
+        dispatch: Dispatch,
+        start: Callable[[tuple[str, ...]], None],
+    ) -> dict[str, object]:
+        """`run`, reporting every node to `dispatch`, as `CacheRun.hooked` does.
+
+        `start` fires `before_run` once the first level has looked its hits up.
+        Each level, innermost first, reports its hits, then walks its plan as a
+        hooked run, so its nodes report as they start and finish. A node whose
+        `after_node` raised is never stored: the walk drops its value first.
+        """
+        cache_run = self._cache_run
+        levels = cache_run.levels
+        warned: set[str] = set()
+        reasons: dict[str, str] = {}
+        known: dict[str, object] = {}
+        try:
+            versions = cache_run.versions(inputs, overrides, warned, reasons)
+            begun = cache_run.begin_reported(
+                levels[-1],
+                inputs,
+                overrides,
+                known=known,
+                versions=versions,
+                warned=warned,
+                reasons=reasons,
+            )
+        except BaseException:
+            start(())
+            raise
+        start(cache_run.reported(begun, levels[-1]))
+        for at, level in enumerate(reversed(levels)):
+            if at:
+                begun = cache_run.begin_reported(
+                    level,
+                    inputs,
+                    overrides,
+                    known=known,
+                    versions=versions,
+                    warned=warned,
+                    reasons=reasons,
                 )
-            else:
-                known = await schedule.run(inputs, begun.overrides, on_value)
+            dispatch.loaded(begun)
+            schedule = self._schedule(begun.plan)
+            on_value = functools.partial(level.finish, begun)
+            known = await schedule.hooked(inputs, begun.overrides, dispatch, on_value)
         return known
 
 
