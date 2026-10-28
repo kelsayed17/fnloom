@@ -71,6 +71,11 @@ def _strip(annotation: object) -> object:
         annotation = aliased
 
 
+def stripped(annotation: object) -> object:
+    """`annotation` without `Annotated` metadata, and read through PEP 695 aliases."""
+    return _strip(annotation)
+
+
 def read_aliases(annotation: object) -> None:
     """Evaluates the value of every PEP 695 alias in `annotation`, nested or not.
 
@@ -175,8 +180,10 @@ def _fits(declared: object, value: object, asked: _Asked = ()) -> bool:  # noqa:
         return False
     try:
         return isinstance(value, declared)
-    except TypeError:  # a protocol that is not runtime-checkable (Q42)
-        return False
+    except TypeError:
+        # A `TypedDict` is checked by its kind, any `dict`, its keys unread (Q61);
+        # a protocol that is not runtime-checkable is no match (Q42).
+        return typing.is_typeddict(declared) and isinstance(value, dict)
 
 
 def value_matches(declared: object, value: object) -> bool:

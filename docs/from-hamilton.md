@@ -50,6 +50,8 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `@config.when(name="x")` | The same on `when`, `when_not` and `when_in`. On `when_not_in`, Hamilton reads `name` as a config key, while fnloom reads it as the node name, as on the other forms (Q59) |
 | `@config.default` | Not in Hamilton: the variant used when no other matches |
 | `@config(lambda cfg: ...)` | Not there |
+| `@extract_fields({"a": int})`, `@extract_fields("a", "b")`, `@extract_fields()` | The same, imported from `fnloom` ([Extracting fields](writing-nodes.md#extracting-fields)). A `Mapping[str, T]` return works too (Q61) |
+| `@extract_fields(..., fill_with=v)` | The same, but the producer's mapping is never changed, and `None` is a fill (Q62) |
 | A row as `(bindings, docstring)`, `group(...)`, `parameterize_sources`, `parameterize_values` | Not yet. A row is a mapping |
 
 </div>
@@ -91,6 +93,11 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | Two matching variants, or a variant defined twice | Names the wrong function; keeps the last silently | `ValueError` at build naming both, or the lines (Q58) |
 | `@config.when` without parentheses, `when_in(key="ab")` | The node vanishes; substring matching | Refused when decorating (Q59) |
 | The function's `__name__`, and its tags | Renamed in place; a `hamilton.config` tag | Untouched; `NodeView.config` holds the conditions (Q60) |
+| An extracted field of the wrong type, or missing | Passed on unchecked; `InvalidDecoratorException` when run | `ValueError` when run, also with input checks off (Q61) |
+| `@extract_fields({"a": str})` on a `dict[str, int]` return | Builds | `ValueError` at build (Q61) |
+| `@extract_fields` with a mapping and names, or a name the `TypedDict` lacks | Drops the names; a bare `KeyError` | `ValueError` when decorating (Q61) |
+| An input or field annotated with a `TypedDict` | The input check raises `TypeError` | Any `dict` is accepted (Q61) |
+| `@tag` on an `@extract_fields` function | Tags the fields only | Tags the producer and the fields (Q63) |
 
 </div>
 
@@ -117,10 +124,10 @@ value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](
 
 ## Not there yet
 
-fnloom is pre-alpha. The core, the native path, `@parameterize`, `@tag`, `@config`, graph inspection, type checks
-and result caching are done. These Hamilton features come next, roughly in this order:
+fnloom is pre-alpha. The core, the native path, `@parameterize`, `@tag`, `@config`, `@extract_fields`, graph
+inspection, type checks and result caching are done. These Hamilton features come next, roughly in this order:
 
-1. **More decorators:** `@extract_columns` and `@extract_fields`.
+1. **More decorators:** `@extract_columns`.
 2. **Adapters and lifecycle hooks**, result builders and async execution.
 3. **Graph visualisation.**
 4. **Dynamic execution**, materializers, `@subdag`, `@check_output` and `@pipe`.

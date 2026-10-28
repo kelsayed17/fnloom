@@ -9,7 +9,7 @@ from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, NamedTuple
 
-from fnloom import _config
+from fnloom import _config, _extract
 from fnloom._config import Condition, Found, redefinitions, resolve_variants
 from fnloom._decorators import _ATTRIBUTE, Source, Value, decorations
 from fnloom._types import read_aliases
@@ -240,10 +240,15 @@ def _node_defs(
         tags, module_name = recorded.tags, module.__name__
         if not conditions:
             # Positional and without `config`: the common case, kept cheapest.
-            return [NodeDef(name, params, tags, fn, fn, module_name, returns)]
-        return [
-            NodeDef(name, params, tags, fn, fn, module_name, returns, {}, conditions)
-        ]
+            node = NodeDef(name, params, tags, fn, fn, module_name, returns)
+        else:
+            node = NodeDef(
+                name, params, tags, fn, fn, module_name, returns, {}, conditions
+            )
+        if recorded.extract is None:
+            return [node]
+        # Lowered after the variant is selected; resolved and checked by `resolve`.
+        return _extract.lower(node, recorded.extract, check=False)
     nodes: list[NodeDef] = []
     for node_name, row in recorded.rows.items():
         params = _bind(parameters, row)
@@ -261,6 +266,13 @@ def _node_defs(
                 conditions,
             )
         )
+    if recorded.extract is not None:
+        # At most one row: `@parameterize` and `@extract_fields` refuse more.
+        return [
+            lowered
+            for node in nodes
+            for lowered in _extract.lower(node, recorded.extract, check=False)
+        ]
     return nodes
 
 
@@ -297,6 +309,8 @@ def _skipped(module: ModuleType) -> str:
 def _definition(node: NodeDef) -> str:
     """How `node` was written: as a function, or as a row of a parameterized one."""
     function = getattr(node.origin, "__name__", node.name)
+    if _extract.is_generated(node):
+        return f"a field of function {function!r}"
     if decorations(node.origin).rows is None:
         return f"function {function!r}"
     return f"a row of function {function!r}"
@@ -485,7 +499,9 @@ def resolve(nodes: Sequence[NodeDef]) -> list[NodeDef]:
     """
     origins: dict[int, tuple[Callable[..., object], list[str]]] = {}
     nodes_of: dict[int, NodeDef] = {}
-    for node in nodes:
+    # A field node is lowered again from its resolved producer, by `_lowered`.
+    own = [node for node in nodes if not _extract.is_generated(node)]
+    for node in own:
         origins.setdefault(id(node.origin), (node.origin, []))[1].append(node.name)
         nodes_of.setdefault(id(node.origin), node)
     values: dict[int, dict[str, typing.Any]] = {}
@@ -513,7 +529,7 @@ def resolve(nodes: Sequence[NodeDef]) -> list[NodeDef]:
         error.add_note(_unresolved_note(failures))
         raise error
     resolved: list[NodeDef] = []
-    for node in nodes:
+    for node in own:
         if (hints := values.get(id(node.origin))) is None:
             # Every annotation was already a class, which evaluates to itself.
             resolved.append(node)
@@ -532,4 +548,38 @@ def resolve(nodes: Sequence[NodeDef]) -> list[NodeDef]:
             resolved.append(node)
         else:
             resolved.append(replace(node, params=params, returns=returns))
-    return resolved
+    return _lowered(resolved)
+
+
+def _lowered(nodes: list[NodeDef]) -> list[NodeDef]:
+    """`nodes`, resolved, with each producer's field nodes lowered from its return.
+
+    `ValueError` listing, sorted, every declared field type a return cannot feed,
+    and then every field name that another node already has.
+    """
+    if all(decorations(node.origin).extract is None for node in nodes):
+        return nodes
+    lowered: list[NodeDef] = []
+    problems: list[str] = []
+    for node in nodes:
+        extraction = decorations(node.origin).extract
+        if extraction is None:
+            lowered.append(node)
+            continue
+        try:
+            lowered.extend(_extract.lower(node, extraction, check=True))
+        except ValueError as error:
+            problems.append(str(error))
+    if problems:
+        raise ValueError("; ".join(sorted(problems)))
+    seen: dict[str, NodeDef] = {}
+    clashes: list[str] = []
+    for node in lowered:
+        if node.name in seen:
+            clashes.append(_duplicate(seen[node.name], node))
+        else:
+            seen[node.name] = node
+    if clashes:
+        # A field a forward-referenced `TypedDict` gives is first known here.
+        raise ValueError("; ".join(sorted(clashes)))
+    return lowered

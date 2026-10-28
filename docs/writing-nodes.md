@@ -288,6 +288,90 @@ Mistakes are refused rather than guessed at (Q58, Q59):
 
 The decorators never change your function, and add no tags (Q60).
 
+## Extracting fields
+
+`@extract_fields` makes a node of each field of the mapping a function returns. The function stays a node of its own
+name, returning the whole mapping, and each field node reads it. Give the fields a type each, in a mapping:
+
+```python
+# file: stats.py
+from typing import TypedDict
+
+from fnloom import extract_fields
+
+
+@extract_fields({"low": int, "high": int})
+def bounds(readings: list[int]) -> dict:
+    """The smallest and largest reading."""
+    return {"low": min(readings), "high": max(readings)}
+
+
+class Summary(TypedDict):
+    count: int
+    label: str
+
+
+@extract_fields()
+def summary(readings: list[int]) -> Summary:
+    """Every field of a TypedDict return is a node."""
+    return {"count": len(readings), "label": "readings"}
+
+
+@extract_fields("mean", fill_with=0.0)
+def averages(readings: list[int]) -> dict[str, float]:
+    """A named field takes its type from the return: here, float."""
+    return {"mean": sum(readings) / len(readings)} if readings else {}
+
+
+def spread(low: int, high: int) -> int:
+    """Field nodes feed other nodes like any node."""
+    return high - low
+```
+
+```python
+import stats
+
+driver = fnloom.build(stats)
+driver.node_names()
+# -> ['averages', 'bounds', 'count', 'high', 'label', 'low', 'mean', 'readings', 'spread', 'summary']
+driver.execute(["spread", "count", "mean"], inputs={"readings": [3, 9, 6]})
+# -> {'spread': 6, 'count': 3, 'mean': 6.0}
+driver.execute(["mean", "averages"], inputs={"readings": []})
+# -> {'mean': 0.0, 'averages': {}}
+driver.nodes["mean"].type
+# -> float
+```
+
+- **Three forms.** A mapping of names to types; names alone, typed from a `dict[str, T]`, `Mapping[str, T]` or
+  `TypedDict` return; or no arguments, for every field of a `TypedDict` return. A mapping and names together are
+  refused, as is a name the `TypedDict` doesn't have (Q61).
+- **Fields are checked on every run** against their types, with the same check as inputs, even when you build
+  `without_input_type_checks()`. A wrong type is a `ValueError` naming the producer, the field and both types, and a
+  missing field is a `ValueError` naming the fields the producer did return. A declared type the return annotation
+  can't feed fails the build (Q61).
+- **`fill_with`** is the value of a missing field. Only that field's node sees it: the producer's mapping is never
+  changed, and `fill_with=None` fills with `None` (Q62).
+- `@tag` tags the producer and every field node (Q63). A field node shares the producer's docstring and config.
+- `@parameterize` with one row works, and the producer takes the row's name. Two rows are refused when decorating.
+
+```python
+# file: halves.py
+from fnloom import extract_fields
+
+
+@extract_fields({"left": int})
+def split(number: int) -> dict:
+    """Returns the wrong type for `left`."""
+    return {"left": str(number // 2)}
+```
+
+```python
+import halves
+
+fnloom.build(halves).execute(["left"], inputs={"number": 8})
+# raises ValueError: 'split' returned field 'left' as str, but it is declared int
+```
+
 ## What is refused
 
 fnloom calls a node with one keyword argument per parameter, and expects it to return its value. Functions that can't

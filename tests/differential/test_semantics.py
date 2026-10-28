@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 import pytest
 from hamilton import driver as hamilton_driver
+from hamilton.function_modifiers.base import InvalidDecoratorException
 from harness import (
     Direction,
     Nodes,
@@ -509,3 +510,94 @@ def test_config_selects_the_same_nodes(settings: dict[str, object]) -> None:
     assert driver.execute(outputs, inputs={"x": 1}) == hamilton.execute(
         outputs, inputs={"x": 1}
     )
+
+
+# Producers for the extract tests; `{decorator}` imports each library's
+# `extract_fields`.
+_EXTRACTED = """
+from typing import TypedDict
+{decorator}
+
+class Point(TypedDict):
+    x: int
+    y: str
+
+@extract_fields({{"a": int, "b": str}})
+def mapped(n: int) -> dict:
+    return {{"a": n, "b": str(n), "extra": 0}}
+
+@extract_fields("c", "d")
+def named(n: int) -> dict[str, int]:
+    return {{"c": n, "d": n + 1}}
+
+@extract_fields()
+def point(n: int) -> Point:
+    return {{"x": n, "y": "y"}}
+
+def total(a: int, c: int, x: int) -> int:
+    return a + c + x
+"""
+_HAMILTON_EXTRACT = "from hamilton.function_modifiers import extract_fields"
+_FNLOOM_EXTRACT = "from fnloom import extract_fields"
+
+
+def test_extract_fields_makes_the_same_nodes_types_and_values() -> None:
+    """Each producer is kept under its own name; the fields and their types agree."""
+    hamilton_module = make_module(
+        "semantics_extract_h", _EXTRACTED.format(decorator=_HAMILTON_EXTRACT)
+    )
+    fnloom_module = make_module(
+        "semantics_extract_f", _EXTRACTED.format(decorator=_FNLOOM_EXTRACT)
+    )
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    driver = fnloom.build(fnloom_module)
+    hamilton_types = {
+        v.name: v.type for v in hamilton.list_available_variables() if v.name != "n"
+    }
+    assert driver.node_names() == sorted([*hamilton_types, "n"])
+    for name, produced in hamilton_types.items():
+        if name == "point":
+            # Each module defines its own `Point`.
+            assert driver.nodes[name].type is fnloom_module.Point
+            assert produced is hamilton_module.Point
+        else:
+            assert driver.nodes[name].type == produced, name
+    outputs = sorted(hamilton_types)
+    assert driver.execute(outputs, inputs={"n": 2}) == hamilton.execute(
+        outputs, inputs={"n": 2}
+    )
+
+
+_EMPTY_FIELDS = """
+{decorator}
+
+@extract_fields({{}})
+def p() -> dict:
+    return {{}}
+"""
+
+_NOT_A_TYPE = """
+{decorator}
+
+@extract_fields({{"a": 5}})
+def p() -> dict:
+    return {{"a": 5}}
+"""
+
+
+def test_extract_fields_refuses_the_same_arguments_when_decorating() -> None:
+    """An empty mapping and a non-type value fail at decoration on both sides."""
+    for source_text, fnloom_error in (
+        (_EMPTY_FIELDS, ValueError),
+        (_NOT_A_TYPE, TypeError),
+    ):
+        with pytest.raises(InvalidDecoratorException):
+            make_module(
+                "semantics_extract_bad_h",
+                source_text.format(decorator=_HAMILTON_EXTRACT),
+            )
+        with pytest.raises(fnloom_error):
+            make_module(
+                "semantics_extract_bad_f",
+                source_text.format(decorator=_FNLOOM_EXTRACT),
+            )

@@ -7,7 +7,7 @@ import pickle
 import sys
 import textwrap
 import types
-from typing import TYPE_CHECKING, Annotated, Any
+from typing import TYPE_CHECKING, Annotated, Any, TypedDict
 
 import pytest
 from hamilton import driver as hamilton_driver
@@ -1322,3 +1322,224 @@ def test_q60_no_mutation_and_no_tag() -> None:
     assert not hasattr(fnloom_module.foo__a, "__original_name__")
     assert driver.nodes["foo"].tags == {}
     assert [c.key for c in driver.nodes["foo"].config] == ["mode"]
+
+
+_HAMILTON_EXTRACT = (
+    "from hamilton.function_modifiers import extract_fields, parameterize, tag, value"
+)
+_FNLOOM_EXTRACT = "from fnloom import extract_fields, parameterize, tag, value"
+
+_UNCHECKED = """
+{decorator}
+
+@extract_fields({{"a": int, "b": int}})
+def p() -> dict:
+    return {{"a": "not-int"}}
+
+@extract_fields({{"c": str}})
+def q() -> dict[str, int]:
+    return {{"c": 1}}
+
+def uses_a(a: int) -> str:
+    return a
+"""
+
+
+@pytest.mark.deliberate("Q61")
+def test_q61_fields_are_checked_at_build_and_run() -> None:
+    """Hamilton checks no field's type and fails a missing one with its own class.
+
+    fnloom refuses a declared type the return cannot feed at build, and checks
+    each field's value and presence on every run, also with input checks off.
+    """
+    hamilton_module = make_module(
+        "differential_q61_h", _UNCHECKED.format(decorator=_HAMILTON_EXTRACT)
+    )
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    assert hamilton.execute(["a", "uses_a", "c"]) == {
+        "a": "not-int",
+        "uses_a": "not-int",
+        "c": 1,
+    }
+    with pytest.raises(InvalidDecoratorException, match="No such field: b"):
+        hamilton.execute(["b"])
+    fnloom_module = make_module(
+        "differential_q61_f", _UNCHECKED.format(decorator=_FNLOOM_EXTRACT)
+    )
+    with pytest.raises(ValueError, match=r"field 'c' is declared str"):
+        fnloom.build(fnloom_module)
+    del fnloom_module.q
+    for builder in (fnloom.Builder(), fnloom.Builder().without_input_type_checks()):
+        driver = builder.with_modules(fnloom_module).build()
+        with pytest.raises(ValueError, match=r"returned field 'a' as str"):
+            driver.execute(["a"])
+        with pytest.raises(ValueError, match=r"no field 'b'; it returned 'a'"):
+            driver.execute(["b"])
+
+
+_MIXED = """
+from collections.abc import Mapping
+from typing import TypedDict
+{decorator}
+
+class Point(TypedDict):
+    x: int
+
+@extract_fields({{"a": int}}, "b")
+def mixed() -> dict:
+    return {{"a": 1, "b": 2}}
+"""
+
+_TYPED_DICT_MISSING = """
+from typing import TypedDict
+{decorator}
+
+class Point(TypedDict):
+    x: int
+
+@extract_fields(["zz"])
+def p() -> Point:
+    return {{"x": 1}}
+"""
+
+_MAPPING = """
+from collections.abc import Mapping
+{decorator}
+
+@extract_fields("a")
+def p() -> Mapping[str, int]:
+    return {{"a": 1}}
+"""
+
+_TWO_ROWS = """
+{decorator}
+
+@extract_fields({{"a": int}})
+@parameterize(r1={{"n": value(1)}}, r2={{"n": value(2)}})
+def p(n: int) -> dict:
+    return {{"a": n}}
+"""
+
+
+@pytest.mark.deliberate("Q61")
+def test_q61_misuse_is_refused_when_decorating() -> None:
+    """Hamilton drops extra names, raises `KeyError` and refuses `Mapping`.
+
+    It refuses two rows only at build. fnloom refuses the first, second and
+    fourth with a `ValueError` when decorating, and accepts a `Mapping` return.
+    """
+    mixed = make_module(
+        "differential_q61_mixed_h", _MIXED.format(decorator=_HAMILTON_EXTRACT)
+    )
+    assert _hamilton_names(hamilton_driver.Builder().with_modules(mixed).build()) == [
+        "a",
+        "mixed",
+    ]
+    with pytest.raises(KeyError, match="zz"):
+        make_module(
+            "differential_q61_td_h",
+            _TYPED_DICT_MISSING.format(decorator=_HAMILTON_EXTRACT),
+        )
+    with pytest.raises(InvalidDecoratorException, match="must be a `dict`"):
+        make_module(
+            "differential_q61_mapping_h", _MAPPING.format(decorator=_HAMILTON_EXTRACT)
+        )
+    two_rows = make_module(
+        "differential_q61_rows_h", _TWO_ROWS.format(decorator=_HAMILTON_EXTRACT)
+    )
+    with pytest.raises(InvalidDecoratorException, match="single node"):
+        hamilton_driver.Builder().with_modules(two_rows).build()
+    with pytest.raises(ValueError, match=r"not both; the extra names: 'b'"):
+        make_module(
+            "differential_q61_mixed_f", _MIXED.format(decorator=_FNLOOM_EXTRACT)
+        )
+    with pytest.raises(ValueError, match=r"which has no field 'zz'"):
+        make_module(
+            "differential_q61_td_f",
+            _TYPED_DICT_MISSING.format(decorator=_FNLOOM_EXTRACT),
+        )
+    mapping = make_module(
+        "differential_q61_mapping_f", _MAPPING.format(decorator=_FNLOOM_EXTRACT)
+    )
+    assert fnloom.build(mapping).execute(["a"]) == {"a": 1}
+    with pytest.raises(ValueError, match=r"parameterize makes 2: 'r1', 'r2'"):
+        make_module(
+            "differential_q61_rows_f", _TWO_ROWS.format(decorator=_FNLOOM_EXTRACT)
+        )
+
+
+class _Coordinates(TypedDict):
+    x: int
+
+
+@pytest.mark.deliberate("Q61")
+def test_q61_a_typed_dict_takes_any_dict() -> None:
+    """Hamilton's input check raises on a `TypedDict`; fnloom takes any dict."""
+    with pytest.raises(TypeError, match="TypedDict does not support instance"):
+        htypes.check_input_type(_Coordinates, {"x": 1})
+    assert value_matches(_Coordinates, {"x": 1})
+    assert not value_matches(_Coordinates, [("x", 1)])
+
+
+_FILLED = """
+{decorator}
+
+SHARED: dict[str, int] = {{"a": 1}}
+
+@extract_fields({{"a": int, "b": int}}, fill_with=-1)
+def p() -> dict:
+    return SHARED
+
+@extract_fields({{"c": int}}, fill_with=None)
+def q() -> dict:
+    return {{}}
+"""
+
+
+@pytest.mark.deliberate("Q62")
+def test_q62_fill_never_mutates_and_none_fills() -> None:
+    """Hamilton writes the fill into the returned dict and reads `None` as no fill."""
+    hamilton_module = make_module(
+        "differential_q62_h", _FILLED.format(decorator=_HAMILTON_EXTRACT)
+    )
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    assert hamilton.execute(["b", "p"]) == {"b": -1, "p": {"a": 1, "b": -1}}
+    assert hamilton_module.SHARED == {"a": 1, "b": -1}
+    with pytest.raises(InvalidDecoratorException, match="No such field: c"):
+        hamilton.execute(["c"])
+    fnloom_module = make_module(
+        "differential_q62_f", _FILLED.format(decorator=_FNLOOM_EXTRACT)
+    )
+    driver = fnloom.build(fnloom_module)
+    assert driver.execute(["b", "p", "c"]) == {"b": -1, "p": {"a": 1}, "c": None}
+    assert fnloom_module.SHARED == {"a": 1}
+
+
+_TAGGED = """
+{decorator}
+
+@tag(owner="z")
+@extract_fields({{"a": int}})
+def p() -> dict:
+    return {{"a": 1}}
+"""
+
+
+@pytest.mark.deliberate("Q63")
+def test_q63_tags_land_on_the_producer_too() -> None:
+    """Hamilton tags only the field nodes; fnloom tags the producer as well."""
+    hamilton_module = make_module(
+        "differential_q63_h", _TAGGED.format(decorator=_HAMILTON_EXTRACT)
+    )
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    hamilton_tags = {
+        v.name: {k: t for k, t in v.tags.items() if not k.startswith("module")}
+        for v in hamilton.list_available_variables()
+    }
+    assert hamilton_tags == {"a": {"owner": "z"}, "p": {}}
+    fnloom_module = make_module(
+        "differential_q63_f", _TAGGED.format(decorator=_FNLOOM_EXTRACT)
+    )
+    driver = fnloom.build(fnloom_module)
+    assert driver.nodes["a"].tags == {"owner": "z"}
+    assert driver.nodes["p"].tags == {"owner": "z"}
