@@ -513,6 +513,66 @@ def test_config_selects_the_same_nodes(settings: dict[str, object]) -> None:
     )
 
 
+# A config decorator stacked with `{other}`, in the order `{stack}` gives;
+# `{imports}` imports each library's decorators.
+_STACKED = """
+{imports}
+
+{stack}
+def rows__a(k: int) -> int:
+    return k
+
+@config.when(mode="b")
+def rows__b(x: int) -> int:
+    return x
+"""
+
+_PARAMETERIZE = '@parameterize(r1={"k": value(1)}, r2={"k": value(2)})'
+_TAG = '@tag(owner="desk")'
+_WHEN = '@config.when(mode="a")'
+
+
+@pytest.mark.parametrize("other", [_PARAMETERIZE, _TAG], ids=["parameterize", "tag"])
+@pytest.mark.parametrize("config_first", [True, False], ids=["outer", "inner"])
+@pytest.mark.parametrize("mode", ["a", "b"])
+def test_decorator_order_never_matters(
+    other: str, *, config_first: bool, mode: str
+) -> None:
+    """A config decorator over or under `@parameterize` or `@tag`: the same graph."""
+    stack = f"{_WHEN}\n{other}" if config_first else f"{other}\n{_WHEN}"
+    library = "hamilton.function_modifiers"
+    names = "config, parameterize, tag, value"
+    hamilton_module = make_module(
+        "semantics_stacked_h",
+        _STACKED.format(imports=f"from {library} import {names}", stack=stack),
+    )
+    fnloom_module = make_module(
+        "semantics_stacked_f",
+        _STACKED.format(imports=f"from fnloom import {names}", stack=stack),
+    )
+    settings: dict[str, object] = {"mode": mode}
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_config(settings)
+        .with_modules(hamilton_module)
+        .build()
+    )
+    variables = {
+        v.name: v for v in hamilton.list_available_variables() if v.name != "mode"
+    }
+    driver = fnloom.Builder().with_config(settings).with_modules(fnloom_module).build()
+    assert driver.node_names() == sorted(variables)
+    outputs = [
+        name for name in sorted(variables) if not variables[name].is_external_input
+    ]
+    inputs = {name: 9 for name, v in variables.items() if v.is_external_input}
+    assert driver.execute(outputs, inputs=inputs) == hamilton.execute(
+        outputs, inputs=inputs
+    )
+    for name in outputs:
+        assert driver.nodes[name].tags.get("owner") == variables[name].tags.get("owner")
+
+
 # Producers for the extract tests; `{decorator}` imports each library's
 # `extract_fields`.
 _EXTRACTED = """
@@ -676,6 +736,33 @@ def test_extract_columns_refuses_a_list_and_no_columns() -> None:
         extract_columns()
     with pytest.raises(ValueError, match="got no columns"):
         fnloom.extract_columns()
+
+
+# A column named like its producer (H2.3l).
+_SELF_COLUMN = """
+import pandas as pd
+{decorator}
+
+@extract_columns("frame", "a")
+def frame(n: int) -> pd.DataFrame:
+    return pd.DataFrame({{"frame": [n], "a": [n]}})
+"""
+
+
+def test_a_column_named_like_its_producer_fails_the_build() -> None:
+    """Both sides refuse the clash with `ValueError` at build, not when run."""
+    pytest.importorskip("pandas")
+    _hamilton_pandas()
+    hamilton_module = make_module(
+        "semantics_self_column_h", _SELF_COLUMN.format(decorator=_HAMILTON_COLUMNS)
+    )
+    with pytest.raises(ValueError, match="more than once"):
+        hamilton_driver.Builder().with_modules(hamilton_module).build()
+    fnloom_module = make_module(
+        "semantics_self_column_f", _SELF_COLUMN.format(decorator=_FNLOOM_COLUMNS)
+    )
+    with pytest.raises(ValueError, match=r"^node 'frame' is defined twice in "):
+        fnloom.build(fnloom_module)
 
 
 # A graph mixing async and sync nodes, with an optional input and a sync row. An

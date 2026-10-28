@@ -363,6 +363,31 @@ def _typed_dict_keys(returns: object) -> frozenset[str]:
     return frozenset(keys)
 
 
+def field_names(fn: Callable[..., object], extraction: Extraction) -> tuple[str, ...]:
+    """The names `extraction` gives on `fn`, as far as they are known unresolved.
+
+    The named items; for an `extract_fields` naming none, the keys of the
+    `TypedDict` that `fn` returns, its annotation evaluated if it is written as
+    a string. A return annotation that does not evaluate gives no names.
+    """
+    if extraction.items:
+        return tuple(name for name, _, _ in extraction.items)
+    returns = annotationlib.get_annotations(
+        fn, format=annotationlib.Format.FORWARDREF
+    ).get("return")
+    if isinstance(returns, str):
+        returns = annotationlib.ForwardRef(returns, owner=fn)
+    if isinstance(returns, annotationlib.ForwardRef):
+        try:
+            returns = typing.evaluate_forward_ref(returns)
+        except NameError, AttributeError:
+            return ()
+    returns = _types.stripped(returns)
+    if not typing.is_typeddict(returns):
+        return ()
+    return tuple(sorted(_typed_dict_keys(returns)))
+
+
 def _value_type(returns: object) -> tuple[bool, object | None]:
     """Whether `returns` is a mapping type, and its value type when it names one."""
     origin = typing.get_origin(returns) or returns

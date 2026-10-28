@@ -278,6 +278,20 @@ def _cancellation(name: str, future: asyncio.Future[object]) -> BaseException:
 
 
 # What a node may raise that the walk does not catch: they stop the loop itself.
+async def _stopped(tasks: list[asyncio.Future[object]]) -> None:
+    """Waits until every one of `tasks` is done, whatever cancels the waiter.
+
+    A cancellation while waiting is held back: the caller hears of it, as it
+    hears of its first, only once every node task has stopped.
+    """
+    pending = set(tasks)
+    while pending:
+        try:
+            _, pending = await asyncio.wait(pending)
+        except asyncio.CancelledError:
+            continue
+
+
 _STOPPING = (KeyboardInterrupt, SystemExit)
 
 
@@ -290,6 +304,7 @@ class _Run:
 
     __slots__ = (
         "_cancelled",
+        "_factory",
         "_failure",
         "_finished",
         "_loop",
@@ -299,6 +314,7 @@ class _Run:
         "_remaining",
         "_running",
         "_schedule",
+        "_stopping",
         "_values",
     )
 
@@ -316,6 +332,8 @@ class _Run:
         self._values = values
         self._on_value = on_value
         self._loop = asyncio.get_running_loop()
+        # Read once per run: without a custom factory, tasks are made directly.
+        self._factory = self._loop.get_task_factory() is not None
         self._pending = dict(schedule.pending)
         self._remaining = len(schedule.calls)
         self._ready = deque(schedule.start)
@@ -324,6 +342,7 @@ class _Run:
         self._failure: BaseException | None = None
         # The node tasks running when the run failed: cancelled, then awaited.
         self._cancelled: list[asyncio.Future[object]] = []
+        self._stopping = False
 
     async def wait(self) -> dict[str, object]:
         """Runs every node; the values, or the first failure, noted, raised.
@@ -343,8 +362,7 @@ class _Run:
             # The caller was cancelled: its nodes stop before the caller hears of it.
             tasks = self._tasks()
             self._stop()
-            if tasks:
-                await asyncio.wait(tasks)
+            await _stopped(tasks)
             raise
         except BaseException:
             # The loop is stopping (`KeyboardInterrupt`, `SystemExit`): no waiting.
@@ -409,8 +427,11 @@ class _Run:
         if kind == "await":
             coroutine = cast("Coroutine[Any, Any, object]", payload(**kwargs))
             # Eager: a node that never suspends is done here, with no loop turn. A
-            # custom task factory gets `eager_start` too.
-            return self._loop.create_task(coroutine, eager_start=True)
+            # custom task factory sees the task, `eager_start` passed on; without
+            # one, the task is made directly, skipping `create_task`'s dispatch.
+            if self._factory:
+                return self._loop.create_task(coroutine, eager_start=True)
+            return asyncio.Task(coroutine, loop=self._loop, eager_start=True)
         # In the default executor and the caller's context, as `asyncio.to_thread`
         # would, but as a future, not a task: cancelling it never waits for the
         # thread.
@@ -485,11 +506,16 @@ class _Run:
         self._stop()
 
     def _stop(self) -> None:
-        """Ends the run and cancels every running node.
+        """Ends the run and cancels every running node, once.
 
         A task takes its cancellation; a thread cannot be interrupted, so its
-        future is cancelled and its result, when it comes, dropped.
+        future is cancelled and its result, when it comes, dropped. A second
+        stop, the caller cancelled after a failure, say, does nothing: a node
+        still cleaning up from the first is not interrupted, as with `TaskGroup`.
         """
+        if self._stopping:
+            return
+        self._stopping = True
         self._ready.clear()
         if not self._finished.done():
             self._finished.set_result(None)

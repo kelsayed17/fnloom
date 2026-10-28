@@ -1065,6 +1065,59 @@ def test_q57_a_missing_key_and_a_missing_variant() -> None:
     assert _fnloom_configured({}, without_bar).node_names() == ["bar", "x"]
 
 
+_ROWS = """
+{decorator}
+{rows}
+
+@parameterize(r1={{"k": value(1)}}, r2={{"k": value(2)}})
+@config.when(mode="a")
+def rows__a(k: int) -> int:
+    return k
+
+@parameterize(r1={{"k": value(10)}})
+@config.when_not(mode="a")
+def rows__other(k: int) -> int:
+    return k
+
+def total(r1: int, r2: int) -> int:
+    return r1 + r2
+"""
+
+
+@pytest.mark.deliberate("Q57")
+def test_q57_a_name_only_an_unselected_variant_gives() -> None:
+    """Hamilton makes a row only the unselected variant has an input; fnloom refuses."""
+    hamilton_module = make_module(
+        "differential_q57_rows_h",
+        _ROWS.format(
+            decorator=_HAMILTON_CONFIG,
+            rows="from hamilton.function_modifiers import parameterize, value",
+        ),
+    )
+    hamilton = _hamilton_configured({"mode": "z"}, hamilton_module)
+    assert _hamilton_names(hamilton) == ["mode", "r1", "r2", "total"]
+    with pytest.raises(ValueError, match=r"Required input r2 not provided"):
+        hamilton.execute(["total"])
+    assert hamilton.execute(["total"], inputs={"r2": 5}) == {"total": 15}
+    fnloom_module = make_module(
+        "differential_q57_rows_f",
+        _ROWS.format(
+            decorator=_FNLOOM_CONFIG, rows="from fnloom import parameterize, value"
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match=(
+            r"^no selected variant gives 'r2': the config \{'mode': 'z'\} selects "
+            r"rows__other for 'rows', and only rows__a gives 'r2'$"
+        ),
+    ):
+        _fnloom_configured({"mode": "z"}, fnloom_module)
+    assert _fnloom_configured({"mode": "a"}, fnloom_module).execute(["total"]) == {
+        "total": 3
+    }
+
+
 _MISSING_KEY = """
 {decorator}
 
@@ -2082,18 +2135,22 @@ import asyncio
 
 
 async def doubled(x: int) -> int:
+    print("doubled")
     await asyncio.sleep(0)
     return x * 2
 
 
 def plus_one(doubled: int) -> int:
+    print("plus_one")
     return doubled + 1
 """
 
 
 @pytest.mark.deliberate("Q68")
 @pytest.mark.filterwarnings(_HAMILTON_ASYNC_WARNING)
-def test_q68_the_async_driver_caches(tmp_path: Path) -> None:
+def test_q68_the_async_driver_caches(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     """Hamilton fails to build an async driver with a cache; fnloom's caches."""
     module = make_module("differential_q68", _CACHED_ASYNC)
 
@@ -2122,7 +2179,9 @@ def test_q68_the_async_driver_caches(tmp_path: Path) -> None:
         "doubled": hit,
         "plus_one": hit,
     }
+    assert sorted(capsys.readouterr().out.split()) == ["doubled", "plus_one"]
     assert asyncio.run(driver.execute(request, inputs={"x": 2})) == {"plus_one": 5}
+    assert capsys.readouterr().out == "", "the warm run runs nothing"
 
 
 # The row decorators in each library's spelling.

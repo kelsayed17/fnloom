@@ -31,8 +31,8 @@ needed to produce them, in a fixed order, with your mistakes caught before anyth
 
 - 🧵 **Your functions are the graph.** No decorators, no registration, no config objects. Delete fnloom tomorrow and
   your code is still plain Python you can call and test directly.
-- ⚡ **Up to 24× faster repeat runs than Hamilton.** Compile a request once with `prepare`, then run it as often as you
-  like. A 1,000-node graph runs in about 0.2 ms.
+- ⚡ **Up to 24× faster repeat runs than Hamilton on plain graphs.** Compile a request once with `prepare`, then run
+  it as often as you like. A 1,000-node graph runs in about 0.2 ms.
 - 🛡️ **Mistakes fail loudly, and early.** A misspelled input, a dependency cycle, a type mismatch between two functions
   or an `async def` node in a sync build raises a clear error naming the culprit. Hamilton accepts several of these
   silently.

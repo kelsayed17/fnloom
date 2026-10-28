@@ -33,7 +33,7 @@ executor rebuilt in Rust.
 
     [:lucide-arrow-right: Writing nodes](writing-nodes.md)
 
--   :lucide-zap:{ .lg .fl-icon } **Up to 24× faster repeat runs**
+-   :lucide-zap:{ .lg .fl-icon } **Up to 24× faster repeat runs on plain graphs**
 
     ---
 

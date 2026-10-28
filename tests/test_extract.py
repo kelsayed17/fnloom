@@ -786,7 +786,7 @@ def test_a_field_is_keyed_never_stored_and_its_consumer_hits(kind: str) -> None:
         "averages": CacheOutcome("hit", None),
         "doubled": CacheOutcome("hit", None),
         "mean": CacheOutcome(
-            "miss", "extracted field: always recomputed from its producer"
+            "miss", "extracted field: runs whenever needed; never served from the store"
         ),
     }
 

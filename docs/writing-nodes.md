@@ -248,7 +248,9 @@ post.nodes["cost"].origin is shipping.cost__post
 - **Stacked decorators all apply:** `@config.when(carrier="post")` over `@config.when_not(region="eu")` needs both.
   The order you stack them in, and their order with `@parameterize` and `@tag`, never matters.
 - `@parameterize` under a config decorator gives its rows only when the variant is selected.
-- `Driver.config` is a read-only copy of the config, and a pickled driver keeps it.
+- `Driver.config` is a read-only, shallow copy of the config, and a pickled driver keeps it. Shallow means a list
+  value you change after `with_config` shows the change there too.
+- `NodeView.config` holds the conditions that selected a node, each a `fnloom.Condition`.
 
 A node that no variant matches, with no `@config.default`, is left out. That's fine when nothing reads it, and
 requesting it says why it's missing. When another node reads it, the build fails, naming what each variant needs:
@@ -275,6 +277,11 @@ import tiers
 fnloom.Builder().with_config({"tier": "basic"}).with_modules(tiers).build()
 # raises ValueError: no variant of 'discount' matches the config {'tier': 'basic'}; its variants need tier == 'gold' (discount__gold); add @config.default or a variant for it
 ```
+
+The same holds for a name only an unselected variant gives: a `@parameterize` row, or a field it extracts. It's never
+made an input. Reading it fails the build with `no selected variant gives 'r2': ...`, naming the variants that do.
+An `@extract_fields()` that names no fields gives its `TypedDict`'s keys, as far as its return annotation evaluates
+at build.
 
 Mistakes are refused rather than guessed at (Q58, Q59):
 

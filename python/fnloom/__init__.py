@@ -3,7 +3,7 @@
 from importlib.metadata import version as _version
 
 from fnloom._caching import CacheOutcome
-from fnloom._config import config
+from fnloom._config import Condition, config
 from fnloom._core import UnfingerprintableError
 from fnloom._decorators import (
     CachePolicy,
@@ -46,6 +46,7 @@ __all__ = [
     "CachePolicy",
     "CacheStore",
     "CacheWarning",
+    "Condition",
     "DiskCache",
     "Driver",
     "Format",

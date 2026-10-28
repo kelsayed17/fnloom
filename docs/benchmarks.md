@@ -7,18 +7,20 @@ and at running a prepared plan, so a row where it's reliably slower counts as a 
 
 <div class="grid cards" markdown>
 
--   :lucide-repeat:{ .lg .fl-icon } **2.5× to 998× faster repeat runs**
+-   :lucide-repeat:{ .lg .fl-icon } **2.5× to 24× faster repeat runs**
 
-    Running a prepared plan again, wherever both finish. A 1,000-node layered graph: 4.35 ms in Hamilton,
-    0.21 ms in fnloom; 10,000 extracted fields: 6.4 s against 6.4 ms.
+    Running a prepared plan again on the plain graphs, wherever both finish. A 1,000-node layered graph: 4.35 ms
+    in Hamilton, 0.21 ms in fnloom. With `@extract_fields`, where Hamilton's cost grows faster than the graph, up to
+    998×: 10,000 extracted fields take 6.4 s against 6.4 ms.
 
 -   :lucide-hammer:{ .lg .fl-icon } **Every graph builds faster**
 
-    At least 1.5× faster on every shape, and 41× on 10,000 `@parameterize` rows (5.3 s against 0.13 s).
+    At least 1.35× faster on every graph, the least on 10 extracted fields, and 41× on 10,000 `@parameterize` rows
+    (5.3 s against 0.13 s).
 
 -   :lucide-infinity:{ .lg .fl-icon } **Runs what Hamilton can't**
 
-    Hamilton raises `RecursionError` on 5 of the 16 graphs. fnloom runs all of them, and checks every answer.
+    Hamilton raises `RecursionError` on 5 of the 20 graphs. fnloom runs all of them, and checks every answer.
 
 -   :lucide-gauge:{ .lg .fl-icon } **Microseconds per run**
 
@@ -78,7 +80,7 @@ once per plan into one `isinstance` call. Only generics, unions and the like tak
 
 Hamilton builds the 1,000- and 10,000-node chains, the 10,000-node layered graph and the 1,000- and 10,000-row `rows`
 graphs, then raises `RecursionError` on the first `execute`: its graph walk recurses once per level of depth. fnloom
-runs all 16 cases, with checks on and off, and every answer it gives is checked against the shape's closed form.
+runs all 20 cases, with checks on and off, and every answer it gives is checked against the shape's closed form.
 
 ### Build: re-measured
 
@@ -158,8 +160,10 @@ more than its uncached ones, 25 to 27 times as much in memory, as the caching de
 **fnloom, async** is `AsyncDriver` with `sync_nodes="inline"`, timed on the loop; Hamilton's async driver has no row,
 since it fails to build with a cache (Q68). Its warm runs load the outputs and run nothing, as the sync driver's do.
 Its cold runs with `MemoryCache` cost 3.7 to 3.8 times its uncached ones, against 1.9 to 2.3 times on the sync
-driver: the async walk is Python, so it looks up and stores each node through Python calls instead of the native walk
-a plain `MemoryCache` gets on `Driver`. With `DiskCache`, the files cost the same on either driver.
+driver. Two things make that up. The async walk is Python, so it looks up and stores each node through Python calls
+instead of the native walk a plain `MemoryCache` gets on `Driver`. And a cached async plan builds its `Schedule`
+lazily, on its first run, so the cold figure counts it, where the uncached figure leaves it to `prepare`. With
+`DiskCache`, the files cost the same on either driver.
 
 The targets of the caching design (§8), with fnloom's figures:
 
@@ -197,21 +201,24 @@ no prepared plans, runs `execute`, planning included.
 
 | shape | n | nodes | Hamilton | fnloom, `thread` | fnloom, `inline` |
 | --- | ---: | --- | --- | --- | --- |
-| chain | 100 | async | 5.655 / 5.433 | 0.110 / 0.086 | 0.111 / 0.086 |
-| chain | 100 | sync | 5.307 / 5.439 | 3.915 / 3.409 | 0.080 / 0.055 |
-| chain | 1,000 | async | 55.0 / 53.8 | 0.929 / 0.882 | 0.926 / 0.881 |
-| chain | 1,000 | sync | 55.7 / 53.7 | 34.6 / 33.9 | 0.598 / 0.557 |
-| layered | 100 | async | 2.344 / 2.101 | 0.129 / 0.097 | 0.126 / 0.096 |
-| layered | 100 | sync | 2.203 / 1.978 | 3.149 / 2.326 | 0.093 / 0.065 |
-| layered | 1,000 | async | 22.2 / 21.8 | 1.073 / 1.013 | 1.057 / 1.004 |
-| layered | 1,000 | sync | 21.9 / 22.0 | 24.2 / 23.0 | 0.729 / 0.677 |
+| chain | 100 | async | 5.584 / 5.160 | 0.102 / 0.078 | 0.106 / 0.077 |
+| chain | 100 | sync | 5.606 / 5.145 | 3.897 / 3.406 | 0.083 / 0.057 |
+| chain | 1,000 | async | 54.4 / 53.1 | 0.828 / 0.785 | 0.837 / 0.783 |
+| chain | 1,000 | sync | 54.5 / 52.9 | 34.6 / 33.6 | 0.650 / 0.585 |
+| layered | 100 | async | 2.246 / 2.103 | 0.114 / 0.088 | 0.114 / 0.088 |
+| layered | 100 | sync | 2.229 / 1.977 | 3.114 / 2.343 | 0.098 / 0.068 |
+| layered | 1,000 | async | 22.0 / 21.5 | 0.970 / 0.911 | 0.960 / 0.907 |
+| layered | 1,000 | sync | 22.6 / 21.8 | 24.1 / 23.0 | 0.754 / 0.700 |
 
 Measured on the machine above, with CPython 3.14.8 and a release build, on 2026-10-28. Wherever both run nodes on the
-loop, which means every `async` row and the `inline` column, fnloom is 18 to 93 times faster than Hamilton on a first
-run and 22 to 99 times faster on a steady one. The smallest gains are on the 100-node layered graph of `async def`
-nodes, 18.2× and 18.6× on the first run. The generated `async def` nodes never suspend. fnloom starts each node's
-task eagerly, so a node that doesn't suspend finishes with no turn of the loop, while Hamilton schedules a task for
-every node. A node that awaits real I/O pays for its suspensions on either.
+loop, which means every `async` row and the `inline` column, fnloom is 20 to 84 times faster than Hamilton on a first
+run and 24 to 90 times faster on a steady one. The smallest gain is on the 100-node layered graph of `async def`
+nodes, 19.6× on the first run in either column. The generated `async def` nodes never suspend. fnloom starts each
+node's task eagerly, so a node that doesn't suspend finishes with no turn of the loop, while Hamilton schedules a task
+for every node. Without a custom task factory on the loop, fnloom makes each task directly instead of through
+`loop.create_task`, which took about a tenth off the 1,000-node `async def` rows (steady, 0.882 to 0.785 ms on the
+chain and 1.013 to 0.911 ms on the layered graph, against the previous run). A node that awaits real I/O pays for its
+suspensions on either.
 
 **`thread` is slower than Hamilton on the layered graph of sync nodes, by design.** Each sync node makes a round trip
 to a worker thread: `loop.run_in_executor` queues the call to the loop's default executor, a worker thread wakes to
@@ -222,8 +229,8 @@ Hamilton. These are the rows where it's slower:
 
 | row | Hamilton, first / steady | fnloom `thread`, first / steady | slower by, first / steady | fnloom `inline` |
 | --- | --- | --- | --- | --- |
-| layered, 100, sync | 2.203 / 1.978 | 3.149 / 2.326 | 43% / 18% | 0.093 / 0.065 |
-| layered, 1,000, sync | 21.9 / 22.0 | 24.2 / 23.0 | 10% / 4% | 0.729 / 0.677 |
+| layered, 100, sync | 2.229 / 1.977 | 3.114 / 2.343 | 40% / 19% | 0.098 / 0.068 |
+| layered, 1,000, sync | 22.6 / 21.8 | 24.1 / 23.0 | 6% / 6% | 0.754 / 0.700 |
 
 Hamilton runs sync nodes on the loop and stops it while each one runs. The thread is what keeps the loop free (Q65),
 so the `thread` column isn't a like-for-like comparison. For a graph of cheap sync nodes, `sync_nodes="inline"` is
@@ -298,6 +305,7 @@ All times use `time.perf_counter_ns`, in milliseconds. Graph generation is not t
 - `layered`: `n` nodes in rows of ten, each reading two nodes of the row above; one input, `seed`.
 - `rows`: one function with `n` `@parameterize` rows, each sourcing the row before it, the first sourcing the input
   `seed`. The module is generated in Hamilton's spelling for Hamilton and in fnloom's for fnloom.
+- `extract`: one `@extract_fields` producer returning a dict of `n` int fields, each read by its own consumer.
 
 ## The instruction-count gate
 

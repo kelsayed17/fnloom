@@ -13,7 +13,8 @@ Hamilton 1.90.0 is fnloom's test oracle: every place the two differ on purpose i
 - **Deep graphs just work.** Hamilton's graph walk recurses, so a chain of about 1,000 nodes raises `RecursionError`.
   fnloom has no depth limit.
 - **Faster repeat runs.** `prepare` compiles a request once, and each run after that is a loop in Rust: up to 24×
-  faster than Hamilton's `execute` on the [benchmarks](benchmarks.md).
+  faster than Hamilton's `execute` on the plain graphs of the [benchmarks](benchmarks.md), and more with
+  `@extract_fields`.
 - **Typos are errors.** A misspelled input or override raises instead of being silently ignored.
 - **Stable order.** Nodes run in the same order however you list outputs, so logs and side effects are reproducible.
 - **Real types.** fnloom ships `py.typed`, and its decorators keep your function's signature for type checkers.

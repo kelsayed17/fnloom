@@ -9,8 +9,8 @@ the store holds, and runs the plan with those as overrides, so the core prunes t
 upstream. Each `default` node that runs is stored under its key as it succeeds;
 nothing else is ever looked up, so nothing else is stored. A field or column
 node of `@extract_fields` or `@extract_columns` is keyed, so what reads it chains
-from its key, but is never looked up or stored: it always runs, so its check
-always runs. `explain`
+from its key, but is never looked up or stored: it runs whenever it is needed,
+and its check with it, and is never served from the store. `explain`
 reports what a run would do with each computed node, running nothing.
 
 The cache never fails a run: a store that raises is a miss or a skipped write,
@@ -62,10 +62,10 @@ class CacheOutcome(NamedTuple):
             reason `"policy recompute"`, and is never stored. `"uncacheable"`: the
             node has no key, so it always runs and is never stored. An
             `@extract_*` field or column node is always a miss, with the reason
-            `"extracted field: always recomputed from its producer"`: it is
-            keyed but never stored, so its check runs on every run. `"unknown"`:
-            the key depends on the result of a `recompute` node, which only a run
-            knows.
+            `"extracted field: runs whenever needed; never served from the store"`:
+            it is keyed but never stored, so its check runs whenever it runs.
+            `"unknown"`: the key depends on the result of a `recompute` node,
+            which only a run knows.
         reason: Why a node is uncacheable or unknown, or is a `recompute` miss;
             `None` for a plain hit or miss.
     """
@@ -81,9 +81,9 @@ _NO_KEYS: Mapping[str, bytes | None] = MappingProxyType(_EMPTY_KEYS)
 # The outcome of a `recompute` node with a key, or one that only a run would know.
 _RECOMPUTE = CacheOutcome("miss", "policy recompute")
 
-# The outcome of an extracted field with a key: it always runs, never stored.
+# The outcome of an extracted field with a key: run when needed, never stored.
 _EXTRACTED = CacheOutcome(
-    "miss", "extracted field: always recomputed from its producer"
+    "miss", "extracted field: runs whenever needed; never served from the store"
 )
 
 
@@ -99,7 +99,7 @@ class NodeKey:
         behavior: The node's cache behavior.
         params: The key parameters, in declaration order, the ignored ones left out.
         stored: Whether a `default` node is looked up and stored; False for an
-            extracted field, which is keyed but always runs.
+            extracted field, which is keyed but never served from the store.
     """
 
     static: bytes | None
@@ -151,7 +151,8 @@ def _field_policy(producer: CachePolicy) -> CachePolicy:
     """An extracted field's policy: keyed like its producer, never stored.
 
     `disable` carries over; `recompute`, `ignore` and the format do not, since a
-    field always runs and is never stored. A pinned `version` carries over.
+    field runs whenever it is needed and is never stored. A pinned `version`
+    carries over.
     """
     behavior: CacheBehavior = "disable" if producer.behavior == "disable" else "default"
     return CachePolicy(behavior, frozenset(), producer.version)

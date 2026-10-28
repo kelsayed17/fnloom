@@ -15,28 +15,30 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `json` format refuses any value that would not load back as the same types, such as a tuple, so a hit never
   returns a different value (Q54).
 - `len(MemoryCache)`, the number of entries it holds.
-- `Builder.with_config(...)` and `Driver.config`, a read-only copy. `@config.when`, `when_not`, `when_in` and
-  `when_not_in` pick a function's variant at build, and `@config.default` marks the variant used when no other
-  matches. `name=` names the node on all four forms. Config shapes the graph only: a key is never a node, an input or
-  a value (Q56). A key the config doesn't have never matches, and a node something needs that no variant gives fails
-  the build, naming what each variant needs (Q57). Two matching variants fail the build, naming both, and so does a
-  config-decorated function defined twice in its module, naming the lines of each (Q58). Misuse, such as
-  `@config.when` without parentheses or `when_in(mode="ab")`, is refused when decorating (Q59). The user's function is
-  never changed, and `NodeView.config` holds the conditions that picked a node (Q60).
+- `Builder.with_config(...)` and `Driver.config`, a read-only, shallow copy. `@config.when`, `when_not`, `when_in` and
+  `when_not_in` pick a function's variant at build, and `@config.default` marks the variant used when no other matches.
+  `name=` names the node on all four forms. Config shapes the graph only: a key is never a node, an input or a value
+  (Q56). A key the config doesn't have never matches, and a node something needs that no variant gives fails the build,
+  naming what each variant needs; so does a row or extracted field only an unselected variant gives (Q57). Two matching
+  variants fail the build, naming both, and so does a config-decorated function defined twice in its module, naming the
+  lines of each (Q58). Misuse, such as `@config.when` without parentheses or `when_in(mode="ab")`, is refused when
+  decorating (Q59). The user's function is never changed, and `NodeView.config` holds the conditions that picked a node,
+  each a `fnloom.Condition` (Q60).
 - `@extract_fields` splits a node's mapping into one node per field. Each field's value is checked against its
   declared type on every run, even with input checks off, and declared types are checked at build against a
   `TypedDict` or `dict[str, T]` return (Q61). A `Mapping[str, T]` return works. `fill_with` never changes the
-  producer's value, and `None` is a fill (Q62). With a cache, a field or column is never stored: it reruns from its
-  cached producer, so its check always runs, and its key covers its name, declared type and fill.
+  producer's value, and `None` is a fill (Q62). With a cache, a field or column is never stored or served from the
+  store: it reruns from its cached producer whenever it's needed, its check with it, and its key covers its name,
+  declared type and fill.
 - `@extract_columns` splits any value with `__getitem__`, such as a pandas or polars frame or a mapping, into one node
   per column, with no registry or extension to load (Q64). A missing column raises `ValueError` when run, naming the
   columns the producer did return. `@tag` on an `@extract_*` function tags the producer and every field or column
   (Q63).
 - `Builder.build_async()` and `AsyncDriver`, for graphs with `async def` nodes. The build is synchronous (Q12), and
-  `execute` and `AsyncPreparedPlan.run` are coroutines that return the sync driver's dict, in request order (Q11).
-  Sync nodes run in a worker thread, or on the loop with `build_async(sync_nodes="inline")` (Q65). A failing node
-  cancels its running siblings and raises its own exception once, noted with its name (Q66). Requests are checked as
-  the sync driver checks them (Q67), and an `async def` `@parameterize` row is awaited (Q69).
+  `execute` and `AsyncPreparedPlan.run` are coroutines that return the sync driver's dict, in request order (Q11). Sync
+  nodes run in a worker thread, or on the loop with `build_async(sync_nodes="inline")` (Q65). A failing node cancels its
+  running siblings, each once, waits for them and raises its own exception, noted with its name (Q66). Requests are
+  checked as the sync driver checks them (Q67), and an `async def` `@parameterize` row is awaited (Q69).
 - Caching on the async driver: `with_cache(...).build_async()` uses the sync driver's keys, stores, policies and
   `explain_cache`. A node is stored as it succeeds; one that fails, or that a failure cancels, stores nothing (Q68).
 

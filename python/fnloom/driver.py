@@ -369,7 +369,10 @@ class Driver:
 
     @property
     def config(self) -> Mapping[str, object]:
-        """The config the graph was built with: a read-only copy, empty by default.
+        """The config the graph was built with: a read-only, shallow copy.
+
+        Empty by default. Shallow: a value the caller changes in place after
+        `with_config`, such as a list, shows the change here too.
 
         Config only selects `@config.when*` variants: it is never passed to a node
         (Q56).
@@ -415,7 +418,14 @@ class Driver:
         if self._unmatched and (
             absent := sorted({name for name in outputs if name in self._unmatched})
         ):
-            raise ValueError("\n".join(self._unmatched[name] for name in absent))
+            lines = [self._unmatched[name] for name in absent]
+            # A misspelled output in the same request is named too, not hidden.
+            known = self._nodes
+            if unknown := sorted(
+                {n for n in outputs if n not in self._unmatched and n not in known}
+            ):
+                lines.append(f"unknown outputs: {', '.join(map(repr, unknown))}")
+            raise ValueError("\n".join(lines))
         try:
             plan = self._graph.prepare(
                 list(outputs), sorted(input_names), sorted(override_names)
@@ -881,8 +891,8 @@ class Builder:
 
         A key given again takes its later value. The config selects among
         `@config.when*` variants when building, and is never passed to a node
-        (Q56); the driver's `config` is a read-only copy of it. `TypeError` for a
-        non-mapping or a key that is not a `str`.
+        (Q56); the driver's `config` is a read-only, shallow copy of it.
+        `TypeError` for a non-mapping or a key that is not a `str`.
         """
         return self._with(config={**self._config, **_checked_config(config)})
 
@@ -968,16 +978,19 @@ class Builder:
         `async def` is a node too.
         """
         scanned = scan(self._modules, self._config, awaits=awaits)
-        if scanned.unmatched and (
-            absent := _unmatched_edges(scanned.nodes, scanned.unmatched)
-        ):
-            raise ValueError(absent)
         nodes = resolve(scanned.nodes)
+        unmatched = scanned.unmatched
+        if unmatched:
+            # A field of a forward-referenced `TypedDict` is first known resolved.
+            names = {node.name for node in nodes}
+            unmatched = {n: why for n, why in unmatched.items() if n not in names}
+            if absent := _unmatched_edges(nodes, unmatched):
+                raise ValueError(absent)
         views = node_views(nodes)
         graph = _graph_of(nodes)
         if mismatches := _edge_mismatches(views.functions):
             raise ValueError("\n".join(mismatches))
-        return nodes, views, graph, scanned.unmatched
+        return nodes, views, graph, unmatched
 
     def _driver(
         self,

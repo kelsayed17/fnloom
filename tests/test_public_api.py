@@ -57,4 +57,5 @@ def test_the_regressed_callables_are_covered() -> None:
         "PreparedPlan.run",
         "NodeView",
         "DiskCache",
+        "Condition",
     }

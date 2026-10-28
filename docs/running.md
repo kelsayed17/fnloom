@@ -347,7 +347,16 @@ the failed node's own exception, with the same note naming the node as the sync 
 interrupted: the run doesn't wait for it, and drops its result when it comes. `asyncio.run` still waits for running
 threads when the loop shuts down, since it shuts the default executor down. If the caller is cancelled, as by
 `asyncio.timeout`, the run cancels its nodes the same way, and the cancellation reaches the caller once each
-`async def` node has stopped.
+`async def` node has stopped. Each node is cancelled once: a second cancellation of the caller, or one after a node
+failed, doesn't interrupt a node's cleanup, and the caller still waits for it.
 
-**Not yet:** `with_cache` and `build_async` together raise `NotImplementedError`. An async driver made by a builder
+A few edges follow from that, as with `TaskGroup`:
+
+- A node that swallows its cancellation and never finishes makes the caller wait for it.
+- An exception a node raises while cleaning up from its cancellation is dropped. The run raises the first failure, or
+  the caller's cancellation.
+- A node task that something else cancels fails the run as `node 'name' was cancelled`. That holds even when the node
+  then raises its own `CancelledError`, which can't be told apart from the outside one.
+
+An async driver can cache too: see [Caching on the async driver](caching.md#on-the-async-driver). One made by a builder
 pickles as that builder, as a `Driver` does.

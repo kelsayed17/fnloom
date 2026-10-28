@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Literal
 
+from fnloom import _extract
 from fnloom._decorators import _ATTRIBUTE, decorations
 
 if TYPE_CHECKING:
@@ -351,8 +352,10 @@ def matches(policy: ConfigPolicy, config: Mapping[str, object]) -> bool:
 
 def _variant(fn: Callable[..., object], policy: ConfigPolicy) -> Variant:
     node = node_name(fn, policy.name)
-    rows = decorations(fn).rows
-    produces = (node,) if rows is None else tuple(rows)
+    recorded = decorations(fn)
+    produces = (node,) if recorded.rows is None else tuple(recorded.rows)
+    if recorded.extract is not None:
+        produces = (*produces, *_extract.field_names(fn, recorded.extract))
     return Variant(fn, policy, node, produces)
 
 
@@ -409,6 +412,27 @@ def unmatched(
         f"no variant of {name!r} matches the config {_shown(config)}; "
         f"its variants need {needs}; add @config.default or a variant for it"
     )
+
+
+def _not_given(
+    picked: Variant, variants: Sequence[Variant], config: Mapping[str, object]
+) -> dict[str, str]:
+    """Why each name another variant gives, but `picked` does not, is absent."""
+    labels = _labels(variants)
+    givers: dict[str, list[str]] = {}
+    for variant in variants:
+        for produced in variant.produces:
+            if produced not in picked.produces:
+                givers.setdefault(produced, []).append(labels[id(variant.function)])
+    return {
+        produced: (
+            f"no selected variant gives {produced!r}: the config {_shown(config)} "
+            f"selects {labels[id(picked.function)]} for {picked.node!r}, and only "
+            f"{', '.join(sorted(set(givers[produced])))} "
+            f"{'gives' if len(set(givers[produced])) == 1 else 'give'} {produced!r}"
+        )
+        for produced in sorted(givers)
+    }
 
 
 def _pick(
@@ -469,6 +493,7 @@ def resolve_variants(
             problems.append((node, problem))
         elif picked is not None:
             chosen.add(id(picked.function))
+            missing.update(_not_given(picked, variants, config))
         else:
             reason = unmatched(node, config, variants)
             for produced in sorted({p for v in variants for p in v.produces}):

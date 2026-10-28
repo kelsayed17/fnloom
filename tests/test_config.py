@@ -380,6 +380,161 @@ def test_an_unneeded_node_without_a_variant_is_absent() -> None:
         driver.execute(["bar", "foo"], inputs={"x": 1})
 
 
+def test_a_field_only_an_unselected_variant_gives_is_not_an_input() -> None:
+    """A field of an unmatched variant is refused when read, not made an input."""
+    source_code = """
+from fnloom import config, extract_fields
+
+@extract_fields({"x": int, "y": int})
+@config.when(mode="a")
+def parts__a(n: int) -> dict:
+    return {"x": n, "y": n + 1}
+
+def total(x: int, y: int) -> int:
+    return x + y
+"""
+    reason = (
+        "no variant of 'parts' matches the config {'mode': 'b'}; its variants need "
+        "mode == 'a' (parts__a); add @config.default or a variant for it"
+    )
+    with pytest.raises(ValueError, match=f"^{re.escape(reason)}\\n") as raised:
+        _built("cfg_unmatched_fields", source_code, {"mode": "b"})
+    assert str(raised.value).splitlines() == [reason, reason]
+    built = _built("cfg_matched_fields", source_code, {"mode": "a"})
+    assert built.execute(["total"], inputs={"n": 1}) == {"total": 3}
+    unread = source_code.replace("def total(x: int, y: int)", "def total(n: int)")
+    unread = unread.replace("return x + y", "return n")
+    driver = _built("cfg_unread_fields", unread, {"mode": "b"})
+    assert driver.node_names() == ["n", "total"]
+    with pytest.raises(ValueError, match=f"^{re.escape(reason)}$"):
+        driver.prepare(["x"])
+
+
+# Variant `a` gives rows `r1` and `r2`; the default gives only `r1`.
+_ROWS = """
+from fnloom import config, parameterize, value
+
+@parameterize(r1={"k": value(1)}, r2={"k": value(2)})
+@config.when(mode="a")
+def rows__a(k: int) -> int:
+    return k
+
+@parameterize(r1={"k": value(10)})
+@config.default
+def rows__d(k: int) -> int:
+    return k
+
+def total(r1: int, r2: int) -> int:
+    return r1 + r2
+"""
+
+# Why `r2` is absent when the default of `_ROWS` is selected.
+_NOT_GIVEN = (
+    "no selected variant gives 'r2': the config {'mode': 'z'} selects rows__d "
+    "for 'rows', and only rows__a gives 'r2'"
+)
+
+
+def test_a_row_only_an_unselected_variant_gives_is_not_an_input() -> None:
+    """With the default selected, a row only variant `a` has is refused, not input."""
+    with pytest.raises(ValueError, match=f"^{re.escape(_NOT_GIVEN)}$"):
+        _built("cfg_rows_read", _ROWS, {"mode": "z"})
+    selected = _built("cfg_rows_a", _ROWS, {"mode": "a"})
+    assert selected.execute(["total"]) == {"total": 3}
+    unread = _ROWS.replace("def total(r1: int, r2: int)", "def total(r1: int)")
+    unread = unread.replace("return r1 + r2", "return r1")
+    driver = _built("cfg_rows_unread", unread, {"mode": "z"})
+    assert driver.node_names() == ["r1", "total"]
+    assert driver.execute(["total"]) == {"total": 10}
+    with pytest.raises(ValueError, match=f"^{re.escape(_NOT_GIVEN)}$"):
+        driver.prepare(["r2"])
+
+
+def test_a_typed_dict_variant_gives_its_fields() -> None:
+    """A field-less extract of a defined `TypedDict` counts its keys as given."""
+    source_code = """
+from typing import TypedDict
+
+from fnloom import config, extract_fields
+
+class Parts(TypedDict):
+    x: int
+    y: int
+
+@extract_fields()
+@config.when(mode="a")
+def parts__a(n: int) -> Parts:
+    return {"x": n, "y": n + 1}
+
+@extract_fields({"x": int})
+@config.default
+def parts__d(n: int) -> dict:
+    return {"x": n}
+
+def total(x: int, y: int) -> int:
+    return x + y
+"""
+    with pytest.raises(ValueError, match=r"^no selected variant gives 'y': "):
+        _built("cfg_typed_default", source_code, {})
+    built = _built("cfg_typed_a", source_code, {"mode": "a"})
+    assert built.execute(["total"], inputs={"n": 1}) == {"total": 3}
+
+
+def test_forward_referenced_typed_dict_fields_are_known() -> None:
+    """A `TypedDict` defined after its variant still names the fields it gives.
+
+    And a field a plain function gives through one is never reported absent.
+    """
+    source_code = """
+from typing import TypedDict
+
+from fnloom import config, extract_fields
+
+@extract_fields()
+@config.when(mode="a")
+def parts__a(n: int) -> "Later":
+    return {"x": n, "y": n + 1}
+
+@extract_fields({"x": int})
+@config.default
+def parts__d(n: int) -> dict:
+    return {"x": n}
+
+@extract_fields()
+def plain(n: int) -> "Other":
+    return {"z": n}
+
+class Later(TypedDict):
+    x: int
+    y: int
+
+class Other(TypedDict):
+    z: int
+
+def total(x: int, y: int) -> int:
+    return x + y
+
+def zed(z: int) -> int:
+    return z
+"""
+    with pytest.raises(ValueError, match=r"^no selected variant gives 'y': "):
+        _built("cfg_forward_default", source_code, {})
+    built = _built("cfg_forward_a", source_code, {"mode": "a"})
+    assert built.execute(["total", "zed"], inputs={"n": 1}) == {"total": 3, "zed": 1}
+
+
+def test_a_request_names_unmatched_and_unknown_outputs_together() -> None:
+    """Requesting an unmatched node and a misspelled one names both kinds, sorted."""
+    source_code = _VARIANTS.replace("def bar(foo: int)", "def bar(x: int)")
+    driver = _built("cfg_unmatched_and_unknown", source_code, {"mode": "c"})
+    with pytest.raises(ValueError, match=r"^no variant of 'foo'") as raised:
+        driver.prepare(["zed", "foo", "bar", "baz"])
+    assert str(raised.value).splitlines() == [
+        _NO_VARIANT,
+        "unknown outputs: 'baz', 'zed'",
+    ]
+
+
 def test_default_is_used_only_when_nothing_else_matches() -> None:
     """`@config.default` stands in for an unmatched mode, and steps aside otherwise."""
     source_code = (

@@ -352,6 +352,92 @@ def test_a_timeout_waits_for_the_nodes_cleanup() -> None:
     _run(scenario())
 
 
+# `slow` waits forever; cancelled, it cleans up until `RELEASE` is set. `boom`
+# fails once `slow` has started.
+CLEANING_UP = """
+import asyncio
+
+LOG = []
+STARTED = asyncio.Event()
+CLEANING = asyncio.Event()
+RELEASE = asyncio.Event()
+
+
+async def slow(x: int) -> int:
+    STARTED.set()
+    try:
+        await asyncio.Event().wait()
+    except asyncio.CancelledError:
+        CLEANING.set()
+        try:
+            await RELEASE.wait()
+        except asyncio.CancelledError:
+            LOG.append("cleanup interrupted")
+            raise
+        LOG.append("cleaned up")
+        raise
+    return x
+
+
+async def boom(x: int) -> int:
+    await STARTED.wait()
+    raise KeyError("boom")
+
+
+def both(slow: int, boom: int) -> int:
+    return slow + boom
+"""
+
+# Loop turns a test yields to let a wrongly delivered cancellation land.
+_TURNS = 10
+
+
+async def _turns() -> None:
+    for _ in range(_TURNS):
+        await asyncio.sleep(0)
+
+
+def test_a_caller_cancelled_after_a_failure_never_cancels_a_node_twice() -> None:
+    """A node cleaning up after a sibling's failure finishes its cleanup."""
+    module = make_module("async_cancel_after_failure", CLEANING_UP)
+    driver = fnloom.Builder().with_modules(module).build_async()
+
+    async def scenario() -> None:
+        run = asyncio.create_task(driver.execute(["both"], inputs={"x": 1}))
+        await module.CLEANING.wait()
+        run.cancel()
+        await _turns()
+        assert module.LOG == []
+        assert not run.done()
+        module.RELEASE.set()
+        with pytest.raises(asyncio.CancelledError):
+            await run
+        assert module.LOG == ["cleaned up"]
+
+    _run(asyncio.wait_for(scenario(), PATIENCE))
+
+
+def test_a_caller_cancelled_twice_still_waits_for_its_nodes() -> None:
+    """A second cancellation while the nodes clean up does not cut the wait short."""
+    module = make_module("async_cancel_twice", CLEANING_UP)
+    driver = fnloom.Builder().with_modules(module).build_async()
+
+    async def scenario() -> None:
+        run = asyncio.create_task(driver.execute(["slow"], inputs={"x": 1}))
+        await module.STARTED.wait()
+        run.cancel()
+        await module.CLEANING.wait()
+        run.cancel()
+        await _turns()
+        assert not run.done()
+        module.RELEASE.set()
+        with pytest.raises(asyncio.CancelledError):
+            await run
+        assert module.LOG == ["cleaned up"]
+
+    _run(asyncio.wait_for(scenario(), PATIENCE))
+
+
 def test_a_nodes_own_cancelled_error_is_raised_as_itself() -> None:
     """A node raising `CancelledError` itself: that very object, with the note."""
     module = make_module(
