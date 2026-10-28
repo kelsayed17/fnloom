@@ -1,7 +1,7 @@
 //! Turning a request into a validated, reusable execution plan.
 
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
+use std::collections::{BTreeSet, BinaryHeap};
 
 use crate::error::{MissingInput, PlanError};
 use crate::graph::Graph;
@@ -138,13 +138,11 @@ impl<P> Graph<P> {
     /// requested and the computed nodes that read it so.
     fn plan_actions(&self, resolved: &Resolved) -> Result<Vec<Option<Action>>, PlanError> {
         let mut actions = vec![None; self.nodes().len()];
-        // Each missing input: whether it was requested, and its required readers. Ids follow
-        // name order, so both come out sorted by name.
-        let mut missing: BTreeMap<NodeId, (bool, BTreeSet<NodeId>)> = BTreeMap::new();
+        let mut missing = BTreeSet::new();
         for &id in &resolved.outputs {
             let action = self.action_for(id, resolved);
             if action == Action::SkipOptionalInput {
-                missing.entry(id).or_default().0 = true;
+                missing.insert(id);
             }
             actions[id.index()] = Some(action);
         }
@@ -162,27 +160,53 @@ impl<P> Graph<P> {
                 if edge.dependency == Dependency::Required
                     && actions[input.index()] == Some(Action::SkipOptionalInput)
                 {
-                    missing.entry(input).or_default().1.insert(id);
+                    missing.insert(input);
                 }
             }
         }
         if missing.is_empty() {
             Ok(actions)
         } else {
-            Err(PlanError::MissingInputs(
-                missing
-                    .into_iter()
-                    .map(|(id, (requested, consumers))| MissingInput {
-                        name: self.node(id).name.clone(),
-                        requested,
-                        consumers: consumers
-                            .into_iter()
-                            .map(|consumer| self.node(consumer).name.clone())
-                            .collect(),
-                    })
-                    .collect(),
-            ))
+            Err(self.missing_inputs(&missing, &actions, resolved))
         }
+    }
+
+    /// The `MissingInputs` error for `missing`: each input with whether it was requested, and
+    /// the computed nodes of `actions` reading it by a required edge.
+    ///
+    /// Kept out of `plan_actions`, so the walk a successful plan takes stays as small as it
+    /// was. Ids follow name order, so the inputs and their consumers come out sorted by name.
+    #[cold]
+    #[inline(never)]
+    fn missing_inputs(
+        &self,
+        missing: &BTreeSet<NodeId>,
+        actions: &[Option<Action>],
+        resolved: &Resolved,
+    ) -> PlanError {
+        let consumers_of = |input: NodeId| {
+            self.nodes()
+                .iter()
+                .enumerate()
+                .filter(|&(index, node)| {
+                    actions[index] == Some(Action::Compute)
+                        && node.inputs.iter().any(|edge| {
+                            edge.node == input && edge.dependency == Dependency::Required
+                        })
+                })
+                .map(|(_, node)| node.name.clone())
+                .collect()
+        };
+        PlanError::MissingInputs(
+            missing
+                .iter()
+                .map(|&id| MissingInput {
+                    name: self.node(id).name.clone(),
+                    requested: resolved.outputs.contains(&id),
+                    consumers: consumers_of(id),
+                })
+                .collect(),
+        )
     }
 
     /// The action for a needed node; an input that is not supplied is taken to be optional.
