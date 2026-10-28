@@ -67,6 +67,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Fixed
 
+- `DiskCache` no longer warns on Windows that every cache directory is writable by other users. It judged access by
+  POSIX mode bits, which Windows reports as `0o777` for every directory; it now checks them on POSIX only.
 - The cache returned a stale result after an edit it should have seen. A module constant read through another name
   (a default, a helper handed the module, a class attribute), a function's own attribute, a name read as a string
   (`globals()["RATE"]`, `getattr(config, "RATE")`), a name a module's `__getattr__` serves, and a method of an input

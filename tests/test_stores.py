@@ -484,6 +484,14 @@ def test_disk_warns_about_a_directory_others_can_write(tmp_path: Path) -> None:
         DiskCache(path)
 
 
+@pytest.mark.skipif(os.name == "posix", reason="mode bits mean access")
+def test_disk_does_not_judge_access_by_mode_bits_off_posix(tmp_path: Path) -> None:
+    """Off POSIX the mode bits say nothing about who can write, so no warning."""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        DiskCache(tmp_path)
+
+
 @_POSIX
 def test_disk_clear_warns_about_what_it_cannot_remove(tmp_path: Path) -> None:
     """A failed `clear` says so, rather than leaving entries behind in silence."""
