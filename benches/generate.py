@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:
     from collections.abc import Generator
 
-type Shape = Literal["chain", "fan_in", "layered", "rows", "extract"]
+type Shape = Literal["chain", "fan_in", "layered", "rows", "extract", "types"]
 type Spelling = Literal["hamilton", "fnloom"]
 type Request = tuple[list[str], dict[str, object]]
 
@@ -81,12 +81,45 @@ def _extract(n: int, spelling: Spelling) -> str:
     )
 
 
+# The kinds of the `types` shape's parameters, in turn: what `x{i}` is declared as is
+# `_TYPED[i % 3]`. Hamilton refuses every value of a fixed-length tuple type (H5.10d),
+# so its spelling declares the tuple parameters as a bare `tuple`.
+_TYPED: dict[Spelling, tuple[str, str, str]] = {
+    "fnloom": ("Optional[int]", "tuple[int, str, float]", "list[int]"),
+    "hamilton": ("Optional[int]", "tuple", "list[int]"),
+}
+
+
+def _typed_value(i: int) -> object:
+    """Input `x{i}` of the `types` shape; an `Optional[int]` at an odd `i` is `None`."""
+    kind = i % 3
+    if kind == 0:
+        return None if i % 2 else i
+    if kind == 1:
+        return (i, "s", 0.5)
+    return [i]
+
+
+def _types(n: int, spelling: Spelling) -> str:
+    kinds = _TYPED[spelling]
+    params = ", ".join(f"x{i}: {kinds[i % 3]}" for i in range(n))
+    # The int in each: an `Optional[int]` itself (`None` counts 0), a tuple's or a
+    # list's first item.
+    terms = ", ".join(f"x{i} or 0" if i % 3 == 0 else f"x{i}[0]" for i in range(n))
+    return (
+        "from typing import Optional\n\n\n"
+        f"def total({params}) -> int:\n    return sum(({terms},))\n"
+    )
+
+
 def module_source(shape: Shape, n: int, spelling: Spelling = "fnloom") -> str:
     """Returns the source of `make_module(shape, n, spelling)`."""
     if shape == "rows":
         return _rows(n, spelling)
     if shape == "extract":
         return _extract(n, spelling)
+    if shape == "types":
+        return _types(n, spelling)
     return {"chain": _chain, "fan_in": _fan_in, "layered": _layered}[shape](n)
 
 
@@ -97,9 +130,11 @@ def make_module(shape: Shape, n: int, spelling: Spelling = "fnloom") -> ModuleTy
     inputs, `layered` rows of ten nodes each reading two nodes of the row above, and
     `rows` one function with `n` `parameterize` rows, each sourcing the row before
     (the first sources `seed`), and `extract` one `extract_fields` producer of `n`
-    int fields, `f0` to `f{n-1}`, each read by its own consumer `c{i}`. Only `rows`
-    and `extract` differ by `spelling`: the decorators come from Hamilton or from
-    fnloom.
+    int fields, `f0` to `f{n-1}`, each read by its own consumer `c{i}`. `types` is
+    `fan_in` over typed inputs: one function whose `n` parameters are declared in
+    turn `Optional[int]`, `tuple[int, str, float]` and `list[int]`. Only `rows`,
+    `extract` and `types` differ by `spelling`: the decorators come from Hamilton or
+    from fnloom, and Hamilton's `types` declares its tuples as a bare `tuple`.
     """
     source = module_source(shape, n, spelling)
     module = ModuleType(f"bench_{shape}_{n}_{next(_counter)}")
@@ -136,6 +171,8 @@ def make_request(shape: Shape, n: int) -> Request:
         return [f"r{n - 1}"], {"seed": _SEED}
     if shape == "extract":
         return [f"c{i}" for i in range(n)], {"seed": _SEED}
+    if shape == "types":
+        return ["total"], {f"x{i}": _typed_value(i) for i in range(n)}
     last_row = (n - 1) // LAYER_WIDTH
     outputs = [
         f"l{last_row}_{c}" for c in range(LAYER_WIDTH) if last_row * LAYER_WIDTH + c < n
@@ -154,6 +191,9 @@ def make_expected(shape: Shape, n: int) -> dict[str, object]:
     if shape == "extract":
         # Field `f{i}` is `seed + i`, and consumer `c{i}` adds one.
         return {f"c{i}": _SEED + i + 1 for i in range(n)}
+    if shape == "types":
+        # Each input carries `i`, but an `Optional[int]` given `None` (an odd `i`).
+        return {"total": sum(i for i in range(n) if i % 3 or i % 2 == 0)}
     row = [(_SEED + c) % _MODULUS for c in range(LAYER_WIDTH)]
     for _ in range((n - 1) // LAYER_WIDTH):
         row = [

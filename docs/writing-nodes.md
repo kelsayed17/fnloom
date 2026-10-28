@@ -278,6 +278,9 @@ driver.execute(["short_window", "long_window"], inputs={"days": 14})
 
 Every parameter and every return value needs a type annotation, so each edge in the graph is typed where it's
 declared. fnloom then checks edges, inputs and overrides against them; see [Type checks](running.md#type-checks).
+Annotate what a parameter really takes. A parameter that may be `None` needs `T | None` (or `Optional[T]`), even with
+a default of `None`: `None` passed for `x: int` is refused (Q79). A fixed-length tuple, `tuple[int, str]`, is checked
+by its length and each item (Q80).
 
 Annotations are evaluated when the graph is built, as in Hamilton. String annotations
 (`from __future__ import annotations`) and forward references to a class further down the module are fine.

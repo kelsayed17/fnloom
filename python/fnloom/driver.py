@@ -46,9 +46,10 @@ type _PlanKey = tuple[tuple[str, ...], frozenset[str], frozenset[str]]
 # A request's final_vars (a list or tuple, copied), its input and override names,
 # and its plan.
 type _LastRequest = tuple[Sequence[str], frozenset[str], frozenset[str], PreparedPlan]
-# A checked name, its declared type, and the class `isinstance` checks it against
-# when the type is a plain class (`None` for any other type).
-type _Check = tuple[str, object, type | None]
+# A checked name, its declared type, the classes `isinstance` checks it against
+# when the type is a plain class or a union of them (`None` for any other type),
+# and the type's check, made when the plan is prepared (`_types.check_of`).
+type _Check = tuple[str, object, _types.Classes | None, _types.Matcher]
 
 # How many compiled plans a driver keeps; the least recently used one goes first.
 PLAN_CACHE_SIZE = 128
@@ -149,14 +150,14 @@ def _difference(kind: str, prepared: frozenset[str], given: frozenset[str]) -> s
 def _mismatches(checks: Sequence[_Check], values: Mapping[str, object]) -> list[str]:
     """A line for each checked value that does not fit its declared type."""
     found: list[str] = []
-    for name, declared, cls in checks:
+    for name, declared, cls, matches in checks:
         value = values[name]
-        if value is None:
-            continue
+        # A plain class answers for `None` too: `isinstance(None, int)` is False,
+        # and only `object`, `NoneType` and a union with it take it (Q79).
         if cls is not None:
             if isinstance(value, cls):
                 continue
-        elif _types.value_matches(declared, value):
+        elif matches(value):
             continue
         found.append(
             f"{name}: expected {inspect.formatannotation(declared)}, "
@@ -227,8 +228,9 @@ class PreparedPlan:
         `plan` is the native plan, or the `CacheRun` over it when the driver has
         a cache: either is called with values already checked. `checks` are the
         input and the override checks each run applies: the supplied names whose
-        values are checked, each with its declared type and, for a plain class,
-        the class `isinstance` checks it against.
+        values are checked, each with its declared type, the classes `isinstance`
+        checks it against when it is a plain class or a union of them, and its
+        check, worked out when the plan was prepared.
         """
         self._plan = plan
         self._outputs = tuple(dict.fromkeys(outputs))
@@ -544,13 +546,17 @@ class Driver:
         return {name: sorted(readers[name]) for name in sorted(readers)}
 
     def _declared(self, names: list[str]) -> tuple[_Check, ...]:
-        """Each of `names` with its node's type; a name with no view goes unchecked."""
+        """Each of `names` with its node's type; a name with no view goes unchecked.
+
+        Each distinct type's check is made once (`_types.checks_of`), here, when a
+        plan is prepared.
+        """
         # By type, not view: the views of many inputs are never made at all.
+        typed = [(n, self._nodes.type_of(n)) for n in names if n in self._nodes]
+        checks = _types.checks_of(declared for _, declared in typed)
         return tuple(
-            (n, declared, _types.plain_class(declared))
-            for n in names
-            if n in self._nodes
-            for declared in (self._nodes.type_of(n),)
+            (n, declared, classes, matches)
+            for (n, declared), (classes, matches) in zip(typed, checks, strict=True)
         )
 
     def _explained(self, message: str, key: _PlanKey) -> list[str]:

@@ -20,7 +20,7 @@ and at running a prepared plan, so a row where it's reliably slower counts as a 
 
 -   :lucide-infinity:{ .lg .fl-icon } **Runs what Hamilton can't**
 
-    Hamilton raises `RecursionError` on 5 of the 20 graphs. fnloom runs all of them, and checks every answer.
+    Hamilton raises `RecursionError` on 5 of the 24 graphs. fnloom runs all of them, and checks every answer.
 
 -   :lucide-gauge:{ .lg .fl-icon } **Microseconds per run**
 
@@ -57,14 +57,27 @@ sample.
 | extract | 100 | 2.679 / 1.310 / 1.232 | 1.228 / 0.137 / 0.106 | 1.176 / 0.061 / 0.060 | 0.060 / 0.036 |
 | extract | 1,000 | 65.3 / 12.7 / 11.4 | 68.4 / 1.115 / 0.919 | 65.8 / 0.602 / 0.597 | 0.480 / 0.350 |
 | extract | 10,000 | 4,520.7 / 208.3 / 179.0 | 6,161.3 / 12.9 / 10.3 | 6,372.9 / 6.385 / 6.304 | 5.770 / 3.424 |
+| types | 10 | 0.207 / 0.147 / 0.079 | 0.082 / 0.061 / 0.011 | 0.038 / 0.003 / 0.002 | 0.029 / 0.007 |
+| types | 100 | 0.512 / 0.438 / 0.403 | 0.332 / 0.138 / 0.052 | 0.296 / 0.030 / 0.012 | 0.092 / 0.030 |
+| types | 1,000 | 4.634 / 3.840 / 4.947 | 3.151 / 1.187 / 0.629 | 3.087 / 0.484 / 0.309 | 0.645 / 0.301 |
+| types | 10,000 | 114.6 / 41.5 / 37.9 | 51.8 / 32.4 / 26.1 | 50.3 / 23.8 / 22.0 | 8.712 / 3.385 |
 
 Measured on an Apple M2 Pro with 16 GB, macOS 27.0, CPython 3.14.9, `apache-hamilton==1.90.0`, and a release build
-of the extension, on 2026-10-27; the `extract` rows on 2026-10-28.
+of the extension, on 2026-10-27; the `extract` and `types` rows on 2026-10-28.
 
 **`extract`** is one `@extract_fields` producer returning a dict of `n` int fields, each read by its own consumer,
 with every consumer requested. fnloom checks each field against its type on every run, with input checks on or off
 (Q61), and still runs 8.6 to 998 times faster than Hamilton's `execute`, which checks none. Hamilton's cost grows
 faster than `n`: 65.8 ms at 1,000 fields, and 6.4 s at 10,000.
+
+**`types`** is `fan_in` over typed inputs: one function whose `n` parameters are declared, in turn, `Optional[int]`
+(every other one given `None`), `tuple[int, str, float]` and `list[int]`. fnloom checks each tuple's length and items
+(Q80), and `None` against the type (Q79). Hamilton refuses every value of a fixed-length tuple type, so its module
+declares those parameters as a bare `tuple`, which it checks with one `isinstance`. Each type's check is worked out
+once, when the plan is prepared: `Optional[int]` is one `isinstance` against `(int, NoneType)`, a `list` for
+`list[int]` passes on its class, and a tuple checks its three items. Steady execution is 2.1 to 13 times faster than
+Hamilton's `execute`, the least at 10,000 parameters, where, as for `fan_in`, the one call with 10,000 keyword
+arguments is most of the cost. The checks cost about 0.18 ms per 1,000 inputs.
 
 **Steady execution**, the cost of running a prepared plan again, is where fnloom differs most. With checks on, it's
 2.5 to 24 times faster than Hamilton's `execute` on the first four shapes wherever both finish, and 8.6 to 998 times
@@ -73,8 +86,10 @@ on `extract`, because the plan is compiled once and each run is a loop over its 
 both.
 
 **Input checks are close to free.** The gap between the two fnloom figures is within noise: steady execution with
-checks on and off differs by at most 0.05 ms on every graph. A check against a plain class such as `int` is compiled
-once per plan into one `isinstance` call. Only generics, unions and the like take the general path.
+checks on and off differs by at most 0.05 ms on every graph of the first five shapes. A check against a plain class
+such as `int`, or a union of them such as `int | None`, is compiled once per plan into one `isinstance` call. A
+generic or a fixed tuple gets a check made once per plan too, and only a value it can't settle by class takes the
+general path.
 
 ### Where Hamilton raises
 
@@ -282,7 +297,7 @@ uv run python -m benches.run > bench.jsonl 2> bench.stderr
 uv run python -m benches.run extract > extract.jsonl 2> bench.stderr   # only the shapes named
 ```
 
-It prints 60 JSON lines to stdout (`shape`, `n`, `runtime`, `input_checks`, `build_ms`,
+It prints 72 JSON lines to stdout (`shape`, `n`, `runtime`, `input_checks`, `build_ms`,
 `first_execute_ms`, `steady_execute_ms`, `prepare_ms`, `error`, `error_phase`).
 Hamilton prints a help banner to stderr whenever it raises, hence the second redirect.
 Each runtime's answer is checked against the shape's closed form, and a
@@ -334,6 +349,9 @@ All times use `time.perf_counter_ns`, in milliseconds. Graph generation is not t
 - `rows`: one function with `n` `@parameterize` rows, each sourcing the row before it, the first sourcing the input
   `seed`. The module is generated in Hamilton's spelling for Hamilton and in fnloom's for fnloom.
 - `extract`: one `@extract_fields` producer returning a dict of `n` int fields, each read by its own consumer.
+- `types`: one function with `n` input parameters, declared in turn `Optional[int]`, `tuple[int, str, float]` and
+  `list[int]`, summing the int in each. Hamilton's module declares the tuples as a bare `tuple`, since it refuses
+  every value of a fixed-length tuple type.
 
 ## The instruction-count gate
 

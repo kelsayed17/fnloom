@@ -304,6 +304,27 @@ _INT_SUPERTYPES = [
     "int | str",
     "Annotated[int, 'm']",
 ]
+# Every matrix type that does not admit `None`, which Hamilton passes for all (Q79).
+_REFUSING_NONE = [
+    "int",
+    "float",
+    "bool",
+    "str",
+    "Base",
+    "Child",
+    "list",
+    "list[int]",
+    "dict[str, int]",
+    "tuple[int, ...]",
+    "Sequence",
+    "Sequence[int]",
+    "int | str",
+    "Literal[1, 2]",
+    "Annotated[int, 'm']",
+    "Protocol",
+    "runtime Protocol",
+    "NewType(int)",
+]
 DELIBERATE: dict[tuple[str, str], str] = {
     ("tuple[int, ...]", "(1, 2)"): "Q37",
     ("tuple[int, ...]", "Sequence[int]"): "Q37",
@@ -316,6 +337,7 @@ DELIBERATE: dict[tuple[str, str], str] = {
     ("int | str", "object"): "Q40",
     ("Annotated[int, 'm']", "True"): "Q41",
     **dict.fromkeys(((p, "Protocol") for p in _PROTOCOL_PRODUCERS), "Q42"),
+    **dict.fromkeys(((d, "None") for d in _REFUSING_NONE), "Q79"),
 }
 """Matrix pairs where fnloom differs on purpose, each mapped to its register row.
 
@@ -393,6 +415,44 @@ def g(a: Child) -> int:
     assert fnloom.build(module).nodes["a"].type is hamilton
 
 
+_ANY_AND_INT = {
+    "int first": "def a(x: int) -> int:\n    return x\n\n"
+    "def b(x: Any) -> int:\n    return 1\n",
+    "Any first": "def b(x: Any) -> int:\n    return 1\n\n"
+    "def a(x: int) -> int:\n    return x\n",
+}
+
+
+@pytest.mark.parametrize("order", list(_ANY_AND_INT))
+def test_any_and_int_consumers_check_the_input_as_int(order: str) -> None:
+    """`int` and `Any` consumers of one input check it as `int`, in either order.
+
+    Hamilton 1.90.0 does too (H5.10b), so `Any` never widens a typed input: a `str`
+    is refused even when only the `Any` consumer is requested.
+    """
+    module = make_module(
+        f"differential_any_int_{order.split(maxsplit=1)[0].lower()}",
+        "from typing import Any\n\n" + _ANY_AND_INT[order],
+    )
+    (hamilton,) = (
+        node.type
+        for node in hamilton_driver.Builder()
+        .with_modules(module)
+        .build()
+        .list_available_variables()
+        if node.name == "x"
+    )
+    assert hamilton is int
+    assert fnloom.build(module).nodes["x"].type is int
+    for outputs in (["b"], ["a", "b"]):
+        wrong = run_hamilton([module], outputs, {"x": "s"})
+        assert wrong == Outcome(None, "ValueError"), outputs
+        assert run_fnloom([module], outputs, {"x": "s"}) == wrong, outputs
+    right = run_hamilton([module], ["b"], {"x": 1})
+    assert right == Outcome({"b": 1}, None)
+    assert run_fnloom([module], ["b"], {"x": 1}) == right
+
+
 def test_edge_mismatch_same_exception_class() -> None:
     """A node returning `str` feeding an `int` parameter fails both builds."""
     module = make_module(
@@ -423,8 +483,19 @@ def test_a_compiled_plain_class_check_agrees_with_value_matches() -> None:
         if cls is None:
             continue
         for value_id, value in VALUES.items():
-            compiled = value is None or isinstance(value, cls)
+            compiled = isinstance(value, cls)
             assert compiled is _types.value_matches(annotation, value), (
+                declared,
+                value_id,
+            )
+
+
+def test_a_prepared_check_agrees_with_value_matches() -> None:
+    """Over the matrix, the check prepared once per type answers as `value_matches`."""
+    for declared, annotation in TYPES.items():
+        _, matches = _types.check_of(annotation)
+        for value_id, value in VALUES.items():
+            assert matches(value) is _types.value_matches(annotation, value), (
                 declared,
                 value_id,
             )

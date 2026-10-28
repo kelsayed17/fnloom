@@ -75,11 +75,12 @@ class _Extractor:
 
     Called with the producer's value under the producer's name. A missing field
     takes the fill, when there is one, without changing the producer's value
-    (Q62). The value is checked as an input is: `None` passes, a plain class by
-    `isinstance`, anything else by `value_matches` (Q61).
+    (Q62). The value is checked as an input is: a plain class by `isinstance`,
+    anything else by `value_matches`, so `None` passes only a type admitting it
+    (Q61, Q79).
     """
 
-    __slots__ = ("_cls", "_declared", "_field", "_fill", "_producer")
+    __slots__ = ("_cls", "_declared", "_field", "_fill", "_matches", "_producer")
 
     # What an error calls the item this node reads.
     noun: ClassVar[str] = "field"
@@ -91,7 +92,7 @@ class _Extractor:
         self._producer = producer
         self._field = field
         self._declared = declared
-        self._cls = _types.plain_class(declared)
+        self._cls, self._matches = _types.check_of(declared)
         self._fill = fill
 
     @property
@@ -135,13 +136,11 @@ class _Extractor:
 
     def _checked(self, found: object) -> object:
         """`found`, when it matches the declared type; `ValueError` otherwise."""
-        if found is None:
-            return found
         cls = self._cls
         if cls is not None:
             if isinstance(found, cls):
                 return found
-        elif _types.value_matches(self._declared, found):
+        elif self._matches(found):
             return found
         msg = (
             f"{self._producer!r} returned {self.noun} {self._field!r} as "

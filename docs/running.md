@@ -222,11 +222,19 @@ driver.execute(["total"], inputs={"price": "2.5", "quantity": 4})
 
 A few rules worth knowing:
 
-- `None` fits every type.
+- `None` fits only a type that admits it: `Optional[T]`, `T | None`, `object`, `Any`, `None` itself, and a `TypeVar`
+  that is free or whose bound or a constraint admits it. Hamilton lets `None` through for every type, so the node
+  then fails on its own (Q79). A default of `None` doesn't make a parameter optional: annotate it `T | None` to pass
+  `None`.
 - An input you supply but the plan never reads isn't checked. Every override is, even one for a node the plan never
   reaches.
 - The checks a plan needs are worked out once, when it's prepared, so a run only checks values. Checking against a
   plain class like `int` costs one `isinstance` call.
+
+```python
+driver.execute(["total"], inputs={"price": None, "quantity": 4})
+# raises ValueError: price: expected float, got NoneType
+```
 
 ### What the checks understand
 
@@ -237,10 +245,11 @@ A few rules worth knowing:
 | Unions, `Optional`, `Literal` | Against each member or value |
 | `Annotated[T, ...]` | As `T`; metadata never changes the answer |
 | `NewType` | As its supertype |
-| `TypeVar` | Anything fits; on an edge it matches only itself |
+| `TypeVar` | Anything but `None` fits; `None` fits a free one, or one whose bound or a constraint admits it. On an edge it matches only itself |
 | A `runtime_checkable` protocol | `isinstance` |
 | A PEP 695 alias (`type Price = float`) | As what it names |
 | `list`, `dict`, `tuple` and other plain classes | `isinstance` |
+| `tuple[int, str]`, `tuple[()]` and other fixed-length tuples | A tuple of that length whose items each fit, nested tuples included; `tuple[()]` takes only `()` (Q80) |
 | `list[T]`, `tuple[T, ...]`, `Sequence[T]`, `set[T]`, `Iterable[T]` | A value of exactly the declared class (a `list` for `list[T]`) by class only, so `["a"]` fits `list[int]`. Any other value by kind, plus its first element |
 | `dict[K, V]` | By class only: the value's class must be exactly `dict` |
 | Other `collections.abc` generics (`Mapping[str, int]`, `Callable[[int], int]`, ...) | By kind only, so any `dict` fits `Mapping[str, int]` |
@@ -251,9 +260,19 @@ uses its type parameters in the order it declares them. One that reorders them i
 alias inside another generic's arguments is compared as written too, so a node returning `list[float]` doesn't feed a
 `list[Price]` parameter.
 
+Both checks are public: `fnloom.value_matches(declared, value)` answers as the input check, and
+`fnloom.type_matches(produced, expected)` as the edge check.
+
+```python
+fnloom.value_matches(tuple[int, str], (1, "a")), fnloom.value_matches(int, None)
+# -> (True, False)
+fnloom.type_matches(int, int | None)
+# -> True
+```
+
 ### Unsupported annotations
 
-Anything else refuses every value except `None`. Two examples are a plain protocol (one not marked
+Anything else refuses every value. Two examples are a plain protocol (one not marked
 `runtime_checkable`), and a `dict` subclass, such as an `OrderedDict`, for `dict[str, int]`.
 Either annotate with a supported form, or build with `Builder.without_input_type_checks()`:
 

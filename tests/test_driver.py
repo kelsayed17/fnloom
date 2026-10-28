@@ -325,8 +325,12 @@ def test_a_none_input_counts_as_supplied() -> None:
 
 
 def test_a_none_override_counts_as_supplied() -> None:
-    """A `None` override replaces the node, and its upstream is not needed."""
-    driver = build(make_module("drv_none_override", CHAIN.replace("b * 2", "b")))
+    """A `None` override replaces the node, and its upstream is not needed.
+
+    The node is declared `int | None`: `None` passes only a type admitting it (Q79).
+    """
+    source = CHAIN.replace("b * 2", "b").replace("int", "int | None")
+    driver = build(make_module("drv_none_override", source))
     assert driver.execute(["c"], overrides={"b": None}) == {"c": None}
 
 
@@ -379,5 +383,7 @@ def test_public_api_is_exported() -> None:
         "register_fingerprint",
         "source",
         "tag",
+        "type_matches",
         "value",
+        "value_matches",
     ]

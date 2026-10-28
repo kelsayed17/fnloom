@@ -40,6 +40,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `json` format refuses any value that would not load back as the same types, such as a tuple, so a hit never
   returns a different value (Q54).
 - `len(MemoryCache)`, the number of entries it holds.
+- `fnloom.value_matches(declared, value)` and `fnloom.type_matches(produced, expected)`, the checks `execute` runs on
+  each input, override and extracted field and `build` runs on each edge, are public. Their docstrings state the
+  rules, as Hamilton's `htypes.check_input_type` is public too.
 - `Builder.with_config(...)` and `Driver.config`, a read-only, shallow copy. `@config.when`, `when_not`, `when_in` and
   `when_not_in` pick a function's variant at build, and `@config.default` marks the variant used when no other matches.
   `name=` names the node on all four forms. Config shapes the graph only: a key is never a node, an input or a value
@@ -87,6 +90,14 @@ change the public API; such changes are listed under **Changed** and **Removed**
   keep the behaviour, write `@fnloom.defaults(shadowed=("cost",))` on the consumer, and
   `@fnloom.defaults(differing=("shared",))` on each consumer of the input but one; or rename the node, or make the
   defaults equal (Q76). `@fnloom.defaults` is new, and records names only.
+- **Breaking:** `None` passes an input, override or extracted-field check only when the type admits it: `Optional[T]`,
+  `T | None`, `object`, `Any`, `None`, or a `TypeVar` that is free or whose bound or a constraint admits it. Hamilton
+  passes `None` for every type, and so did fnloom, so `None` for `x: int` is now a `ValueError` before anything runs:
+  `x: expected int, got NoneType`. Annotate the parameter `x: int | None` (a default of `None` does not make it
+  optional), or stop passing `None` (Q79).
+- **Breaking:** a fixed-length tuple type, `tuple[int, str]` or `tuple[()]`, now checks a value's length and each item
+  with the same rules, nested tuples included. Before, any tuple fitted; Hamilton refuses every one. `tuple[int, ...]`
+  and bare `tuple` are unchanged (Q80).
 - A `TypedDict`-typed input or override accepts any `dict`, its keys unchecked, as the shallow container checks do.
   Before, every value failed the check, so such an input could never be supplied (Q61).
 - `build()` still refuses a graph with an `async def` node, and its `ValueError` now names `build_async()` (Q32).

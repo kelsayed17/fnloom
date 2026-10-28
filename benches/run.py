@@ -197,7 +197,7 @@ def measure_case(shape: Shape, n: int) -> list[Row]:
 
 
 def main() -> None:
-    """Prints the 60 rows as JSON lines, or those of the shapes named as arguments."""
+    """Prints the 72 rows as JSON lines, or those of the shapes named as arguments."""
     every = get_args(Shape.__value__)
     named = sys.argv[1:]
     if unknown := sorted(set(named) - set(every)):

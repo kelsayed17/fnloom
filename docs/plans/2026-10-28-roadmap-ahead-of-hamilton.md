@@ -121,7 +121,7 @@ behind); **n/a** (fnloom has no such feature yet; the plan builds it without the
 | No `py.typed`; decorators erase signatures | fixed | Q1 |
 | Annotations resolve at build, so a name imported only under `TYPE_CHECKING` raises `NameError` from inside `build` (it reads like a library bug, and linters that move imports break builds) | same | Plan 5: read annotations with `annotationlib`'s forward-reference format; an unresolved name becomes a named opaque type that matches only itself and `Any`, and the build reports it if a check needs it |
 | Every parameter and the return must be annotated | same, clearer message | Keep; document |
-| `Any` on one consumer absorbs a concrete type on another, so a shared input goes unchecked (#1180) | same | Plan 5: unify to the most specific annotation; `Any` never widens a typed input |
+| `Any` on one consumer absorbs a concrete type on another, so a shared input goes unchecked (#1180) | n/a: not a 1.90.0 behaviour (H5.10b); both check the shared input as the concrete type | Pinned by the KEEP test `test_any_and_int_consumers_check_the_input_as_int` in `tests/differential/test_semantics.py` |
 | `None` passes every input check | same | Plan 5: `None` only for `Optional`, `object` or `Any` (register row) |
 | Fixed-length `tuple[int, str]` rejects a correct value (#1749 on the output side); fnloom accepts any tuple without checking length or items | fixed (no false refusal), partial | Plan 5: check a fixed-length tuple's length and items |
 | Container checks are shallow (`dict[str, ndarray]` is "a dict"; lists by their first item) | same, deliberately | Plan 5: keep shallow by default (cost); an opt-in deep check |

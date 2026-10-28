@@ -1729,7 +1729,7 @@ SHARED: dict[str, int] = {{"a": 1}}
 def p() -> dict:
     return SHARED
 
-@extract_fields({{"c": int}}, fill_with=None)
+@extract_fields({{"c": int | None}}, fill_with=None)
 def q() -> dict:
     return {{}}
 """
@@ -3194,3 +3194,84 @@ def test_q78_unsupplied_input_as_an_output(fixture: str) -> None:
     assert run_fnloom([module], [requested]) == Outcome(None, "ValueError")
     with pytest.raises(ValueError, match=rf"missing inputs: '{requested}'"):
         fnloom.build(module).execute([requested])
+
+
+@pytest.mark.deliberate("Q79")
+def test_q79_none_passes_only_types_that_admit_it() -> None:
+    """Hamilton passes `None` for every input type; fnloom where the type admits it."""
+    refused = [declared for declared, _ in _pairs("Q79")]
+    assert refused == [
+        "int",
+        "float",
+        "bool",
+        "str",
+        "Base",
+        "Child",
+        "list",
+        "list[int]",
+        "dict[str, int]",
+        "tuple[int, ...]",
+        "Sequence",
+        "Sequence[int]",
+        "int | str",
+        "Literal[1, 2]",
+        "Annotated[int, 'm']",
+        "Protocol",
+        "runtime Protocol",
+        "NewType(int)",
+    ]
+    for declared in refused:
+        assert hamilton_value(declared, "None") is True, declared
+        assert fnloom_value(declared, "None") is False, declared
+    for declared in ("Optional[int]", "int | None", "object", "Any", "TypeVar"):
+        assert hamilton_value(declared, "None") is True, declared
+        assert fnloom_value(declared, "None") is True, declared
+    module = make_module(
+        "differential_q79",
+        """
+def plain(x: int) -> object:
+    return x
+
+def optional(y: int | None) -> object:
+    return y
+
+def nothing(z: None) -> object:
+    return z
+""",
+    )
+    assert run_hamilton([module], ["plain"], {"x": None}) == Outcome(
+        {"plain": None}, None
+    )
+    assert run_fnloom([module], ["plain"], {"x": None}) == Outcome(None, "ValueError")
+    for output, name in (("optional", "y"), ("nothing", "z")):
+        expected = Outcome({output: None}, None)
+        assert run_hamilton([module], [output], {name: None}) == expected
+        assert run_fnloom([module], [output], {name: None}) == expected
+
+
+@pytest.mark.deliberate("Q80")
+def test_q80_fixed_tuples_check_length_and_items() -> None:
+    """Hamilton refuses every fixed-length tuple; fnloom checks length and items."""
+    module = make_module(
+        "differential_q80",
+        """
+def pair(p: tuple[int, str]) -> object:
+    return p
+
+def empty(e: tuple[()]) -> object:
+    return e
+""",
+    )
+    refused = Outcome(None, "ValueError")
+    for output, name, right in (("pair", "p", (1, "a")), ("empty", "e", ())):
+        assert run_hamilton([module], [output], {name: right}) == refused, output
+        assert run_fnloom([module], [output], {name: right}) == Outcome(
+            {output: right}, None
+        )
+    for output, name, wrong in (
+        ("pair", "p", ("a", 1)),
+        ("pair", "p", (1,)),
+        ("empty", "e", (1,)),
+    ):
+        assert run_hamilton([module], [output], {name: wrong}) == refused, wrong
+        assert run_fnloom([module], [output], {name: wrong}) == refused, wrong

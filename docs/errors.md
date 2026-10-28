@@ -107,6 +107,15 @@ driver.execute(["label"], overrides={"total": "ten"})
 # raises ValueError: total: expected float, got str
 ```
 
+`None` is a mismatch too, unless the type admits it: `Optional[T]`, `T | None`, `object`, `Any` or a free `TypeVar`
+(Q79). Annotate the parameter `float | None` to accept it. A fixed-length tuple is checked by length and by item, so
+`(1,)` for `tuple[int, str]` is refused (Q80):
+
+```python
+driver.execute(["label"], inputs={"price": None, "quantity": 2})
+# raises ValueError: price: expected float, got NoneType
+```
+
 Build with `Builder.without_input_type_checks()` to skip these (see [Type checks](running.md#type-checks)).
 
 ## When you run a prepared plan

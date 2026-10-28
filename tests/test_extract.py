@@ -320,7 +320,7 @@ def test_none_is_a_fill_value() -> None:
         """
         from fnloom import extract_fields
 
-        @extract_fields({"a": int, "b": int}, fill_with=None)
+        @extract_fields({"a": int, "b": int | None}, fill_with=None)
         def p() -> dict:
             return {"a": 1}
         """,
