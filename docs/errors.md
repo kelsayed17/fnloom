@@ -49,6 +49,28 @@ driver = fnloom.build(pricing)
 | A config-decorated function defined twice in one module | `ValueError: function 'foo__a' is defined more than once in module 'm' (lines 4, 8); Python keeps only the last` |
 | A config value whose `==` returns something other than a `bool` (NumPy's boolean scalar counts as one), such as an array, every such key listed, sorted | `TypeError: == on these config keys did not return a bool: 'mode' (numpy.ndarray)` |
 | A config that isn't a mapping, or a key that isn't a `str`, given to `with_config` | `TypeError: config keys must be str, got: int` |
+| A parameter with a default that reads a node of its name (Q76) | `ValueError: shadowed default: parameter 'cost' of 'f' has a default, but it reads the node 'cost', which replaces it; rename one, or let the node win with @fnloom.defaults(shadowed=('cost',)) on 'f'` |
+| One input given different defaults by its consumers (Q76) | `ValueError: differing defaults: input 'x' has different defaults in 'f' (parameter 'x') = 1, 'g' (parameter 'x') = 2; make them equal, or write @fnloom.defaults(differing=(<parameter>,)) on each of these consumers but one` |
+| With `with_declared_inputs`, an input not declared, or a declared name that is no input, one line each (Q75) | `ValueError: declared name 'prise' is not an input of the graph (did you mean 'price'?)`, then `undeclared input 'price' (did you mean 'prise'?)` |
+| A module's `__all__` that isn't a list or tuple of `str` (Q73) | `TypeError: module 'm': __all__ must be a list or tuple of str, got str` |
+| Something that isn't a plain function given to `with_functions` or `node()`, such as a `functools.partial` (Q72) | `TypeError: a functools.partial of 'm.f' is not a function: give the function itself with bind={'parameter': value(...)}` |
+| A function whose name no node can take, such as a lambda, given to `with_functions` (Q72) | `ValueError: function 'm.<lambda>' has no name a node can take: give it one with fnloom.node(fn, name=...)` |
+| A `node(name=...)` that isn't an identifier (Q72) | `ValueError: node name 'a.b' is not an identifier` |
+| A namespace that isn't a dotted identifier path, every one listed (Q74) | `ValueError: namespace 'a-b' is not a dotted identifier path, such as 'a' or 'a.b'` |
+| `rebuild()` after a reload, with a function given to `with_functions` beside its module (Q83) | `ValueError: node 'k' is defined twice in 'm': function 'm.k' given to with_functions is stale after a reload: give the reloaded function to a new builder` |
+| A `group(...)` parameter whose annotation names something defined further down and, once resolved, is not `list[X]` or `dict[str, X]` (Q82) | `TypeError: group() parameters must be annotated as their group: 'm.f': 'xs' (int) needs list[X] for its group` |
+
+## When you decorate
+
+`@parameterize` and its shorthands check their rows when the module is imported, listing every culprit in one
+message (Q82):
+
+| Mistake | Raises |
+| --- | --- |
+| A docstring placeholder a row doesn't bind, a positional field or a stray brace | `ValueError: the docstring of 'f' is a template for each row's doc: row 'a': placeholder {ghost} is not 'output_name' or a parameter the row binds; write a literal brace as {{ or }}, or give the row its own doc with (bindings, doc)` |
+| A row binding a parameter the function doesn't have | `ValueError: the function does not have the parameters named by: row 'a' parameter 'nope'` |
+| A `group(...)` parameter not annotated as `list[X]` or `dict[str, X]` | `TypeError: group() parameters must be annotated as their group: 'p' (int) needs list[X] for its group` |
+| A `group(...)` item that isn't `source(...)` or `value(...)` | `TypeError: group() takes source(...) or value(...), not: item 0 (str)` |
 
 ## When you execute or prepare
 
@@ -93,6 +115,17 @@ driver.execute("label")
 
 `inputs` and `overrides` are keyword-only, so a mapping passed positionally is a `TypeError` instead of being
 mistaken for one of them.
+
+Some mistakes are found only with a setting, or with a function in `final_vars`. A function's problem is raised with
+the request's other output problems, each kind on its own line, in one error:
+
+| Mistake | Raises |
+| --- | --- |
+| A function in `final_vars` that makes several nodes, such as a `@parameterize` one (Q30) | `TypeError: final_vars items must be str or a function: function m.rows makes 2 nodes: pass 'a', 'b' instead` |
+| A function in `final_vars` that no node of the driver comes from (Q30) | `ValueError: final_vars: function m.f is not the function of any node of this driver (...): pass a node name` |
+| With `with_strict_overrides`, an override of an input not supplied in `inputs` too (Q75) | `ValueError: override of input 'price' refused: not supplied, though needed by 'total' (supply it in inputs= too; strict overrides are on)` |
+| A value checked against an annotation that didn't resolve at build (Q81) | `TypeError: amount: cannot check a value against unresolved 'Decimal': ...` |
+| A deep check with more than 10,000 questions open about one value (see below) | `TypeError: value too cyclic to check against ...: more than 10,000 groups open about one value` |
 
 ## Type checks on a run
 

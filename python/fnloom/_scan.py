@@ -4,6 +4,7 @@ import annotationlib
 import functools
 import inspect
 import operator
+import sys
 import typing
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
@@ -25,6 +26,8 @@ from fnloom._decorators import (
     Value,
     decorations,
     group_element,
+    group_mismatch,
+    readable,
 )
 from fnloom._functions import FunctionSource, NodeSpec
 from fnloom._namespaces import qualified
@@ -217,6 +220,31 @@ def _bind(
     return tuple(params)
 
 
+def _readable_groups(
+    fn: Callable[..., object],
+    parameters: list[_Parameter],
+    rows: Mapping[str, Mapping[str, Binding]],
+) -> list[_Parameter]:
+    """`parameters`, each a group binds with its string annotation evaluated.
+
+    So a group's element is read off `list[X]` under `from __future__ import
+    annotations` too, and `X`, if it does not resolve at build, is the element
+    `Unresolved` (Q81) rather than the whole annotation.
+    """
+    grouped = {
+        param
+        for bindings in rows.values()
+        for param, binding in bindings.items()
+        if isinstance(binding, Group)
+    }
+    if not grouped:
+        return parameters
+    return [
+        (name, has_default, readable(fn, annotation) if name in grouped else annotation)
+        for name, has_default, annotation in parameters
+    ]
+
+
 def _within(binding: Source | Value, within: Within | None) -> Source | Value:
     """`binding`, reading the namespace's node when `within` defines its source."""
     if (
@@ -401,6 +429,7 @@ def _node_defs(  # noqa: PLR0913  # keyword-only options, one per kind of source
     nodes: list[NodeDef] = []
     namespace = None if within is None else within.namespace
     docs = recorded.docs if bind is None else {}
+    parameters = _readable_groups(fn, parameters, rows)
     for node_name, row in rows.items():
         params = _bind(parameters, row, within)
         payload, renames = _payload(fn, params)
@@ -604,9 +633,36 @@ def _duplicate(
             f"node {first.name!r} is defined in both "
             f"{first.module!r}{marks[0]} and {second.module!r}{marks[1]}"
         )
+    if (stale := _stale(first, second, given)) is not None:
+        return f"node {first.name!r} is defined twice in {first.module!r}: {stale}"
     return (
         f"node {first.name!r} is defined twice in {first.module!r}: "
         f"by {_definition(first, given)} and by {_definition(second, given)}"
+    )
+
+
+def _stale(first: NodeDef, second: NodeDef, given: AbstractSet[int]) -> str | None:
+    """Why a function given to `with_functions` clashes with its module's, or `None`.
+
+    After `importlib.reload`, the module holds a new function of the same module
+    and qualified name, which the scan found, and the builder still holds the one
+    it was given (Q83). Another function of that name is the usual clash.
+    """
+    if (id(first) in given) == (id(second) in given):
+        return None
+    old, new = (first, second) if id(first) in given else (second, first)
+    name = getattr(old.origin, "__qualname__", None)
+    if (
+        old.origin is new.origin
+        or name is None
+        or name != getattr(new.origin, "__qualname__", None)
+        or old.origin.__module__ != new.origin.__module__
+        or getattr(sys.modules.get(old.origin.__module__), name, None) is not new.origin
+    ):
+        return None
+    return (
+        f"function '{old.origin.__module__}.{name}' given to with_functions is stale "
+        "after a reload: give the reloaded function to a new builder"
     )
 
 
@@ -982,6 +1038,7 @@ def resolve(nodes: Sequence[NodeDef], rules: Rules = SHALLOW) -> list[NodeDef]:
         if _all_classes(nodes_of[key]) and not _resigned(origin):
             continue
         values[key] = resolved_hints(origin)
+    _check_groups(own, values)
     resolved: list[NodeDef] = []
     for node in own:
         if (hints := values.get(id(node.origin))) is None:
@@ -1001,6 +1058,41 @@ def resolve(nodes: Sequence[NodeDef], rules: Rules = SHALLOW) -> list[NodeDef]:
         else:
             resolved.append(replace(node, params=params, returns=returns))
     return _lowered(resolved, rules)
+
+
+def _check_groups(
+    nodes: Sequence[NodeDef], values: Mapping[int, Mapping[str, object]]
+) -> None:
+    """`TypeError` listing every group parameter whose resolved annotation is wrong.
+
+    Only an annotation left unread when decorating, naming what was not defined
+    then, can still be wrong here. One that does not resolve at build fits when
+    its outer `list[...]` or `dict[str, ...]` did (Q81).
+    """
+    lines: set[str] = set()
+    for node in nodes:
+        if (hints := values.get(id(node.origin))) is None:
+            continue
+        for p in node.params:
+            if p.slot is None:
+                continue
+            hint = hints[p.name]
+            is_list = isinstance(p.slot, int)
+            shape = hint
+            if isinstance(hint, Unresolved):
+                forward = annotationlib.Format.FORWARDREF
+                written = annotationlib.get_annotations(node.origin, format=forward)
+                shape = readable(node.origin, written.get(p.name))
+            if group_mismatch(p.name, shape, is_list=is_list) is None:
+                continue
+            origin = node.origin
+            name = getattr(origin, "__qualname__", node.name)
+            line = group_mismatch(p.name, hint, is_list=is_list)
+            lines.add(f"'{origin.__module__}.{name}': {line}")
+    if lines:
+        listed = "; ".join(sorted(lines))
+        msg = f"group() parameters must be annotated as their group: {listed}"
+        raise TypeError(msg)
 
 
 def _resolved_param(p: Param, hint: object) -> Param:

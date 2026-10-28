@@ -96,7 +96,7 @@ def opaque(annotation: object) -> object:
     """
     if isinstance(annotation, str):
         return Unresolved(annotation)
-    if _unresolvable(annotation):
+    if unresolvable(annotation):
         return Unresolved(_written(annotation))
     return annotation
 
@@ -131,7 +131,7 @@ def _parts(current: object, seen: set[int]) -> list[object] | None:
     return parts
 
 
-def _unresolvable(annotation: object) -> bool:
+def unresolvable(annotation: object) -> bool:
     """Whether some name in `annotation` did not resolve, nested or through an alias.
 
     A `ForwardRef` left by evaluating it, or a PEP 695 alias whose value raises
@@ -167,7 +167,7 @@ def resolved_hints(owner: object, *, extras: bool = True) -> dict[str, Any]:
             owner, include_extras=extras, format=annotationlib.Format.FORWARDREF
         )
     for key, hint in hints.items():
-        if _unresolvable(hint):
+        if unresolvable(hint):
             hints[key] = Unresolved(_written(hint))
     return hints
 
@@ -185,10 +185,9 @@ def _evaluated(
     if many:
         parts = typing.cast("tuple[object, ...]", value)
         return tuple(
-            Unresolved(_written(part)) if _unresolvable(part) else part
-            for part in parts
+            Unresolved(_written(part)) if unresolvable(part) else part for part in parts
         )
-    return Unresolved(_written(value)) if _unresolvable(value) else value
+    return Unresolved(_written(value)) if unresolvable(value) else value
 
 
 @functools.lru_cache(maxsize=256)
@@ -1051,8 +1050,9 @@ def value_matches(
     This is the check `execute` runs on every input, override and extracted field.
 
     - **`None`** fits only a type that admits it (Q79): `Optional[T]`, `T | None`,
-      `object`, `Any`, `None` itself, and a `TypeVar` that is free or whose bound
-      or one of whose constraints admits it. Hamilton passes `None` for every type.
+      `object`, `Any`, `None` itself, `Literal[None]`, and a `TypeVar` that is
+      free or whose bound or one of whose constraints admits it. Hamilton passes
+      `None` for every type.
     - **A class** fits by `isinstance`, so a subclass fits; `bool` fits `int`, and
       `int` does not fit `float`.
     - **Unions, `Literal`, `Annotated`, `NewType` and PEP 695 aliases** answer per

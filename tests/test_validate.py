@@ -711,3 +711,39 @@ def test_override_checks_can_be_skipped_alone() -> None:
     # Skipping the input checks as well still skips both, as before.
     both = builder.without_input_type_checks().build()
     assert both.execute(["user"], inputs={"x": "s"}) == {"user": "ss"}
+
+
+def test_a_function_problem_and_an_unknown_output_are_raised_together() -> None:
+    """Every culprit of every kind, in one message: no round trip per kind."""
+    _, driver = _priced("val_together")
+    other = make_module(
+        "val_together_other", "def stray(x: int) -> int:\n    return x\n"
+    )
+    with pytest.raises(ValueError, match=r"^final_vars: ") as alone:
+        driver.execute([other.stray], inputs=GOOD)
+    with pytest.raises(ValueError, match=r"^final_vars: ") as both:
+        driver.execute([other.stray, "margn", "tax"], inputs=GOOD)
+    with pytest.raises(ValueError, match="region") as unmatched:
+        driver.execute(["tax"], inputs=GOOD)
+    assert str(both.value).split("\n") == [
+        str(alone.value),
+        str(unmatched.value),
+        "unknown outputs: 'margn' (did you mean 'margin'?)",
+    ]
+    # A malformed item lists the unknown output too, in its `TypeError`.
+    with pytest.raises(TypeError, match="final_vars items must be str") as malformed:
+        driver.execute([5, "margn"])  # ty: ignore[invalid-argument-type]  # the refusal is the point
+    assert str(malformed.value).split("\n")[1:] == [
+        "unknown outputs: 'margn' (did you mean 'margin'?)"
+    ]
+
+
+def test_validate_lists_both_non_mappings() -> None:
+    """`inputs` and `overrides` both malformed are named in one `TypeError`."""
+    _, driver = _priced("val_both_mappings")
+    with pytest.raises(TypeError) as raised:
+        driver.validate(["margin"], inputs=["revenue"], overrides=5)  # ty: ignore[invalid-argument-type]  # the refusal is the point
+    assert str(raised.value) == (
+        "inputs must be a mapping of names to values, got list; "
+        "overrides must be a mapping of names to values, got int"
+    )

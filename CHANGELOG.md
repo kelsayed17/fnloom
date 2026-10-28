@@ -83,13 +83,17 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `@fnloom.defaults(differing=("shared",))` on each consumer of the input but one; or rename the node, or make the
   defaults equal (Q76). `@fnloom.defaults` is new, and records names only.
 - **Breaking:** `None` passes an input, override or extracted-field check only when the type admits it: `Optional[T]`,
-  `T | None`, `object`, `Any`, `None`, or a `TypeVar` that is free or whose bound or a constraint admits it. Hamilton
-  passes `None` for every type, and so did fnloom, so `None` for `x: int` is now a `ValueError` before anything runs:
-  `x: expected int, got NoneType`. Annotate the parameter `x: int | None` (a default of `None` does not make it
-  optional), or stop passing `None` (Q79).
+  `T | None`, `object`, `Any`, `None`, `Literal[None]`, or a `TypeVar` that is free or whose bound or a constraint
+  admits it. Hamilton passes `None` for every type, and so did fnloom, so `None` for `x: int` is now a `ValueError`
+  before anything runs: `x: expected int, got NoneType`. Annotate the parameter `x: int | None` (a default of `None`
+  does not make it optional), or stop passing `None` (Q79).
 - **Breaking:** a fixed-length tuple type, `tuple[int, str]` or `tuple[()]`, now checks a value's length and each item
   with the same rules, nested tuples included. Before, any tuple fitted; Hamilton refuses every one. `tuple[int, ...]`
   and bare `tuple` are unchanged (Q80).
+- **Breaking:** a `@parameterize` function's docstring is now a template, filled per row with `str.format_map`. In 0.2.0
+  each row used it as written, so a docstring with braces, such as `"""Returns {"count": n}."""`, now raises a
+  `ValueError` naming the row when the module is imported. Escape literal braces as `{{` and `}}`, or give the row its
+  doc as `(bindings, doc)`, which is used as written. Hamilton fails on the same docstring when decorating (Q82).
 - An annotation naming something that does not exist at run time, such as a name imported only under
   `TYPE_CHECKING`, no longer fails the build with `NameError`. It becomes an opaque type, `unresolved 'Decimal'`, with
   its text as written; an alias over such a name and a `TypedDict` field type do too. An edge matches it only from or

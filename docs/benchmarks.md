@@ -7,7 +7,7 @@ and at running a prepared plan, so a row where it's reliably slower counts as a 
 
 <div class="grid cards" markdown>
 
--   :lucide-repeat:{ .lg .fl-icon } **2.5× to 24× faster repeat runs**
+-   :lucide-repeat:{ .lg .fl-icon } **2× to 24× faster repeat runs**
 
     Running a prepared plan again on the plain graphs, wherever both finish. A 1,000-node layered graph: 4.35 ms
     in Hamilton, 0.21 ms in fnloom. With `@extract_fields`, where Hamilton's cost grows faster than the graph, up to
@@ -15,8 +15,8 @@ and at running a prepared plan, so a row where it's reliably slower counts as a 
 
 -   :lucide-hammer:{ .lg .fl-icon } **Every graph builds faster**
 
-    At least 1.35× faster on every graph, the least on 10 extracted fields, and 41× on 10,000 `@parameterize` rows
-    (5.3 s against 0.13 s).
+    At least 1.2× faster on every graph, the least on `fan_in` with 10 parameters (one fresh process per sample),
+    and 41× on 10,000 `@parameterize` rows (5.3 s against 0.13 s).
 
 -   :lucide-infinity:{ .lg .fl-icon } **Runs what Hamilton can't**
 
@@ -41,10 +41,10 @@ sample.
 | chain | 100 | 1.904 / 1.986 / 0.531 † | 0.326 / 0.054 / 0.025 | 0.295 / 0.015 / 0.014 | 0.023 / 0.009 |
 | chain | 1,000 | 18.5 / 7.367 / 5.518 | `RecursionError` / 0.326 / 0.215 | `RecursionError` / 0.159 / 0.139 | 0.176 / 0.060 |
 | chain | 10,000 | 207.5 / 63.4 / 58.7 | `RecursionError` / 3.254 / 2.035 | `RecursionError` / 1.339 / 1.345 | 1.786 / 0.492 |
-| fan_in | 10 | 0.152 / 0.052 / 0.025 | 0.067 / 0.037 / 0.012 | 0.034 / 0.002 / 0.001 | 0.015 / 0.006 |
-| fan_in | 100 | 0.323 / 0.156 / 0.144 | 0.295 / 0.099 / 0.041 | 0.266 / 0.015 / 0.011 | 0.066 / 0.026 |
-| fan_in | 1,000 | 3.024 / 1.467 / 1.245 | 2.777 / 0.932 / 0.593 | 2.733 / 0.312 / 0.269 | 0.597 / 0.308 |
-| fan_in | 10,000 | 66.1 / 17.3 / 16.4 | 42.2 / 26.4 / 20.1 | 43.4 / 17.2 / 17.2 | 7.550 / 6.642 |
+| fan_in | 10 | 0.196 / 0.264 / 0.063 † | 0.095 / 0.057 / 0.015 | 0.038 / 0.003 / 0.002 | 0.028 / 0.009 |
+| fan_in | 100 | 0.375 / 0.390 / 0.175 † | 0.323 / 0.133 / 0.056 | 0.277 / 0.018 / 0.014 | 0.089 / 0.038 |
+| fan_in | 1,000 | 3.013 / 1.689 / 2.727 | 2.923 / 1.184 / 0.673 | 2.606 / 0.335 / 0.298 | 0.650 / 0.329 |
+| fan_in | 10,000 | 25.8 / 31.7 / 13.5 † | 44.2 / 29.9 / 24.9 | 43.8 / 21.8 / 21.3 | 7.547 / 3.410 |
 | layered | 10 | 0.323 / 0.120 / 0.163 | 0.068 / 0.047 / 0.024 | 0.039 / 0.003 / 0.002 | 0.015 / 0.007 |
 | layered | 100 | 2.201 / 0.748 / 0.628 | 0.434 / 0.067 / 0.032 | 0.397 / 0.019 / 0.020 | 0.037 / 0.018 |
 | layered | 1,000 | 21.6 / 7.219 / 7.502 | 4.757 / 0.374 / 0.269 | 4.353 / 0.209 / 0.184 | 0.270 / 0.088 |
@@ -62,8 +62,10 @@ sample.
 | types | 1,000 | 4.634 / 3.840 / 4.947 | 3.151 / 1.187 / 0.629 | 3.087 / 0.484 / 0.309 | 0.645 / 0.301 |
 | types | 10,000 | 114.6 / 41.5 / 37.9 | 51.8 / 32.4 / 26.1 | 50.3 / 23.8 / 22.0 | 8.712 / 3.385 |
 
-Measured on an Apple M2 Pro with 16 GB, macOS 27.0, CPython 3.14.9, `apache-hamilton==1.90.0`, and a release build
-of the extension, on 2026-10-27; the `extract` and `types` rows on 2026-10-28.
+Measured on an Apple M2 Pro with 16 GB, macOS 27.0, `apache-hamilton==1.90.0`, and a release build of the extension.
+The `chain`, `layered` and `rows` rows were measured on 2026-10-27, with the interpreter recorded then as CPython
+3.14.9; the `extract` and `types` rows on 2026-10-28. The `fan_in` row was measured again on 2026-10-28 with CPython
+3.14.8, all three runtimes in one session (`python -m benches.run fan_in`).
 
 **`extract`** is one `@extract_fields` producer returning a dict of `n` int fields, each read by its own consumer,
 with every consumer requested. fnloom checks each field against its type on every run, with input checks on or off
@@ -104,21 +106,20 @@ an alias, is walked question by question and costs more per item (over 200,000 i
 | `list[list[list[int]] \| None]` | 8.3 µs |
 | `type Tree = list[Tree] \| int` | 13.7 µs |
 
-A part the value shares, even on a cycle, is read once per check, never once per path. A check that fails on a cycle
-may read a fitting part again, once for each failing part it was first read under. Widening costs nothing on a value
-that fits without it.
+A check that fits reads each part the value shares once, even on a cycle, never once per path; a check that fails may
+read shared parts more than once. Widening costs nothing on a value that fits without it.
 
 **Steady execution**, the cost of running a prepared plan again, is where fnloom differs most. With checks on, it's
-2.5 to 24 times faster than Hamilton's `execute` on the first four shapes wherever both finish, and 8.6 to 998 times
+2.0 to 24 times faster than Hamilton's `execute` on the first four shapes wherever both finish, and 8.6 to 998 times
 on `extract`, because the plan is compiled once and each run is a loop over its steps in Rust. The low end is
-`fan_in` at 10,000 parameters (2.5×), where one Python call with 10,000 keyword arguments is most of the cost for
+`fan_in` at 10,000 parameters (2.0×), where one Python call with 10,000 keyword arguments is most of the cost for
 both.
 
 **Input checks are close to free.** The gap between the two fnloom figures is within noise: steady execution with
-checks on and off differs by at most 0.05 ms on every graph of the first five shapes. A check against a plain class
-such as `int`, or a union of them such as `int | None`, is compiled once per plan into one `isinstance` call. A
-generic or a fixed tuple gets a check made once per plan too, and only a value it can't settle by class takes the
-general path.
+checks on and off differs by at most 0.05 ms on every graph of the first five shapes but `fan_in` at 10,000
+parameters, where it is 0.45 ms of 21.8 ms (2%). A check against a plain class such as `int`, or a union of them such
+as `int | None`, is compiled once per plan into one `isinstance` call. A generic or a fixed tuple gets a check made
+once per plan too, and only a value it can't settle by class takes the general path.
 
 ### Where Hamilton raises
 
@@ -143,6 +144,15 @@ goes first, on a release build, timing only the build call (medians, ms, Hamilto
 | fan_in | 100 | 0.428 / 0.222 | fnloom faster (was 0.419 / 0.542) |
 | fan_in | 1,000 | 4.271 / 1.581 | fnloom faster (was 4.290 / 4.491) |
 | fan_in | 10,000 | 32.6 / 17.5 | fnloom faster (was 33.0 / 49.8) |
+
+The `fan_in` builds the table marks † after its 2026-10-28 re-measure were measured the same way that day, with CPython
+3.14.8:
+
+| shape | n | Hamilton / fnloom | verdict |
+| --- | ---: | --- | --- |
+| fan_in | 10 | 0.149 / 0.121 | fnloom faster |
+| fan_in | 100 | 0.355 / 0.241 | fnloom faster |
+| fan_in | 10,000 | 26.7 / 15.1 | fnloom faster |
 
 No build is reliably slower. The checks-on and checks-off builds do the same build work, since input checks run per
 run, so their differences in the table (for example rows 10,000, 128.1 against 60.9 ms) are noise.

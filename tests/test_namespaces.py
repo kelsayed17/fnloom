@@ -637,9 +637,16 @@ def test_builder_namespaces_hold_one_per_module() -> None:
     module = make_module("ns_lengths", _PRICING)
     with pytest.raises(
         ValueError,
-        match=re.escape("namespaces must hold one per module: 1 modules, 2 namespaces"),
+        match=re.escape("namespaces must hold one per module: 1 module, 2 namespaces"),
     ):
         fnloom.Builder((module,), namespaces=("a", "b"))
+    with pytest.raises(TypeError) as every:
+        fnloom.Builder((module,), namespaces=("a-b", 5, "ok"))  # ty: ignore[invalid-argument-type]  # the refusal is the point
+    assert str(every.value) == (
+        "namespace 'a-b' is not a dotted identifier path, such as 'a' or 'a.b'; "
+        "namespace must be a str or None, got int; "
+        "namespaces must hold one per module: 1 module, 3 namespaces"
+    )
     with pytest.raises(ValueError, match="is not a dotted identifier path"):
         fnloom.Builder((module,), namespaces=("a-b",))
     assert fnloom.Builder((module,), namespaces=("a",)).build().node_names() == [

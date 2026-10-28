@@ -296,7 +296,7 @@ fnloom.build(baskets).validate(["basket_total"], inputs={"prices": [1.5, "2"]})
 # -> []
 deep = fnloom.Builder().with_modules(baskets).with_deep_type_checks().build()
 deep.validate(["basket_total"], inputs={"prices": [1.5, "2"]})
-# -> ['prices: expected list[float], got list']
+# -> ['prices: expected list[float], got list (an item does not fit)']
 ```
 
 A deep check reads every item on every run, so it costs time in proportion to the value: about 2.6 ms for a list of
@@ -304,12 +304,10 @@ A deep check reads every item on every run, so it costs time in proportion to th
 a value of a standard class (`list`, `dict`, `set`, `tuple`, `deque`, ...) has its items read: any other value, such
 as an iterable class of your own, keeps the default checks, so an endless one is never read to its end. A subclass of
 a standard collection, such as a `list` subclass of your own, is checked by the default rules too. A value of any size
-or depth is read in full, and a part it shares, such as one list held in two places, is read once per check, on a
-cycle or not, never once per path. A check that fails on a cycle reads each failing part once, but may read a
-fitting part again, once for each failing part it was first read under. A string is the one part a failing check can
-read again each time it is met, at the cost of its characters. A check gives up only when more than 10,000 of its
-questions are open about one value at once, which only a cycle no check can see, such as a type made afresh on each
-reading, reaches.
+or depth is read in full. A check that fits reads each part the value shares, such as one list held in two places,
+once, on a cycle or not, never once per path. A check that fails may read shared parts more than once. A check gives
+up only when more than 10,000 of its questions are open about one value at once, which only a cycle no check can see,
+such as a type made afresh on each reading, reaches.
 
 `Builder.with_numeric_widening()` lets an `int` (but not a `bool`) and a numpy integer or floating scalar fit
 `float`, and a numpy integer scalar fit `int`. Hamilton refuses them all, as fnloom does by default. numpy is
@@ -378,7 +376,8 @@ driver.what_is_downstream_of("total")
 Each query returns sorted names, including the nodes you named. `node_names()` lists every node, inputs included.
 
 `what_is_the_path_between(upstream, downstream)` returns every node on a path from one to the other, both included.
-Either end may be an input. The order is topological, with ties broken by name, so it's the same on every run:
+The upstream end may be an input; the downstream end is one only when both ends are that input, since nothing feeds an
+input. The order is topological, with ties broken by name, so it's the same on every run:
 
 ```python
 driver.what_is_the_path_between("price", "label")
@@ -522,7 +521,9 @@ fresh.execute(["total"], inputs={"price": 2.0, "quantity": 3})
 - The old driver is unchanged, and keeps running its old code until you drop it.
 - Code versions are read again, so with a shared cache store the edited node, and everything downstream of it,
   misses on the new driver ([Code versions](caching.md#code-versions)).
-- A function given to `with_functions` is the object you gave. After a reload, give the new one to a new builder.
+- A function given to `with_functions` is the object you gave. After a reload, give the new one to a new builder. When
+  the builder has the function's module too, `rebuild` raises a `ValueError` saying the function given to
+  `with_functions` is stale after a reload.
 - `AsyncDriver.rebuild()` keeps `sync_nodes` too. A driver made from a native graph has no builder, and raises a
   `TypeError`.
 

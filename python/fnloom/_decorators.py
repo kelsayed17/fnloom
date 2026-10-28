@@ -10,6 +10,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Literal, overload
 
 from fnloom._stores import Format
+from fnloom._types import unresolvable
 
 if TYPE_CHECKING:
     from fnloom._config import ConfigPolicy
@@ -207,12 +208,49 @@ def group_element(annotation: object, *, is_list: bool) -> object:
     return shape[1]
 
 
+def readable(fn: Callable[..., object], annotation: object) -> object:
+    """`annotation`, a string evaluated as far as it can be when decorating.
+
+    Under `from __future__ import annotations` every annotation is a string. One
+    is evaluated against `fn`'s module and type parameters, a name not defined yet
+    staying a forward reference, read again at build. A string that does not
+    evaluate at all is returned as it is.
+    """
+    if not isinstance(annotation, str):
+        return annotation
+    forward = annotationlib.ForwardRef(annotation, owner=fn)
+    try:
+        return forward.evaluate(format=annotationlib.Format.FORWARDREF)
+    except Exception:  # noqa: BLE001  # any failure leaves the reading to build
+        return annotation
+
+
+# Stands for a parameter without an annotation, for `group_mismatch`.
+_NO_ANNOTATION: Final = object()
+
+
+def group_mismatch(param: str, annotation: object, *, is_list: bool) -> str | None:
+    """The line saying `param`'s `annotation` does not fit its group, or `None`."""
+    shape = _group_shape(annotation)
+    if shape is not None and shape[0] == is_list:
+        return None
+    needs = "list[X]" if is_list else "dict[str, X]"
+    found = (
+        "no annotation"
+        if annotation is _NO_ANNOTATION
+        else inspect.formatannotation(annotation)
+    )
+    return f"{param!r} ({found}) needs {needs} for its group"
+
+
 def _group_problems(
     fn: Callable[..., object], rows: Mapping[str, Mapping[str, object]]
 ) -> list[str]:
     """One line per group parameter that is not annotated as its group needs.
 
-    Each parameter and group kind is listed once, however many rows bind it.
+    Each parameter and group kind is listed once, however many rows bind it. A
+    string annotation is evaluated first; one naming what is not defined yet is
+    left for the build to check, once it resolves.
     """
     forward = annotationlib.Format.FORWARDREF
     annotations = annotationlib.get_annotations(fn, format=forward)
@@ -224,18 +262,11 @@ def _group_problems(
     }
     lines: list[str] = []
     for param, is_list in sorted(wanted):
-        annotation = annotations.get(param)
-        shape = _group_shape(annotation)
-        if shape is not None and shape[0] == is_list:
+        annotation = readable(fn, annotations.get(param, _NO_ANNOTATION))
+        line = group_mismatch(param, annotation, is_list=is_list)
+        if line is None or isinstance(annotation, str) or unresolvable(annotation):
             continue
-        needs = "list[X]" if is_list else "dict[str, X]"
-        found = (
-            "no annotation"
-            if param not in annotations
-            else inspect.formatannotation(annotation)
-        )
-        unquoted = ", written unquoted" if isinstance(annotation, str) else ""
-        lines.append(f"{param!r} ({found}) needs {needs} for its group{unquoted}")
+        lines.append(line)
     return lines
 
 

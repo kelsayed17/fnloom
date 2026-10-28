@@ -183,6 +183,12 @@ def test_path_between_unknown_names_are_all_named() -> None:
         driver.what_is_the_path_between("root", "nope")
     with pytest.raises(TypeError, match="node names must be str, got int"):
         driver.what_is_the_path_between("root", 5)  # ty: ignore[invalid-argument-type]
+    with pytest.raises(TypeError) as both:
+        driver.what_is_the_path_between(5, 2.5)  # ty: ignore[invalid-argument-type]
+    assert str(both.value) == (
+        "node names must be str, got int for upstream; "
+        "node names must be str, got float for downstream"
+    )
 
 
 def test_path_between_no_path_is_empty() -> None:
@@ -272,6 +278,24 @@ def test_rebuild_sees_a_reloaded_module(
     assert asyncio.run(built_async.execute(["b"], inputs={"x": 1})) == {"b": 20}
     assert "c" not in driver.node_names()
     assert rebuilt.execute(["b"], inputs={"x": 1}) == {"b": 10010}
+
+
+def test_rebuild_names_a_function_stale_after_a_reload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A function given beside its own module is stale after a reload, and says so."""
+    module = _importable(tmp_path, monkeypatch, "rebuild_stale", RELOADED)
+    driver = fnloom.Builder().with_modules(module).with_functions(module.b).build()
+    assert driver.execute(["b"], inputs={"x": 1}) == {"b": 20}
+    (tmp_path / "rebuild_stale.py").write_text(EDITED, encoding="utf-8")
+    importlib.reload(module)
+    with pytest.raises(ValueError, match=r"^node 'b' ") as raised:
+        driver.rebuild()
+    assert str(raised.value) == (
+        "node 'b' is defined twice in 'rebuild_stale': function 'rebuild_stale.b' "
+        "given to with_functions is stale after a reload: give the reloaded "
+        "function to a new builder"
+    )
 
 
 def test_rebuild_needs_a_builder() -> None:

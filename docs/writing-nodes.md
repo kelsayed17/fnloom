@@ -458,7 +458,8 @@ driver.execute(["both"], inputs={"gross": 12.0})
 A few details:
 
 - A parameter can't read another namespace's node: a parameter `net` in namespace `us` reads `us.net` or the plain
-  `net`, never `eu.net`. Naming the full name in `source("eu.net")` reads that node, from anywhere.
+  `net`, never `eu.net`. Naming the full name in `source("eu.net")` reads that node from another namespace too, unless
+  the namespace it's written in has a node of its own named `eu.net` (in full, `us.eu.net`), which it reads instead.
 - Every name a namespaced module makes is prefixed: `@config` variants, `@parameterize` rows and extracted fields. Each
   namespace selects its own `@config` variant, and the errors, `validate`, `inputs()`, `outputs()`,
   `what_is_the_path_between` and suggestions all use full names.
@@ -700,7 +701,9 @@ driver.nodes["math"].type is int
 - **`NodeView.params`** lists one `Param` per item, with the item's place in `slot`: its index in a list, or its key
   in a dict.
 - **Misuse is refused when decorating,** each offender listed once, in one message:
-    - a parameter not annotated as `list[X]` or `dict[str, X]` (a quoted annotation too, since it can't be read then);
+    - a parameter not annotated as `list[X]` or `dict[str, X]`. A string annotation, as `from __future__ import
+      annotations` makes every one, is read then too; one naming something defined further down the module is
+      checked at build instead, once it resolves, with the same message;
     - positional and keyword items mixed, an empty `group()`, a nested `group`, or a bare string.
 - `fnloom.node(fn, bind=...)` takes a `group(...)` as a `@parameterize` row does.
 

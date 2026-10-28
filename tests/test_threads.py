@@ -2,6 +2,7 @@
 
 import sys
 import sysconfig
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -128,9 +129,13 @@ def test_one_driver_across_threads() -> None:
     driver = _mixed_driver()
     inputs_before = dict(driver.inputs())
     path = driver.what_is_the_path_between("high", "gathered")
+    upstream = driver.what_is_upstream_of("gathered")
+    # Every thread starts at once, so all 16 overlap rather than a few at a time.
+    start = threading.Barrier(MIXED_THREADS)
 
     def work(thread: int) -> int:
         checked = 0
+        start.wait()
         for run in range(MIXED_RUNS):
             n = thread * 1_000 + run % REPEAT
             given = {"n": n}
@@ -154,6 +159,7 @@ def test_one_driver_across_threads() -> None:
                 ]
                 assert dict(driver.inputs()) == inputs_before
                 assert driver.what_is_the_path_between("high", "gathered") == path
+                assert driver.what_is_upstream_of("gathered") == upstream
             checked += 1
         return checked
 

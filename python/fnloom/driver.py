@@ -5,6 +5,7 @@ import importlib
 import inspect
 import sys
 import threading
+import typing
 
 # Imported for real, not under TYPE_CHECKING: the public signatures annotate with
 # them, and `inspect.signature` resolves those annotations at run time.
@@ -100,14 +101,18 @@ class _Request:
         views: NodeViews,
         inputs: Mapping[str, object] | None,
         overrides: Mapping[str, object] | None,
+        unmatched: Mapping[str, str],
     ) -> _PlanKey:
         """The outputs as names, and the input and override names of a request.
 
         A function becomes its node's name (Q30). `TypeError` for a bare `str`
         (Q6), or an output that is neither a name nor a function. The names are
-        checked against the graph when the plan is compiled.
+        checked against the graph when the plan is compiled, unless a function
+        in `final_vars` is refused: `unmatched`, each output no variant gave by
+        its line, then lets that error name every other culprit too.
         """
-        return (_requested_names(final_vars, views), _names(inputs), _names(overrides))
+        names = _requested_names(final_vars, views, unmatched)
+        return (names, _names(inputs), _names(overrides))
 
 
 # No names, made once: calling `frozenset[str]` costs more than the check it serves.
@@ -188,9 +193,25 @@ def _mismatches(checks: Sequence[_Check], values: Mapping[str, object]) -> list[
                 continue
         found.append(
             f"{name}: expected {inspect.formatannotation(declared)}, "
-            f"got {inspect.formatannotation(type(value))}"
+            f"got {inspect.formatannotation(type(value))}{_inside(declared, value)}"
         )
     return found
+
+
+def _inside(declared: object, value: object) -> str:
+    """What failed when `value`'s class is `declared`'s own: its length, or an item.
+
+    Empty when the class itself does not fit, which the line already says.
+    """
+    origin = typing.get_origin(declared)
+    if not isinstance(origin, type) or not isinstance(value, origin):
+        return ""
+    if origin is tuple and isinstance(value, tuple):
+        args = typing.get_args(declared)
+        variadic = len(args) == 2 and args[1] is Ellipsis  # noqa: PLR2004  # `tuple[X, ...]`
+        if not variadic and len(value) != len(args):
+            return " (its length does not fit)"
+    return " (an item does not fit)"
 
 
 def _edge_mismatches(functions: Mapping[str, NodeView]) -> list[str]:
@@ -512,7 +533,9 @@ class Driver:
             and _keys(overrides) == last[2]
         ):
             return last[3]
-        key = _Request.check(final_vars, self._nodes, inputs, overrides)
+        key = _Request.check(
+            final_vars, self._nodes, inputs, overrides, self._unmatched
+        )
         with self._plans_lock:
             prepared = self._plans.pop(key, None)
             if prepared is None:
@@ -714,16 +737,19 @@ class Driver:
         A malformed request raises: `TypeError` for a bare `str`, an item of
         `final_vars` that is neither a name nor a function, or a function that
         makes several nodes, as `execute` raises it; and `TypeError` for `inputs`
-        or `overrides` that is not a mapping, which `execute` refuses too.
+        or `overrides` that is not a mapping, naming both when both are not, which
+        `execute` refuses too.
         """
+        wrong: list[str] = []
         for kind, values in (("inputs", inputs), ("overrides", overrides)):
             if values is not None and not isinstance(values, Mapping):
-                msg = (
+                wrong.append(
                     f"{kind} must be a mapping of names to values, "
                     f"got {type(values).__name__}"
                 )
-                raise TypeError(msg)
-        outputs, absent_functions = requested(final_vars, self._nodes)
+        if wrong:
+            raise TypeError("; ".join(wrong))
+        outputs, absent_functions = requested(final_vars, self._nodes, self._unmatched)
         key: _PlanKey = (outputs, _names(inputs), _names(overrides))
         _, input_names, override_names = key
         wanted = list(dict.fromkeys(outputs))
@@ -880,16 +906,21 @@ class Driver:
     def what_is_the_path_between(self, upstream: str, downstream: str) -> list[str]:
         """Returns every node on a path from `upstream` to `downstream` (Q70).
 
-        Both endpoints are included, and an input can be either one. The order is
-        topological, ties broken by name, so it never depends on
+        Both endpoints are included. An input can be `upstream`, but is
+        `downstream` only when both are that input, since nothing feeds an input.
+        The order is topological, ties broken by name, so it never depends on
         `PYTHONHASHSEED`. Empty when `downstream` doesn't depend on `upstream`;
         `[upstream]` when they're the same node. `ValueError` names every unknown
-        endpoint, sorted; `TypeError` when one is not a `str`.
+        endpoint, sorted; `TypeError` names each that is not a `str`.
         """
-        for end in (upstream, downstream):
+        wrong: list[str] = []
+        for role, end in (("upstream", upstream), ("downstream", downstream)):
             if not isinstance(end, str):
-                msg = f"node names must be str, got {type(end).__name__}"
-                raise TypeError(msg)
+                wrong.append(
+                    f"node names must be str, got {type(end).__name__} for {role}"
+                )
+        if wrong:
+            raise TypeError("; ".join(wrong))
         ends = {upstream, downstream}
         if unknown := sorted(n for n in ends if n not in self._nodes):
             msg = f"unknown nodes: {', '.join(map(repr, unknown))}"
@@ -1316,13 +1347,29 @@ def _checked_namespaces(
     """
     if not namespaces:
         return (None,) * count
+    lines: set[str] = set()
+    malformed = False
     if len(namespaces) != count:
-        msg = (
-            f"namespaces must hold one per module: {count} modules, "
-            f"{len(namespaces)} namespaces"
+        lines.add(
+            f"namespaces must hold one per module: {_counted(count, 'module')}, "
+            f"{_counted(len(namespaces), 'namespace')}"
         )
-        raise ValueError(msg)
-    return tuple(checked_namespace(namespace) for namespace in namespaces)
+    checked: list[str | None] = []
+    for namespace in namespaces:
+        try:
+            checked.append(checked_namespace(namespace))
+        except (TypeError, ValueError) as error:
+            lines.add(str(error))
+            malformed = malformed or isinstance(error, TypeError)
+    if lines:
+        msg = "; ".join(sorted(lines))
+        raise TypeError(msg) if malformed else ValueError(msg)
+    return tuple(checked)
+
+
+def _counted(count: int, noun: str) -> str:
+    """`count` and `noun`, plural unless it is one: `1 module`, `2 modules`."""
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
 
 
 def _unimportable_module(module: ModuleType) -> str | None:

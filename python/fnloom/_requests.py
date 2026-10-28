@@ -4,13 +4,15 @@ import difflib
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from fnloom._view import NodeViews
 
 
 def output_names(
-    final_vars: Sequence[str | Callable[..., object]], views: NodeViews
+    final_vars: Sequence[str | Callable[..., object]],
+    views: NodeViews,
+    unmatched: Mapping[str, str],
 ) -> tuple[str, ...]:
     """The node names `final_vars` asks for: a `str` is a name, a function its node.
 
@@ -27,12 +29,29 @@ def output_names(
     - `ValueError` otherwise: a function no node of this driver comes from, such as
       one of another module, an unselected `@config` variant, or a lambda.
 
-    A name is not checked against the graph here: compiling the plan does.
+    When a function is refused, the names are listed too, on lines of their own
+    in the same message: each output no `@config` variant gave, by its line in
+    `unmatched`, and the unknown outputs, each with its closest node. Otherwise
+    a name is not checked against the graph here: compiling the plan does.
     """
-    names, absent = requested(final_vars, views)
+    names, absent = requested(final_vars, views, unmatched)
     if absent:
-        raise ValueError(ABSENT + "; ".join(absent))
+        lines = [ABSENT + "; ".join(absent), *_name_lines(names, views, unmatched)]
+        raise ValueError("\n".join(lines))
     return names
+
+
+def _name_lines(
+    names: Iterable[str], views: NodeViews, unmatched: Mapping[str, str]
+) -> list[str]:
+    """The lines for `names` the graph lacks: outputs no variant gave, then unknown."""
+    wanted = set(names)
+    lines = [unmatched[name] for name in sorted(wanted & unmatched.keys())]
+    if unknown := sorted(n for n in wanted if n not in views and n not in unmatched):
+        candidates = list(views)
+        listed = ", ".join(f"'{n}'{suggest(n, candidates)}" for n in unknown)
+        lines.append(f"unknown outputs: {listed}")
+    return lines
 
 
 # How the error for functions no node comes from starts.
@@ -40,7 +59,9 @@ ABSENT = "final_vars: "
 
 
 def requested(
-    final_vars: Sequence[str | Callable[..., object]], views: NodeViews
+    final_vars: Sequence[str | Callable[..., object]],
+    views: NodeViews,
+    unmatched: Mapping[str, str],
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """The names `final_vars` resolves to, and each function no node comes from.
 
@@ -67,8 +88,10 @@ def requested(
         culprits.add(text)
         malformed = malformed or kind != "absent"
     if malformed:
-        msg = "final_vars items must be str or a function: "
-        raise TypeError(msg + "; ".join(sorted(culprits)))
+        msg = "final_vars items must be str or a function: " + "; ".join(
+            sorted(culprits)
+        )
+        raise TypeError("\n".join([msg, *_name_lines(names, views, unmatched)]))
     return tuple(names), tuple(sorted(culprits))
 
 

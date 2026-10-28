@@ -1,6 +1,8 @@
 # Roadmap: ahead of Hamilton everywhere
 
-**Status:** draft for maintainer review, 2026-10-28. Nothing below is built.
+**Status:** in progress, 2026-10-28. Plans 1–4, the Plan 4 follow-up and Plan 3 are merged and released in 0.2.0.
+Plan 5 is on its own branch, in review; a row below marked done or fixed in Plan 5 describes that branch. Plans 6 and
+later are not built.
 
 **Goal:** for every capability Hamilton 1.90.0 offers, fnloom has an equivalent that is at least as good, or a
 written decision explaining why it doesn't. "At least as good" means: same intent; behaviour proven differentially
@@ -155,7 +157,7 @@ behind); **n/a** (fnloom has no such feature yet; the plan builds it without the
 | Decorator stacking order is ignored, and collisions name the wrong decorator (#1163) | fixed so far | Done for config and extract in Plan 3: stacked in any order, and two matching variants name both functions (Q58). Plan 8 does the same for its decorators |
 | `@extract_columns` is a pandas registry (polars after a plugin, which autoload-off disables), with missing columns found only at run; `@extract_fields` checks no types and drops extra keys | fixed (Plan 3) | A generic split over any value with `__getitem__`, with no registry or plugin; fields type-checked on every run; extra names refused; `fill_with` never mutates. A missing column is still found at run, when the value first exists, and the error names the columns the producer returned (Q61–Q64) |
 | `@check_output` is pandas-only; `@check_output_custom` sees only the output and renames the node | n/a | Plan 8: validators over any type, seeing inputs and output, without renaming |
-| `@parameterize` + `value()` silently drops a caller's value for that parameter | fixed (Plan 5) | An input or override naming a parameter only `value()` binds is refused as unknown (Q77) |
+| `@parameterize` + `value()` silently drops a caller's value for that parameter | already refused (Q4, Q5); documented (Q77) | An input or override naming a parameter only `value()` binds is refused as unknown (Q77) |
 | `@pipe_output` can't share work between steps; optional parameters leak in as inputs | n/a | Plan 8 |
 | Two adapters can't implement the same lifecycle method (cache + graceful errors, result builder + type-check opt-out); a raising hook skips the others; hook signatures are checked only at run | n/a | Plan 6: any number of hooks per event, run in a defined order, signatures checked when attached (Q23, Q24) |
 | `execute` returns different types depending on the adapter; the legacy constructor returns a pandas frame that broadcasts scalars | fixed | Q19: always a dict |

@@ -325,7 +325,7 @@ def test_group_misuse_is_refused_once_per_offender() -> None:
             keyed: dict[int, int],
             seq: tuple[int, ...],
             plain: int,
-            quoted: "list[int]",  # noqa: UP037  # a quoted annotation is the misuse
+            quoted: "int",  # noqa: UP037  # quoted, and read when decorating
             missing,  # noqa: ANN001  # no annotation is the misuse
         ) -> int:
             return len([bare, ok, keyed, seq, plain, quoted, missing])
@@ -338,7 +338,7 @@ def test_group_misuse_is_refused_once_per_offender() -> None:
         "'keyed' (dict[int, int]) needs dict[str, X] for its group; "
         "'missing' (no annotation) needs list[X] for its group; "
         "'plain' (int) needs list[X] for its group; "
-        "'quoted' ('list[int]') needs list[X] for its group, written unquoted; "
+        "'quoted' (int) needs list[X] for its group; "
         "'seq' (tuple[int, ...]) needs list[X] for its group"
     )
 
@@ -770,3 +770,120 @@ def test_parameterize_sources_reports_mixed_key_types_clearly() -> None:
         "row 'a': parameter name 1 is not a str; "
         "row 'a': parameter name 2.5 is not a str"
     )
+
+
+_FUTURE_GROUPS = """
+from __future__ import annotations
+
+from fnloom import group, parameterize, source, value
+
+
+@parameterize(total={"xs": group(source("a"), value(2))})
+def listed(xs: list[int]) -> int:
+    return sum(xs)
+
+
+@parameterize(keyed={"ys": group(k=source("b"))})
+def named(ys: dict[str, Later]) -> int:
+    return sum(later.n for later in ys.values())
+
+
+@parameterize(aliased={"zs": group(source("c"), source("a"))})
+def aliased(zs: Ints) -> int:
+    return sum(zs)
+
+
+class Later:
+    def __init__(self, n: int) -> None:
+        self.n = n
+
+
+Ints = list[int]
+"""
+
+
+def test_a_group_under_future_annotations_builds_and_runs() -> None:
+    """String annotations are read when decorating, or at build if they name later.
+
+    `list[int]` evaluates when decorating; `dict[str, Later]` too, `Later` staying
+    a forward reference to its element; `Ints`, a name defined further down, only
+    at build. Hamilton builds and runs the same module.
+    """
+    module = make_module("sugar_future_groups", _FUTURE_GROUPS)
+    driver = fnloom.build(module)
+    inputs = driver.inputs()
+    assert (inputs["a"].type, inputs["b"].type, inputs["c"].type) == (
+        int,
+        module.Later,
+        int,
+    )
+    result = driver.execute(
+        ["total", "keyed", "aliased"], inputs={"a": 1, "b": module.Later(4), "c": 5}
+    )
+    assert result == {"total": 3, "keyed": 4, "aliased": 6}
+
+
+def test_a_wrong_quoted_group_shape_is_refused_when_decorating() -> None:
+    """A string annotation that evaluates when decorating is checked then."""
+    source_text = """
+    from __future__ import annotations
+
+    from fnloom import group, parameterize, source
+
+
+    @parameterize(one={"xs": group(source("a")), "ys": group(k=source("b"))})
+    def f(xs: int, ys: list[int]) -> int:
+        return xs
+    """
+    with pytest.raises(TypeError) as raised:
+        make_module("sugar_future_wrong", source_text)
+    assert str(raised.value) == (
+        "group() parameters must be annotated as their group: "
+        "'xs' (int) needs list[X] for its group; "
+        "'ys' (list[int]) needs dict[str, X] for its group"
+    )
+
+
+def test_a_wrong_group_shape_named_later_is_refused_at_build() -> None:
+    """A name defined further down is read at build; a wrong shape is refused then.
+
+    Every culprit is listed, across functions, in one message.
+    """
+    source_text = """
+    from __future__ import annotations
+
+    from fnloom import group, node, parameterize, source
+
+
+    @parameterize(one={"xs": group(source("a"))})
+    def f(xs: Num) -> int:
+        return xs
+
+
+    @parameterize(two={"ys": group(k=source("b"))})
+    def g(ys: Ints) -> int:
+        return len(ys)
+
+
+    Num = int
+    Ints = list[int]
+    """
+    module = make_module("sugar_future_later", source_text)
+    with pytest.raises(TypeError) as raised:
+        fnloom.build(module)
+    assert str(raised.value) == (
+        "group() parameters must be annotated as their group: "
+        "'sugar_future_later.f': 'xs' (int) needs list[X] for its group; "
+        "'sugar_future_later.g': 'ys' (list[int]) needs dict[str, X] for its group"
+    )
+
+
+def test_a_quoted_group_shape_in_a_node_binding_is_read() -> None:
+    """`fnloom.node(bind=)` reads a string annotation as a row does."""
+
+    def total(xs: "list[int]") -> int:  # noqa: UP037  # the quoted annotation is the case
+        return sum(xs)
+
+    spec = fnloom.node(total, name="t", bind={"xs": group(source("a"), value(5))})
+    driver = fnloom.Builder().with_functions(spec).build()
+    assert driver.execute(["t"], inputs={"a": 1}) == {"t": 6}

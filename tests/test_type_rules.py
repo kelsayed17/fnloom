@@ -352,10 +352,13 @@ def first(pair: tuple[int, str]) -> int:
     )
     driver = fnloom.build(module)
     assert driver.execute(["first"], inputs={"pair": (1, "a")}) == {"first": 1}
-    for wrong in (("a", 1), (1,), (1, "a", 2)):
-        with pytest.raises(
-            ValueError, match=r"^pair: expected tuple\[int, str\], got tuple$"
-        ):
+    for wrong, failed in (
+        (("a", 1), "an item does not fit"),
+        ((1,), "its length does not fit"),
+        ((1, "a", 2), "its length does not fit"),
+    ):
+        line = f"pair: expected tuple[int, str], got tuple ({failed})"
+        with pytest.raises(ValueError, match=rf"^{re.escape(line)}$"):
             driver.execute(["first"], inputs={"pair": wrong})
 
 
@@ -772,12 +775,16 @@ def reads(
     wrong = {"x": [{"a": {1}}, {"b": {2, "s"}}], "y": (1, "s"), "z": ([1], ["s"])}
     assert shallow.validate(["reads"], inputs=wrong) == []
     assert deep.validate(["reads"], inputs=wrong) == [
-        "x: expected list[dict[str, set[int]]], got list",
-        "y: expected tuple[int, ...], got tuple",
-        "z: expected collections.abc.Sequence[list[int]], got tuple",
+        "x: expected list[dict[str, set[int]]], got list (an item does not fit)",
+        "y: expected tuple[int, ...], got tuple (an item does not fit)",
+        (
+            "z: expected collections.abc.Sequence[list[int]], got tuple "
+            "(an item does not fit)"
+        ),
     ]
     with pytest.raises(
-        ValueError, match=r"^x: expected list\[dict\[str, set\[int\]\]\], got list\n"
+        ValueError,
+        match=r"^x: expected list\[dict\[str, set\[int\]\]\], got list \(an item",
     ):
         deep.execute(["reads"], inputs=wrong)
     right = {"x": [{"a": {1}}, {}], "y": (1, 2), "z": ([1], [])}
@@ -1137,10 +1144,13 @@ def total(counts: list[int], items: list[int]) -> int:
     with pytest.raises(ValueError, match=r"^'parts' returned field 'items' as list"):
         deep.execute(["items"], inputs=given)
     assert shallow.execute(["counts"], overrides={"counts": ["s"]}) == {"counts": ["s"]}
-    with pytest.raises(ValueError, match=r"^counts: expected list\[int\], got list$"):
+    with pytest.raises(
+        ValueError,
+        match=r"^counts: expected list\[int\], got list \(an item does not fit\)$",
+    ):
         deep.execute(["counts"], overrides={"counts": ["s"]})
     assert deep.validate(["counts"], overrides={"counts": ["s"]}) == [
-        "counts: expected list[int], got list"
+        "counts: expected list[int], got list (an item does not fit)"
     ]
 
 
@@ -1181,7 +1191,10 @@ def test_widening_accepts_int_for_float_and_numpy_scalars() -> None:
     assert deep.execute(["scaled"], inputs={**inputs, "rates": [1, 0.5]}) == {
         "scaled": 3.5
     }
-    with pytest.raises(ValueError, match=r"^rates: expected list\[float\], got list$"):
+    with pytest.raises(
+        ValueError,
+        match=r"^rates: expected list\[float\], got list \(an item does not fit\)$",
+    ):
         deep.execute(["scaled"], inputs={**inputs, "rates": [True]})
     assert fnloom.value_matches(float | str, 1, widen=True) is True
     assert fnloom.value_matches(tuple[float, int], (1, 2), widen=True) is True
@@ -1240,7 +1253,7 @@ def test_type_rule_settings_survive_pickling_copying_and_async() -> None:
     for built in (builder.build_async(), pickled):
         assert asyncio.run(built.execute(["scaled"], inputs=inputs)) == {"scaled": 3.0}
         assert built.validate(["scaled"], inputs={**inputs, "rates": ["s"]}) == [
-            "rates: expected list[float], got list"
+            "rates: expected list[float], got list (an item does not fit)"
         ]
     settings = pickle.loads(pickle.dumps(builder))._settings()  # noqa: S301, SLF001  # our own pickle, its settings
     assert settings["deep_type_checks"] is True
@@ -1307,3 +1320,24 @@ def test_a_prepared_ruled_check_answers_as_value_matches(rules: _types.Rules) ->
             )
             got = isinstance(value, classes) if classes is not None else prepared(value)
             assert got is expected, (declared, value)
+
+
+def test_a_mismatch_whose_class_fits_says_an_item_does_not() -> None:
+    """When the value's class is the declared one's, the line says what failed."""
+    module = make_module(
+        "rules_item_line",
+        """
+def reads(xs: list[float], pair: tuple[int, str], n: int) -> int:
+    return n
+""",
+    )
+    deep = _deep(module)
+    lines = deep.validate(["reads"], inputs={"xs": [1.0, "s"], "pair": (1,), "n": "s"})
+    assert lines == [
+        "n: expected int, got str",
+        "pair: expected tuple[int, str], got tuple (its length does not fit)",
+        "xs: expected list[float], got list (an item does not fit)",
+    ]
+    assert deep.validate(["reads"], inputs={"xs": [1.0], "pair": (1, 2), "n": 1}) == [
+        "pair: expected tuple[int, str], got tuple (an item does not fit)"
+    ]
