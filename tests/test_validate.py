@@ -2,11 +2,12 @@
 
 import asyncio
 import threading
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, cast
 
 import pytest
 
 import fnloom
+from fnloom._view import NodeViews
 from helpers import make_module
 
 if TYPE_CHECKING:
@@ -107,7 +108,8 @@ def test_a_non_callable_item_is_refused_with_the_functions_problems() -> None:
     module, driver = _driver("req_items")
     with pytest.raises(TypeError, match="final_vars items must be str") as info:
         driver.execute([5, module.rows, 2.5])  # ty: ignore[invalid-argument-type]  # the refusal is the point
-    assert "float 2.5, int 5" in str(info.value)
+    assert "float 2.5; function" in str(info.value)
+    assert "; int 5" in str(info.value)
     assert "rows makes 2 nodes" in str(info.value)
     with pytest.raises(TypeError, match="not a single str"):
         driver.execute("base")
@@ -174,3 +176,68 @@ def test_a_shared_driver_resolves_functions_from_many_threads() -> None:
         thread.join()
     assert not errors
     assert results == [{"top": 11}] * 400
+
+
+def test_every_culprit_of_every_kind_is_listed_once_in_one_message() -> None:
+    """A malformed item, a several-node function, absent functions and a repeat."""
+    module, driver = _driver("req_mixed", {"k": "a"})
+    culprits: list[Any] = [module.rows, module.variant__b, 5, module.base, lambda: 1]
+    culprits.append(module.variant__b)
+    with pytest.raises(TypeError, match="final_vars items must be str") as info:
+        driver.execute(culprits, inputs={"x": 1})
+    message = str(info.value)
+    parts = message.split(": ", 1)[1].split("; ")
+    assert parts == sorted(set(parts))
+    # `base` is fine and `variant__b` is repeated: two fewer than requested.
+    assert len(parts) == len(culprits) - 2
+    assert message.count("req_mixed.variant__b") == 1
+    assert "int 5" in message
+    assert "rows makes 2 nodes" in message
+    assert "is a lambda" in message
+    # Without a malformed item, the same absent functions are a `ValueError`.
+    with pytest.raises(ValueError, match=r"req_mixed\.variant__b") as absent:
+        driver.execute([module.variant__b, lambda: 1, module.variant__b])
+    assert str(absent.value).count("req_mixed.variant__b") == 1
+
+
+ALIASED = """
+import fnloom
+
+
+def base(x: int) -> int:
+    return x * 10
+
+
+alias = base
+
+
+@fnloom.parameterize(rows={"y": fnloom.value(1)}, other={"y": fnloom.value(2)})
+def rows(base: int, y: int) -> int:
+    return base + y
+
+
+@fnloom.parameterize(a={"y": fnloom.value(1)}, b={"y": fnloom.value(2)})
+def pair(base: int, y: int) -> int:
+    return base + y
+"""
+
+
+def test_an_alias_and_a_row_named_like_the_function_resolve_to_it() -> None:
+    """Several nodes share an origin: the one named like the function is its node."""
+    module = make_module("req_alias", ALIASED)
+    driver = fnloom.build(module)
+    assert {"base", "alias"} <= set(driver.nodes)
+    assert driver.execute([module.base], inputs={"x": 1}) == {"base": 10}
+    assert driver.execute([module.rows], inputs={"x": 1}) == {"rows": 11}
+    with pytest.raises(TypeError, match=r"pair makes 2 nodes: pass 'a', 'b'"):
+        driver.execute([module.pair], inputs={"x": 1})
+
+
+def test_a_view_mapping_without_the_generated_set_still_skips_fields() -> None:
+    """A `NodeViews` made from a bare mapping derives which nodes are fields."""
+    module, driver = _driver("req_bare")
+    views = cast("NodeViews", driver.nodes)
+    bare = NodeViews(dict(views.functions), {})
+    owned = bare.owners[id(module.produced)]
+    assert owned == ("produced",)
+    assert bare.owners == views.owners

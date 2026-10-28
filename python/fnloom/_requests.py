@@ -15,14 +15,15 @@ def output_names(
 
     A function means the node it produces in this driver, matched by identity with
     the node's origin, never by name (Q30): a plain function is its node, and an
-    `@extract_*` function is its producer, not its fields. Every problem is listed
-    at once, sorted, in one message:
+    `@extract_*` function is its producer, not its fields. When a function makes
+    several nodes, the one named like it is its node, as for an alias; otherwise it
+    is an error. Every culprit of every kind is listed once, sorted, in one message:
 
-    - `TypeError` for a bare `str` (Q6), for an item that is neither a `str` nor a
-      function, and for a function that makes several nodes, such as a
-      `@parameterize` one, which lists its rows;
-    - `ValueError` for a function no node of this driver comes from: one of another
-      module, an unselected `@config` variant, or a lambda.
+    - `TypeError` for a bare `str` (Q6), and when any culprit is malformed: an item
+      that is neither a `str` nor a function, or a function that makes several nodes,
+      such as a `@parameterize` one, which lists its rows;
+    - `ValueError` otherwise: a function no node of this driver comes from, such as
+      one of another module, an unselected `@config` variant, or a lambda.
 
     A name is not checked against the graph here: compiling the plan does.
     """
@@ -34,24 +35,21 @@ def output_names(
     if all(isinstance(item, str) for item in items):
         return items  # ty: ignore[invalid-return-type]  # every item was just checked
     names: list[str] = []
-    problems: dict[str, list[str]] = {"foreign": [], "several": [], "absent": []}
+    # Each culprit once, whatever its kind; `malformed` makes the error a `TypeError`.
+    culprits: set[str] = set()
+    malformed = False
     for item in items:
         kind, text = _read(item, views)
         if kind == "name":
             names.append(text)
-        else:
-            problems[kind].append(text)
-    if problems["foreign"]:
-        msg = "final_vars items must be str or a function, got " + ", ".join(
-            sorted(problems["foreign"])
-        )
-        if problems["several"]:
-            msg += "; " + "; ".join(sorted(problems["several"]))
-        raise TypeError(msg)
-    if problems["several"]:
-        raise TypeError("final_vars: " + "; ".join(sorted(problems["several"])))
-    if problems["absent"]:
-        raise ValueError("final_vars: " + "; ".join(sorted(problems["absent"])))
+            continue
+        culprits.add(text)
+        malformed = malformed or kind != "absent"
+    if culprits:
+        if malformed:
+            msg = "final_vars items must be str or a function: "
+            raise TypeError(msg + "; ".join(sorted(culprits)))
+        raise ValueError("final_vars: " + "; ".join(sorted(culprits)))
     return tuple(names)
 
 
@@ -62,10 +60,14 @@ def _read(item: object, views: NodeViews) -> tuple[str, str]:
     if not callable(item):
         return "foreign", f"{type(item).__name__} {item!r}"
     owned = views.owners.get(id(item), ())
-    if len(owned) == 1:
-        return "name", owned[0]
-    if owned:
+    if len(owned) > 1:
+        # An alias, `alias = base`, or a row named like the function: that one node.
+        named = [name for name in owned if name == getattr(item, "__name__", None)]
+        if len(named) == 1:
+            return "name", named[0]
         return "several", _several(item, owned)
+    if owned:
+        return "name", owned[0]
     return "absent", f"{_described(item)} {_why_absent(item, views)}"
 
 

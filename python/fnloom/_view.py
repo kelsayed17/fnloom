@@ -203,12 +203,13 @@ class NodeViews(Mapping[str, NodeView]):
         self,
         functions: Mapping[str, NodeView],
         inputs: Mapping[str, object],
-        generated: AbstractSet[str] = frozenset(),
+        generated: AbstractSet[str] | None = None,
     ) -> None:
         """Holds the function nodes' views, and each input's type by name.
 
         `generated` names the nodes made from a function's output, such as an
         extracted field: they are not what their function stands for in a request.
+        When not given, they are the nodes reading a node of the same function.
         """
         self._functions = functions
         self._inputs = inputs
@@ -234,13 +235,32 @@ class NodeViews(Mapping[str, NodeView]):
         owners = self._owners
         if owners is None:
             built: dict[int, list[str]] = {}
+            generated = self._generated
+            if generated is None:
+                generated = self._derived_generated()
             for name, view in self._functions.items():
-                if view.origin is not None and name not in self._generated:
+                if view.origin is not None and name not in generated:
                     built.setdefault(id(view.origin), []).append(name)
             owners = {key: tuple(sorted(names)) for key, names in built.items()}
             # Two threads may both build it: the two are equal, and one is kept.
             self._owners = owners
         return owners
+
+    def _derived_generated(self) -> frozenset[str]:
+        """The nodes that read a node of their own function: its extracted fields.
+
+        A function cannot read itself, so only a field of its output does.
+        """
+        functions = self._functions
+        return frozenset(
+            name
+            for name, view in functions.items()
+            if any(
+                (producer := functions.get(dep)) is not None
+                and producer.origin is view.origin
+                for dep in view.dependencies
+            )
+        )
 
     @property
     def functions(self) -> Mapping[str, NodeView]:

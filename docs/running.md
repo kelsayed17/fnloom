@@ -45,10 +45,11 @@ driver.execute([pricing.label], inputs={"price": 2.5, "quantity": 4})
 # -> {'label': '10.00 EUR'}
 ```
 
-fnloom matches the function itself, never its name. An `@extract_fields` function means its producer, not its fields. A
-function that makes several nodes, such as a `@parameterize` one, raises a `TypeError` listing its rows, so pass their
-names. A function that makes none, such as one from another module, an unselected `@config` variant or a lambda, raises
-a `ValueError`.
+fnloom matches the function itself, never its name. An `@extract_fields` function means its producer, not its fields.
+A function that makes several nodes raises a `TypeError` listing them, so pass their names, unless one of them is
+named like the function, as an alias or a `@parameterize` row can be: that one is its node. A function that makes
+none, such as one from another module, an unselected `@config` variant or a lambda, raises a `ValueError`. A request
+lists every such problem at once.
 
 Only the nodes your outputs need will run. You must supply every required input on the way, and every name you pass
 must be a node in the graph. A misspelled input is an error, never a value that's quietly ignored.

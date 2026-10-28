@@ -249,6 +249,128 @@ def test_q30_final_vars_given_as_functions() -> None:
     assert run_fnloom([module], [forged], {"a": 1}) == Outcome(None, "ValueError")
 
 
+Q30_IMPORTS = {
+    "hamilton": "from hamilton.function_modifiers import config, extract_fields",
+    "fnloom": "from fnloom import config, extract_fields",
+}
+
+Q30_SOURCE = """
+{imports}
+
+
+def base(x: int) -> int:
+    return x * 10
+
+
+@extract_fields({{"f1": int, "f2": str}})
+def produced(base: int) -> dict:
+    return {{"f1": base, "f2": "s"}}
+
+
+@config.when(k="a")
+def variant__a(base: int) -> int:
+    return base
+
+
+@config.when(k="b")
+def variant__b(base: int) -> int:
+    return -base
+"""
+
+
+def _q30_pair(name: str) -> tuple[types.ModuleType, types.ModuleType]:
+    """The same module written for Hamilton and for fnloom, config `k=a` active."""
+    return (
+        make_module(
+            f"differential_q30_{name}_h",
+            Q30_SOURCE.format(imports=Q30_IMPORTS["hamilton"]),
+        ),
+        make_module(
+            f"differential_q30_{name}_f",
+            Q30_SOURCE.format(imports=Q30_IMPORTS["fnloom"]),
+        ),
+    )
+
+
+def _q30_outcomes(
+    hamilton_module: types.ModuleType,
+    fnloom_module: types.ModuleType,
+    outputs: tuple[str, ...],
+    stray: Callable[..., object] | None = None,
+) -> tuple[Outcome, Outcome]:
+    """Runs `module.<name>` for each name, or `stray`, on both, with `k=a`."""
+
+    def pick(module: types.ModuleType) -> list[Any]:
+        return [stray if stray is not None else getattr(module, n) for n in outputs]
+
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module)
+    fnloom_builder = fnloom.Builder().with_modules(fnloom_module)
+    results: list[Outcome] = []
+    for builder, module in (
+        (hamilton.with_config({"k": "a"}), hamilton_module),
+        (fnloom_builder.with_config({"k": "a"}), fnloom_module),
+    ):
+        try:
+            built = builder.build()
+            result = built.execute(pick(module), inputs={"x": 1})
+        except Exception as error:  # noqa: BLE001  # the exception class is compared
+            results.append(Outcome(None, type(error).__name__))
+        else:
+            results.append(Outcome(dict(result), None))
+    return results[0], results[1]
+
+
+@pytest.mark.deliberate("Q30")
+def test_q30_an_extract_function_is_its_producer_on_both_sides() -> None:
+    """Both map an `@extract_fields` function to its producer (H5.3c)."""
+    hamilton, ours = _q30_outcomes(*_q30_pair("extract"), ("produced",))
+    assert hamilton == Outcome({"produced": {"f1": 10, "f2": "s"}}, None)
+    assert ours == hamilton
+
+
+@pytest.mark.deliberate("Q30")
+def test_q30_functions_no_node_comes_from_raise_value_error_on_both_sides() -> None:
+    """A foreign function, a lambda and an unselected variant: `ValueError` each.
+
+    Hamilton's message is wrong ("materializer", H5.3e) or unhelpful, and its
+    unselected variant is "Unknown nodes" (H5.3d); fnloom names the function and why.
+    """
+    hamilton_module, fnloom_module = _q30_pair("absent")
+    foreign = make_module(
+        "differential_q30_foreign", "def stray(x: int) -> int:\n    return x\n"
+    )
+    for stray in (foreign.stray, lambda: 1):
+        hamilton, ours = _q30_outcomes(hamilton_module, fnloom_module, ("base",), stray)
+        assert hamilton == Outcome(None, "ValueError")
+        assert ours == hamilton
+    hamilton, ours = _q30_outcomes(hamilton_module, fnloom_module, ("variant__b",))
+    assert hamilton == Outcome(None, "ValueError")
+    assert ours == hamilton
+
+
+@pytest.mark.deliberate("Q30")
+def test_q30_a_submodule_function_is_refused_by_hamilton_and_found_by_identity() -> (
+    None
+):
+    """Hamilton refuses a function of a submodule of a package it was given (H5.3f).
+
+    fnloom has no package-wide discovery: it matches the function against the nodes of
+    the module it was given, and accepts it when that module is the submodule.
+    """
+    sub = make_module("q30pkg.sub", "def from_sub(x: int) -> int:\n    return x + 1\n")
+    package = make_module("q30pkg", "from q30pkg.sub import from_sub\n")
+    assert run_hamilton([package], [sub.from_sub], {"x": 1}) == Outcome(
+        None, "ValueError"
+    )
+    assert run_hamilton([package], ["from_sub"], {"x": 1}) == Outcome(
+        {"from_sub": 2}, None
+    )
+    assert run_fnloom([sub], [sub.from_sub], {"x": 1}) == Outcome({"from_sub": 2}, None)
+    # The same function, through a package that holds only an import of it, is no node.
+    with pytest.raises(ValueError, match="has no nodes"):
+        fnloom.build(package)
+
+
 @pytest.mark.deliberate("Q31")
 def test_q31_inputs_and_overrides_are_keyword_only() -> None:
     """Hamilton reads a positional mapping as overrides; fnloom raises `TypeError`."""
