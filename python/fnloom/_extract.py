@@ -380,7 +380,7 @@ def field_names(fn: Callable[..., object], extraction: Extraction) -> tuple[str,
     if isinstance(returns, annotationlib.ForwardRef):
         try:
             returns = typing.evaluate_forward_ref(returns)
-        except NameError, AttributeError:
+        except Exception:  # noqa: BLE001  # an annotation that fails to evaluate gives no names
             return ()
     returns = _types.stripped(returns)
     if not typing.is_typeddict(returns):

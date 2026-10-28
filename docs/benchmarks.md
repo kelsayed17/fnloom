@@ -213,7 +213,7 @@ no prepared plans, runs `execute`, planning included.
 Measured on the machine above, with CPython 3.14.8 and a release build, on 2026-10-28. Wherever both run nodes on the
 loop, which means every `async` row and the `inline` column, fnloom is 20 to 84 times faster than Hamilton on a first
 run and 24 to 90 times faster on a steady one. The smallest gain is on the 100-node layered graph of `async def`
-nodes, 19.6× on the first run in either column. The generated `async def` nodes never suspend. fnloom starts each
+nodes, 19.7× on the first run in either column. The generated `async def` nodes never suspend. fnloom starts each
 node's task eagerly, so a node that doesn't suspend finishes with no turn of the loop, while Hamilton schedules a task
 for every node. Without a custom task factory on the loop, fnloom makes each task directly instead of through
 `loop.create_task`, which took about a tenth off the 1,000-node `async def` rows (steady, 0.882 to 0.785 ms on the
@@ -230,7 +230,7 @@ Hamilton. These are the rows where it's slower:
 | row | Hamilton, first / steady | fnloom `thread`, first / steady | slower by, first / steady | fnloom `inline` |
 | --- | --- | --- | --- | --- |
 | layered, 100, sync | 2.229 / 1.977 | 3.114 / 2.343 | 40% / 19% | 0.098 / 0.068 |
-| layered, 1,000, sync | 22.6 / 21.8 | 24.1 / 23.0 | 6% / 6% | 0.754 / 0.700 |
+| layered, 1,000, sync | 22.6 / 21.8 | 24.1 / 23.0 | 7% / 6% | 0.754 / 0.700 |
 
 Hamilton runs sync nodes on the loop and stops it while each one runs. The thread is what keeps the loop free (Q65),
 so the `thread` column isn't a like-for-like comparison. For a graph of cheap sync nodes, `sync_nodes="inline"` is

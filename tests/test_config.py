@@ -410,6 +410,33 @@ def total(x: int, y: int) -> int:
         driver.prepare(["x"])
 
 
+@pytest.mark.parametrize("annotation", ['"int |"', "\"1 + 'a'\""])
+def test_an_unselected_variant_never_fails_on_its_return_annotation(
+    annotation: str,
+) -> None:
+    """An unselected variant whose annotation does not evaluate gives no names."""
+    source_code = f"""
+from typing import TypeVar
+from fnloom import config, extract_fields
+
+T = TypeVar("T")
+
+@extract_fields()
+@config.when(mode="a")
+def parts__a(n: int) -> {annotation}:
+    return {{}}
+
+@config.default
+def parts__d(n: int) -> int:
+    return n
+
+def total(parts: int) -> int:
+    return parts
+"""
+    built = _built("cfg_bad_annotation", source_code, {"mode": "z"})
+    assert built.execute(["total"], inputs={"n": 2}) == {"total": 2}
+
+
 # Variant `a` gives rows `r1` and `r2`; the default gives only `r1`.
 _ROWS = """
 from fnloom import config, parameterize, value
