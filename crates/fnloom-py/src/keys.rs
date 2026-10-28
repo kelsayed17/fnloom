@@ -170,10 +170,11 @@ impl KeyPlan {
             let Some(node) = this.nodes.get(at) else {
                 continue;
             };
-            if node.stored
-                && let Some(Some(key)) = keys.get(at)
-                && let Some(value) = store_ref.load(py, key)
-            {
+            let found = match keys.get(at) {
+                Some(Some(key)) if node.stored => store_ref.load(py, key),
+                _ => None,
+            };
+            if let Some(value) = found {
                 hits.set_item(node.name.bind(py), value)?;
                 continue;
             }
@@ -195,10 +196,11 @@ impl KeyPlan {
         // names in `versions`, so find those nodes once rather than look each read up.
         let mut given = vec![Given::No; self.nodes.len()];
         for (name, version) in versions.iter() {
-            if let Ok(name) = name.cast::<PyString>()
-                && let Some(&at) = self.index.get(name.to_str()?)
-                && let Some(slot) = given.get_mut(at)
-            {
+            let Ok(name) = name.cast::<PyString>() else {
+                continue;
+            };
+            let at = self.index.get(name.to_str()?).copied();
+            if let Some(slot) = at.and_then(|at| given.get_mut(at)) {
                 *slot = Given::Yes(version_of(&version)?);
             }
         }
