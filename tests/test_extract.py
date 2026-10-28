@@ -1,13 +1,16 @@
 """Tests for `@extract_fields`: the producer, its field nodes and their checks."""
 
 import itertools
-from typing import TYPE_CHECKING, Any, TypedDict
+from typing import TYPE_CHECKING, Any, TypedDict, override
 
 import pytest
 
 import fnloom
 from fnloom import (
     Builder,
+    CacheOutcome,
+    DiskCache,
+    MemoryCache,
     _types,
     config,
     extract_fields,
@@ -22,6 +25,7 @@ from helpers import make_module
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
+    from pathlib import Path
     from types import ModuleType
 
 
@@ -669,3 +673,148 @@ def test_an_unresolved_typed_dict_field_names_the_producer() -> None:
     assert raised.value.__notes__ == [
         "resolving the fields of extract_unresolved.Broken, returned by 'p'"
     ]
+
+
+def test_every_producer_with_an_unresolved_typed_dict_is_named() -> None:
+    """Two producers whose `TypedDict` fields do not resolve: one error, both named."""
+    module = make_module(
+        "extract_unresolved_two",
+        """
+        from typing import TypedDict
+        from fnloom import extract_fields
+
+        class Broken(TypedDict):
+            x: Missing
+
+        class Other(TypedDict):
+            y: Absent
+
+        @extract_fields("y")
+        def q() -> Other:
+            return {"y": 1}
+
+        @extract_fields("x")
+        def p() -> Broken:
+            return {"x": 1}
+        """,
+    )
+    with pytest.raises(NameError, match="Missing") as raised:
+        fnloom.build(module)
+    assert raised.value.__notes__ == [
+        (
+            "resolving the fields of extract_unresolved_two.Broken, returned by 'p'; "
+            "extract_unresolved_two.Other, returned by 'q'"
+        )
+    ]
+
+
+class _CountingCache(MemoryCache):
+    """A memory store that counts each `put`, so the native walk is not used."""
+
+    def __init__(self) -> None:
+        """Starts empty, with no puts."""
+        super().__init__()
+        self.puts = 0
+
+    @override
+    def put(self, key: bytes, value: object) -> None:
+        self.puts += 1
+        super().put(key, value)
+
+
+# The calls are recorded in a global, so each node pins its code version.
+_CACHED = """
+from fnloom import cache, extract_fields
+
+CALLS: list[str] = []
+
+@cache(version="1")
+@extract_fields({{"mean": {declared}}}, fill_with={fill})
+def averages(x: int) -> dict:
+    CALLS.append("averages")
+    return {{}}
+
+@cache(version="1")
+def doubled(mean: object) -> object:
+    CALLS.append("doubled")
+    return 2 * mean
+"""
+
+
+def _cached(name: str, fill: str = "0.0", declared: str = "float") -> ModuleType:
+    return make_module(name, _CACHED.format(fill=fill, declared=declared))
+
+
+def test_a_rebuild_with_another_extraction_is_not_served_stale(tmp_path: Path) -> None:
+    """A new fill shows, and a new declared type is checked, with a `DiskCache`."""
+    store = DiskCache(tmp_path / "cache")
+    for fill in ("0.0", "1.0"):
+        module = _cached("extract_cached", fill=fill)
+        driver = Builder().with_modules(module).with_cache(store).build()
+        assert driver.execute(["mean", "doubled"], inputs={"x": 1}) == {
+            "mean": float(fill),
+            "doubled": 2 * float(fill),
+        }
+    module = _cached("extract_cached", declared="str")
+    driver = Builder().with_modules(module).with_cache(store).build()
+    with pytest.raises(ValueError, match=r"'mean' as float, but it is declared str"):
+        driver.execute(["mean"], inputs={"x": 1})
+
+
+@pytest.mark.parametrize("kind", ["counting", "native"])
+def test_a_field_is_keyed_never_stored_and_its_consumer_hits(kind: str) -> None:
+    """The consumer of a field hits on a warm run; the field is never stored."""
+    store = _CountingCache() if kind == "counting" else MemoryCache()
+    module = _cached(f"extract_keyed_{kind}")
+    driver = Builder().with_modules(module).with_cache(store).build()
+    assert driver.execute(["doubled"], inputs={"x": 1}) == {"doubled": 0.0}
+    assert module.CALLS == ["averages", "doubled"]
+    assert driver.execute(["doubled"], inputs={"x": 1}) == {"doubled": 0.0}
+    assert module.CALLS == ["averages", "doubled"]
+    if isinstance(store, _CountingCache):
+        # One put for each node that ran, the producer and the consumer; never
+        # one for the field.
+        assert store.puts == len(module.CALLS)
+    module.CALLS.clear()
+    # A request for the field runs it, from the stored producer, every time.
+    assert driver.execute(["mean"], inputs={"x": 1}) == {"mean": 0.0}
+    assert module.CALLS == []
+    assert driver.explain_cache(["mean", "doubled"], inputs={"x": 1}) == {
+        "averages": CacheOutcome("hit", None),
+        "doubled": CacheOutcome("hit", None),
+        "mean": CacheOutcome(
+            "miss", "extracted field: always recomputed from its producer"
+        ),
+    }
+
+
+def test_an_unfingerprintable_fill_makes_the_field_uncacheable() -> None:
+    """A fill with no fingerprint leaves the field, and what reads it, uncacheable."""
+    module = _cached("extract_unkeyed", fill="object()")
+    driver = Builder().with_modules(module).with_cache(MemoryCache()).build()
+    outcomes = driver.explain_cache(["doubled"], inputs={"x": 1})
+    assert outcomes["mean"].status == "uncacheable"
+    assert outcomes["mean"].reason is not None
+    assert outcomes["mean"].reason.startswith("fill_with of field 'mean'")
+    assert outcomes["doubled"] == CacheOutcome(
+        "uncacheable", "reads uncacheable 'mean'"
+    )
+
+
+def test_the_producer_format_does_not_apply_to_fields(tmp_path: Path) -> None:
+    """A producer's `@cache(format=...)` stores the producer only."""
+    module = make_module(
+        "extract_format",
+        """
+        from fnloom import cache, extract_fields
+
+        @cache(format="json")
+        @extract_fields({"a": int})
+        def p() -> dict:
+            return {"a": 1}
+        """,
+    )
+    store = DiskCache(tmp_path / "cache")
+    driver = Builder().with_modules(module).with_cache(store).build()
+    assert driver.execute(["a", "p"]) == {"a": 1, "p": {"a": 1}}
+    assert driver.execute(["a", "p"]) == {"a": 1, "p": {"a": 1}}

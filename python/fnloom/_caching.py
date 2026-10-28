@@ -7,7 +7,9 @@ plan's `recompute` nodes, in a nested run, then computes every key, walks back f
 the outputs to the first nodes
 the store holds, and runs the plan with those as overrides, so the core prunes their
 upstream. Each `default` node that runs is stored under its key as it succeeds;
-nothing else is ever looked up, so nothing else is stored. `explain`
+nothing else is ever looked up, so nothing else is stored. A field node of
+`@extract_fields` is keyed, so what reads it chains from its key, but is never
+looked up or stored: it always runs, so its check always runs. `explain`
 reports what a run would do with each computed node, running nothing.
 
 The cache never fails a run: a store that raises is a miss or a skipped write,
@@ -21,7 +23,7 @@ from collections import abc
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
 
-from fnloom import _core
+from fnloom import _core, _extract
 from fnloom._codeversion import UncacheableError, code_version
 from fnloom._decorators import CacheBehavior, CachePolicy, Source, decorations
 from fnloom._fingerprint import fingerprint, forget_class_versions
@@ -55,7 +57,10 @@ class CacheOutcome(NamedTuple):
         status: `"hit"`: the store holds the node's key. `"miss"`: it does not, so
             the node runs and is stored; a `recompute` node is always one, with the
             reason `"policy recompute"`, and is never stored. `"uncacheable"`: the
-            node has no key, so it always runs and is never stored. `"unknown"`:
+            node has no key, so it always runs and is never stored. An
+            `@extract_fields` field node is always a miss, with the reason
+            `"extracted field: always recomputed from its producer"`: it is
+            keyed but never stored, so its check runs on every run. `"unknown"`:
             the key depends on the result of a `recompute` node, which only a run
             knows.
         reason: Why a node is uncacheable or unknown, or is a `recompute` miss;
@@ -69,6 +74,11 @@ class CacheOutcome(NamedTuple):
 # The outcome of a `recompute` node with a key, or one that only a run would know.
 _RECOMPUTE = CacheOutcome("miss", "policy recompute")
 
+# The outcome of an extracted field with a key: it always runs, never stored.
+_EXTRACTED = CacheOutcome(
+    "miss", "extracted field: always recomputed from its producer"
+)
+
 
 @dataclass(frozen=True, slots=True)
 class NodeKey:
@@ -81,12 +91,15 @@ class NodeKey:
         reason: Why `static` is `None`, else `None`.
         behavior: The node's cache behavior.
         params: The key parameters, in declaration order, the ignored ones left out.
+        stored: Whether a `default` node is looked up and stored; False for an
+            extracted field, which is keyed but always runs.
     """
 
     static: bytes | None
     reason: str | None
     behavior: CacheBehavior
     params: tuple[KeyParam, ...]
+    stored: bool = True
 
 
 def node_keys(nodes: Sequence[NodeDef]) -> dict[str, NodeKey]:
@@ -99,6 +112,8 @@ def node_keys(nodes: Sequence[NodeDef]) -> dict[str, NodeKey]:
     keys: dict[str, NodeKey] = {}
     for node in nodes:
         policy = decorations(node.origin).cache or _DEFAULT_POLICY
+        if _extract.is_generated(node):
+            policy = _field_policy(policy)
         code: bytes | UncacheableError
         if policy.behavior == "disable":
             # Never keyed, so its code is never read.
@@ -125,6 +140,43 @@ def node_keys(nodes: Sequence[NodeDef]) -> dict[str, NodeKey]:
     return keys
 
 
+def _field_policy(producer: CachePolicy) -> CachePolicy:
+    """An extracted field's policy: keyed like its producer, never stored.
+
+    `disable` carries over; `recompute`, `ignore` and the format do not, since a
+    field always runs and is never stored. A pinned `version` carries over.
+    """
+    behavior: CacheBehavior = "disable" if producer.behavior == "disable" else "default"
+    return CachePolicy(behavior, frozenset(), producer.version)
+
+
+def _extraction_parts(node: NodeDef) -> tuple[list[bytes], str | None]:
+    """An extracted field's own key parts, or why it has no key.
+
+    Its field, its declared type's `repr` and its fill's fingerprint, or a marker
+    for no fill: a rebuild changing any of them changes the key of what reads it.
+    """
+    payload = _extract.extractor(node)
+    if payload is None:
+        return [], None
+    parts = [b"extract", payload.field.encode(), repr(payload.declared).encode()]
+    if payload.fill is _extract.MISSING_FILL:
+        return [*parts, b"no fill", b""], None
+    try:
+        return [*parts, b"fill", fingerprint(payload.fill)], None
+    except _core.UnfingerprintableError as error:
+        return parts, f"fill_with of field {payload.field!r}: {error}"
+    except Exception as error:  # noqa: BLE001  # a failing fingerprint: uncacheable
+        reason = (
+            f"cannot fingerprint fill_with of field {payload.field!r} of node "
+            f"{node.name!r}: {error!r}"
+        )
+        # Up: `_extraction_parts`, `_node_key`, `node_keys`, `Cache.of`,
+        # `Builder.build`, its caller.
+        _warn_build(reason, stacklevel=7)
+        return parts, reason
+
+
 def _node_key(
     node: NodeDef, policy: CachePolicy, code: bytes | UncacheableError
 ) -> NodeKey:
@@ -149,6 +201,8 @@ def _node_key(
             # Up: `_node_key`, `node_keys`, `Cache.of`, `Builder.build`, its caller.
             _warn_build(reason, stacklevel=6)
         params.append((param.name, None, version))
+    extraction, unkeyed = _extraction_parts(node)
+    reason = reason or unkeyed
     static = None
     if policy.behavior == "disable":
         reason = "policy disable"
@@ -171,9 +225,11 @@ def _node_key(
                 code,
                 policy.behavior.encode(),
                 *framed,
+                *extraction,
             ]
         )
-    return NodeKey(static, reason, policy.behavior, tuple(params))
+    stored = not extraction
+    return NodeKey(static, reason, policy.behavior, tuple(params), stored)
 
 
 def _formats(store: CacheStore, nodes: Sequence[NodeDef]) -> dict[str, Format]:
@@ -187,7 +243,8 @@ def _formats(store: CacheStore, nodes: Sequence[NodeDef]) -> dict[str, Format]:
     formats: dict[str, Format] = {}
     problems: list[str] = []
     for node in nodes:
-        policy = decorations(node.origin).cache
+        # A field is never stored, so its producer's format does not apply.
+        policy = None if _extract.is_generated(node) else decorations(node.origin).cache
         wanted = None if policy is None else policy.format
         if wanted is None or isinstance(store, MemoryCache):
             continue
@@ -317,7 +374,7 @@ class CacheRun:
                     name,
                     k.static,
                     [source for _, source, _ in k.params if source is not None],
-                    k.behavior == "default",
+                    k.behavior == "default" and k.stored,
                     list(cache.sources[name]),
                 )
                 for name, k in zip(computed, keys, strict=True)
@@ -331,6 +388,11 @@ class CacheRun:
         # In plan order.
         self._node_keys = dict(zip(computed, keys, strict=True))
         self._behaviors = {name: k.behavior for name, k in self._node_keys.items()}
+        # Looked up and stored: a `default` node that is no extracted field.
+        self._stored = {
+            name: k.behavior == "default" and k.stored
+            for name, k in self._node_keys.items()
+        }
         self._sources = {name: cache.sources[name] for name in computed}
         # Every input and override a key reads gets a version, so a version that
         # is missing only ever means an optional input not supplied.
@@ -427,6 +489,8 @@ class CacheRun:
             key = keys[name]
             if key is None:
                 outcome = self._keyless(k, reasons, outcomes)
+            elif not k.stored:
+                outcome = _EXTRACTED
             elif k.behavior == "default":
                 found = self._get(key, name, warned) is not MISSING
                 outcome = CacheOutcome("hit" if found else "miss", None)
@@ -528,7 +592,7 @@ class CacheRun:
                 hits[name] = known[name]
                 continue
             key = keys[name]
-            if key is not None and self._behaviors[name] == "default":
+            if key is not None and self._stored[name]:
                 value = self._get(key, name, warned)
                 if value is not MISSING:
                     hits[name] = value
@@ -568,16 +632,17 @@ class CacheRun:
     ) -> Callable[[str, object], None]:
         """What stores each computed value as its node succeeds, and records it."""
         store = self._store
-        behaviors = self._behaviors
+        stored = self._stored
         formats = self._formats
 
         def on_value(name: str, value: object) -> None:
             if values is not None:
                 values[name] = value
             # Only a `default` node is ever looked up, so only one is stored: a
-            # `disable` node has no key, and a `recompute` node always runs.
+            # `disable` node has no key, and a `recompute` node or an extracted
+            # field always runs.
             key = keys[name]
-            if key is None or behaviors[name] != "default":
+            if key is None or not stored[name]:
                 return
             try:
                 if (format_ := formats.get(name)) is not None:

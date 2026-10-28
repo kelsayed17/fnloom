@@ -1479,6 +1479,19 @@ def test_q61_a_typed_dict_takes_any_dict() -> None:
         htypes.check_input_type(_Coordinates, {"x": 1})
     assert value_matches(_Coordinates, {"x": 1})
     assert not value_matches(_Coordinates, [("x", 1)])
+    # And through a driver's real input check.
+    module = make_module(
+        "differential_q61_td_input",
+        """
+        def count(point: Coordinates) -> int:
+            return len(point)
+        """,
+    )
+    setattr(module, "Coordinates", _Coordinates)  # noqa: B010  # a module attribute ty cannot see
+    driver = fnloom.build(module)
+    assert driver.execute(["count"], inputs={"point": {"x": 1}}) == {"count": 1}
+    with pytest.raises(ValueError, match=r"point: expected .*_Coordinates, got list"):
+        driver.execute(["count"], inputs={"point": [("x", 1)]})
 
 
 _FILLED = """
@@ -1518,28 +1531,35 @@ def test_q62_fill_never_mutates_and_none_fills() -> None:
 _TAGGED = """
 {decorator}
 
-@tag(owner="z")
-@extract_fields({{"a": int}})
+{first}
+{second}
 def p() -> dict:
     return {{"a": 1}}
 """
+_TAG_ORDERS = [
+    ('@tag(owner="z")', '@extract_fields({"a": int})'),
+    ('@extract_fields({"a": int})', '@tag(owner="z")'),
+]
 
 
 @pytest.mark.deliberate("Q63")
 def test_q63_tags_land_on_the_producer_too() -> None:
-    """Hamilton tags only the field nodes; fnloom tags the producer as well."""
-    hamilton_module = make_module(
-        "differential_q63_h", _TAGGED.format(decorator=_HAMILTON_EXTRACT)
-    )
-    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
-    hamilton_tags = {
-        v.name: {k: t for k, t in v.tags.items() if not k.startswith("module")}
-        for v in hamilton.list_available_variables()
-    }
-    assert hamilton_tags == {"a": {"owner": "z"}, "p": {}}
-    fnloom_module = make_module(
-        "differential_q63_f", _TAGGED.format(decorator=_FNLOOM_EXTRACT)
-    )
-    driver = fnloom.build(fnloom_module)
-    assert driver.nodes["a"].tags == {"owner": "z"}
-    assert driver.nodes["p"].tags == {"owner": "z"}
+    """Hamilton tags only the field nodes, in either order; fnloom the producer too."""
+    for index, (first, second) in enumerate(_TAG_ORDERS):
+        hamilton_module = make_module(
+            f"differential_q63_h{index}",
+            _TAGGED.format(decorator=_HAMILTON_EXTRACT, first=first, second=second),
+        )
+        hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+        hamilton_tags = {
+            v.name: {k: t for k, t in v.tags.items() if not k.startswith("module")}
+            for v in hamilton.list_available_variables()
+        }
+        assert hamilton_tags == {"a": {"owner": "z"}, "p": {}}, (first, second)
+        fnloom_module = make_module(
+            f"differential_q63_f{index}",
+            _TAGGED.format(decorator=_FNLOOM_EXTRACT, first=first, second=second),
+        )
+        driver = fnloom.build(fnloom_module)
+        assert driver.nodes["a"].tags == {"owner": "z"}
+        assert driver.nodes["p"].tags == {"owner": "z"}

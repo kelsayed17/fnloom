@@ -247,8 +247,10 @@ def _node_defs(
             )
         if recorded.extract is None:
             return [node]
-        # Lowered after the variant is selected; resolved and checked by `resolve`.
-        return _extract.lower(node, recorded.extract, check=False)
+        # Lowered after the variant is selected. These field nodes are placeholders,
+        # used only to find duplicate names; `resolve` lowers them again, typed
+        # from the resolved return, with their checks.
+        return _extract.lower(node, recorded.extract, resolved=False)
     nodes: list[NodeDef] = []
     for node_name, row in recorded.rows.items():
         params = _bind(parameters, row)
@@ -267,11 +269,12 @@ def _node_defs(
             )
         )
     if recorded.extract is not None:
-        # At most one row: `@parameterize` and `@extract_fields` refuse more.
+        # At most one row: `@parameterize` and `@extract_fields` refuse more. The
+        # field nodes are placeholders for duplicate detection, as above.
         return [
             lowered
             for node in nodes
-            for lowered in _extract.lower(node, recorded.extract, check=False)
+            for lowered in _extract.lower(node, recorded.extract, resolved=False)
         ]
     return nodes
 
@@ -561,25 +564,51 @@ def _lowered(nodes: list[NodeDef]) -> list[NodeDef]:
         return nodes
     lowered: list[NodeDef] = []
     problems: list[str] = []
+    # Each producer whose `TypedDict` field types do not resolve, with the error.
+    unresolved: list[tuple[str, _Unresolved, str]] = []
     for node in nodes:
         extraction = decorations(node.origin).extract
         if extraction is None:
             lowered.append(node)
             continue
         try:
-            lowered.extend(_extract.lower(node, extraction, check=True))
+            lowered.extend(_extract.lower(node, extraction, resolved=True))
         except ValueError as error:
             problems.append(str(error))
+        except (NameError, AttributeError) as error:
+            unresolved.append((node.name, error, _extract.returned_type(node)))
+    if unresolved:
+        _raise_unresolved(unresolved)
     if problems:
         raise ValueError("; ".join(sorted(problems)))
+    # A field a forward-referenced `TypedDict` gives is first known here.
+    _refuse_duplicates(lowered)
+    return lowered
+
+
+def _refuse_duplicates(nodes: list[NodeDef]) -> None:
+    """`ValueError` naming every node name defined twice in `nodes`, sorted."""
     seen: dict[str, NodeDef] = {}
     clashes: list[str] = []
-    for node in lowered:
+    for node in nodes:
         if node.name in seen:
             clashes.append(_duplicate(seen[node.name], node))
         else:
             seen[node.name] = node
     if clashes:
-        # A field a forward-referenced `TypedDict` gives is first known here.
         raise ValueError("; ".join(sorted(clashes)))
-    return lowered
+
+
+def _raise_unresolved(unresolved: list[tuple[str, _Unresolved, str]]) -> None:
+    """Raises the first failing producer's error, by name, as `resolve` does.
+
+    With one note naming every producer whose `TypedDict` fields do not resolve;
+    each failure is (producer name, its error, its return type as shown).
+    """
+    unresolved.sort(key=lambda failure: failure[0])
+    listed = "; ".join(
+        f"{shown}, returned by {name!r}" for name, _, shown in unresolved
+    )
+    error = unresolved[0][1]
+    error.add_note(f"resolving the fields of {listed}")
+    raise error

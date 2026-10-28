@@ -80,6 +80,21 @@ class _Extractor:
         self._cls = _types.plain_class(declared)
         self._fill = fill
 
+    @property
+    def field(self) -> str:
+        """The field this node reads."""
+        return self._field
+
+    @property
+    def declared(self) -> object:
+        """The field's declared type, which its value is checked against."""
+        return self._declared
+
+    @property
+    def fill(self) -> object:
+        """The value of a missing field, or `MISSING_FILL` for none."""
+        return self._fill
+
     def __call__(self, /, **values: object) -> object:
         """The field's value; `ValueError` when it is missing or of the wrong type."""
         # Any value with `in` and `[]` will do, as in Hamilton; another is named.
@@ -318,12 +333,8 @@ def _field_types(producer: NodeDef, extraction: Extraction) -> list[tuple[str, o
         raise ValueError(problem)
     returns = _types.stripped(producer.returns)
     if typing.is_typeddict(returns):
-        try:
-            given = typing.get_type_hints(returns)
-        except (NameError, AttributeError) as error:
-            shown = inspect.formatannotation(returns)
-            error.add_note(f"resolving the fields of {shown}, returned by {label}")
-            raise
+        # A field type that does not resolve raises; `_scan` names every producer.
+        given = typing.get_type_hints(returns)
         items = extraction.items or tuple((name, None, None) for name in sorted(given))
     else:
         given = None
@@ -349,17 +360,21 @@ def _field_types(producer: NodeDef, extraction: Extraction) -> list[tuple[str, o
     return typed
 
 
-def lower(producer: NodeDef, extraction: Extraction, *, check: bool) -> list[NodeDef]:
+def lower(
+    producer: NodeDef, extraction: Extraction, *, resolved: bool
+) -> list[NodeDef]:
     """`producer`, unchanged, then one generated node per extracted field.
 
     Each generated node reads the producer under its name, has the producer's
-    origin, module, tags and config, and an `_Extractor` payload. With `check`,
+    origin, module, tags and config, and an `_Extractor` payload. With `resolved`,
     `producer`'s annotations are resolved: each field's type is read from the
     return, and a declared type it cannot feed is a `ValueError` naming every
-    such field. Without, as when scanning, a field the decorator gave no type is
-    typed `Any`, and nothing is checked yet.
+    such field; a `TypedDict` field type that does not resolve raises its
+    `NameError` or `AttributeError`. Without, as when scanning, the field nodes
+    are placeholders, used only to find duplicate names: a field the decorator
+    gave no type is typed `Any`, and nothing is checked yet.
     """
-    if check:
+    if resolved:
         typed = _field_types(producer, extraction)
     else:
         items = extraction.items
@@ -393,3 +408,14 @@ def lower(producer: NodeDef, extraction: Extraction, *, check: bool) -> list[Nod
 def is_generated(node: NodeDef) -> bool:
     """Whether `node` is a field node `lower` made, not a function's own."""
     return isinstance(node.payload, _Extractor)
+
+
+def extractor(node: NodeDef) -> _Extractor | None:
+    """The payload of a field node `lower` made; `None` for any other node."""
+    payload = node.payload
+    return payload if isinstance(payload, _Extractor) else None
+
+
+def returned_type(node: NodeDef) -> str:
+    """`node`'s return type as an error shows it."""
+    return inspect.formatannotation(_types.stripped(node.returns))
