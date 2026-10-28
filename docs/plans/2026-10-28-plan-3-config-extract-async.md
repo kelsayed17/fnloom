@@ -1,7 +1,7 @@
 # fnloom Plan 3: config, extract and async
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or
-> superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [x]`) syntax for tracking.
+> superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Status:** done. Every task below was built and tested on the `claude/plan-3-config-extract-async` branch on
 2026-10-28, one commit per task with its review's fixes on top. The plan is kept as written, as the record of what

@@ -26,7 +26,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - `@extract_fields` splits a node's mapping into one node per field. Each field's value is checked against its
   declared type on every run, even with input checks off, and declared types are checked at build against a
   `TypedDict` or `dict[str, T]` return (Q61). A `Mapping[str, T]` return works. `fill_with` never changes the
-  producer's value, and `None` is a fill (Q62).
+  producer's value, and `None` is a fill (Q62). With a cache, a field or column is never stored: it reruns from its
+  cached producer, so its check always runs, and its key covers its name, declared type and fill.
 - `@extract_columns` splits any value with `__getitem__`, such as a pandas or polars frame or a mapping, into one node
   per column, with no registry or extension to load (Q64). A missing column raises `ValueError` when run, naming the
   columns the producer did return. `@tag` on an `@extract_*` function tags the producer and every field or column
@@ -44,10 +45,6 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - A `TypedDict`-typed input or override accepts any `dict`, its keys unchecked, as the shallow container checks do.
   Before, every value failed the check, so such an input could never be supplied (Q61).
 - `build()` still refuses a graph with an `async def` node, and its `ValueError` now names `build_async()` (Q32).
-- Cache keys cover extraction: a field or column node of `@extract_fields` or `@extract_columns` is keyed by its
-  producer's key, its decorator, its name, its declared type and its fill, and what reads it is keyed from it, so a
-  rebuild changing any of them misses. The field node itself is never stored: it reruns from its cached producer, so
-  its type check runs on every run.
 - A cold cached run is 2.7 to 2.9 times faster with `MemoryCache`, and a warm one 2.1 to 3.3 times faster: a plain
   `MemoryCache` keeps its entries in the native extension, which walks it and stores each result with no call into
   Python per node (issue #10). A subclass of `MemoryCache` is used through its methods, like any other store.

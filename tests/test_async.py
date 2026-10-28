@@ -919,6 +919,83 @@ def test_async_cached_failure_stores_nothing_for_the_failed_node(
     assert driver.explain_cache(["b"], inputs={"x": 1}) == {"a": hit, "b": hit}
 
 
+CACHED_LATE = """
+import asyncio
+import threading
+
+from fnloom import cache
+
+STARTED = threading.Event()
+RELEASE = threading.Event()
+DONE = threading.Event()
+
+
+def a(x: int) -> int:
+    return x + 1
+
+
+# A version, so reading the events leaves each node cacheable.
+@cache(version="1")
+async def b(a: int) -> int:
+    assert await asyncio.to_thread(STARTED.wait, 10.0)
+    raise KeyError("b")
+
+
+@cache(version="1")
+def late(x: int) -> int:
+    STARTED.set()
+    RELEASE.wait(10.0)
+    DONE.set()
+    return x
+
+
+def c(b: int, late: int) -> int:
+    return b + late
+"""
+
+
+@pytest.mark.parametrize("plain", [True, False], ids=["memory", "subclass"])
+def test_async_cached_failure_stores_nothing_for_a_thread_finishing_late(
+    *, plain: bool
+) -> None:
+    """In `thread` mode, a sync sibling that finishes after the failure stores nothing.
+
+    Neither the failed node nor the late sibling is stored; `a`, which succeeded
+    before the failure, is.
+    """
+    module = make_module("async_cached_late", CACHED_LATE)
+    store = fnloom.MemoryCache() if plain else _CountingCache()
+    driver = (
+        fnloom.Builder()
+        .with_modules(module)
+        .with_cache(store)
+        .build_async(sync_nodes="thread")
+    )
+
+    async def scenario() -> None:
+        with pytest.raises(KeyError) as info:
+            await driver.execute(["c"], inputs={"x": 1})
+        assert info.value.__notes__ == ["in node 'b'"]
+        # The sibling still runs in its thread; let it finish, and its future's
+        # callback run on the loop.
+        assert not module.DONE.is_set()
+        module.RELEASE.set()
+        assert await asyncio.to_thread(module.DONE.wait, PATIENCE)
+        for _ in range(3):
+            await asyncio.sleep(0)
+
+    _run(scenario())
+    miss = fnloom.CacheOutcome("miss", None)
+    assert driver.explain_cache(["c"], inputs={"x": 1}) == {
+        "a": fnloom.CacheOutcome("hit", None),
+        "b": miss,
+        "c": miss,
+        "late": miss,
+    }
+    if isinstance(store, _CountingCache):
+        assert store.puts == 1
+
+
 RECOMPUTED = """
 import asyncio
 from pathlib import Path

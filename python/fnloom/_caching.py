@@ -337,7 +337,8 @@ class Begun:
         plan: The core plan to run: the request's, with the hits as overrides.
         overrides: The run's overrides and the hits, by name.
         hits: The values loaded from the store or computed by the pre-run, by name.
-        keys: Each computed node's key, by name; empty on the binding's walk.
+        keys: Each computed node's key, by name; empty on the binding's walk,
+            which keeps them in `pending`.
         pending: On the binding's walk, the keys it stores as the core run calls
             it; `None` when `finish` stores each value instead.
         warned: The nodes this run has already warned about.
@@ -557,10 +558,14 @@ class CacheRun:
         Only a `default` node is ever looked up, so only one is stored: a
         `disable` node has no key, and a `recompute` node or an extracted field
         always runs. A store that raises skips the write, and warns.
+
+        For a run begun without `pending` only: the binding's walk stores
+        through its own keys. A name the run has no key for is a `KeyError`, so
+        a run and a plan that disagree never skip a store silently.
         """
         if begun.values is not None:
             begun.values[name] = value
-        key = begun.keys.get(name)
+        key = begun.keys[name]
         if key is None or not self._stored[name]:
             return
         try:
