@@ -28,7 +28,7 @@ from typing import (
 
 from fnloom import _async, _checks, _core, _hooks, _steps, _types, _wrappers
 from fnloom._caching import Cache, CacheOutcome, CacheRun
-from fnloom._decorators import Source
+from fnloom._decorators import Source, Value
 from fnloom._defaults import default_problems
 from fnloom._drawing import Drawing, Mark, drawing, with_context
 from fnloom._export import export
@@ -2298,6 +2298,78 @@ def _checked_namespaces(
     return tuple(checked)
 
 
+def _checked_bind(namespace: str, bind: object) -> dict[str, Source | Value]:
+    """`bind` for `namespace`, as a dict; see `Builder.with_modules`."""
+    if not isinstance(bind, Mapping):
+        msg = (
+            "bind must be a mapping of names to source(...) or value(...), "
+            f"got {type(bind).__name__}"
+        )
+        raise TypeError(msg)
+    problems: list[str] = []
+    wrong = False
+    for key, binding in typing.cast("Mapping[object, object]", bind).items():
+        if not isinstance(key, str) or not key.isidentifier():
+            problems.append(f"bind key {key!r} under {namespace!r} is no identifier")
+        elif not isinstance(binding, (Source, Value)):
+            wrong = True
+            problems.append(
+                f"bind {key!r} under {namespace!r} must be source(...) or value(...), "
+                f"got {type(binding).__name__}"
+            )
+    if problems:
+        msg = "; ".join(sorted(problems))
+        raise TypeError(msg) if wrong else ValueError(msg)
+    return dict(typing.cast("Mapping[str, Source | Value]", bind))
+
+
+def _checked_bound(
+    bound: Mapping[str, Mapping[str, Source | Value]] | None,
+) -> Mapping[str, Mapping[str, Source | Value]]:
+    """Each namespace's `bind=`, checked and read-only (Q112)."""
+    if bound is None or not bound:
+        return MappingProxyType[str, Mapping[str, Source | Value]]({})
+    return MappingProxyType(
+        {
+            checked_namespace(namespace) or "": MappingProxyType(
+                _checked_bind(namespace, bind)
+            )
+            for namespace, bind in bound.items()
+        }
+    )
+
+
+def _bound_with(
+    bound: Mapping[str, Mapping[str, Source | Value]],
+    namespace: str,
+    bind: Mapping[str, Source | Value],
+) -> dict[str, Mapping[str, Source | Value]]:
+    """`bound` with `bind` added under `namespace`; a key bound otherwise is refused."""
+    added = _checked_bind(namespace, bind)
+    current = bound.get(namespace, {})
+    if clashes := sorted(
+        key
+        for key in added.keys() & current.keys()
+        if not _steps.same_binding(added[key], current[key])
+    ):
+        listed = ", ".join(repr(key) for key in clashes)
+        msg = f"namespace {namespace!r} already binds {listed} otherwise"
+        raise ValueError(msg)
+    return {**bound, namespace: {**current, **added}}
+
+
+def _refuse_unread(
+    bound: Mapping[str, Mapping[str, Source | Value]], used: Mapping[str, set[str]]
+) -> None:
+    """`ValueError` naming each bound name no node of its namespace reads (Q112)."""
+    if unread := sorted(
+        f"bind names {key!r} under namespace {namespace!r}, which no node there reads"
+        for namespace, bind in bound.items()
+        for key in bind.keys() - used.get(namespace, set())
+    ):
+        raise ValueError("; ".join(unread))
+
+
 def _counted(count: int, noun: str) -> str:
     """`count` and `noun`, plural unless it is one: `1 module`, `2 modules`."""
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
@@ -2321,16 +2393,19 @@ def _builder_of[R](  # noqa: PLR0913, PLR0917  # pickle passes each part positio
     functions: tuple[FunctionReference, ...] = (),
     namespaces: tuple[str | None, ...] = (),
     result_builder: _ResultBuilder[R] | None = None,
+    bound: Mapping[str, Mapping[str, Source | Value]] | None = None,
 ) -> Builder[R]:
     """A pickled builder, its modules imported again by name, its functions too.
 
     `namespaces` holds each module's namespace, in order, or is empty for none.
-    `result_builder` pickles by Python's own rules, as a hook does.
+    `result_builder` pickles by Python's own rules, as a hook does, and so do the
+    values `bound` holds, each namespace's `bind=`.
     """
     modules = tuple(importlib.import_module(name) for name in names)
     return Builder(
         modules,
         namespaces=namespaces,
+        bound=bound,
         store=store,
         config=config,
         functions=from_references(functions),
@@ -2389,6 +2464,7 @@ class Builder[R = dict[str, object]]:
         modules: tuple[ModuleType, ...] = (),
         *,
         namespaces: Sequence[str | None] = (),
+        bound: Mapping[str, Mapping[str, Source | Value]] | None = None,
         functions: Sequence[FunctionSource] = (),
         check_inputs: bool = True,
         check_overrides: bool = True,
@@ -2408,7 +2484,8 @@ class Builder[R = dict[str, object]]:
 
         `namespaces` holds each module's namespace, in order, or is empty when
         none has one (see `with_modules`); a `ValueError` when it is given with
-        another length, or holds a bad namespace.
+        another length, or holds a bad namespace. `bound` holds each namespace's
+        `bind=`, checked as `with_modules` checks it.
         `functions` are the node sources of `with_functions`. `store`, when
         given, caches the results of the driver's runs in it.
         `config`, copied, selects `@config.when*` variants (see `with_config`).
@@ -2425,6 +2502,7 @@ class Builder[R = dict[str, object]]:
         """
         self._modules = _checked_modules(modules)
         self._namespaces = _checked_namespaces(namespaces, len(self._modules))
+        self._bound = _checked_bound(bound)
         self._functions = checked_functions(functions)
         self._check_inputs = check_inputs
         self._check_overrides = check_overrides
@@ -2455,6 +2533,7 @@ class Builder[R = dict[str, object]]:
             tuple[FunctionReference, ...],
             tuple[str | None, ...],
             _ResultBuilder[R] | None,
+            Mapping[str, Mapping[str, Source | Value]],
         ],
     ]:
         """The modules' names and namespaces, the functions' references, the settings.
@@ -2478,6 +2557,7 @@ class Builder[R = dict[str, object]]:
             references(self._functions),
             self._namespaces,
             self._result_builder,
+            self._bound,
         )
 
     def _settings(self) -> _Settings:
@@ -2495,11 +2575,12 @@ class Builder[R = dict[str, object]]:
             "node_wrappers": self._wrappers,
         }
 
-    def _with(
+    def _with(  # noqa: PLR0913  # keyword-only, one per builder part
         self,
         modules: tuple[ModuleType, ...] | None = None,
         *,
         namespaces: tuple[str | None, ...] | None = None,
+        bound: Mapping[str, Mapping[str, Source | Value]] | None = None,
         functions: tuple[FunctionSource, ...] | None = None,
         store: CacheStore | None = None,
         config: Mapping[str, object] | None = None,
@@ -2514,6 +2595,7 @@ class Builder[R = dict[str, object]]:
         built = Builder(
             self._modules if modules is None else modules,
             namespaces=self._namespaces if namespaces is None else namespaces,
+            bound=self._bound if bound is None else bound,
             store=self._store if store is None else store,
             config=self._config if config is None else config,
             result_builder=self._result_builder,
@@ -2524,7 +2606,10 @@ class Builder[R = dict[str, object]]:
         return built
 
     def with_modules(
-        self, *modules: ModuleType, namespace: str | None = None
+        self,
+        *modules: ModuleType,
+        namespace: str | None = None,
+        bind: Mapping[str, Source | Value] | None = None,
     ) -> Builder[R]:
         """Returns a new builder with `modules` appended to this one's.
 
@@ -2536,14 +2621,31 @@ class Builder[R = dict[str, object]]:
         namespaced. A module may be given under several namespaces, making
         separate nodes from the same functions in each.
 
-        `TypeError` when an item is not a module, such as a function, or when
-        `namespace` is neither a `str` nor `None`; `ValueError` for a `str` that
-        is not a dotted identifier path.
+        `bind` feeds the namespace its own inputs (Q112): each key is a name its
+        nodes read that none of its modules defines, bound to `source("x")`,
+        which reads `x` as a name outside the namespace, or to `value(v)`. It
+        holds for the whole namespace, across `with_modules` calls.
+
+        `TypeError` when an item is not a module, such as a function, when
+        `namespace` is neither a `str` nor `None`, when `bind` is given without a
+        namespace or binds something other than `source` or `value`; `ValueError`
+        for a `str` that is not a dotted identifier path, a key that is no
+        identifier, or a key the namespace already binds otherwise. At build, a
+        key the namespace defines, or that no node of it reads, is a `ValueError`.
         """
         checked = checked_namespace(namespace)
+        bound = self._bound
+        if bind is not None:
+            if checked is None:
+                msg = (
+                    "bind needs a namespace: with_modules(..., namespace=..., bind=...)"
+                )
+                raise TypeError(msg)
+            bound = _bound_with(self._bound, checked, bind)
         return self._with(
             (*self._modules, *modules),
             namespaces=(*self._namespaces, *(checked,) * len(modules)),
+            bound=bound,
         )
 
     def with_functions(self, *items: Callable[..., object] | NodeSpec) -> Builder[R]:
@@ -2739,6 +2841,7 @@ class Builder[R = dict[str, object]]:
         built = Builder(
             self._modules,
             namespaces=self._namespaces,
+            bound=self._bound,
             store=self._store,
             config=self._config,
             result_builder=build,
@@ -2827,19 +2930,23 @@ class Builder[R = dict[str, object]]:
         `__all__` left out. With `awaits`, an
         `async def` is a node too.
         """
+        used: dict[str, set[str]] = {}
         scanned = scan(
             self._modules,
             self._config,
             awaits=awaits,
             functions=self._functions,
             namespaces=self._namespaces,
+            bound=self._bound,
+            used=used,
         )
         nodes = _checks.attached(
             resolve(scanned.nodes, self._rules, self._value_checks)
         )
         if unbuilt := _steps.unbuilt_targets(self._modules, nodes):
             raise ValueError("\n".join(unbuilt))
-        nodes, stepped = _steps.lowered(nodes, self._config)
+        nodes, stepped = _steps.lowered(nodes, self._config, self._bound, used)
+        _refuse_unread(self._bound, used)
         relays = _steps.relays(nodes)
         _checks.refuse_unreadable(nodes)
         unmatched = scanned.unmatched
