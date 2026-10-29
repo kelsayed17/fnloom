@@ -217,6 +217,7 @@ def test_diff() -> None:
         "removed": [],
         "changed": {},
         "unversioned": [],
+        "warnings": [],
     }
 
 
@@ -227,6 +228,11 @@ def test_diff_names_a_node_it_cannot_see_into() -> None:
     found = _export.diff(old, new)
     assert found["unversioned"] == ["capped"]
     assert "capped" not in found["changed"]
+    assert found["warnings"] == [
+        f"{side} has no graph_version: a change inside an unversioned node "
+        "(capped) can't be seen"
+        for side in ("old", "new")
+    ]
     with pytest.raises(ValueError, match="new: not an fnloom export"):
         _export.diff(old, {"nodes": []})
 
@@ -400,3 +406,14 @@ def test_every_kind_of_node_exports() -> None:
     assert nodes["money"]["type"] == "Decimal"
     assert nodes["renamed"]["function"].endswith("plain")
     assert json.loads(json.dumps(document)) == document
+
+
+def test_diff_compares_marks_and_refuses_a_name_twice() -> None:
+    """A run's outputs changing shows; a document naming a node twice is refused."""
+    driver = _driver()
+    old = driver.export(["b"], inputs={"x": 1})
+    new = driver.export(["b", "a"], inputs={"x": 1})
+    assert _export.diff(old, new)["changed"] == {"a": ["marks"]}
+    twice = {**old, "nodes": [*old["nodes"], old["nodes"][0]]}
+    with pytest.raises(ValueError, match="new: nodes named twice: 'x'"):
+        _export.diff(old, twice)

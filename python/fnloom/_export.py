@@ -27,7 +27,7 @@ if TYPE_CHECKING:
 FORMAT = "fnloom.export/1"
 
 # What `diff` compares, in the order it lists them.
-_COMPARED = ("kind", "type", "params", "config", "tags", "version")
+_COMPARED = ("kind", "type", "params", "config", "tags", "version", "marks")
 
 
 def export(  # noqa: PLR0913  # one argument per part of the document
@@ -229,11 +229,14 @@ def diff(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
     """What changed between two documents, node by node.
 
     `added` and `removed` are names, sorted; `changed` maps each node in both to
-    the fields that differ, of `kind`, `type`, `params`, `config`, `tags` and
-    `version`. `unversioned` names each function node in both that a side has no
-    version for and that differs in nothing else, its version aside: a change in
-    its code can't be seen. The documents' own `config` and `request` are not
-    compared, only their nodes. `ValueError` for a document of another format.
+    the fields that differ, of `kind`, `type`, `params`, `config`, `tags`,
+    `version` and `marks` (a run's output or override). `unversioned` names
+    each function node in both that a side has no version for and that differs
+    in nothing else, its version aside: a change in its code can't be seen.
+    `warnings` says, for each document with no `graph_version`, which nodes
+    leave it blind (Q96). The documents' own `config` and `request` are not
+    compared, only their nodes. `ValueError` for a document of another format,
+    or one naming a node twice.
     """
     for side, document in (("old", old), ("new", new)):
         if not isinstance(document, dict) or document.get("format") != FORMAT:
@@ -245,6 +248,10 @@ def diff(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
             for node in nodes
         ):
             msg = f"{side}: an fnloom export's nodes must be a list of named entries"
+            raise ValueError(msg)
+        names = [node["name"] for node in nodes]
+        if twice := sorted({n for n in names if names.count(n) > 1}):
+            msg = f"{side}: nodes named twice: {', '.join(map(repr, twice))}"
             raise ValueError(msg)
     before = {node["name"]: node for node in old["nodes"]}
     after = {node["name"]: node for node in new["nodes"]}
@@ -259,9 +266,28 @@ def diff(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
             unversioned.append(name)
         elif fields:
             changed[name] = fields
+    blind = [
+        f"{side} has no graph_version: a change inside an unversioned node "
+        f"({', '.join(_unversioned(document))}) can't be seen"
+        for side, document in (("old", old), ("new", new))
+        if document.get("graph_version") is None
+    ]
     return {
         "added": sorted(after.keys() - before.keys()),
         "removed": sorted(before.keys() - after.keys()),
         "changed": changed,
         "unversioned": unversioned,
+        "warnings": blind,
     }
+
+
+def _unversioned(document: Mapping[str, Any]) -> list[str]:
+    """The function nodes of `document` that have no version, or `["a value()"]`."""
+    names: list[str] = [
+        str(node["name"])
+        for node in document["nodes"]
+        if node.get("kind") == "function" and node.get("version") is None
+    ]
+    if not names:
+        return ["a value() with no fingerprint"]
+    return names

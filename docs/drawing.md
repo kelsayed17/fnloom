@@ -193,6 +193,19 @@ with its own folder on `sys.path` so it can import its siblings. A module inside
 its relative imports. `MODULE@NS` gives a module's nodes the namespace `NS`. Without `--format`, `-o` writes the format
 its suffix names.
 
+`run.toml` below holds a run's request, and `after.json` is an export made later, after the code changed:
+
+```toml
+outputs = ["total"]
+
+[config]
+region = "eu"
+
+[inputs]
+price = 9.5
+quantity = 2
+```
+
 ```bash
 fnloom draw prices.py --config region=eu > prices.dot
 fnloom draw prices.py --config region=eu --upstream subtotal --format mermaid
@@ -210,16 +223,18 @@ fnloom diff before.json after.json
 | `--outputs a,b` | the outputs of a run |
 | `--context FILE` | a `.json` or `.toml` file with the tables `config`, `inputs` and `overrides` and the list `outputs`; a flag wins over its entry |
 
-A `@config.when` node is built as `Builder` builds it: without its key in the config it is left out, so give the key
-with `--config`.
+A `@config.when` node is built as `Builder` builds it: without its key in the config it is left out when nothing reads
+it, and is otherwise a `ValueError` naming the key (Q57). Give the key with `--config`.
 
 | Command | Does |
 | --- | --- |
 | `draw` | the whole graph, or `--upstream NODE...`, `--downstream NODE...`, `--path FROM TO` (`--no-context` for the path alone) or `--execution`; `--format dot` (the default) or `mermaid` to stdout, or any format Graphviz makes to `-o FILE`; `--orient`, `--no-legend`, `--no-validate` |
 | `export` | the graph, or the run `--outputs` makes, as JSON, to stdout or `-o FILE` |
 | `validate` | every problem a run of `--outputs` would raise, one per line; status 1 if there is any |
-| `diff OLD NEW` | what changed between two exports, as JSON; status 0 for no change, 1 for a change, 2 for a file that is no export |
+| `diff OLD NEW` | what changed between two exports, as JSON; status 0 for no change, 1 for a change or a node it can't see into, 2 for a file that is no export. When an export has no `graph_version`, `warnings` says which unversioned nodes hide their changes, and each warning is printed on stderr too |
 
 stdout carries only the result. An error goes to stderr as `fnloom: TypeName: message`, with status 1; a command line
-that can't be run gets argparse's message and status 2. A `--input x=1` is the number 1, as JSON reads it; quote it,
-`--input 'x="1"'`, for the string.
+that can't be run gets argparse's message and status 2.
+
+Every `KEY=VALUE` is read as JSON first, and as a plain string when it isn't JSON: `--config n=7` is the number 7,
+`--config n=007` the string `'007'` (a leading zero isn't JSON), and `--input 'x="1"'` the string `'1'`.

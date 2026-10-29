@@ -166,7 +166,9 @@ def _graph_arguments(parser: argparse.ArgumentParser) -> None:
         action="append",
         default=[],
         metavar="KEY=VALUE",
-        help="a config entry; VALUE is JSON, or else a plain string",
+        help="a config entry; VALUE is read as JSON, or else as a plain string, "
+        "so n=7 is the int 7 and n=007 (not JSON) the string '007'; quote a "
+        "string that looks like JSON: n='\"7\"'",
     )
     parser.add_argument(
         "--input", action="append", default=[], metavar="KEY=VALUE", help="an input"
@@ -304,6 +306,8 @@ def _diff(args: argparse.Namespace) -> int:
         _report(error)
         return 2
     sys.stdout.write(json.dumps(found, indent=2, sort_keys=True) + "\n")
+    for warning in found["warnings"]:
+        sys.stderr.write(f"fnloom: warning: {warning}\n")
     changed = found["added"] or found["removed"] or found["changed"]
     return 1 if changed or found["unversioned"] else 0
 
@@ -338,7 +342,8 @@ def _module(spec: str) -> tuple[ModuleType, str | None]:
 def _split_namespace(spec: str) -> tuple[str, str | None]:
     """`spec` and no namespace, or what precedes `@NS` and `NS`, a dotted name."""
     head, at, tail = spec.rpartition("@")
-    if not at:
+    if not at or tail.lower().endswith(".py") or Path(spec).is_file():
+        # No `@`, or one inside a file's own name, such as `my@flow.py`.
         return spec, None
     if not tail:
         msg = f"no namespace after '@' in {spec!r}"
@@ -357,6 +362,12 @@ def _load_file(target: str) -> ModuleType:
     if str(path.parent) not in sys.path:
         sys.path.insert(0, str(path.parent))
     name = path.stem
+    if name in sys.stdlib_module_names:
+        msg = (
+            f"{target}: {name!r} is a standard library module's name, which this "
+            "file would shadow; rename the file"
+        )
+        raise _UsageError(msg)
     loaded = sys.modules.get(name)
     if loaded is not None:
         where = getattr(loaded, "__file__", None)

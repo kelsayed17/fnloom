@@ -375,13 +375,19 @@ Q98).
 - **`graph_version` leaves out tags and docs**, which don't change what a node computes; `diff` still reports a tag
   change. It also leaves out an `@extract_columns` `fill_with`, which the result cache keys on: a known gap, since
   `NodeView` doesn't carry the extractor.
-- **`diff`** compares nodes only, not the documents' `config` or `request`, and refuses a document that isn't an
-  export's shape with a `ValueError`, which the CLI turns into status 2.
+- **`diff`** compares nodes only, not the documents' `config` or `request`; it compares `marks` too, so a run's outputs
+  changing shows. It refuses a document that isn't an export's shape, or names a node twice, with a `ValueError`,
+  which the CLI turns into status 2. At the maintainer's request, its result has `warnings`, one for each document
+  with no `graph_version`, naming the unversioned nodes that hide their changes; the CLI prints each on stderr as
+  well. A node it can't see into makes the status 1.
+- **`KEY=VALUE` is JSON first**, so `--config n=7` is the int 7 and `--config n=007` the string `'007'`; the help and
+  the guide say so, at the maintainer's request.
 - **The CLI's namespace is `MODULE@NS`**, not a `--namespace` flag after the module: argparse can't attach a flag to a
   positional. `@` starts a namespace only when a dotted name follows it, so a folder named `a@b` stays a folder.
 - **The CLI loads a `.py` path under its stem** with `spec_from_file_location`, and refuses one whose stem is already
-  imported from another file (`json.py`, or two files named `flow.py`) as a usage error, rather than silently using the
-  module already loaded.
+  imported from another file (two files named `flow.py`), or that names a standard library module (`json.py`,
+  `statistics.py`), as a usage error, rather than silently using one module for another. An `@` in a file's own name
+  (`my@flow.py`) is part of the path.
 - **`main` always returns a status**, `--help` and usage errors included, so an in-process caller never sees
   `SystemExit`; the console script exits with it. A closed pipe (`fnloom draw ... | head`) ends quietly with status 1,
   and Ctrl-C with 130. Without `--format`, `draw -o FILE` writes the format the suffix names.

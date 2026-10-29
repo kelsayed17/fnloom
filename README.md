@@ -134,7 +134,7 @@ dispatch.
 **Yes, if** you compute many derived values from a few inputs (features, metrics, pricing, signals), want each step
 to be a small function you can test on its own, and run the same graph many times in one process.
 
-**Not yet, if** you need graph visualisation, dynamic execution, or an adapter that wraps how a node is called, such
+**Not yet, if** you need dynamic execution, or an adapter that wraps how a node is called, such
 as `GracefulErrorAdapter`. They're on the [roadmap](#status). fnloom is also not a scheduler. It doesn't retry,
 distribute or schedule work, so pair it with an orchestrator if you need that.
 

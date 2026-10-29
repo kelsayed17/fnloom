@@ -270,6 +270,7 @@ def test_diff(flow: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
         "removed": [],
         "changed": {},
         "unversioned": [],
+        "warnings": [],
     }
     flow.write_text(flow.read_text() + "\ndef d(b: int) -> int:\n    return b\n")
     for name in ("flow", "helper"):
@@ -356,7 +357,7 @@ def test_a_file_named_like_an_imported_module_is_refused(
     shadow.write_text("def j(x: int) -> int:\n    return x\n")
     status, _, err = _run(capsys, "draw", str(shadow))
     assert status == 2  # noqa: PLR2004  # a usage error
-    assert "a module named 'json' is already imported" in err
+    assert "'json' is a standard library module's name" in err
     other = tmp_path / "other"
     other.mkdir()
     (other / "flow.py").write_text("def z(x: int) -> int:\n    return x\n")
@@ -410,3 +411,53 @@ def test_a_closed_pipe_is_quiet(flow: Path) -> None:
     head.stdout.close()
     _, err = head.communicate()
     assert err == b""
+
+
+def test_diff_warns_when_an_export_is_blind(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A null graph_version is said on stderr, naming the unversioned node."""
+    module = tmp_path / "blind_flow.py"
+    module.write_text(
+        "LIMITS = [1]\n\ndef capped(x: int) -> int:\n    return LIMITS[0]\n"
+    )
+    old = tmp_path / "old.json"
+    _run(capsys, "export", str(module), "-o", str(old))
+    status, out, err = _run(capsys, "diff", str(old), str(old))
+    assert status == 1
+    assert json.loads(out)["unversioned"] == ["capped"]
+    assert err.count("fnloom: warning: ") == 2  # noqa: PLR2004  # old and new
+    assert "(capped) can't be seen" in err
+
+
+def test_a_leading_zero_is_a_string(
+    flow: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`007` isn't JSON, so it is the string '007'; `7` is the int 7."""
+    _, out, _ = _run(
+        capsys, "export", str(flow), "--config", "n=007", "--config", "m=7"
+    )
+    assert json.loads(out)["config"] == {"m": "7", "n": "'007'"}
+
+
+def test_an_at_sign_in_a_file_name_is_part_of_the_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`my@flow.py` is a file, not module `my` in namespace `flow.py`."""
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    path = tmp_path / "my@flow.py"
+    path.write_text("def a(x: int) -> int:\n    return x\n")
+    status, out, err = _run(capsys, "draw", str(path))
+    assert (status, err) == (0, "")
+    assert '"a" [' in out
+
+
+def test_a_file_named_like_a_standard_module_is_refused(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A `statistics.py` would shadow the real one for the whole process."""
+    path = tmp_path / "statistics.py"
+    path.write_text("def a(x: int) -> int:\n    return x\n")
+    status, _, err = _run(capsys, "draw", str(path))
+    assert status == 2  # noqa: PLR2004  # a usage error
+    assert "standard library module's name" in err
