@@ -324,6 +324,13 @@ async def _passed_async(value: object) -> object:
     return value
 
 
+def relays(nodes: Sequence[NodeDef]) -> frozenset[str]:
+    """The `@pipe_output` nodes that only pass their last step's value on."""
+    return frozenset(
+        node.name for node in nodes if node.payload in {_passed, _passed_async}
+    )
+
+
 def lowered(
     nodes: Sequence[NodeDef], config: Mapping[str, object]
 ) -> tuple[list[NodeDef], frozenset[str]]:

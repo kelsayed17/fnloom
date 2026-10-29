@@ -849,7 +849,11 @@ def wrapped(
     it with its own guided error.
     """
     return [
-        replace(node, payload=_checking(node, awaits=awaits, owner=owner))
+        replace(
+            node,
+            payload=_checking(node, awaits=awaits, owner=owner),
+            extracting=extractor(node),
+        )
         if node.checks
         else node
         for node in nodes

@@ -2840,6 +2840,7 @@ class Builder[R = dict[str, object]]:
         if unbuilt := _steps.unbuilt_targets(self._modules, nodes):
             raise ValueError("\n".join(unbuilt))
         nodes, stepped = _steps.lowered(nodes, self._config)
+        relays = _steps.relays(nodes)
         _checks.refuse_unreadable(nodes)
         unmatched = scanned.unmatched
         if unmatched:
@@ -2860,7 +2861,7 @@ class Builder[R = dict[str, object]]:
         owner = object()
         nodes = _checks.wrapped(nodes, awaits=awaits, owner=owner)
         if self._wrappers:
-            nodes = self._chained(nodes, views, awaits=awaits)
+            nodes = self._chained(nodes, views, relays, awaits=awaits)
         graph = _graph_of(nodes)
         if mismatches := _edge_mismatches(views.functions):
             raise ValueError("\n".join(mismatches))
@@ -2873,7 +2874,12 @@ class Builder[R = dict[str, object]]:
         return nodes, views, graph, unmatched, scanned.left_out, owner
 
     def _chained(
-        self, nodes: list[NodeDef], views: NodeViews, *, awaits: bool
+        self,
+        nodes: list[NodeDef],
+        views: NodeViews,
+        relays: frozenset[str],
+        *,
+        awaits: bool,
     ) -> list[NodeDef]:
         """`nodes`, each run through the node wrappers, outside its checks (Q111).
 
@@ -2883,7 +2889,7 @@ class Builder[R = dict[str, object]]:
         """
         if awaits:
             _wrappers.refuse_async(nodes)
-        chained = _wrappers.wrapped(nodes, views, self._wrappers)
+        chained = _wrappers.wrapped(nodes, views, self._wrappers, relays)
         if not self._output_type_checks:
             return chained
         return _output_checked(chained, self._rules, self._value_checks, awaits=awaits)

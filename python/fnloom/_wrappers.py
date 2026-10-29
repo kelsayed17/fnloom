@@ -16,9 +16,12 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from fnloom import _async
+from fnloom._extract import is_generated
 from fnloom._scan import by_parameter
 
 if TYPE_CHECKING:
+    from collections.abc import Set as AbstractSet
+
     from fnloom._scan import NodeDef
     from fnloom._view import NodeView
 
@@ -69,12 +72,21 @@ def wrapped(
     nodes: Sequence[NodeDef],
     views: Mapping[str, NodeView],
     wrappers: tuple[NodeWrapper, ...],
+    relays: AbstractSet[str] = frozenset(),
 ) -> list[NodeDef]:
-    """`nodes`, each one's payload run through `wrappers`, the first outermost."""
+    """`nodes`, each one's payload run through `wrappers`, the first outermost.
+
+    A node that runs no function of the user's is left alone: an extracted
+    field, and each name in `relays`, a `@pipe_output` node passing its last
+    step's value on. So a wrapper sees functions, steps and `.raw` nodes only,
+    and a field stays a field to the cache.
+    """
     if not wrappers:
         return list(nodes)
     return [
-        replace(node, payload=_chained(node, views[node.name], wrappers))
+        node
+        if node.name in relays or is_generated(node)
+        else replace(node, payload=_chained(node, views[node.name], wrappers))
         for node in nodes
     ]
 

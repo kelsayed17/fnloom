@@ -723,10 +723,14 @@ def _lowered_columns(
 
 def is_generated(node: NodeDef) -> bool:
     """Whether `node` is a field or column node `lower` made, not a function's own."""
-    return isinstance(node.payload, _Extractor)
+    return extractor(node) is not None
 
 
 def extractor(node: NodeDef) -> _Extractor | None:
-    """The payload of a node `lower` made; `None` for any other node."""
+    """The extractor of a node `lower` made; `None` for any other node.
+
+    Its payload, or, when a check or a wrapper has replaced that, the extractor
+    the node kept, so a checked field is still a field to the cache.
+    """
     payload = node.payload
-    return payload if isinstance(payload, _Extractor) else None
+    return payload if isinstance(payload, _Extractor) else node.extracting

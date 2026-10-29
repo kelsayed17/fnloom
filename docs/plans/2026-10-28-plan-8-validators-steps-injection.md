@@ -424,8 +424,12 @@ from-hamilton.md, quirk-register.md, benchmarks.md, index.md, README.md, CHANGEL
   resolvers), so a name imported only under `TYPE_CHECKING` is no error; a wrapper annotated that way failed in the
   first build.
 - **Wrappers and output type checks.** With output type checks on, a wrapped node's value is checked inside the chain,
-  on the function's value, and again outside it, on what the chain returns. Every computed node is wrapped, step,
-  `.raw` and field nodes included, so a wrapper sees each.
+  on the function's value, and again outside it, on what the chain returns.
+- **Which nodes are wrapped.** Every node that runs a function of the user's: a function's node, a step and a `.raw`
+  node. An extracted field and a `@pipe_output` node passing its last step's value on run none, so they aren't
+  wrapped; a wrapper therefore doesn't see a check failing on a piped node's final value. A field keeps its
+  extractor when a check or a wrapper replaces its payload (`NodeDef.extracting`), so it stays a field to the cache
+  and to the async driver: a first build stored a wrapped or checked field.
 - **Benchmarks** are recorded in [Benchmarks](../benchmarks.md#checks-and-wrappers) from the development build that
   `scripts/check.sh` makes. `benches.run` was not re-run: a graph with no Plan 8 decorator and no wrapper builds the
   very node definitions it built before, since `attached`, `lowered`, `wrapped` and the chain return their input

@@ -49,6 +49,7 @@ if TYPE_CHECKING:
     from types import ModuleType
 
     from fnloom._checks import Check
+    from fnloom._extract import _Extractor
 
 _UNSUPPORTED_KINDS = {
     inspect.Parameter.POSITIONAL_ONLY: "positional-only parameter",
@@ -87,6 +88,9 @@ class NodeDef:
     namespace: str | None = None
     documented: bool = False
     checks: tuple[Check, ...] = ()
+    # A field's extractor, kept when a check or a wrapper replaces its payload,
+    # so the node is still known as a field: see `_extract.extractor`.
+    extracting: _Extractor | None = None
 
 
 def core_inputs(params: tuple[Param, ...]) -> list[tuple[str, bool]]:

@@ -270,3 +270,104 @@ def test_wrappers_share_a_driver_across_threads() -> None:
         thread.join()
     assert sorted(results) == list(range(16))  # ty: ignore[invalid-argument-type]
     assert sorted(seen) == list(range(16))  # ty: ignore[invalid-argument-type]
+
+
+FIELDS = """
+from fnloom import check_output, extract_fields, pipe_output, step
+
+def _inc(v: int) -> int:
+    return v + 1
+
+@check_output(range=(0, 100), field="p")
+@extract_fields({"p": int, "q": int})
+def pair(x: int) -> dict:
+    return {"p": x, "q": x}
+
+def total(p: int, q: int) -> int:
+    return p + q
+
+@pipe_output(step(_inc))
+def piped(x: int) -> int:
+    return x
+"""
+
+
+def test_fields_stay_fields_to_the_cache_with_wrappers_and_checks() -> None:
+    """A field, checked or not, is never stored, wrappers or none."""
+    for index, wrapped in enumerate((False, True)):
+        builder = _builder(FIELDS, f"fields_cached_{index}").with_cache(
+            fnloom.MemoryCache()
+        )
+        if wrapped:
+            builder = builder.with_node_wrappers(_module_wrapper)
+        driver = builder.build()
+        driver.execute(["total"], inputs={"x": 1})
+        outcomes = driver.explain_cache(["total"], inputs={"x": 1})
+        assert outcomes["p"].status == "miss", (wrapped, outcomes["p"])
+        assert outcomes["q"].status == "miss"
+        assert outcomes["total"].status == "hit"
+
+
+def test_wrappers_see_functions_steps_and_raw_nodes_only() -> None:
+    """Not extracted fields, nor a `@pipe_output` node passing its value on."""
+    seen: list[str] = []
+
+    def recording(
+        node: fnloom.NodeView, call: Callable[[], object], inputs: object
+    ) -> object:
+        del inputs
+        seen.append(node.name)
+        return call()
+
+    driver = _builder(FIELDS, "seen_wrapped").with_node_wrappers(recording).build()
+    driver.execute(["total", "piped"], inputs={"x": 1})
+    assert sorted(seen) == ["pair", "piped.raw", "piped.with_inc", "total"]
+
+
+def test_inputs_hold_what_the_node_reads() -> None:
+    """By parameter name; `value()` bindings and unused defaults are left out."""
+    source = """
+from fnloom import inject, value
+
+@inject(k=value(3))
+def scaled(x: int, k: int, extra: int = 0) -> int:
+    return x * k + extra
+"""
+    seen: list[dict[str, object]] = []
+
+    def recording(
+        node: object, call: Callable[[], object], inputs: Mapping[str, object]
+    ) -> object:
+        del node
+        seen.append(dict(inputs))
+        return call()
+
+    driver = _builder(source, "inputs_wrapped").with_node_wrappers(recording).build()
+    driver.execute(["scaled"], inputs={"x": 2})
+    assert seen == [{"x": 2}]
+
+
+def _doubling(node: object, call: Callable[[], object], inputs: object) -> object:
+    """Changes the value, so a driver that dropped its wrappers would show it."""
+    del node, inputs
+    value = call()
+    return value * 2 if isinstance(value, int) else value
+
+
+def test_wrappers_that_change_values_are_carried() -> None:
+    """Pickled, copied and rebuilt drivers still run them."""
+    driver = (
+        fnloom.Builder()
+        .with_modules(picklable_nodes)
+        .with_node_wrappers(_doubling)
+        .build()
+    )
+    expected = {"total": ((1 * 2) * 2 + 2) * 2}
+    for carried in (
+        driver,
+        pickle.loads(pickle.dumps(driver)),  # noqa: S301  # our own bytes
+        copy.copy(driver),
+        copy.deepcopy(driver),
+        driver.rebuild(),
+    ):
+        assert carried.execute(["total"], inputs={"a": 1, "b": 2}) == expected
