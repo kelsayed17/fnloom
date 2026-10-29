@@ -4,7 +4,7 @@
 > superpowers:test-driven-development inside each task and an independent reviewer subagent per PR. Steps use
 > checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** draft for the maintainer's approval, 2026-10-29. Nothing is built until it is approved.
+**Status:** approved 2026-10-29 as drafted, with the recommended answer to each open question: the SVG engine behind its spike, `NodeView.tags` widened, released with whichever of Plans 10 to 12 lands first. PR 0 (a test for every row) was added at the maintainer's request the same day.
 
 **Numbering:** Plan 10 (typed absence and sequential fan-out) and Plan 11 (the scheduler, `with_threads`, `run_many`,
 `absent_on`) are taken by the dynamic execution design (#30), which also takes register rows Q118 to Q138. This plan
@@ -224,6 +224,62 @@ so `diff` sees an edited predicate. `NodeView.config` holds it as a `Condition` 
   winning function's module, and `NodeView.replaced` names the module replaced. Better than
   `allow_module_overrides()`: one named node, not every collision, and a typo fails.
 
+## PR 0: a test for every row
+
+Before any improvement lands, every row of the three comparison tables gets a test proving what it says: fnloom's
+side always, and Hamilton's side whenever the row claims something about Hamilton ("ignored", "re-planned on every
+call", "crashes on fixed tuples"), by running Hamilton 1.90.0 in `tests/differential/`. Tests only: no behaviour
+changes, and the doc rows keep their wording apart from the Q-ids they gain.
+
+**Inventory (2026-10-29):** the tables hold 89 rows: 31 Decorators, 48 What changes in your code, 10 Caching. 69 are
+fully covered by existing tests. 20 have a gap: 9 on fnloom's side and 14 on Hamilton's, some on both. The
+row-by-row map is the [appendix](#appendix-row-inventory). The gaps:
+
+| Row | Missing |
+| --- | --- |
+| `target_=` | fnloom: refused by `@cache` |
+| `@config.default` | Hamilton: `config` has no `default` |
+| `@config(lambda cfg: ...)` | fnloom: refused |
+| Two `@check_output`, or one with `@extract_fields`/`@pipe_output` (Q103) | Hamilton: the stacked forms fail or misbehave |
+| `@pipe`, `@flow`, `collapse=True` | fnloom: none exported. Hamilton: `pipe` aliases `pipe_input`, `flow` is absent, `collapse=True` raises `NotImplementedError` |
+| Step `namespace=` and `on_output=` | fnloom: each is a `TypeError` today |
+| Reusing a request (Q3) | Hamilton: each `execute` plans again (counted over two calls) |
+| `PandasDataFrameResult` (Q89) | fnloom: `with_result_builder(polars.DataFrame)`. Hamilton: the index warnings are logged |
+| `raw_execute` (Q19) | Hamilton: positional, with `display_graph` |
+| `PrintLn` | Hamilton: name and time; inputs and result at `verbosity=2` |
+| A failing node logged (Q88) | Hamilton: the support banner |
+| `GraphConstructionHook` | Hamilton: `run_after_graph_construction` gets the built graph |
+| `GracefulErrorAdapter` | Hamilton: runs past a failure, skipping its dependents |
+| Task hooks | fnloom: no task hooks exported |
+| `graphviz_kwargs`, `custom_style_function`, `show_schema` | fnloom: `draw*` refuses them. Hamilton: they style the `Digraph` |
+| `export_execution` (Q95) | Hamilton: an input carries its consumer's `source` |
+| The `hamilton` CLI (Q97) | Hamilton: needs `typer`; config only from a context file |
+| Per-node behaviour | fnloom: `with_cache` refuses name lists today |
+| A helper or global the node reads | fnloom: a mutable global pinned by `@cache(version=)` builds and hits |
+| What a run did | Hamilton: the cache log says `hit` on every lookup |
+
+Rows that the improvement PRs rewrite get their today-tests in PR 0 anyway. Each improvement PR then changes those
+tests along with the row, so every version of the row is tested.
+
+**Making the map checkable.** Each row cites at least one register Q-id, which the existing `deliberate` marker
+already ties to a differential test:
+
+- `tests/test_docs.py::test_every_comparison_row_cites_a_register_row` parses the three tables and fails on a row
+  with no `Qn`, or a `Qn` that is no register row.
+- `tests/test_docs.py::test_every_cited_row_has_a_differential_test` fails when a cited `Qn` has no test in
+  `tests/differential/` marked `deliberate("Qn")` or `keeps("Qn")`.
+- `keeps(id)` is a new marker for kept behaviour. The differential conftest validates it as it validates
+  `deliberate`, and existing `test_semantics.py` tests that already prove a "The same" row are marked with it
+  rather than duplicated.
+- 21 rows cite no Q-id today. Those that an improvement item rewrites cite that item's row (Q139, Q140, Q142, Q143,
+  Q145, Q147, Q148), which PR 0 adds to the register in its present state. The improvement PR amends it. Rows a
+  current register row already covers cite it (`@cache(format=)` cites Q55, the helper-or-global row Q48). The rest
+  get new KEEP or DROP rows from Q151, one per feature: the imports and `@parameterize` bindings,
+  `@cache(behavior=)`, the `@config.when*` family, `@config.default`, `@pipe`/`@flow`/`collapse`, the public type
+  helpers, turning the cache on, and the cache log against `explain_cache`. `GracefulErrorAdapter` and the task hooks
+  cite Plans 10 and 11's rows (Q118 to Q138) once those are in the register; until then, a DEFER row from Q151 points
+  at the design.
+
 ## Register rows
 
 | Row | Disposition | One line |
@@ -271,6 +327,8 @@ Each PR: TDD, the register rows, the `from-hamilton.md` rows rewritten to say ho
 `[Unreleased]` entry, `scripts/check.sh` green, an independent reviewer subagent, then the maintainer's go-ahead to
 squash-merge. Branches merge `main` in; nothing is rebased or force-pushed.
 
+0. **PR 0: a test for every row.** Tests, register rows, Q-ids in the doc rows and the two checks, as above. It
+   lands before every other PR.
 1. **PR A: tags (item 3).** Rust tag enum, `@tag` sequences, `NodeViews.tagged`, export/diff/`graph_version`, CLI
    `--tag`. First, because items 1 and 4 read tags.
 2. **PR B: drawing (items 1 and 8).** `Style`, `styled`, display options, then the SVG spike; the spike's result
@@ -283,7 +341,7 @@ squash-merge. Branches merge `main` in; nothing is rebased or force-pushed.
    all resolved in the scan.
 7. **PR G: results (item 6).** `frame(...)`.
 
-A to G are independent except A before B and C. PRs D to G can be reviewed in any order.
+PR 0 comes first. A to G are independent except A before B and C. PRs D to G can be reviewed in any order.
 
 ## Review Focus
 
@@ -300,9 +358,109 @@ A to G are independent except A before B and C. PRs D to G can be reviewed in an
 
 ## Open questions for the maintainer
 
+Answered 2026-10-29: the recommended option for each.
+
 1. **Item 8:** build the builtin SVG engine behind the spike as written, or skip straight to the excellent error?
 2. **Item 3:** `NodeView.tags` becomes `Mapping[str, str | tuple[str, ...]]`, which breaks type-checked code that
    reads a tag as `str`. Accept the break, or add `NodeView.tag_values` as the new field and keep `tags` `str`-only
    (refusing to build a view of a tuple tag)? Recommended: accept the break.
 3. **Release:** ship these in 0.3.0 with Plan 10, or as 0.4.0 after it? Recommended: whichever lands first; no
    dependency either way.
+
+## Appendix: row inventory
+
+Every comparison row and the tests covering it on 2026-10-29, before PR 0. `DD` is
+`tests/differential/test_deliberate_differences.py`, `SEM` is `tests/differential/test_semantics.py`, and `t/` is
+`tests/`. A Hamilton cell is "n/a" when the row says nothing about Hamilton beyond its API or "The same".
+
+| table | row | Q | fnloom covered by | Hamilton covered by | missing assertion |
+| --- | --- | --- | --- | --- | --- |
+| Dec | import parameterize/source/value | | t/test_public_api.py::test_signature_resolves, t/test_decorators.py | n/a | |
+| Dec | `@parameterize` source() | | SEM::test_rows_compute_the_same_values, SEM::test_rows_list_the_same_nodes | n/a | |
+| Dec | `@parameterize` value(v) not copied | | SEM::test_value_object_is_passed_by_identity | SEM::test_value_object_is_passed_by_identity | |
+| Dec | `@tag` str only | Q36 | DD::test_q36_list_valued_tag | DD::test_q36_list_valued_tag | |
+| Dec | `@cache` recompute/disable | | t/test_caching.py, t/test_decorators.py | n/a | |
+| Dec | `@cache(behavior="ignore")` on producer | Q50 | DD::test_q50_a_client_is_never_pickled | DD::test_q50 (only through `with_cache(ignore=[...])`) | |
+| Dec | `@cache(format=...)` | | DD::test_q54, DD::test_q55, t/test_stores.py (Format) | n/a | |
+| Dec | `target_=` | | GAP (version= in t/test_decorators.py::test_cache_records_ignore_and_version) | n/a | fnloom: `target_=` is refused (TypeError), or not accepted by any decorator |
+| Dec | config.when family | | t/test_config.py, SEM::test_config_selects_the_same_nodes | n/a | |
+| Dec | `when_not_in(name=)` | Q59 | DD::test_q59_a_name_and_a_non_iterable | DD::test_q59_a_name_and_a_non_iterable | |
+| Dec | `@config.default` | | t/test_config.py | GAP | Hamilton: `hamilton.function_modifiers.config` has no `default` |
+| Dec | `@config(lambda cfg: ...)` | | GAP | n/a | fnloom: `config(callable)` is refused or absent |
+| Dec | `@extract_fields` forms, Mapping return | Q61 | t/test_extract.py (L605), DD::test_q61_misuse_is_refused_when_decorating | n/a (Mapping refusal in DD::test_q61_misuse) | |
+| Dec | `extract_fields fill_with` | Q62 | DD::test_q62_fill_never_mutates_and_none_fills | DD::test_q62_fill_never_mutates_and_none_fills | |
+| Dec | `@extract_columns` no extension, mapping | Q64 | DD::test_q64_extract_columns_needs_no_extension, DD::test_q64_a_dict_return_is_split | n/a | |
+| Dec | `extract_columns fill_with` | Q64 | DD::test_q64_fill_never_mutates_and_fills_by_name | DD::test_q64_fill_never_mutates_and_fills_by_name | |
+| Dec | `parameterize(row=({...}, doc))` | Q82 | DD::test_q82, t/test_parameterize_sugar.py::test_tuple_rows_keep_their_doc_verbatim, ::test_tuple_rows_are_checked_when_decorating | n/a | |
+| Dec | `{ghost}` placeholder | Q82 | DD::test_q82_parameterize_sugar_is_checked_when_decorating | DD::test_q82 | |
+| Dec | `group(...)` misuse, listed twice | Q82 | DD::test_q82, t/test_parameterize_sugar.py::test_group_misuse_is_refused_once_per_offender | DD::test_q82 | |
+| Dec | `parameterize_sources` non-str | Q82 | DD::test_q82 | DD::test_q82 | |
+| Dec | `parameterize_values` empty/bad key | Q82 | DD::test_q82 | DD::test_q82 | |
+| Dec | `@check_output` | Q99-Q101 | DD::test_q99, test_q100, test_q101 | n/a (also asserted in the same tests) | |
+| Dec | `@check_output_custom` | Q102 | DD::test_q102_custom_checks, t/test_checks.py::test_custom_checks | n/a | |
+| Dec | two checks / with extract_fields or pipe_output | Q103 | DD::test_q103_checks_stack, t/test_checks.py::test_decorator_order_does_not_matter, ::test_a_field_is_checked_rather_than_the_whole_value | GAP (only two `@check_output`) | Hamilton: `@check_output` above/below `@extract_fields` and `@pipe_output` fails or misbehaves |
+| Dec | `pipe_input`/`pipe_output`/step names | Q104 | SEM::test_steps_make_the_same_nodes_and_values, DD::test_q104 | n/a | |
+| Dec | defaulted step param | Q105 | DD::test_q105 | DD::test_q105 | |
+| Dec | `@mutate`, `apply_to` | Q107 | DD::test_q107, SEM::test_mutate_makes_the_same_nodes_and_values, t/test_mutate.py::test_apply_to_* | n/a | |
+| Dec | `@inject` | Q109 | SEM::test_inject_gives_the_same_node, DD::test_q109 | n/a | |
+| Dec | `@resolve` power-user mode | Q110 | DD::test_q110_resolve_needs_no_power_user_mode | DD::test_q110_resolve_needs_no_power_user_mode | |
+| Dec | `@pipe`, `@flow`, `collapse=True`, `schema=` | (Q114) | GAP (schema: DD::test_q114) | GAP (schema: DD::test_q114) | fnloom: no `pipe`/`flow`/`collapse` exported. Hamilton: `pipe` is a deprecated alias of `pipe_input`, `flow` is absent in 1.90.0, `collapse=True` raises NotImplementedError |
+| Dec | `namespace=`, `on_output=` on steps | | GAP (`.on_output` in t/test_steps.py) | n/a | fnloom: `pipe_input(namespace=)`, `.named(..., namespace=)` and `pipe_output(on_output=)` are TypeErrors |
+| Code | `inputs`/`overrides` keyword-only | Q31 | DD::test_q31 | DD::test_q31 | |
+| Code | misspelled input/override | Q4,Q5 | DD::test_q4, test_q5 | DD::test_q4, test_q5 | |
+| Code | `final_vars="total"` | Q6 | DD::test_q6 | DD::test_q6 | |
+| Code | function in `final_vars` | Q30 | DD::test_q30_final_vars_given_as_functions, ::test_q30_functions_no_node_comes_from_* | DD::test_q30_final_vars_given_as_functions | |
+| Code | overriding an input | Q7,Q75 | DD::test_q7, DD::test_q75 | DD::test_q7, DD::test_q75 | |
+| Code | node named like a defaulted param | Q76 | DD::test_q76 | DD::test_q76 | |
+| Code | two differing defaults | Q76 | DD::test_q76 | DD::test_q76 | |
+| Code | `value()`-only parameter name | Q77 | DD::test_q77 | DD::test_q77 | |
+| Code | `__all__` | Q73 | DD::test_q73_all_and_exclude, ::test_q73_config_variants_*, ::test_q73_malformed_all_* | DD::test_q73_all_and_exclude, ::test_q73_config_variants_* | |
+| Code | `@hamilton_exclude` | Q73 | DD::test_q73_exclude_forms_and_stacking, ::test_q73_all_and_exclude | DD::test_q73_exclude_forms_and_stacking | |
+| Code | `create_temporary_module` | Q72 | DD::test_q72_graphs_from_functions | DD::test_q72 | |
+| Code | lambda in temp module | Q72 | DD::test_q72, t/test_authoring.py (L887, `bind=`) | DD::test_q72 | |
+| Code | `allow_module_overrides()` | Q74 | DD::test_q74 | DD::test_q74 | |
+| Code | `@subdag` reuse | Q74,Q112 | DD::test_q74, DD::test_q112 | DD::test_q74, DD::test_q112 | |
+| Code | `what_is_upstream_of` | Q28 | DD::test_q28 | DD::test_q28 | |
+| Code | reusing a request | Q3 | t/test_driver.py::test_prepare_reuses_plan_across_runs | GAP | Hamilton: each `execute` re-walks and re-validates (count planning calls over 2 runs) |
+| Code | `validate_execution` | Q71 | DD::test_q71_validate | DD::test_q71_validate | |
+| Code | `what_is_the_path_between` | Q70 | DD::test_q70_inspection, t/test_inspection.py::test_path_between_* | DD::test_q70_inspection | |
+| Code | `graph_modules` | Q70 | DD::test_q70, t/test_inspection.py::test_modules_are_unique_in_build_order | DD::test_q70 | |
+| Code | `list_available_variables()` | Q70 | t/test_inspection.py::test_inputs_lists_every_input_*, ::test_outputs_are_the_unconsumed_nodes | DD::test_q112 / test_q73 (inputs listed as objects) | |
+| Code | `htypes.check_input_type` | | SEM::test_value_matches_agrees_with_hamilton, ::test_type_matches_agrees_with_hamilton, ::test_a_prepared_check_agrees_with_value_matches | SEM (same tests call htypes) | |
+| Code | override value type checked | Q22 | DD::test_q22, t/test_type_rules.py (without_override_type_checks) | DD::test_q22 | |
+| Code | after `importlib.reload` | Q83 | DD::test_q83 | DD::test_q83 | |
+| Code | hooks: keywords vs events | Q84 | DD::test_q84 | DD::test_q84 | |
+| Code | non-adapter / adapter twice | Q84 | DD::test_q84 | DD::test_q84 | |
+| Code | bad hook signature / async hook | Q84 | DD::test_q84 | DD::test_q84 | |
+| Code | `ResultBuilder.build_result(**outputs)` | Q19 | SEM::test_a_result_builder_gets_the_outputs_in_request_order, t/test_results.py::test_execute_returns_what_the_builder_returns | SEM::test_a_result_builder_gets_the_outputs_in_request_order | |
+| Code | `PandasDataFrameResult` | Q89 | DD::test_q89, t/test_results.py::test_the_documented_pandas_recipe_builds_a_frame; polars GAP | DD::test_q89 (flatten/pad); warnings GAP | fnloom: `with_result_builder(polars.DataFrame)` builds a frame. Hamilton: index warnings are logged |
+| Code | two result builders | Q24 | DD::test_q24 | DD::test_q24 | |
+| Code | `FunctionInputOutputTypeChecker` | Q87 | DD::test_q87 | DD::test_q87 | |
+| Code | `EdgeConnectionHook.validate_input` | Q21 | DD::test_q21, t/test_output_checks.py::test_custom_checks_apply_to_inputs_overrides_fields_outputs_and_validate | DD::test_q21 | |
+| Code | `raw_execute` | Q19 | t/test_results.py::test_raw_results_take_keywords_only, ::test_raw_execute_and_run_raw_skip_the_builder_and_run_the_hooks | GAP | Hamilton: `raw_execute` signature is positional, with `display_graph` |
+| Code | `lifecycle.PrintLn()` | | t/test_hooks.py (after_node ok/result/error, L144) | GAP | Hamilton: PrintLn prints name+time, and inputs/result at verbosity=2 |
+| Code | failing node logged at ERROR | Q88 | DD::test_q88 | DD::test_q88 (banner GAP) | Hamilton: the ERROR log carries the support banner |
+| Code | `GraphConstructionHook` | | t/test_inspection.py, t/test_view.py (driver.nodes) | GAP | Hamilton: `run_after_graph_construction` gets the built graph |
+| Code | `NoEdgeAndInputTypeChecking` | Q10 | DD::test_q10 | DD::test_q10 | |
+| Code | `StaticValidator` | Q117 | DD::test_q117 | DD::test_q117 | |
+| Code | `NodeExecutionMethod` | Q111 | DD::test_q111 | DD::test_q111 | |
+| Code | `GracefulErrorAdapter` | | SEM::test_a_failing_node_stops_the_run_for_hooks, t/test_hooks.py::test_a_failing_node_ends_the_run_with_its_own_error | GAP | Hamilton: GracefulErrorAdapter runs on past a failure and skips its dependents |
+| Code | task hooks | | GAP | n/a | fnloom: no task hooks or dynamic execution exported |
+| Code | `display_*` | Q90,Q94 | DD::test_q90, t/test_drawing.py::test_mermaid_text, ::test_the_text_does_not_depend_on_the_hash_seed | DD::test_q90 (hash seed), DD::test_q94 (None + log) | |
+| Code | `visualize_path_between` | Q90 | t/test_drawing.py::test_draw_path_between, SEM::test_drawings_show_the_same_nodes | SEM::test_drawings_show_the_same_nodes (path/strict) | |
+| Code | `visualize_execution` | Q92 | DD::test_q92, t/test_drawing.py::test_draw_execution_without_validating_* | DD::test_q92 | |
+| Code | type in a drawing | Q91 | DD::test_q91 | DD::test_q91 | |
+| Code | `output_file_path`, `keep_dot` | Q94 | t/test_drawing.py::test_render_runs_graphviz, ::test_render_writes_text_formats_without_graphviz | DD::test_q94 (needs graphviz pkg) | |
+| Code | `graphviz_kwargs` etc. | | GAP | GAP | fnloom: draw methods take none of these kwargs. Hamilton: the kwargs style the Digraph |
+| Code | `export_execution` | Q95,Q96 | DD::test_q95, DD::test_q96, t/test_export.py::test_the_whole_graph, ::test_a_run | DD::test_q95 (JSON, input version); source GAP | Hamilton: an input node carries its consumer's `source` |
+| Code | `hamilton` CLI | Q97,Q98 | t/test_cli.py (draw/export/validate/diff, --context/--override, test_a_file_with_a_sibling_import_builds), DD::test_q97, test_q98 | DD::test_q97, test_q98; typer GAP | Hamilton: the CLI needs `typer`, and config comes only from a context file |
+| Cache | turning it on | | t/test_caching.py (DiskCache/MemoryCache), DD::test_q16 | DD::test_q16 etc. (`with_cache(path=)`) | |
+| Cache | per-node behavior | | GAP | DD::test_q50 (`ignore=[...]` list) | fnloom: `with_cache` takes no per-node name lists (`recompute=`/`ignore=` refused) |
+| Cache | `ignore` | Q50 | DD::test_q50 | DD::test_q50 | |
+| Cache | code version | Q16,Q48 | DD::test_q16, DD::test_q48, t/test_codeversion.py::test_library_versions_count | DD::test_q16 | |
+| Cache | helper/global | | DD::test_q48, t/test_codeversion.py::test_mutable_globals_are_refused | DD::test_q48 | fnloom: a mutable-global node with `@cache(version=...)` caches (hits), end to end |
+| Cache | nested unhashable | Q47 | DD::test_q47 | DD::test_q47 | |
+| Cache | `@cache(format=)` | Q54,Q55 | DD::test_q54, DD::test_q55 | DD::test_q54, DD::test_q55 | |
+| Cache | corrupt entry | Q51 | DD::test_q51 | DD::test_q51 | |
+| Cache | what a run did | | t/test_caching.py::test_explain_names_every_outcome_and_runs_nothing | GAP | Hamilton: the cache log reports a hit on every lookup, including a miss/recompute |
+| Cache | async driver cache | Q68 | DD::test_q68 | DD::test_q68 | |
