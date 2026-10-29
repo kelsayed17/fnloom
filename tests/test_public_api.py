@@ -75,4 +75,12 @@ def test_the_regressed_callables_are_covered() -> None:
         "AsyncPreparedPlan.run_raw",
         "Builder.with_output_type_checks",
         "Builder.with_value_check",
+        "Driver.draw",
+        "Driver.draw_path_between",
+        "AsyncDriver.draw_downstream_of",
+        "Drawing.to_dot",
+        "Driver.export",
+        "AsyncDriver.export",
+        "Drawing.render",
+        "Drawing.to_mermaid",
     }

@@ -21,6 +21,7 @@ from fnloom._decorators import (
     tag,
     value,
 )
+from fnloom._drawing import Drawing, DrawnNode
 from fnloom._extract import extract_columns, extract_fields
 from fnloom._fingerprint import fingerprint, register_fingerprint
 from fnloom._functions import NodeSpec, node
@@ -57,6 +58,8 @@ __all__ = [
     "CacheWarning",
     "Condition",
     "DiskCache",
+    "Drawing",
+    "DrawnNode",
     "Driver",
     "Format",
     "Group",

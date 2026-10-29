@@ -3,7 +3,9 @@
 import asyncio
 import copy
 import inspect
+import json
 import pickle
+import re
 from typing import TYPE_CHECKING, Any, cast, override
 
 import pytest
@@ -36,7 +38,8 @@ from fnloom import _types
 from helpers import make_module
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Callable, Coroutine, Sequence
+    from types import ModuleType
 
 
 def pickle_round_trip(value: object) -> object:
@@ -145,6 +148,136 @@ def test_lineage_queries_name_the_same_nodes(
     hamilton = lineage_hamilton([module], direction, names)
     assert set(names) <= set(hamilton)
     assert lineage_fnloom([module], direction, names) == hamilton
+
+
+# An input's row in one of Hamilton's input boxes: `<tr><td>name</td>...`.
+_INPUT_ROW = re.compile(r"<tr><td>([^<]+)</td>")
+
+
+def _hamilton_drawn(module: ModuleType, scope: str, names: Sequence[str]) -> set[str]:
+    """The nodes and inputs Hamilton's drawing of `scope` shows.
+
+    Run with the `fake_graphviz` fixture. Hamilton draws inputs as rows of a box
+    per consumer, so they are read from the boxes; config nodes are left out.
+    """
+    built = hamilton_driver.Builder().with_modules(module).build()
+    if scope == "upstream":
+        drawn = built.display_upstream_of(*names, show_legend=False)
+    elif scope == "downstream":
+        drawn = built.display_downstream_of(*names, show_legend=False)
+    else:
+        drawn = built.visualize_path_between(
+            names[0],
+            names[1],
+            strict_path_visualization=scope == "strict",
+            show_legend=False,
+        )
+    return _boxed(drawn.nodes)
+
+
+def _boxed(nodes: Sequence[tuple[str, str, object]]) -> set[str]:
+    """The names Hamilton drew: its nodes, and each input in an input box."""
+    found: set[str] = set()
+    for name, label, _ in nodes:
+        if name.startswith("_") and name.endswith("_inputs"):
+            found.update(_INPUT_ROW.findall(label))
+        else:
+            found.add(name)
+    return found
+
+
+@pytest.mark.parametrize(
+    ("fixture", "outputs", "inputs", "overrides"),
+    [
+        ("diamond", ["join"], {"a": 1}, {}),
+        ("diamond", ["join"], {}, {"root": 2}),
+        ("override", ["top"], {}, {"mid": 3}),
+        ("optional", ["scaled"], {"a": 1}, {}),
+        ("optional", ["scaled"], {"a": 1, "factor": 2}, {}),
+    ],
+)
+def test_exports_of_a_run_list_the_same_nodes(
+    fixture: str,
+    outputs: list[str],
+    inputs: dict[str, object],
+    overrides: dict[str, object],
+) -> None:
+    """The run's nodes and the inputs it reads, as `export_execution`'s (Q95)."""
+    module = load_fixture(fixture)
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    exported = json.loads(hamilton.export_execution(outputs, inputs, overrides))
+    document = fnloom.build(module).export(outputs, inputs=inputs, overrides=overrides)
+    assert {n["name"] for n in document["nodes"]} == {
+        n["name"] for n in exported["nodes"]
+    }
+
+
+@pytest.mark.parametrize(
+    ("fixture", "scope", "names"),
+    [
+        ("diamond", "upstream", ["join"]),
+        ("diamond", "upstream", ["left", "right"]),
+        ("diamond", "downstream", ["root"]),
+        ("diamond", "downstream", ["left"]),
+        ("diamond", "path", ["a", "join"]),
+        ("diamond", "path", ["root", "left"]),
+        ("diamond", "strict", ["root", "join"]),
+        ("chain", "upstream", ["c"]),
+        ("chain", "path", ["a", "c"]),
+        ("chain", "strict", ["b", "c"]),
+        ("optional", "upstream", ["scaled"]),
+        ("optional", "downstream", ["a"]),
+        ("optional", "path", ["factor", "scaled"]),
+    ],
+)
+@pytest.mark.usefixtures("fake_graphviz")
+def test_drawings_show_the_same_nodes(
+    fixture: str, scope: str, names: list[str]
+) -> None:
+    """Upstream, downstream with parents, and paths draw the same nodes (Q90)."""
+    module = load_fixture(fixture)
+    built = fnloom.build(module)
+    if scope == "upstream":
+        drawing = built.draw_upstream_of(*names)
+    elif scope == "downstream":
+        drawing = built.draw_downstream_of(*names)
+    else:
+        drawing = built.draw_path_between(names[0], names[1], context=scope != "strict")
+    drawn = {node.name for node in drawing.nodes}
+    assert drawn == _hamilton_drawn(module, scope, names)
+
+
+@pytest.mark.parametrize(
+    ("fixture", "outputs", "inputs", "overrides"),
+    [
+        ("diamond", ["join"], {"a": 1}, {}),
+        ("diamond", ["left", "right"], {"a": 1}, {}),
+        ("diamond", ["join"], {}, {"root": 2}),
+        ("chain", ["c"], {"a": 1}, {}),
+        ("override", ["top"], {}, {"mid": 3}),
+        ("optional", ["scaled"], {"a": 1}, {}),
+        ("optional", ["scaled"], {"a": 1, "factor": 2}, {}),
+    ],
+)
+@pytest.mark.usefixtures("fake_graphviz")
+def test_execution_drawings_show_the_same_nodes(
+    fixture: str,
+    outputs: list[str],
+    inputs: dict[str, object],
+    overrides: dict[str, object],
+) -> None:
+    """The computed nodes, the inputs read and the overrides, as Hamilton's (Q92)."""
+    module = load_fixture(fixture)
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    drawn = hamilton.visualize_execution(
+        outputs, inputs=inputs, overrides=overrides, show_legend=False
+    )
+    drawing = fnloom.build(module).draw_execution(
+        outputs, inputs=inputs, overrides=overrides
+    )
+    assert {n.name for n in drawing.nodes} == _boxed(drawn.nodes)
+    marked = {n.name for n in drawing.nodes if "output" in n.marks}
+    assert marked == {n for n in outputs if n not in inputs}
 
 
 @pytest.mark.parametrize(

@@ -4,6 +4,7 @@ import asyncio
 import collections.abc
 import importlib.util
 import inspect
+import json
 import logging
 import os
 import pickle
@@ -18,11 +19,12 @@ from typing import TYPE_CHECKING, Annotated, Any, TypedDict, cast, override
 import pytest
 from hamilton import async_driver as hamilton_async
 from hamilton import driver as hamilton_driver
-from hamilton import htypes, lifecycle
+from hamilton import graph_types, htypes, lifecycle
 from hamilton.function_modifiers import hamilton_exclude
 from hamilton.function_modifiers.base import InvalidDecoratorException
 from hamilton.lifecycle import NoEdgeAndInputTypeChecking
 from harness import (
+    FAKE_GRAPHVIZ,
     FIXTURES,
     Nodes,
     Outcome,
@@ -4378,3 +4380,436 @@ def test_q88_failures_are_logged_only_on_request(
     assert record.getMessage() == f"node 'boom' failed; inputs: a=2, big={cut}"
     assert record.exc_info is not None
     assert "dflt" not in record.getMessage()
+
+
+_HAMILTON_DRAWN_ORDER = """
+import json
+import sys
+
+from hamilton import driver
+
+sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, sys.argv[2])
+import diamond
+
+built = driver.Builder().with_modules(diamond).build()
+drawn = built.display_all_functions(show_legend=False)
+print(json.dumps([name for name, _, _ in drawn.nodes]))
+"""
+
+
+@pytest.mark.deliberate("Q90")
+@pytest.mark.usefixtures("fake_graphviz")
+def test_q90_drawings(tmp_path: Path) -> None:
+    """Hamilton's drawn order follows the hash seed; fnloom's never does."""
+    (tmp_path / "graphviz.py").write_text(FAKE_GRAPHVIZ)
+    orders = {
+        seed: subprocess.run(  # noqa: S603  # our own interpreter and script
+            [sys.executable, "-c", _HAMILTON_DRAWN_ORDER, str(FIXTURES), tmp_path],
+            env={
+                **os.environ,
+                "PYTHONHASHSEED": seed,
+                "HAMILTON_AUTOLOAD_EXTENSIONS": "0",
+            },
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for seed in ("0", "1", "2", "3", "4", "5")
+    }
+    assert len(set(orders.values())) > 1
+    module = load_fixture("diamond")
+    built = fnloom.build(module)
+    assert [n.name for n in built.draw().nodes] == [
+        "a",
+        "root",
+        "left",
+        "right",
+        "join",
+    ]
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    # Hamilton names the first unknown endpoint; fnloom names both.
+    with pytest.raises(ValueError, match="Upstream node nope not found") as caught:
+        hamilton.visualize_path_between("nope", "nada")
+    assert "nada" not in str(caught.value)
+    with pytest.raises(ValueError, match="'nada', 'nope'"):
+        built.draw_path_between("nope", "nada")
+    # Hamilton draws nothing for no names; fnloom refuses.
+    assert hamilton.display_upstream_of().nodes == []
+    with pytest.raises(TypeError, match="at least one node"):
+        built.draw_upstream_of()
+    # Hamilton draws a downstream node's other parents like any node; fnloom
+    # marks them context.
+    downstream = hamilton.display_downstream_of("left", show_legend=False)
+    styles = {name: attrs for name, _, attrs in downstream.nodes}
+    assert set(styles) == {"root", "left", "right", "join"}
+    assert styles["root"] == styles["left"]
+    marked = {n.name: n.marks for n in built.draw_downstream_of("left").nodes}
+    assert marked == {
+        "root": {"context"},
+        "left": frozenset(),
+        "right": {"context"},
+        "join": frozenset(),
+    }
+    # Hamilton writes a bad orient as given; fnloom refuses it.
+    attributes = hamilton.display_all_functions(orient="XX").kwargs["graph_attr"]
+    assert attributes["rankdir"] == "XX"
+    with pytest.raises(ValueError, match="orient must be one of"):
+        built.draw().to_dot(orient="XX")  # ty: ignore[invalid-argument-type]
+
+
+_Q91_GRAPH = """
+from typing import Literal
+
+from {package} import config
+
+def nested(x: int) -> dict[str, list[int]]:
+    return {{"k": [x]}}
+
+def maybe(nested: dict[str, list[int]]) -> int | None:
+    return None
+
+def kind(x: int) -> Literal["a", "b"]:
+    return "a"
+
+@config.when(mode="fast")
+def chosen__fast(x: int) -> int:
+    return x
+"""
+
+
+@pytest.mark.deliberate("Q91")
+@pytest.mark.usefixtures("fake_graphviz")
+def test_q91_labels() -> None:
+    """Hamilton labels a type by its origin's name; fnloom writes it whole."""
+    hamilton_module = make_module(
+        "q91_h", _Q91_GRAPH.format(package="hamilton.function_modifiers")
+    )
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(hamilton_module)
+        .with_config({"mode": "fast"})
+        .build()
+    )
+    labels = {
+        name: label
+        for name, label, _ in hamilton.display_all_functions(show_legend=False).nodes
+    }
+    assert "<i>dict</i>" in labels["nested"]
+    assert "<i>Union</i>" in labels["maybe"]
+    assert "<i>Literal</i>" in labels["kind"]
+    # A variant shows its key, not the value it matched.
+    assert labels["chosen"].startswith("<<b>chosen: mode</b>")
+    module = make_module("q91_f", _Q91_GRAPH.format(package="fnloom"))
+    built = fnloom.Builder().with_modules(module).with_config({"mode": "fast"}).build()
+    drawn = {n.name: n for n in built.draw().nodes}
+    assert drawn["nested"].type == "dict[str, list[int]]"
+    assert drawn["maybe"].type == "int | None"
+    assert drawn["kind"].type == "Literal['a', 'b']"
+    assert drawn["chosen"].condition == "mode == 'fast'"
+
+
+_Q93_HAMILTON = """
+from hamilton.function_modifiers import config
+
+def a(x: int) -> int:
+    return x
+
+def b(x: int) -> int:
+    return x
+
+@config.when(mode="fast")
+def c__fast(a: int) -> int:
+    return a
+"""
+
+_Q93_FNLOOM = _Q93_HAMILTON.replace(
+    "from hamilton.function_modifiers import config", "from fnloom import config"
+)
+
+
+@pytest.mark.deliberate("Q93")
+@pytest.mark.usefixtures("fake_graphviz")
+def test_q93_inputs_and_config() -> None:
+    """Hamilton boxes an input per consumer and draws config; fnloom doesn't."""
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(make_module("q93_h", _Q93_HAMILTON))
+        .with_config({"mode": "fast", "unused": 1})
+        .build()
+    )
+    drawn = hamilton.display_upstream_of("b", show_legend=False)
+    names = [name for name, _, _ in drawn.nodes]
+    # Every config key, though `b` reads none; `x` once per consumer, as a box.
+    assert {"mode", "unused"} <= set(names)
+    every = hamilton.display_all_functions(show_legend=False)
+    boxes = [name for name, _, _ in every.nodes if name.endswith("_inputs")]
+    assert sorted(boxes) == ["_a_inputs", "_b_inputs"]
+    assert "x" not in [name for name, _, _ in every.nodes]
+    # `deduplicate_inputs` shares one box between consumers of the same inputs.
+    shared = hamilton.display_all_functions(show_legend=False, deduplicate_inputs=True)
+    assert len([n for n, _, _ in shared.nodes if n.endswith("_inputs")]) == 1
+
+    built = (
+        fnloom.Builder()
+        .with_modules(make_module("q93_f", _Q93_FNLOOM))
+        .with_config({"mode": "fast", "unused": 1})
+        .build()
+    )
+    assert [n.name for n in built.draw_upstream_of("b").nodes] == ["x", "b"]
+    nodes = built.draw().nodes
+    assert [n.name for n in nodes if n.kind == "input"] == ["x"]
+    assert ("x", "a") in built.draw().edges
+    assert ("x", "b") in built.draw().edges
+    assert next(n for n in nodes if n.name == "c").condition == "mode == 'fast'"
+
+
+@pytest.mark.deliberate("Q92")
+@pytest.mark.usefixtures("fake_graphviz")
+def test_q92_execution_drawings() -> None:
+    """Hamilton boxes an input requested as an output, unmarked; fnloom marks it."""
+    module = load_fixture("chain")
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    drawn = hamilton.visualize_execution(["a", "b"], inputs={"a": 1}, show_legend=False)
+    names = {name: attrs for name, _, attrs in drawn.nodes}
+    assert "a" not in names
+    assert names["b"]["fillcolor"] == "#FFC857"
+    assert "_b_inputs" in names
+    built = fnloom.build(module)
+    marked = {
+        n.name: n.marks for n in built.draw_execution(["a", "b"], inputs={"a": 1}).nodes
+    }
+    assert marked == {"a": {"output"}, "b": {"output"}}
+    # Both validate; Hamilton's error names its bypass, fnloom's is `validate`'s.
+    with pytest.raises(ValueError, match="bypass_validation=True"):
+        hamilton.visualize_execution(["c"])
+    with pytest.raises(ValueError, match="missing inputs") as caught:
+        built.draw_execution(["c"])
+    assert str(caught.value) == "\n".join(built.validate(["c"]))
+
+
+@pytest.mark.deliberate("Q94")
+def test_q94_drawing_needs_nothing(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """Hamilton without graphviz returns `None` and logs; fnloom's text needs none."""
+    if importlib.util.find_spec("graphviz") is not None:
+        pytest.skip("the graphviz package is installed")
+    module = load_fixture("diamond")
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    target = tmp_path / "graph.svg"
+    with caplog.at_level(logging.DEBUG):
+        assert hamilton.display_all_functions(str(target)) is None
+    assert not target.exists()
+    (error,) = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert "sf-hamilton[visualization]" in error.getMessage()
+    assert error.exc_info is not None
+    dot = fnloom.build(module).draw().to_dot()
+    assert dot.startswith("digraph {")
+
+
+_Q95_HAMILTON = """
+from hamilton.function_modifiers import config
+
+def a(x: int) -> int:
+    return x + 1
+
+def b(a: int) -> int:
+    return a
+
+@config.when(mode="fast")
+def c__fast(b: int) -> int:
+    return b
+"""
+
+
+def _module_from_file(folder: Path, name: str, source: str) -> types.ModuleType:
+    """`source` written to `folder` and imported as `name`, so it has source."""
+    path = folder / f"{name}.py"
+    path.write_text(source)
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.deliberate("Q95")
+def test_q95_exports(tmp_path: Path) -> None:
+    """Hamilton gives an input a consumer's source; fnloom exports it as an input."""
+    # A function Python has no source for: Hamilton's export raises.
+    no_source = make_module("q95_exec", _Q95_HAMILTON)
+    with pytest.raises(OSError, match="source code not available"):
+        hamilton_driver.Builder().with_modules(no_source).build().export_execution(
+            ["a"], {"x": 1}
+        )
+    assert (
+        fnloom.build(no_source).export(["a"], inputs={"x": 1})["nodes"][1]["source"]
+        is None
+    )
+    module = _module_from_file(tmp_path, "q95_h", _Q95_HAMILTON)
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_config({"mode": "fast"})
+        .build()
+    )
+    exported = json.loads(hamilton.export_execution(["c"], {"x": 1}, {"b": 2}))
+    assert set(exported) == {"nodes"}
+    by_name = {n["name"]: n for n in exported["nodes"]}
+    # The override `b` is unmarked, and no node says which variant `c` is.
+    assert set(by_name) == {"b", "c"}
+    assert "override" not in json.dumps(by_name["b"])
+    plain = json.loads(hamilton.export_execution(["a"], {"x": 1}))
+    inputs = {n["name"]: n for n in plain["nodes"]}
+    assert inputs["x"]["version"] == inputs["a"]["version"]
+    with pytest.raises(TypeError, match="expected str instance, function found"):
+        hamilton.export_execution([module.a], {"x": 1})
+
+    fn_module = make_module(
+        "q95_f",
+        _Q95_HAMILTON.replace(
+            "from hamilton.function_modifiers import config",
+            "from fnloom import config",
+        ),
+    )
+    built = (
+        fnloom.Builder().with_modules(fn_module).with_config({"mode": "fast"}).build()
+    )
+    document = built.export(["c"], inputs={"x": 1}, overrides={"b": 2})
+    assert document["format"] == "fnloom.export/1"
+    assert document["config"] == {"mode": "'fast'"}
+    nodes = {n["name"]: n for n in document["nodes"]}
+    assert nodes["b"]["marks"] == ["override"]
+    assert nodes["c"]["config"] == ["mode == 'fast'"]
+    x = {n["name"]: n for n in built.export(["a"], inputs={"x": 1})["nodes"]}["x"]
+    assert x["version"] is None
+    assert x["source"] is None
+    assert built.export([fn_module.a], inputs={"x": 1}) == built.export(
+        ["a"], inputs={"x": 1}
+    )
+
+
+_Q96_GRAPH = """
+K = {k}
+
+def a(x: int) -> int:
+    return x + K
+"""
+
+
+@pytest.mark.deliberate("Q96")
+def test_q96_versions_see_the_code_a_function_reads() -> None:
+    """Hamilton's version is the source text; a changed constant keeps it."""
+    hamilton_versions = []
+    fnloom_versions = []
+    for k in (1, 2):
+        module = make_module(f"q96_{k}", _Q96_GRAPH.format(k=k))
+        built = hamilton_driver.Builder().with_modules(module).build()
+        graph = graph_types.HamiltonGraph.from_graph(built.graph)
+        hamilton_versions.append(
+            (graph.version, {n.name: n.version for n in graph.nodes})
+        )
+        document = fnloom.build(module).export()
+        fnloom_versions.append(
+            (
+                document["graph_version"],
+                {n["name"]: n["version"] for n in document["nodes"]},
+            )
+        )
+    assert hamilton_versions[0] == hamilton_versions[1]
+    # Hamilton gives the input its consumer's version; fnloom gives it none.
+    assert hamilton_versions[0][1]["x"] == hamilton_versions[0][1]["a"]
+    assert fnloom_versions[0][1]["x"] is None
+    assert fnloom_versions[0][0] != fnloom_versions[1][0]
+    assert fnloom_versions[0][1]["a"] != fnloom_versions[1][1]["a"]
+
+
+_Q97_FLOW = """
+from {package} import config
+from q97_helper import double
+
+def a(x: int) -> int:
+    return double(x)
+
+@config.when(mode="fast")
+def b__fast(a: int) -> int:
+    return a
+"""
+
+
+@pytest.mark.deliberate("Q97")
+def test_q97_cli_loading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Hamilton's CLI compiles a file alone and drops `@config.when` nodes."""
+    from hamilton.cli import commands as hamilton_commands  # noqa: PLC0415  # its CLI only
+
+    from fnloom._cli import main  # noqa: PLC0415  # the command under test
+
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    (tmp_path / "q97_helper.py").write_text(
+        "def double(v: int) -> int:\n    return v * 2\n"
+    )
+    hamilton_file = tmp_path / "q97_hamilton.py"
+    hamilton_file.write_text(_Q97_FLOW.format(package="hamilton.function_modifiers"))
+    with pytest.raises(ModuleNotFoundError, match="q97_helper"):
+        hamilton_commands.build([hamilton_file])
+    # Without its sibling import, a context-free build has no `b`.
+    alone = tmp_path / "q97_alone.py"
+    alone.write_text(
+        _Q97_FLOW.format(package="hamilton.function_modifiers")
+        .replace("from q97_helper import double\n", "")
+        .replace("double(x)", "x")
+    )
+    built = hamilton_commands.build([alone])
+    assert "b" not in {n.name for n in built.list_available_variables()}
+
+    fnloom_file = tmp_path / "q97_fnloom.py"
+    fnloom_file.write_text(_Q97_FLOW.format(package="fnloom"))
+    assert main(["export", str(fnloom_file), "--config", "mode=fast"]) == 0
+    names = [n["name"] for n in json.loads(capsys.readouterr().out)["nodes"]]
+    assert names == ["x", "a", "b"]
+
+
+_Q98_OLD = """
+def a(x: int) -> int:
+    return x + 1
+"""
+
+
+@pytest.mark.deliberate("Q98")
+def test_q98_diff_compares_inputs_as_inputs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Hamilton reports an input as edited with its consumer; fnloom doesn't."""
+    from hamilton.cli import logic as hamilton_logic  # noqa: PLC0415  # its CLI only
+
+    from fnloom._cli import main  # noqa: PLC0415  # the command under test
+
+    new_source = _Q98_OLD.replace("x + 1", "x + 2")
+    old_module = _module_from_file(tmp_path, "q98_old", _Q98_OLD)
+    new_module = _module_from_file(tmp_path, "q98_new", new_source)
+    versions = [
+        hamilton_logic.hash_hamilton_nodes(
+            hamilton_driver.Builder().with_modules(module).build()
+        )
+        for module in (old_module, new_module)
+    ]
+    hamilton_diff = hamilton_logic.diff_versions(
+        current_map=versions[1], reference_map=versions[0]
+    )
+    assert sorted(hamilton_diff["edit"]) == ["a", "x"]
+
+    paths = []
+    for name, module in (("old", old_module), ("new", new_module)):
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps(fnloom.build(module).export()))
+        paths.append(str(path))
+    assert main(["diff", *paths]) == 1
+    found = json.loads(capsys.readouterr().out)
+    assert found["changed"] == {"a": ["version"]}

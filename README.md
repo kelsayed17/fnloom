@@ -134,7 +134,7 @@ dispatch.
 **Yes, if** you compute many derived values from a few inputs (features, metrics, pricing, signals), want each step
 to be a small function you can test on its own, and run the same graph many times in one process.
 
-**Not yet, if** you need graph visualisation, dynamic execution, or an adapter that wraps how a node is called, such
+**Not yet, if** you need dynamic execution, or an adapter that wraps how a node is called, such
 as `GracefulErrorAdapter`. They're on the [roadmap](#status). fnloom is also not a scheduler. It doesn't retry,
 distribute or schedule work, so pair it with an orchestrator if you need that.
 
@@ -161,7 +161,9 @@ uv run maturin develop --release
 - ✅ `@config.when*`, `@extract_fields`, `@extract_columns`, and an async driver that caches too
 - ✅ [Hooks](https://kelsayed17.github.io/fnloom/hooks/) before and after a run and each node, result builders,
   output checks and custom value checks
-- 🔜 Visualisation, then dynamic execution
+- ✅ [Drawing](https://kelsayed17.github.io/fnloom/drawing/) as DOT or Mermaid text, export as JSON, and the `fnloom`
+  command
+- 🔜 Dynamic execution
 
 The [design](https://kelsayed17.github.io/fnloom/design/2026-10-26-fnloom-design/) has the full plan. The name is
 provisional, pending a trademark check before the first release.

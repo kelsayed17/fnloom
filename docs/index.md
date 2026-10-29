@@ -151,6 +151,6 @@ tested against Hamilton side by side.
     fnloom isn't on PyPI yet, so [build it from source](getting-started.md). The Rust core, the native Python path,
     `@parameterize`, `@tag`, `@config.when*`, `@extract_fields`, `@extract_columns`, `@exclude`, graph inspection,
     `validate`, graphs from plain functions, namespaces, type checks, [result caching](caching.md), the async driver,
-    [hooks](hooks.md), result builders, output checks and custom value checks are done. Visualisation and dynamic
-    execution come later;
+    [hooks](hooks.md), result builders, output checks, custom value checks, [drawing, export and the
+    CLI](drawing.md) are done. Dynamic execution comes later;
     [the design](design/2026-10-26-fnloom-design.md) has the full plan.
