@@ -501,12 +501,12 @@ Two things are in these rows.
    at startup, and then the first and steady calls are within a millisecond of each other.
 2. **One real first-call loss: `mixed_async`, 5.16 ms against 3.73 ms (1.4× slower), with `sync_nodes="thread"`.** The
    graph's sync nodes make the first call start the loop's default executor and a worker thread: with
-   `sync_nodes="inline"` the same first call takes 2.9 ms, against 5.1 ms for `thread`, and warm calls 1.9 against
-   2.5 ms. About 1.6 ms is thread start-up, once per event loop, and about 1 ms the plan compile. Neither is hashing or
+   `sync_nodes="inline"` the same first call takes 2.9 ms, against 5.1 ms for `thread`, and warm calls 1.9 against 2.5
+   ms. About 1.6 ms is thread start-up, once per event loop, and about 1 ms the plan compile. Neither is hashing or
    type-check setup: the profile of a first call shows no code-version hash of a helper, a constant or a library, and a
-   first call of the sync workloads is within 0.5 ms of a warm one, the plan compile. Nothing here is a bug to fix, so no change was made; `inline` removes the
-   thread start for graphs of cheap sync nodes, as it removes the per-node round trip described under
-   [Async](#async).
+   first call of the sync workloads is within 0.5 ms of a warm one, the plan compile. Nothing here is a bug to fix, so no
+   change was made; `inline` removes the thread start for graphs of cheap sync nodes, as it removes the per-node round
+   trip described under [Async](#async).
 
 ## Why fan-in is fast
 
@@ -609,9 +609,10 @@ environment: the `rust:1.99.1` image on aarch64 Linux. A change that costs instr
 The Python run path is measured by [CodSpeed](https://codspeed.io) as well. `benchmarks/` holds pytest benchmarks of
 a prepared plan's steady `run` on each generated shape, `Driver.execute` on a repeated request, cached runs against a
 `MemoryCache` (warm and cold), the async driver in both `sync_nodes` modes, `@extract_fields`, `@extract_columns` and
-`@config`, the mixed numpy workload of the cold-start section (a steady run, two builds and the async driver in both modes), hooked runs of a 1,000-node chain on both drivers (with and without output checks, and cached, warm and
-cold), and `Builder.build` on a 1,000-node graph. The extension is built in release mode first, so the numbers
-are those of the optimised build.
+`@config`, the mixed numpy workload of the cold-start section (a steady run, two builds and the async driver in both
+modes), hooked runs of a 1,000-node chain on both drivers (with and without output checks, and cached, warm and cold),
+and `Builder.build` on a 1,000-node graph. The extension is built in release mode first, so the numbers are those of
+the optimised build.
 
 CodSpeed counts simulated CPU instructions and allocations instead of reading a clock, so a result is stable on a shared
 runner, and each pull request is compared against `main`. It complements the tables above, which are wall clock on one
