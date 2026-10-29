@@ -501,12 +501,12 @@ Two things are in these rows.
    at startup, and then the first and steady calls are within a millisecond of each other.
 2. **One real first-call loss: `mixed_async`, 5.16 ms against 3.73 ms (1.4× slower), with `sync_nodes="thread"`.** The
    graph's sync nodes make the first call start the loop's default executor and a worker thread: with
-   `sync_nodes="inline"` the same first call takes 2.9 ms, against 5.1 ms for `thread`, and warm calls 1.9 against 2.5
-   ms. About 1.6 ms is thread start-up, once per event loop, and about 1 ms the plan compile. Neither is hashing or
-   type-check setup: the profile of a first call shows no code-version hash of a helper, a constant or a library, and a
-   first call of the sync workloads is within 0.5 ms of a warm one, the plan compile. Nothing here is a bug to fix, so no
-   change was made; `inline` removes the thread start for graphs of cheap sync nodes, as it removes the per-node round
-   trip described under [Async](#async).
+   `sync_nodes="inline"` the same first call takes 2.9 ms, against 5.1 ms for `thread`, and warm calls 1.9 against
+   2.5 ms. About 1.6 ms is thread start-up, once per event loop, and about 1 ms the plan compile. Neither is
+   hashing or type-check setup: the profile of a first call shows no code-version hash of a helper, a constant or
+   a library, and a first call of the sync workloads is within 0.5 ms of a warm one, the plan compile. Nothing
+   here is a bug to fix, so no change was made; `inline` removes the thread start for graphs of cheap sync nodes,
+   as it removes the per-node round trip described under [Async](#async).
 
 ## Why fan-in is fast
 
