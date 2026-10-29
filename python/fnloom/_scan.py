@@ -299,36 +299,33 @@ def _bind_within(
     under the parameter's keyword, and its own name otherwise: `_bind` and
     `_payload` for a function binding nothing, in one cheaper pass.
     """
+    names = within.names
     params: list[Param] = []
     renames: dict[str, str] = {}
     for name, has_default, annotation in parameters:
-        found = within.read(name)
-        # A `value()` binding never gets here: `_bound_values` sends it to `_bind`.
-        read = found.name if isinstance(found, Source) else name
-        if read != name:
+        read = names.get(name, name)
+        if read is not name:
             renames[read] = name
         params.append(Param(name, Source(read), not has_default, annotation))
     return tuple(params), renames
 
 
-def _valued(
+def _bound_rows(
     rows: Mapping[str, Mapping[str, Binding]] | None,
     name: str,
     parameters: Sequence[_Parameter],
     within: Within | None,
 ) -> Mapping[str, Mapping[str, Binding]] | None:
-    """`rows`; for a plain function reading a `value()` its namespace binds, one row.
+    """`rows`; for a plain function reading a name its namespace binds, one row.
 
-    A constant needs the row path's payload, which passes it, so the function
-    becomes one row binding nothing, named as its plain node would be (Q112).
+    A binding may be a constant, or a source another parameter reads too, which
+    only the row path's payload passes, so the function becomes one row binding
+    nothing, named as its plain node would be (Q112).
     """
     if rows is not None or within is None or not within.bound:
         return rows
-    bound = within.bound
-    if any(
-        isinstance(bound.get(p), Value) and p not in within.names
-        for p, _, _ in parameters
-    ):
+    bound, names = within.bound, within.names
+    if any(p in bound and p not in names for p, _, _ in parameters):
         nothing: dict[str, Binding] = {}
         return {name: nothing}
     return rows
@@ -520,7 +517,7 @@ def _node_defs(  # noqa: PLR0913  # keyword-only options, one per kind of source
         name = _config.node_name(fn, recorded.config.name)
         conditions = recorded.config.conditions
     rows, injected_docs = _injected(fn, name, rows, bind)
-    rows = _valued(rows, name, parameters, within)
+    rows = _bound_rows(rows, name, parameters, within)
     if rows is None:
         # A plain function is one node, of its own name, binding nothing, so each
         # parameter reads its own name, or its namespace's node of that name, and

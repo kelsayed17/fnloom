@@ -2329,14 +2329,13 @@ def _checked_bound(
     """Each namespace's `bind=`, checked and read-only (Q112)."""
     if bound is None or not bound:
         return MappingProxyType[str, Mapping[str, Source | Value]]({})
-    return MappingProxyType(
-        {
-            checked_namespace(namespace) or "": MappingProxyType(
-                _checked_bind(namespace, bind)
-            )
-            for namespace, bind in bound.items()
-        }
-    )
+    checked: dict[str, Mapping[str, Source | Value]] = {}
+    for namespace, bind in bound.items():
+        if (name := checked_namespace(namespace)) is None:
+            msg = "bind needs a namespace: with_modules(..., namespace=..., bind=...)"
+            raise TypeError(msg)
+        checked[name] = MappingProxyType(_checked_bind(name, bind))
+    return MappingProxyType(checked)
 
 
 def _bound_with(
@@ -2557,7 +2556,8 @@ class Builder[R = dict[str, object]]:
             references(self._functions),
             self._namespaces,
             self._result_builder,
-            self._bound,
+            # Plain dicts: a `MappingProxyType` doesn't pickle.
+            {namespace: dict(bind) for namespace, bind in self._bound.items()},
         )
 
     def _settings(self) -> _Settings:

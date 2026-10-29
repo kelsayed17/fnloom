@@ -1,8 +1,8 @@
 # Roadmap: ahead of Hamilton everywhere
 
 **Status:** in progress, 2026-10-28. Plans 1–4, the Plan 4 follow-up and Plan 3 are merged and released in 0.2.0.
-Plans 5 to 7 are merged (#24 to #26), not yet released. Plan 8 is on its own branch, merge pending; a row below marked
-done or fixed in Plan 8 describes that branch. Plans 9 and later are not built.
+Plans 5 to 7 are merged (#24 to #26), not yet released. Plan 8 is merged (#27), not yet released. Plan 9 is on its own branch, merge pending; a row below marked decided in
+Plan 9 describes that branch. Plan 10 and later are not built.
 
 **Goal:** for every capability Hamilton 1.90.0 offers, fnloom has an equivalent that is at least as good, or a
 written decision explaining why it doesn't. "At least as good" means: same intent; behaviour proven differentially
@@ -45,7 +45,8 @@ and the design's change log takes a row when the item is approved.
 | `@check_output`, `@check_output_custom` | Done in Plan 8: checks inside the node, adding no node; fail by default with a `ValueError`; over any type; custom checks that read the node's inputs; stacked in any order; part of the cache key (Q99–Q103) |
 | `@pipe_input`, `@pipe_output`, `@mutate`, `@step` | Done in Plan 8: steps as ordinary nodes with Hamilton's names, stable across config; defaulted step parameters never inputs; cross-module `@mutate`; `@pipe_input` with `@parameterize` rows (Q104–Q108) |
 | `@inject`, `@resolve` | Done in Plan 8: `@inject` keeps the name; `@resolve(decorate_with)` without power-user mode, on a copy per build (Q109, Q110) |
-| `@subdag`, `@does`, `@schema`, `@dataloader`, `@datasaver`, `@load_from`, `@save_to` | Plan 9 decides each. Default: not planned, with a register row naming the fnloom way to get the same result |
+| `@subdag`, `@parameterized_subdag` | Decided in Plan 9: `Builder.with_modules(..., namespace=, bind=)` feeds each copy of a module its own inputs (Q112); `config=` per copy and `@parameterized_subdag` are not planned, a config key per copy and a loop of `with_modules` calls instead |
+| `@does`, `@schema.output`, `@dataloader`, `@datasaver`, `@load_from`, `@save_to` | Decided in Plan 9: not planned, each with a register row (Q113 to Q116) and a runnable recipe in [Coming from Hamilton](../from-hamilton.md#hamilton-features-fnloom-leaves-out) |
 | `@cache(format=...)`, per-format result stores | Done in the Plan 4 follow-up: `fnloom.Format`, `"pickle"` and `"json"` built in, more through `DiskCache(formats=...)`; resolved at build (Q55), and `json` stores only what loads back exactly (Q54) |
 
 ### Execution
@@ -58,7 +59,7 @@ and the design's change log takes a row when the item is approved.
 | Plugin ecosystem (dask, ray, spark, pandera, mlflow, UI, tracker) | Not built in (design §2 non-goal). Plan 6's hooks make each one writable outside fnloom (Q84) |
 | A failing node logs its inputs | Done in Plan 6: `after_node` gets `ok=False` with the node, its inputs and its error, and `fnloom.LogFailures` (*new*) is the ready-made hook that logs them (Q88) |
 | `NodeExecutionMethod` and `GracefulErrorAdapter` (node-execution wrappers) | `NodeExecutionMethod` done in Plan 8: `Builder.with_node_wrappers(*wrappers)`, Q24's ordered chain, any number per driver (Q111). Graceful partial failure ships with "Graphs that carry I/O and failure" under [Beyond Hamilton](#beyond-hamilton) |
-| `StaticValidator` | Plan 9 decides it (Plan 6, decision 13). `Driver.nodes` already allows the same check after `build` |
+| `StaticValidator` | Decided in Plan 9: not planned (Q117). A function over `Driver.nodes` after `build()` raises one `ValueError` listing every problem |
 | Async hook methods | Out of scope for Plan 6 (its decision 13): hook methods are plain `def`, called on the loop's thread on the async driver, and an `async def` method is a `TypeError` from `with_hooks` (Q84, Q86) |
 | A function in `final_vars` | Done in Plan 5: matched by identity, never by name (Q30) |
 
@@ -219,7 +220,9 @@ tests against Hamilton for every kept behaviour; benchmarks for anything on the 
    (Q95, Q96); the `fnloom` command (Q97, Q98).
 7. **Plan 8: v1.x decorators.** Done, merge pending: output validators (Q99–Q103), step injection and `@mutate`
    (Q104–Q108), `@inject` and `@resolve` (Q109, Q110), and node wrappers (Q111).
-8. **Plan 9: the long tail.** A decision per remaining Hamilton decorator, each a register row.
+8. **Plan 9: the long tail.** Done, merge pending: a decision per remaining Hamilton decorator, each a register row
+   (Q112 to Q117), with `bind=` on a namespaced `with_modules` as the one build (Q112), and Q110's known limit pinned
+   by a test.
 9. **Design, then Plan 10: dynamic execution**, together with the "Beyond Hamilton" designs.
 
 ## Done means

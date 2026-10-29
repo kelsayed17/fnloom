@@ -92,7 +92,7 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `ad_hoc_utils.create_temporary_module(fa, fb)` | Copies the functions into a module it registers in `sys.modules`; refuses `_` names; the original function in `final_vars` is refused | `Builder().with_functions(fa, fb)`: the functions themselves, no module made or registered, the original in `final_vars` means its node ([Graphs without modules](writing-nodes.md#graphs-without-modules), Q72) |
 | A lambda in `create_temporary_module` | Accepted, failing later | Needs a name: `fnloom.node(fn, name="x")`, which also binds parameters with `bind={...}` (Q72) |
 | `allow_module_overrides()` | The later module's function silently replaces the earlier one, for every reader | No override: a name defined twice fails the build. To use one module twice, give it a namespace ([Namespaces](writing-nodes.md#namespaces), Q74) |
-| `@subdag(module, ...)` to reuse a module | The module's nodes are named `<function>.<name>`, under a function you write | `Builder().with_modules(module, namespace="ns")` names them `ns.<name>`; inside, a parameter reads the namespace's node first, then the plain name, and inputs keep their plain names (Q74) |
+| `@subdag(module, ...)` to reuse a module | The module's nodes are named `<function>.<name>`, under a function you write | `Builder().with_modules(module, namespace="ns")` names them `ns.<name>`; inside, a parameter reads the namespace's node first, then the plain name, and inputs keep their plain names (Q74). `inputs=` becomes `bind=`, which feeds each copy its own inputs ([`@subdag` and `@parameterized_subdag`](#subdag-and-parameterized_subdag), Q112) |
 | `what_is_upstream_of` | `HamiltonNode` objects | Sorted names, including the ones you named (Q28) |
 | Reusing a request | Re-planned on every call | `prepare(...)` returns a plan to run again (Q3) |
 | `validate_execution(final_vars, overrides, inputs)` | Returns `None` or raises one kind of problem; refuses a function in `final_vars`; a missing input names every consumer in the graph | `validate(final_vars, *, inputs, overrides)` returns every problem, one sorted line each, and names only the consumers the request needs; unknown names get a `did you mean` suggestion (Q71) |
@@ -208,6 +208,59 @@ value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](
 
 fnloom doesn't build these Hamilton features, because plain Python, or something fnloom already has, gets the same
 result with less to learn. Each section shows the fnloom way. Each decision is a register row.
+
+### `@subdag` and `@parameterized_subdag`
+
+A namespace is a module used again (Q74), and `bind=` feeds each copy its own input, as `@subdag`'s `inputs=` does
+(Q112). The function body is an ordinary function reading the namespace's nodes by their full names:
+
+```python
+# file: taxes.py
+def net(gross: float) -> float:
+    return gross * 0.8
+
+
+def doubled(net: float) -> float:
+    return net * 2
+```
+
+```python
+# file: finals.py
+import fnloom
+
+
+@fnloom.inject(doubled=fnloom.source("eu.doubled"))
+def eu(doubled: float) -> float:
+    return doubled
+
+
+@fnloom.inject(doubled=fnloom.source("us.doubled"))
+def us(doubled: float) -> float:
+    return doubled
+```
+
+```python
+import fnloom
+import finals
+import taxes
+
+driver = (
+    fnloom.Builder()
+    .with_modules(finals)
+    .with_modules(taxes, namespace="eu", bind={"gross": fnloom.source("eu_gross")})
+    .with_modules(taxes, namespace="us", bind={"gross": fnloom.value(5.0)})
+    .build()
+)
+driver.execute(["eu", "us"], inputs={"eu_gross": 10.0})
+# -> {'eu': 16.0, 'us': 8.0}
+```
+
+Two things differ from Hamilton, on purpose. A misspelled parameter in a final function is a missing-input error, where
+Hamilton makes it a namespaced input. A `bind=` key no node reads is a `ValueError`, where Hamilton drops an unused
+`source()`.
+
+`config=` per copy isn't built: give each copy a config key (`eu_mode`, `us_mode`) read by `@config.when`.
+`@parameterized_subdag` isn't either: loop over `with_modules(taxes, namespace=name, bind=...)`, one call per copy.
 
 ### `@does`
 
@@ -397,8 +450,8 @@ result caching, the async driver, hooks, result builders, output checks, custom 
 CLI, `@check_output` validators, step injection, `@inject`, `@resolve` and node wrappers are done. These Hamilton
 features come next, roughly in this order:
 
-1. **Dynamic execution**, materializers and `@subdag`.
-2. **`GracefulErrorAdapter`** and `StaticValidator`. Node wrappers can change how a node is called, but a run still
-   stops at the first failure.
+1. **Dynamic execution**, which has its own design.
+2. **`GracefulErrorAdapter`**. Node wrappers can change how a node is called, but a run still stops at the first
+   failure.
 
 If your pipeline depends on one of these, it's worth waiting for it before you switch.

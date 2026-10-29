@@ -9,6 +9,14 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Added
 
+- `Builder.with_modules(*modules, namespace=, bind={...})` feeds a namespace inputs of its own, as `@subdag`'s
+  `inputs=` does. Each key is a name the namespace reads that none of its modules defines, bound to `source("x")`, read
+  outside the namespace, or `value(v)`. A key no node reads, or one the namespace defines, is a `ValueError` at build.
+  Bindings are in `Driver.nodes`, the export, `graph_version` and the cache key (a `value()` holding a set is keyed the
+  same on every hash seed), and survive pickling, `copy` and `rebuild()` (Q112).
+- Decisions, each with a register row and a runnable recipe in Coming from Hamilton: `@does`, `@schema.output`,
+  `@dataloader`, `@datasaver`, `@load_from`, `@save_to`, materializers and `StaticValidator` are not planned (Q113 to
+  Q117); `@parameterized_subdag` and `config=` per `@subdag` copy are not planned either (Q112).
 - Output checks. `@fnloom.check_output(range=, values_in=, data_type=, allow_none=, contains=, does_not_contain=,
   allow_nans=, max_fraction_nans=, importance="fail", field=None)` and `@fnloom.check_output_custom(*checks)` check a
   node's value inside the node, adding no node. A custom check is a function, which may read the node's `inputs`, or a

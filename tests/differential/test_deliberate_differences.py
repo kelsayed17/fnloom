@@ -5521,3 +5521,84 @@ def test_q110_a_resolver_importing_a_mutate_is_refused(tmp_path: Path) -> None:
     finally:
         sys.path.remove(str(tmp_path))
         sys.modules.pop("q110_mutating", None)
+
+
+_Q112_TAXES = """
+def net(gross: float) -> float:
+    return gross * 0.8
+
+def doubled(net: float) -> float:
+    return net * 2
+"""
+
+_Q112_SUBDAGS = """
+from hamilton.function_modifiers import source, subdag, value
+import q112_taxes
+
+@subdag(q112_taxes, inputs={"gross": source("eu_gross")})
+def eu(doubled: float) -> float:
+    return doubled
+
+@subdag(q112_taxes, inputs={"gross": value(5.0)})
+def us(doubled: float) -> float:
+    return doubled
+
+@subdag(q112_taxes, inputs={"gross": source("eu_gross")})
+def typo(doubld: float) -> float:
+    return doubld
+"""
+
+_Q112_FINALS = """
+import fnloom
+
+@fnloom.inject(doubled=fnloom.source("eu.doubled"))
+def eu(doubled: float) -> float:
+    return doubled
+
+@fnloom.inject(doubled=fnloom.source("us.doubled"))
+def us(doubled: float) -> float:
+    return doubled
+
+@fnloom.inject(doubld=fnloom.source("eu.doubld"))
+def typo(doubld: float) -> float:
+    return doubld
+"""
+
+
+@pytest.mark.deliberate("Q112")
+def test_q112_bind_feeds_each_namespace(tmp_path: Path) -> None:
+    """Two `@subdag`s with `inputs=` and two bound namespaces give the same values.
+
+    Hamilton makes a misspelled final-function parameter a namespaced input;
+    fnloom's final node reads the namespace's node by name, and a misspelled
+    one is a missing input that `validate` names.
+    """
+    _module_from_file(tmp_path, "q112_taxes", _Q112_TAXES)
+    hamilton_module = _module_from_file(tmp_path, "q112_h", _Q112_SUBDAGS)
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    inputs = {"eu_gross": 10.0}
+    expected = hamilton.execute(["eu", "us"], inputs=inputs)
+    assert expected == {"eu": 16.0, "us": 8.0}
+    assert sorted(
+        v.name for v in hamilton.list_available_variables() if v.is_external_input
+    ) == ["eu_gross", "typo.doubld"]
+    taxes = make_module("q112_taxes_f", _Q112_TAXES)
+    finals = make_module("q112_f", _Q112_FINALS)
+    driver = (
+        fnloom.Builder()
+        .with_modules(finals)
+        .with_modules(taxes, namespace="eu", bind={"gross": fnloom.source("eu_gross")})
+        .with_modules(taxes, namespace="us", bind={"gross": fnloom.value(5.0)})
+        .build()
+    )
+    assert driver.execute(["eu", "us"], inputs=inputs) == expected
+    assert driver.validate(["typo"], inputs=inputs) == [
+        "missing inputs: 'eu.doubld' (needed by 'typo')"
+    ]
+    # An unused binding is refused, where Hamilton drops a source() silently.
+    with pytest.raises(ValueError, match="bind names 'rate' under namespace 'eu'"):
+        fnloom.Builder().with_modules(
+            taxes,
+            namespace="eu",
+            bind={"gross": fnloom.value(1.0), "rate": fnloom.source("r")},
+        ).build()

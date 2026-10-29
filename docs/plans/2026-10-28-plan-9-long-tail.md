@@ -3,7 +3,7 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** approved, 2026-10-28, as drafted, with the recommended option for decision 1. Building on
+**Status:** built, merge pending; approved 2026-10-28, as drafted, with the recommended option for decision 1. Building on
 `claude/plan-9-decisions`.
 
 **Goal:** close the roadmap's step 8 by deciding each Hamilton feature the roadmap leaves to Plan 9: `@subdag` (with
@@ -220,3 +220,19 @@ docs/plans/2026-10-28-roadmap-ahead-of-hamilton.md, README.md, docs/index.md, CH
     - `README.md`, `docs/index.md` and `CHANGELOG.md`.
 - [ ] As built.
 - [ ] Check green; commit.
+
+## As built
+
+- **`bind=` is resolved in the scan and in step lowering**, through one `Within.read`: the namespace's own node first,
+  then its binding. A plain function reading a bound name becomes one row binding nothing, so the row path's payload
+  passes a constant, or a source two parameters share.
+- **A `value()` binding is keyed by a canonical form.** `stable_fingerprint` (`python/fnloom/_canonical.py`, moved out
+  of `_export.py`) is the fingerprint of a value with no set, and a hash of a canonical form otherwise. The cache key
+  and `value_version` both use it, so a `frozenset` constant keys the same on every `PYTHONHASHSEED`. This also fixes
+  the same value in any `value()` parameter, not only a bound one.
+- **Pickling carries `bind=` as plain dicts**, since a `MappingProxyType` doesn't pickle.
+- **Checks.** `with_modules` refuses a missing namespace, a binding that is no `source` or `value`, a key that is no
+  identifier, and a key bound otherwise by an earlier call. `build()` refuses a key the namespace defines or no node
+  reads, each listed, sorted.
+- **Known follow-ups, unchanged:** `fingerprint` hashes dicts in insertion order, and `class_version` can't tell
+  exec-defined classes apart.
