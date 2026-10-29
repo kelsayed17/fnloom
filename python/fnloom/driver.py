@@ -3,6 +3,7 @@
 import copy
 import functools
 import importlib
+import importlib.metadata
 import inspect
 import sys
 import threading
@@ -30,6 +31,7 @@ from fnloom._caching import Cache, CacheOutcome, CacheRun
 from fnloom._decorators import Source
 from fnloom._defaults import default_problems
 from fnloom._drawing import Drawing, Mark, drawing, with_context
+from fnloom._export import export
 from fnloom._extract import is_generated
 from fnloom._functions import (
     FunctionReference,
@@ -1570,6 +1572,53 @@ class Driver[R = dict[str, object]]:
             marks.setdefault(name, []).append("output")
         return drawing(self._nodes, drawn, marks)
 
+    def export(
+        self,
+        final_vars: Sequence[str | Callable[..., object]] | None = None,
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+        validate: bool = True,
+    ) -> dict[str, Any]:
+        """The graph, or the run `execute` would make, as a JSON-ready document (Q95).
+
+        With no `final_vars`, every node and input; with them, the nodes
+        `draw_execution` draws for the same arguments, checked as it checks them.
+        The document is `{"format": "fnloom.export/1", "fnloom", "graph_version",
+        "config", "request", "nodes"}`: `nodes` in topological order, each with
+        its kind, type, parameters, tags, doc, function, config conditions,
+        source, code version and marks; an input with whether it is required and
+        its consumers. No value is exported: `request` lists names, and config
+        values and `value()` bindings are their `repr`. `json.dumps` of it is the
+        same text on every run (Q96).
+
+        `TypeError` for `inputs` or `overrides` without `final_vars`.
+        """
+        if final_vars is None:
+            if inputs is not None or overrides is not None:
+                msg = "inputs and overrides describe a run: give final_vars too"
+                raise TypeError(msg)
+            drawn = self.draw()
+            request = None
+        else:
+            drawn = self.draw_execution(
+                final_vars, inputs=inputs, overrides=overrides, validate=validate
+            )
+            shape = self._shape(final_vars, inputs, overrides)
+            request = {
+                "outputs": shape.planned,
+                "inputs": sorted(shape.supplied),
+                "overrides": sorted(shape.overridden),
+            }
+        return export(
+            drawn,
+            self._nodes,
+            inputs=self.inputs(),
+            config=self._config,
+            request=request,
+            version=importlib.metadata.version("fnloom"),
+        )
+
     def _missing_inputs(self, shape: _Shape) -> set[str]:
         """The inputs a run of `shape` needs that it does not supply.
 
@@ -1917,6 +1966,19 @@ class AsyncDriver[R = dict[str, object]]:
     ) -> Drawing:
         """What a run would compute; see `Driver.draw_execution`."""
         return self._driver.draw_execution(
+            final_vars, inputs=inputs, overrides=overrides, validate=validate
+        )
+
+    def export(
+        self,
+        final_vars: Sequence[str | Callable[..., object]] | None = None,
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+        validate: bool = True,
+    ) -> dict[str, Any]:
+        """The graph or a run as a document; see `Driver.export`."""
+        return self._driver.export(
             final_vars, inputs=inputs, overrides=overrides, validate=validate
         )
 

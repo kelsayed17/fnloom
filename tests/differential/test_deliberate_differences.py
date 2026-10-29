@@ -4,6 +4,7 @@ import asyncio
 import collections.abc
 import importlib.util
 import inspect
+import json
 import logging
 import os
 import pickle
@@ -18,7 +19,7 @@ from typing import TYPE_CHECKING, Annotated, Any, TypedDict, cast, override
 import pytest
 from hamilton import async_driver as hamilton_async
 from hamilton import driver as hamilton_driver
-from hamilton import htypes, lifecycle
+from hamilton import graph_types, htypes, lifecycle
 from hamilton.function_modifiers import hamilton_exclude
 from hamilton.function_modifiers.base import InvalidDecoratorException
 from hamilton.lifecycle import NoEdgeAndInputTypeChecking
@@ -4604,3 +4605,122 @@ def test_q94_drawing_needs_nothing(
     assert error.exc_info is not None
     dot = fnloom.build(module).draw().to_dot()
     assert dot.startswith("digraph {")
+
+
+_Q95_HAMILTON = """
+from hamilton.function_modifiers import config
+
+def a(x: int) -> int:
+    return x + 1
+
+def b(a: int) -> int:
+    return a
+
+@config.when(mode="fast")
+def c__fast(b: int) -> int:
+    return b
+"""
+
+
+def _module_from_file(folder: Path, name: str, source: str) -> types.ModuleType:
+    """`source` written to `folder` and imported as `name`, so it has source."""
+    path = folder / f"{name}.py"
+    path.write_text(source)
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.deliberate("Q95")
+def test_q95_exports(tmp_path: Path) -> None:
+    """Hamilton gives an input a consumer's source; fnloom exports it as an input."""
+    # A function Python has no source for: Hamilton's export raises.
+    no_source = make_module("q95_exec", _Q95_HAMILTON)
+    with pytest.raises(OSError, match="source code not available"):
+        hamilton_driver.Builder().with_modules(no_source).build().export_execution(
+            ["a"], {"x": 1}
+        )
+    assert (
+        fnloom.build(no_source).export(["a"], inputs={"x": 1})["nodes"][1]["source"]
+        is None
+    )
+    module = _module_from_file(tmp_path, "q95_h", _Q95_HAMILTON)
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_config({"mode": "fast"})
+        .build()
+    )
+    exported = json.loads(hamilton.export_execution(["c"], {"x": 1}, {"b": 2}))
+    assert set(exported) == {"nodes"}
+    by_name = {n["name"]: n for n in exported["nodes"]}
+    # The override `b` is unmarked, and no node says which variant `c` is.
+    assert set(by_name) == {"b", "c"}
+    assert "override" not in json.dumps(by_name["b"])
+    plain = json.loads(hamilton.export_execution(["a"], {"x": 1}))
+    inputs = {n["name"]: n for n in plain["nodes"]}
+    assert inputs["x"]["version"] == inputs["a"]["version"]
+    with pytest.raises(TypeError, match="expected str instance, function found"):
+        hamilton.export_execution([module.a], {"x": 1})
+
+    fn_module = make_module(
+        "q95_f",
+        _Q95_HAMILTON.replace(
+            "from hamilton.function_modifiers import config",
+            "from fnloom import config",
+        ),
+    )
+    built = (
+        fnloom.Builder().with_modules(fn_module).with_config({"mode": "fast"}).build()
+    )
+    document = built.export(["c"], inputs={"x": 1}, overrides={"b": 2})
+    assert document["format"] == "fnloom.export/1"
+    assert document["config"] == {"mode": "'fast'"}
+    nodes = {n["name"]: n for n in document["nodes"]}
+    assert nodes["b"]["marks"] == ["override"]
+    assert nodes["c"]["config"] == ["mode == 'fast'"]
+    x = {n["name"]: n for n in built.export(["a"], inputs={"x": 1})["nodes"]}["x"]
+    assert x["version"] is None
+    assert x["source"] is None
+    assert built.export([fn_module.a], inputs={"x": 1}) == built.export(
+        ["a"], inputs={"x": 1}
+    )
+
+
+_Q96_GRAPH = """
+K = {k}
+
+def a(x: int) -> int:
+    return x + K
+"""
+
+
+@pytest.mark.deliberate("Q96")
+def test_q96_versions_see_the_code_a_function_reads() -> None:
+    """Hamilton's version is the source text; a changed constant keeps it."""
+    hamilton_versions = []
+    fnloom_versions = []
+    for k in (1, 2):
+        module = make_module(f"q96_{k}", _Q96_GRAPH.format(k=k))
+        built = hamilton_driver.Builder().with_modules(module).build()
+        graph = graph_types.HamiltonGraph.from_graph(built.graph)
+        hamilton_versions.append(
+            (graph.version, {n.name: n.version for n in graph.nodes})
+        )
+        document = fnloom.build(module).export()
+        fnloom_versions.append(
+            (
+                document["graph_version"],
+                {n["name"]: n["version"] for n in document["nodes"]},
+            )
+        )
+    assert hamilton_versions[0] == hamilton_versions[1]
+    # Hamilton gives the input its consumer's version; fnloom gives it none.
+    assert hamilton_versions[0][1]["x"] == hamilton_versions[0][1]["a"]
+    assert fnloom_versions[0][1]["x"] is None
+    assert fnloom_versions[0][0] != fnloom_versions[1][0]
+    assert fnloom_versions[0][1]["a"] != fnloom_versions[1][1]["a"]

@@ -79,4 +79,6 @@ def test_the_regressed_callables_are_covered() -> None:
         "Driver.draw_path_between",
         "AsyncDriver.draw_downstream_of",
         "Drawing.to_dot",
+        "Driver.export",
+        "AsyncDriver.export",
     }

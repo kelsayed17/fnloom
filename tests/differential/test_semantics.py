@@ -3,6 +3,7 @@
 import asyncio
 import copy
 import inspect
+import json
 import pickle
 import re
 from typing import TYPE_CHECKING, Any, cast, override
@@ -178,6 +179,32 @@ def _hamilton_drawn(module: ModuleType, scope: str, names: Sequence[str]) -> set
         else:
             found.add(name)
     return found
+
+
+@pytest.mark.parametrize(
+    ("fixture", "outputs", "inputs", "overrides"),
+    [
+        ("diamond", ["join"], {"a": 1}, {}),
+        ("diamond", ["join"], {}, {"root": 2}),
+        ("override", ["top"], {}, {"mid": 3}),
+        ("optional", ["scaled"], {"a": 1}, {}),
+        ("optional", ["scaled"], {"a": 1, "factor": 2}, {}),
+    ],
+)
+def test_exports_of_a_run_list_the_same_nodes(
+    fixture: str,
+    outputs: list[str],
+    inputs: dict[str, object],
+    overrides: dict[str, object],
+) -> None:
+    """The run's nodes and the inputs it reads, as `export_execution`'s (Q95)."""
+    module = load_fixture(fixture)
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    exported = json.loads(hamilton.export_execution(outputs, inputs, overrides))
+    document = fnloom.build(module).export(outputs, inputs=inputs, overrides=overrides)
+    assert {n["name"] for n in document["nodes"]} == {
+        n["name"] for n in exported["nodes"]
+    }
 
 
 @pytest.mark.parametrize(

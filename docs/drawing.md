@@ -143,3 +143,40 @@ with tempfile.TemporaryDirectory() as folder:
 text == driver.draw().to_dot()
 # -> True
 ```
+
+## Exporting
+
+`export()` describes the graph as a JSON-ready document, for a tool to read or for a record of what ran. With
+`final_vars`, and `inputs` and `overrides` as `execute` takes them, it describes the run `draw_execution` would draw,
+checked the same way. It runs nothing and holds no value: the request lists names, and config values are their `repr`.
+
+```python
+import json
+
+document = driver.export(["total"], inputs={"price": 9.5, "quantity": 2})
+document["format"], document["config"], document["request"]["outputs"]
+# -> ('fnloom.export/1', {'region': "'eu'"}, ['total'])
+[node["name"] for node in document["nodes"]]
+# -> ['price', 'quantity', 'subtotal', 'shipping', 'tax', 'total']
+text = json.dumps(document, sort_keys=True)
+```
+
+Each node gives its kind (`"function"` or `"input"`), its whole type, each parameter and what it reads, its tags, doc,
+function, config conditions, source and marks. An input says whether it is required and which nodes read it:
+
+```python
+tax = document["nodes"][4]
+tax["kind"], tax["type"], tax["config"], tax["marks"]
+# -> ('function', 'float', ["region == 'eu'"], [])
+price = document["nodes"][0]
+price["kind"], price["required"], price["consumers"], price["version"]
+# -> ('input', True, ['subtotal'], None)
+```
+
+A function node's `version` is its code version, the one the [result cache](caching.md) keys on. It covers the
+function's code, defaults, closures and the globals it reads, helpers and constants included. A function with no code
+version, such as one reading a mutable global, has `version` `None` and an `unversioned` entry saying why.
+`graph_version` hashes every node's name, kind, type, wiring, conditions and version, so it changes when any of them
+does, and it is `None` when some node is unversioned.
+
+The `fnloom diff` command compares two exports.
