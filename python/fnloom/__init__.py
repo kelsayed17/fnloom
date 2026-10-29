@@ -24,6 +24,7 @@ from fnloom._decorators import (
 from fnloom._extract import extract_columns, extract_fields
 from fnloom._fingerprint import fingerprint, register_fingerprint
 from fnloom._functions import NodeSpec, node
+from fnloom._hooks import Hook, LogFailures, NodeEnd, NodeStart, RunEnd, RunStart
 from fnloom._stores import (
     MISSING,
     CacheStore,
@@ -32,7 +33,7 @@ from fnloom._stores import (
     Format,
     MemoryCache,
 )
-from fnloom._types import type_matches, value_matches
+from fnloom._types import ValueCheck, type_matches, value_matches
 from fnloom._view import InputView, NodeView, Param
 from fnloom.driver import (
     AsyncDriver,
@@ -59,15 +60,22 @@ __all__ = [
     "Driver",
     "Format",
     "Group",
+    "Hook",
     "InputView",
+    "LogFailures",
     "MemoryCache",
+    "NodeEnd",
     "NodeSpec",
+    "NodeStart",
     "NodeView",
     "Param",
     "PreparedPlan",
+    "RunEnd",
+    "RunStart",
     "Source",
     "UnfingerprintableError",
     "Value",
+    "ValueCheck",
     "build",
     "cache",
     "config",

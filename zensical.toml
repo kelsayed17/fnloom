@@ -17,6 +17,7 @@ nav = [
     "writing-nodes.md",
     "running.md",
     "caching.md",
+    "hooks.md",
     "errors.md",
     "rust-core.md",
   ] },

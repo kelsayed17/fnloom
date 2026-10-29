@@ -1201,6 +1201,52 @@ def check_of(
     return None, functools.partial(_fits, declared)
 
 
+type ValueCheck = collections.abc.Callable[[object, object], bool]
+"""A custom value check (Q21), exported as `fnloom.ValueCheck`.
+
+Called as `check(declared, value)` for a value the default check refuses; a true
+result admits the value. See `Builder.with_value_check`.
+"""
+
+
+def checks_everything(declared: object) -> bool:
+    """Whether every value fits `declared`, `Any` or `object`: it needs no check."""
+    stripped_type = _strip(declared)
+    return stripped_type is Any or stripped_type is object
+
+
+def admitting(
+    declared: object,
+    check: tuple[Classes | None, Matcher],
+    value_checks: tuple[ValueCheck, ...],
+) -> tuple[Classes | None, Matcher]:
+    """`check`, `declared`'s own, made to admit what any of `value_checks` admits.
+
+    Each custom check is called with `(declared, value)` only for a value the
+    default check refuses, in the order given, until one returns a true value
+    (Q21). One against an annotation that did not resolve refuses by raising
+    `UnresolvedError`, which is raised still when no custom check admits the
+    value. A custom check that raises is not caught. The classes are kept, so a
+    caller that checks by `isinstance` first, and calls the check when that
+    refuses, pays nothing more for a value that fits.
+    """
+    if not value_checks:
+        return check
+    classes, matches = check
+
+    def admits(value: object) -> bool:
+        try:
+            if matches(value):
+                return True
+        except UnresolvedError:
+            if any(custom(declared, value) for custom in value_checks):
+                return True
+            raise
+        return any(custom(declared, value) for custom in value_checks)
+
+    return classes, admits
+
+
 def _ruled_matcher(declared: object, origin: object, rules: Rules) -> Matcher:
     """`check_of`'s check of a type that is no plain class or fixed tuple, by `rules`.
 

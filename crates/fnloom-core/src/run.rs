@@ -45,7 +45,11 @@ pub struct Arg<'g, V> {
 }
 
 /// Lifecycle hooks around a run; every observer sees every event, in slice order.
-pub trait Observer<E> {
+///
+/// `V` is the evaluator's value type and `E` its error type, so the node events can carry
+/// a node's arguments and its result or error, all by reference: an observer that ignores
+/// them costs nothing.
+pub trait Observer<V, E> {
     /// Called once before anything runs.
     ///
     /// # Errors
@@ -55,21 +59,23 @@ pub trait Observer<E> {
         Ok(())
     }
 
-    /// Called before a computed node is evaluated.
+    /// Called before a computed node is evaluated, with the arguments it will get, sorted
+    /// by input id as `Evaluate::evaluate` gets them.
     ///
     /// # Errors
     ///
     /// An error aborts the run after every observer has seen the event.
-    fn pre_node(&mut self, _node: &str) -> Result<(), E> {
+    fn pre_node(&mut self, _node: &str, _args: &[Arg<'_, V>]) -> Result<(), E> {
         Ok(())
     }
 
-    /// Called after a computed node was evaluated; `ok` says whether it succeeded.
+    /// Called after a computed node was evaluated, with the value it returned or the
+    /// error it raised.
     ///
     /// # Errors
     ///
     /// An error aborts the run after every observer has seen the event.
-    fn post_node(&mut self, _node: &str, _ok: bool) -> Result<(), E> {
+    fn post_node(&mut self, _node: &str, _outcome: Result<&V, &E>) -> Result<(), E> {
         Ok(())
     }
 
@@ -92,7 +98,7 @@ pub enum RunError<E> {
         node: String,
         /// What the payload raised.
         source: E,
-        /// Errors observers raised while handling this failure (`post_node(false)`, then
+        /// Errors observers raised while handling this failure (`post_node` with the error, then
         /// `post_graph(false)`); empty when they all succeeded.
         observer_errors: Vec<E>,
     },
@@ -141,13 +147,13 @@ impl<E: Error + 'static> Error for RunError<E> {
 }
 
 /// The observers of one run, driven as a group.
-struct Hooks<'a, 'o, E> {
-    observers: &'a mut [&'o mut dyn Observer<E>],
+struct Hooks<'a, 'o, V, E> {
+    observers: &'a mut [&'o mut dyn Observer<V, E>],
 }
 
-impl<E> Hooks<'_, '_, E> {
+impl<V, E> Hooks<'_, '_, V, E> {
     /// Delivers one event to every observer in slice order and returns the errors raised.
-    fn fire(&mut self, mut event: impl FnMut(&mut dyn Observer<E>) -> Result<(), E>) -> Vec<E> {
+    fn fire(&mut self, mut event: impl FnMut(&mut dyn Observer<V, E>) -> Result<(), E>) -> Vec<E> {
         self.observers
             .iter_mut()
             .filter_map(|observer| event(&mut **observer).err())
@@ -158,7 +164,7 @@ impl<E> Hooks<'_, '_, E> {
     fn check(
         &mut self,
         name: &'static str,
-        event: impl FnMut(&mut dyn Observer<E>) -> Result<(), E>,
+        event: impl FnMut(&mut dyn Observer<V, E>) -> Result<(), E>,
     ) -> Result<(), RunError<E>> {
         let errors = self.fire(event);
         if errors.is_empty() {
@@ -213,7 +219,7 @@ impl Plan {
         eval: &mut V,
         inputs: &BTreeMap<String, V::Value>,
         overrides: &BTreeMap<String, V::Value>,
-        observers: &mut [&mut dyn Observer<V::Error>],
+        observers: &mut [&mut dyn Observer<V::Value, V::Error>],
     ) -> Result<BTreeMap<String, V::Value>, RunError<V::Error>> {
         let lookup = |action, id| {
             let values = if action == Action::UseOverride {
@@ -246,7 +252,7 @@ impl Plan {
         graph: &Graph<P>,
         eval: &mut V,
         lookup: impl FnMut(Action, NodeId) -> Option<V::Value>,
-        observers: &mut [&mut dyn Observer<V::Error>],
+        observers: &mut [&mut dyn Observer<V::Value, V::Error>],
     ) -> Result<Outputs<V::Value>, RunError<V::Error>> {
         let slots = self.seed(graph, lookup)?;
         let mut hooks = Hooks { observers };
@@ -297,7 +303,7 @@ impl Plan {
         graph: &Graph<P>,
         eval: &mut V,
         mut slots: Vec<Option<V::Value>>,
-        hooks: &mut Hooks<'_, '_, V::Error>,
+        hooks: &mut Hooks<'_, '_, V::Value, V::Error>,
     ) -> Result<Outputs<V::Value>, RunError<V::Error>> {
         for step in self.steps() {
             if step.action == Action::Compute {
@@ -341,7 +347,7 @@ fn store<T>(slots: &mut [Option<T>], id: NodeId, value: Option<T>) {
 fn compute<P, V: Evaluate<P>>(
     graph: &Graph<P>,
     eval: &mut V,
-    hooks: &mut Hooks<'_, '_, V::Error>,
+    hooks: &mut Hooks<'_, '_, V::Value, V::Error>,
     step: &Step,
     slots: &[Option<V::Value>],
 ) -> Result<V::Value, RunError<V::Error>> {
@@ -353,16 +359,32 @@ fn compute<P, V: Evaluate<P>>(
         )));
     };
     let args = gather(graph, step, slots)?;
-    hooks.check("pre_node", |observer| observer.pre_node(&node.name))?;
+    if hooks.observers.is_empty() {
+        // No event to deliver, so the node's arguments and outcome need not be lent out.
+        return eval
+            .evaluate(node, payload, &args)
+            .map_err(|source| RunError::Node {
+                node: node.name.clone(),
+                source,
+                observer_errors: Vec::new(),
+            });
+    }
+    hooks.check("pre_node", |observer| observer.pre_node(&node.name, &args))?;
     match eval.evaluate(node, payload, &args) {
         Ok(value) => hooks
-            .check("post_node", |observer| observer.post_node(&node.name, true))
+            .check("post_node", |observer| {
+                observer.post_node(&node.name, Ok(&value))
+            })
             .map(|()| value),
-        Err(source) => Err(RunError::Node {
-            node: node.name.clone(),
-            source,
-            observer_errors: hooks.fire(|observer| observer.post_node(&node.name, false)),
-        }),
+        Err(source) => {
+            let observer_errors =
+                hooks.fire(|observer| observer.post_node(&node.name, Err(&source)));
+            Err(RunError::Node {
+                node: node.name.clone(),
+                source,
+                observer_errors,
+            })
+        }
     }
 }
 
@@ -476,15 +498,15 @@ mod tests {
         }
     }
 
-    impl Observer<String> for Recorder {
+    impl Observer<i64, String> for Recorder {
         fn pre_graph(&mut self) -> Result<(), String> {
             self.event("pre_graph")
         }
-        fn pre_node(&mut self, node: &str) -> Result<(), String> {
+        fn pre_node(&mut self, node: &str, _args: &[Arg<'_, i64>]) -> Result<(), String> {
             self.event(&format!("pre_node:{node}"))
         }
-        fn post_node(&mut self, node: &str, ok: bool) -> Result<(), String> {
-            self.event(&format!("post_node:{node}:{ok}"))
+        fn post_node(&mut self, node: &str, outcome: Result<&i64, &String>) -> Result<(), String> {
+            self.event(&format!("post_node:{node}:{}", outcome.is_ok()))
         }
         fn post_graph(&mut self, ok: bool) -> Result<(), String> {
             self.event(&format!("post_graph:{ok}"))
@@ -495,7 +517,7 @@ mod tests {
         graph: &Graph<i64>,
         plan: &Plan,
         eval: &mut Adder,
-        observers: &mut [&mut dyn Observer<String>],
+        observers: &mut [&mut dyn Observer<i64, String>],
     ) -> Result<BTreeMap<String, i64>, RunError<String>> {
         plan.run(graph, eval, &map(&[("x", 5)]), &BTreeMap::new(), observers)
     }
@@ -838,6 +860,64 @@ mod tests {
             ]
         );
         assert_eq!(eval.calls.len(), 1);
+    }
+
+    /// Logs each node's arguments before it runs and its outcome after.
+    #[derive(Default)]
+    struct ValueLog(Vec<String>);
+
+    impl Observer<i64, String> for ValueLog {
+        fn pre_node(&mut self, node: &str, args: &[Arg<'_, i64>]) -> Result<(), String> {
+            let args: Vec<_> = args
+                .iter()
+                .map(|a| format!("{}={}", a.name, a.value))
+                .collect();
+            self.0.push(format!("{node}({})", args.join(", ")));
+            Ok(())
+        }
+        fn post_node(&mut self, node: &str, outcome: Result<&i64, &String>) -> Result<(), String> {
+            self.0.push(format!("{node} -> {outcome:?}"));
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn observers_see_each_nodes_arguments_and_result() {
+        let g = diamond();
+        let plan = g.prepare(&request(&["d"], &["x"], &[])).unwrap();
+        let mut log = ValueLog::default();
+        let out = run_with(&g, &plan, &mut Adder::default(), &mut [&mut log]).unwrap();
+        assert_eq!(out, map(&[("d", 1122)]));
+        assert_eq!(
+            log.0,
+            [
+                "a(x=5)",
+                "a -> Ok(6)",
+                "b(a=6)",
+                "b -> Ok(16)",
+                "c(a=6)",
+                "c -> Ok(106)",
+                "d(b=16, c=106)",
+                "d -> Ok(1122)",
+            ]
+        );
+    }
+
+    #[test]
+    fn observers_see_the_error_a_node_returned() {
+        let g = diamond();
+        let plan = g.prepare(&request(&["d"], &["x"], &[])).unwrap();
+        let mut log = ValueLog::default();
+        let mut eval = Adder {
+            fail_on: Some("b"),
+            ..Adder::default()
+        };
+        let err = run_with(&g, &plan, &mut eval, &mut [&mut log]).unwrap_err();
+        assert!(matches!(err, RunError::Node { node, .. } if node == "b"));
+        assert_eq!(
+            log.0,
+            ["a(x=5)", "a -> Ok(6)", "b(a=6)", "b -> Err(\"b failed\")"]
+        );
     }
 
     #[test]

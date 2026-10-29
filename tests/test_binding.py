@@ -54,6 +54,8 @@ class Recorder(_core.ObserverBase):
         self.label = label
         self.raise_on = raise_on
         self.events: list[tuple[object, ...]] = []
+        self.kwargs: list[tuple[str, dict[str, object]]] = []
+        self.outcomes: list[tuple[str, bool, object, BaseException | None]] = []
 
     def _record(self, *event: object) -> None:
         self.events.append(event)
@@ -67,13 +69,17 @@ class Recorder(_core.ObserverBase):
         self._record("pre_graph")
 
     @override
-    def pre_node(self, node: str) -> None:
-        """Records the event."""
+    def pre_node(self, node: str, kwargs: dict[str, object]) -> None:
+        """Records the event and a copy of the node's keyword arguments."""
+        self.kwargs.append((node, dict(kwargs)))
         self._record("pre_node", node)
 
     @override
-    def post_node(self, node: str, *, ok: bool) -> None:
-        """Records the event."""
+    def post_node(
+        self, node: str, *, ok: bool, value: object, error: BaseException | None
+    ) -> None:
+        """Records the event and the node's value or error."""
+        self.outcomes.append((node, ok, value, error))
         self._record("post_node", node, ok)
 
     @override
@@ -302,6 +308,68 @@ def test_observers_see_a_successful_run_in_order() -> None:
     assert second.events == expected
 
 
+def test_pre_node_gets_the_kwargs_the_payload_gets() -> None:
+    """`pre_node` gets the payload's keyword arguments by parameter name, renamed."""
+    received: list[dict[str, object]] = []
+
+    def total(alpha: int, renamed: int) -> int:
+        received.append({"alpha": alpha, "renamed": renamed})
+        return alpha + renamed
+
+    graph = _core.Graph(
+        [("total", [("alpha", True), ("beta", True)], {}, total)],
+        {"total": {"beta": "renamed"}},
+    )
+    first, second = Recorder(), Recorder()
+    plan = graph.prepare(["total"], ["alpha", "beta"], [])
+    assert plan.run({"alpha": 1, "beta": 2}, {}, [first, second]) == {"total": 3}
+    assert first.kwargs == second.kwargs == [("total", {"alpha": 1, "renamed": 2})]
+    assert received == [{"alpha": 1, "renamed": 2}]
+
+
+def test_post_node_gets_the_value_or_the_error() -> None:
+    """`post_node` gets the node's value, or on failure the very exception raised."""
+    sentinel = object()
+    recorder = Recorder()
+    graph = _core.Graph([("same", [("a", True)], {}, lambda a: a)])
+    plan = graph.prepare(["same"], ["a"], [])
+    assert plan.run({"a": sentinel}, {}, [recorder])["same"] is sentinel
+    [(node, ok, value, error)] = recorder.outcomes
+    assert (node, ok, error) == ("same", True, None)
+    assert value is sentinel
+
+    raised: list[BaseException] = []
+
+    def boom(a: int) -> int:
+        error = ZeroDivisionError(a)
+        raised.append(error)
+        raise error
+
+    failing = Recorder()
+    graph = _core.Graph([("boom", [("a", True)], {}, boom)])
+    with pytest.raises(ZeroDivisionError):
+        graph.prepare(["boom"], ["a"], []).run({"a": 1}, {}, [failing])
+    [(node, ok, value, error)] = failing.outcomes
+    assert (node, ok, value) == ("boom", False, None)
+    assert error is raised[0]
+
+
+def test_a_parameter_left_to_its_default_is_absent() -> None:
+    """An unsupplied optional input is absent from the kwargs: its default applies."""
+
+    def add(a: int, maybe: int = 10) -> int:
+        return a + maybe
+
+    recorder = Recorder()
+    graph = _core.Graph([("b", [("a", True), ("maybe", False)], {}, add)])
+    assert graph.prepare(["b"], ["a"], []).run({"a": 1}, {}, [recorder]) == {"b": 11}
+    assert recorder.kwargs == [("b", {"a": 1})]
+    supplied = Recorder()
+    plan = graph.prepare(["b"], ["a", "maybe"], [])
+    assert plan.run({"a": 1, "maybe": 2}, {}, [supplied]) == {"b": 3}
+    assert supplied.kwargs == [("b", {"a": 1, "maybe": 2})]
+
+
 def test_a_non_observer_is_rejected() -> None:
     """`observers` accepts only `ObserverBase` instances."""
     plan = _chain().prepare(["c"], ["a"], [])
@@ -367,7 +435,7 @@ class PanickingObserver(_core.ObserverBase):
     """Panics in Rust from its `pre_node` hook."""
 
     @override
-    def pre_node(self, node: str) -> None:
+    def pre_node(self, node: str, kwargs: dict[str, object]) -> None:
         """Panics."""
         _core._panic_for_test()  # noqa: SLF001 - the test-hooks entry point is private by design
 

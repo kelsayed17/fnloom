@@ -6,6 +6,7 @@ use std::sync::Arc;
 use fnloom_core::node::{Node, NodeId};
 use fnloom_core::plan::{Action, Plan as CorePlan};
 use fnloom_core::run::{Arg, Evaluate, Observer};
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{PyTraverseError, PyVisit};
@@ -17,7 +18,7 @@ use crate::observer::{ObserverBase, PyObserver};
 
 /// A value flowing along an edge. `Arc` makes the core's per-argument clones free of
 /// reference-count traffic on the Python object, and needs no GIL to clone.
-type Value = Arc<Py<PyAny>>;
+pub type Value = Arc<Py<PyAny>>;
 
 /// A validated execution order for one request, bound to the graph it was prepared from.
 #[pyclass(frozen, module = "fnloom._core")]
@@ -68,26 +69,32 @@ impl Plan {
     ) -> PyResult<Bound<'py, PyDict>> {
         let graph = self.graph.get();
         let keywords = graph.keywords();
-        // The value of the node just computed, handed from the evaluator to `on_value`.
-        let latest = RefCell::new(None);
-        let mut adapters: Vec<PyObserver<'py>> =
-            observers.into_iter().map(PyObserver::new).collect();
-        let collect_values = on_value.is_some();
+        let kwargs = Kwargs {
+            py,
+            graph,
+            keywords,
+            pending: RefCell::new(None),
+        };
+        let mut adapters: Vec<PyObserver<'py, '_>> = observers
+            .into_iter()
+            .map(|observer| PyObserver::new(observer, &kwargs))
+            .collect();
+        let shared = !adapters.is_empty();
         let mut value_hook = on_value.map(|callback| ValueHook {
             sink: match callback.cast_into::<Keys>() {
                 Ok(keys) => Sink::Store(keys),
                 Err(error) => Sink::Call(error.into_inner()),
             },
+            graph,
             keywords,
-            latest: &latest,
         });
-        let mut hooks: Vec<&mut dyn Observer<PyErr>> = adapters
+        let mut hooks: Vec<&mut dyn Observer<Value, PyErr>> = adapters
             .iter_mut()
-            .map(|adapter| adapter as &mut dyn Observer<PyErr>)
+            .map(|adapter| adapter as &mut dyn Observer<Value, PyErr>)
             .chain(
                 value_hook
                     .as_mut()
-                    .map(|hook| hook as &mut dyn Observer<PyErr>),
+                    .map(|hook| hook as &mut dyn Observer<Value, PyErr>),
             )
             .collect();
         // A failed lookup (a key whose `__eq__` raises) is kept and raised after the run.
@@ -110,10 +117,8 @@ impl Plan {
         let outcome = self.plan.run_by_id(
             graph.core(),
             &mut Caller {
-                py,
-                graph,
-                keywords,
-                latest: collect_values.then_some(&latest),
+                kwargs: &kwargs,
+                shared,
             },
             lookup,
             &mut hooks,
@@ -165,18 +170,79 @@ fn keyword<'py>(
     )
 }
 
-/// Calls each node's function with its arguments as keyword arguments.
-struct Caller<'py, 'g> {
+/// Builds each node's keyword arguments, by parameter name.
+///
+/// When a run has observers, the dict built for a node's `pre_node` is kept until the
+/// node's call takes it, so observers and function get the very same dict and it is
+/// built once.
+pub struct Kwargs<'py, 'g> {
     py: Python<'py>,
     /// The graph, for the keywords a `@parameterize` row renames.
     graph: &'g Graph,
     /// The graph's interned node names, by node id.
     keywords: &'g [Py<PyString>],
-    /// Where each computed value is left for `on_value`; `None` when there is none.
-    latest: Option<&'g RefCell<Option<(NodeId, Value)>>>,
+    /// The dict built for the observers of the node about to run, until its call.
+    pending: RefCell<Option<(NodeId, Bound<'py, PyDict>)>>,
 }
 
-impl Evaluate<Py<PyAny>> for Caller<'_, '_> {
+impl<'py> Kwargs<'py, '_> {
+    /// A new dict of `args`, keyed as `consumer`'s function takes them.
+    fn build(&self, consumer: NodeId, args: &[Arg<'_, Value>]) -> PyResult<Bound<'py, PyDict>> {
+        let kwargs = PyDict::new(self.py);
+        for arg in args {
+            // CPython binds a keyword to a parameter by identity with the interned
+            // parameter name, else by `==` against every parameter. A fresh key string
+            // takes the slow path, which makes an n-parameter call cost O(n²).
+            let keyword = match self.graph.renamed(consumer, arg.node) {
+                Some(renamed) => renamed.bind(self.py).clone(),
+                None => keyword(self.py, self.keywords, arg.node, arg.name),
+            };
+            kwargs.set_item(keyword, arg.value.bind(self.py))?;
+        }
+        Ok(kwargs)
+    }
+
+    /// The dict `node`'s function is about to be called with, built by the first
+    /// observer to ask and kept for the call.
+    pub fn for_observers(
+        &self,
+        node: &str,
+        args: &[Arg<'_, Value>],
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let Some(consumer) = self.graph.core().id_of(node) else {
+            return Err(PyRuntimeError::new_err(format!(
+                "broken plan: node '{node}' is not in the graph"
+            )));
+        };
+        let mut pending = self.pending.borrow_mut();
+        if let Some((id, kwargs)) = pending.as_ref() {
+            if *id == consumer {
+                return Ok(kwargs.clone());
+            }
+        }
+        let kwargs = self.build(consumer, args)?;
+        *pending = Some((consumer, kwargs.clone()));
+        Ok(kwargs)
+    }
+
+    /// The dict to call `consumer`'s function with: the observers' one, else a new one.
+    fn for_call(&self, consumer: NodeId, args: &[Arg<'_, Value>]) -> PyResult<Bound<'py, PyDict>> {
+        match self.pending.borrow_mut().take() {
+            Some((id, kwargs)) if id == consumer => Ok(kwargs),
+            _ => self.build(consumer, args),
+        }
+    }
+}
+
+/// Calls each node's function with its arguments as keyword arguments.
+struct Caller<'k, 'py, 'g> {
+    kwargs: &'k Kwargs<'py, 'g>,
+    /// Whether observers may have left a node's dict in `kwargs`; `false` for a run with
+    /// none, which then only ever builds one.
+    shared: bool,
+}
+
+impl Evaluate<Py<PyAny>> for Caller<'_, '_, '_> {
     type Value = Value;
     type Error = PyErr;
 
@@ -186,11 +252,7 @@ impl Evaluate<Py<PyAny>> for Caller<'_, '_> {
         function: &Py<PyAny>,
         args: &[Arg<'_, Value>],
     ) -> PyResult<Value> {
-        let value = caught(|| self.call(node.id, function, args))?;
-        if let Some(latest) = self.latest {
-            *latest.borrow_mut() = Some((node.id, Arc::clone(&value)));
-        }
-        Ok(value)
+        caught(|| self.call(node.id, function, args))
     }
 }
 
@@ -205,32 +267,32 @@ enum Sink<'py> {
 /// Hands each computed node's name and value to `on_value`, as the last observer.
 struct ValueHook<'py, 'g> {
     sink: Sink<'py>,
+    /// The graph, to find a node's id by name.
+    graph: &'g Graph,
     /// The graph's interned node names, by node id.
     keywords: &'g [Py<PyString>],
-    /// The value the evaluator left for the node just computed.
-    latest: &'g RefCell<Option<(NodeId, Value)>>,
 }
 
-impl Observer<PyErr> for ValueHook<'_, '_> {
-    fn post_node(&mut self, node: &str, ok: bool) -> PyResult<()> {
-        let Some((id, value)) = self.latest.borrow_mut().take() else {
+impl Observer<Value, PyErr> for ValueHook<'_, '_> {
+    fn post_node(&mut self, node: &str, outcome: Result<&Value, &PyErr>) -> PyResult<()> {
+        let Ok(value) = outcome else {
             return Ok(());
         };
-        if !ok {
-            return Ok(());
-        }
         match &self.sink {
             Sink::Call(callback) => {
                 let py = callback.py();
-                let name = keyword(py, self.keywords, id, node);
+                let name = self.graph.core().id_of(node).map_or_else(
+                    || PyString::intern(py, node),
+                    |id| keyword(py, self.keywords, id, node),
+                );
                 caught(|| callback.call1((name, value.bind(py))).map(drop))
             }
-            Sink::Store(keys) => caught(|| keys.get().store(keys.py(), node, &value)),
+            Sink::Store(keys) => caught(|| keys.get().store(keys.py(), node, value)),
         }
     }
 }
 
-impl Caller<'_, '_> {
+impl Caller<'_, '_, '_> {
     /// Calls `function`, the payload of `consumer`, with `args` as keyword arguments.
     fn call(
         &self,
@@ -238,18 +300,12 @@ impl Caller<'_, '_> {
         function: &Py<PyAny>,
         args: &[Arg<'_, Value>],
     ) -> PyResult<Value> {
-        let kwargs = PyDict::new(self.py);
-        for arg in args {
-            // CPython binds a keyword to a parameter by identity with the interned
-            // parameter name, else by `==` against every parameter. A fresh key string
-            // takes the slow path, which makes an n-parameter call cost O(n²).
-            let keyword = match self.graph.renamed(consumer, arg.node) {
-                Some(renamed) => renamed.bind(self.py).clone(),
-                None => keyword(self.py, self.keywords, arg.node, arg.name),
-            };
-            kwargs.set_item(keyword, arg.value.bind(self.py))?;
-        }
-        let result = function.bind(self.py).call((), Some(&kwargs))?;
+        let kwargs = if self.shared {
+            self.kwargs.for_call(consumer, args)?
+        } else {
+            self.kwargs.build(consumer, args)?
+        };
+        let result = function.bind(self.kwargs.py).call((), Some(&kwargs))?;
         Ok(Arc::new(result.unbind()))
     }
 }

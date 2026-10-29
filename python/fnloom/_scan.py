@@ -31,7 +31,14 @@ from fnloom._decorators import (
 )
 from fnloom._functions import FunctionSource, NodeSpec
 from fnloom._namespaces import qualified
-from fnloom._types import SHALLOW, Rules, Unresolved, opaque, resolved_hints
+from fnloom._types import (
+    SHALLOW,
+    Rules,
+    Unresolved,
+    ValueCheck,
+    opaque,
+    resolved_hints,
+)
 from fnloom._view import Param
 
 if TYPE_CHECKING:
@@ -276,33 +283,47 @@ def _bind_within(
     return tuple(params), renames
 
 
-def _payload(
-    origin: Callable[..., object], params: tuple[Param, ...]
-) -> tuple[Callable[..., object], dict[str, str]]:
-    """What the core calls for a row, and the keyword renames it calls it with.
+class _Shape(NamedTuple):
+    """How the core's keyword arguments become a row's parameters, made at build.
 
-    When each source feeds one parameter, the core passes each source under its
-    parameter's name, so the payload is `origin` itself, or `origin` with each
-    `Value` bound by `functools.partial`: no Python call in between. When one source
-    feeds several parameters, or a parameter is a `group(...)`, the payload is a call
-    that maps the core's keywords onto them, building each group's list or dict anew.
-    Either way a parameter whose source the core did not pass is left out, so its
-    default applies, and each `Value` is passed as the object itself, the same on
-    every call.
+    `sourced` pairs each plain parameter bound to a source with that source's
+    name; `constants` are the plain parameters bound to a `value()`. `direct` is
+    True when each source feeds one parameter and no parameter is a group: the
+    core then passes each source under its parameter's name, so nothing maps
+    them. Otherwise `groups` holds each group parameter's name, whether it is a
+    list, and its items.
     """
+
+    sourced: tuple[tuple[str, str], ...]
+    constants: dict[str, object]
+    groups: list[tuple[str, bool, list[tuple[int | str, Source | Value]]]]
+    direct: bool
+
+
+def _shape(params: tuple[Param, ...]) -> _Shape:
+    """The `_Shape` of a row's `params`; shared by `_payload` and `by_parameter`."""
     plain = [p for p in params if p.slot is None]
     sourced = tuple(
         (p.name, p.binding.name) for p in plain if isinstance(p.binding, Source)
     )
     constants = {p.name: p.binding.value for p in plain if isinstance(p.binding, Value)}
-    if len(plain) == len(params) and len({source for _, source in sourced}) == len(
-        sourced
-    ):
-        renames = {source: param for param, source in sourced if source != param}
-        if constants:
-            return functools.partial(origin, **constants), renames
-        return origin, renames
-    groups = _groups(params)
+    direct = len(plain) == len(params) and len(
+        {source for _, source in sourced}
+    ) == len(sourced)
+    return _Shape(sourced, constants, [] if direct else _groups(params), direct)
+
+
+def _wrapper(
+    origin: Callable[..., object], shape: _Shape, constants: dict[str, object]
+) -> Callable[..., object]:
+    """A call mapping the core's keywords, by source name, onto `origin`'s.
+
+    Each sourced parameter whose source was passed gets its value, then
+    `constants`, then each group its list or dict, built anew. `_payload` gives
+    the row's constants and the function; `by_parameter` none, and a function
+    returning the keywords, so the two can't map them differently.
+    """
+    sourced, groups = shape.sourced, shape.groups
 
     def call(**supplied: object) -> object:
         keywords = {
@@ -317,7 +338,62 @@ def _payload(
             keywords[param] = [v for _, v in built] if is_list else dict(built)
         return origin(**keywords)
 
-    return call, {}
+    return call
+
+
+def _payload(
+    origin: Callable[..., object], params: tuple[Param, ...]
+) -> tuple[Callable[..., object], dict[str, str]]:
+    """What the core calls for a row, and the keyword renames it calls it with.
+
+    When each source feeds one parameter, the core passes each source under its
+    parameter's name, so the payload is `origin` itself, or `origin` with each
+    `Value` bound by `functools.partial`: no Python call in between. When one source
+    feeds several parameters, or a parameter is a `group(...)`, the payload is a call
+    that maps the core's keywords onto them, building each group's list or dict anew.
+    Either way a parameter whose source the core did not pass is left out, so its
+    default applies, and each `Value` is passed as the object itself, the same on
+    every call.
+    """
+    shape = _shape(params)
+    if shape.direct:
+        renames = {source: param for param, source in shape.sourced if source != param}
+        if shape.constants:
+            return functools.partial(origin, **shape.constants), renames
+        return origin, renames
+    return _wrapper(origin, shape, shape.constants), {}
+
+
+def _keywords(**keywords: object) -> dict[str, object]:
+    """The keywords it is called with: what `by_parameter`'s wrapper calls."""
+    return keywords
+
+
+def by_parameter(
+    params: tuple[Param, ...],
+) -> Callable[[Mapping[str, object]], dict[str, object]] | None:
+    """How to key the core's keyword arguments for a node by its parameters' names.
+
+    `None` when the core already passes them so: when `_payload` calls the origin
+    itself, or a `functools.partial` of it. Otherwise the core calls `_payload`'s
+    wrapper by source name, and the result maps them as that wrapper does, made
+    by the same `_wrapper` from the same `_shape`: one source feeding several
+    parameters gives each its value, and a `group(...)` parameter is its list or
+    dict, built afresh. A parameter bound to a `value()` is left out, as is one
+    whose source the core did not pass. In declaration order. Only hooks use it.
+    """
+    shape = _shape(params)
+    if shape.direct:
+        return None
+    gather = _wrapper(_keywords, shape, {})
+    order = tuple(dict.fromkeys(p.name for p in params))
+
+    def keyed(supplied: Mapping[str, object]) -> dict[str, object]:
+        # `_keywords` returns the dict it was called with.
+        found = typing.cast("dict[str, object]", gather(**supplied))
+        return {name: found[name] for name in order if name in found}
+
+    return keyed
 
 
 def _groups(
@@ -1015,7 +1091,11 @@ def _resigned(fn: Callable[..., object]) -> bool:
     return hasattr(fn, "__wrapped__") or hasattr(fn, "__signature__")
 
 
-def resolve(nodes: Sequence[NodeDef], rules: Rules = SHALLOW) -> list[NodeDef]:
+def resolve(
+    nodes: Sequence[NodeDef],
+    rules: Rules = SHALLOW,
+    value_checks: tuple[ValueCheck, ...] = (),
+) -> list[NodeDef]:
     """Returns `nodes` with their annotations evaluated to values, as Hamilton does.
 
     `typing.get_type_hints` evaluates them: string annotations, and forward
@@ -1026,7 +1106,8 @@ def resolve(nodes: Sequence[NodeDef], rules: Rules = SHALLOW) -> list[NodeDef]:
     `Unresolved`, with its text as written, where Hamilton raises `NameError`
     (Q81). A PEP 695 alias's value, and a `TypeVar`'s bound and constraints, are
     read here too, so a run never evaluates one (Q44). `rules` are the value
-    checks' rules, which an extracted field's check follows.
+    checks' rules, which an extracted field's check follows, and it admits what
+    any of `value_checks` admits (Q21).
     """
     origins: dict[int, Callable[..., object]] = {}
     nodes_of: dict[int, NodeDef] = {}
@@ -1059,7 +1140,7 @@ def resolve(nodes: Sequence[NodeDef], rules: Rules = SHALLOW) -> list[NodeDef]:
             resolved.append(node)
         else:
             resolved.append(replace(node, params=params, returns=returns))
-    return _lowered(resolved, rules)
+    return _lowered(resolved, rules, value_checks)
 
 
 def _check_groups(
@@ -1110,7 +1191,9 @@ def _resolved_param(p: Param, hint: object) -> Param:
     return Param(p.name, p.binding, p.required, hint, p.slot)
 
 
-def _lowered(nodes: list[NodeDef], rules: Rules) -> list[NodeDef]:
+def _lowered(
+    nodes: list[NodeDef], rules: Rules, value_checks: tuple[ValueCheck, ...]
+) -> list[NodeDef]:
     """`nodes`, resolved, with each producer's field nodes lowered from its return.
 
     `ValueError` listing, sorted, every declared field type a return cannot feed,
@@ -1126,7 +1209,15 @@ def _lowered(nodes: list[NodeDef], rules: Rules) -> list[NodeDef]:
             lowered.append(node)
             continue
         try:
-            lowered.extend(_extract.lower(node, extraction, resolved=True, rules=rules))
+            lowered.extend(
+                _extract.lower(
+                    node,
+                    extraction,
+                    resolved=True,
+                    rules=rules,
+                    value_checks=value_checks,
+                )
+            )
         except ValueError as error:
             problems.append(str(error))
     if problems:

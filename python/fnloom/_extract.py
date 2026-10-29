@@ -85,22 +85,27 @@ class _Extractor:
     # What an error calls the item this node reads.
     noun: ClassVar[str] = "field"
 
-    def __init__(
+    def __init__(  # noqa: PLR0913  # the item, its fill, and the driver's check settings
         self,
         producer: str,
         field: str,
         declared: object,
         fill: object,
         rules: _types.Rules = _types.SHALLOW,
+        *,
+        value_checks: tuple[_types.ValueCheck, ...] = (),
     ) -> None:
         """Reads `field` from node `producer`'s value, checked against `declared`.
 
-        The check follows `rules`, the driver's deep checks and widening.
+        The check follows `rules`, the driver's deep checks and widening, and
+        admits what any of `value_checks` admits (Q21).
         """
         self._producer = producer
         self._field = field
         self._declared = declared
-        self._cls, self._matches = _types.check_of(declared, rules)
+        self._cls, self._matches = _types.admitting(
+            declared, _types.check_of(declared, rules), value_checks
+        )
         self._fill = fill
 
     @property
@@ -145,18 +150,15 @@ class _Extractor:
     def _checked(self, found: object) -> object:
         """`found`, when it matches the declared type; `ValueError` otherwise."""
         cls = self._cls
-        if cls is not None:
-            if isinstance(found, cls):
+        if cls is not None and isinstance(found, cls):
+            return found
+        # Refused by class: the check answers the same, or a custom check admits.
+        try:
+            if self._matches(found):
                 return found
-        else:
-            try:
-                if self._matches(found):
-                    return found
-            except _types.UnresolvedError as error:
-                msg = (
-                    f"{self._producer!r} returned {self.noun} {self._field!r}: {error}"
-                )
-                raise TypeError(msg) from None
+        except _types.UnresolvedError as error:
+            msg = f"{self._producer!r} returned {self.noun} {self._field!r}: {error}"
+            raise TypeError(msg) from None
         msg = (
             f"{self._producer!r} returned {self.noun} {self._field!r} as "
             f"{inspect.formatannotation(type(found))}, but it is declared "
@@ -628,6 +630,7 @@ def lower(
     *,
     resolved: bool,
     rules: _types.Rules = _types.SHALLOW,
+    value_checks: tuple[_types.ValueCheck, ...] = (),
 ) -> list[NodeDef]:
     """`producer`, unchanged, then one generated node per extracted field.
 
@@ -637,7 +640,8 @@ def lower(
     `producer`'s annotations are resolved: each field's type is read from the
     return, and a declared type it cannot feed is a `ValueError` naming every
     such field; a `TypedDict` field type that does not resolve is `Unresolved`
-    (Q81). Each field's check follows `rules`. Without, as when scanning, the
+    (Q81). Each field's check follows `rules`, and admits what any of
+    `value_checks` admits. Without, as when scanning, the
     field nodes are placeholders, used only to find duplicate names: a field the
     decorator gave no type is typed `Any`, and nothing is checked yet. Column nodes are
     typed by `column_type` of the resolved return, and `Any` before it resolves;
@@ -645,7 +649,7 @@ def lower(
     """
     if extraction.kind == "columns":
         declared = column_type(producer.returns) if resolved else Any
-        return _lowered_columns(producer, extraction, declared, rules)
+        return _lowered_columns(producer, extraction, declared, rules, value_checks)
     if resolved:
         typed = _field_types(producer, extraction)
     else:
@@ -669,7 +673,12 @@ def lower(
                 name=qualified(producer.namespace, name),
                 params=(param,),
                 payload=_Extractor(
-                    producer.name, name, declared, extraction.fill, rules
+                    producer.name,
+                    name,
+                    declared,
+                    extraction.fill,
+                    rules,
+                    value_checks=value_checks,
                 ),
                 returns=declared,
                 renames={},
@@ -684,6 +693,7 @@ def _lowered_columns(
     extraction: Extraction,
     declared: object,
     rules: _types.Rules = _types.SHALLOW,
+    value_checks: tuple[_types.ValueCheck, ...] = (),
 ) -> list[NodeDef]:
     """`producer`, then a node per column, each typed `declared`, with its doc."""
     param = Param(producer.name, Source(producer.name), True, producer.returns)  # noqa: FBT003  # `required`, in field order
@@ -695,7 +705,12 @@ def _lowered_columns(
                 name=qualified(producer.namespace, name),
                 params=(param,),
                 payload=_ColumnExtractor(
-                    producer.name, name, declared, extraction.fill, rules
+                    producer.name,
+                    name,
+                    declared,
+                    extraction.fill,
+                    rules,
+                    value_checks=value_checks,
                 ),
                 returns=declared,
                 renames={},

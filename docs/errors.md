@@ -126,6 +126,8 @@ the request's other output problems, each kind on its own line, in one error:
 | A function in `final_vars` that no node of the driver comes from (Q30) | `ValueError: final_vars: function m.f is not the function of any node of this driver (...): pass a node name` |
 | With `with_strict_overrides`, an override of an input not supplied in `inputs` too (Q75) | `ValueError: override of input 'price' refused: not supplied, though needed by 'total' (supply it in inputs= too; strict overrides are on)` |
 | A value checked against an annotation that didn't resolve at build (Q81) | `TypeError: amount: cannot check a value against unresolved 'Decimal': ...` |
+| With `with_output_type_checks`, a node returning a value its annotation refuses (Q87) | `TypeError: score: returned int, expected float`, as the node's failure, with its `in node` note |
+| A custom value check that raises (Q21) | Its own exception, as it is: from the run's checks, or from a node when it checks a result |
 | A deep check with more than 10,000 questions open about one value (see below) | `TypeError: value too cyclic to check against ...: more than 10,000 groups open about one value` |
 
 ## Type checks on a run
@@ -155,6 +157,9 @@ A value checked against an annotation that didn't resolve at build, such as a na
 `amount: cannot check a value against unresolved 'Decimal': it did not resolve when the graph was built; import what
 it names at run time, not only under TYPE_CHECKING`. An extracted field names its producer and field first.
 
+A [custom value check](running.md#custom-value-checks) can admit a value these refuse; one that raises fails the
+run with its own exception, not a `ValueError`.
+
 Build with `Builder.without_input_type_checks()` to skip these (see [Type checks](running.md#type-checks)). With
 `Builder.with_deep_type_checks()`, a collection's items are checked too, and with `Builder.with_numeric_widening()`
 an `int` fits `float` (see [Deep checks and numeric widening](running.md#deep-checks-and-numeric-widening)). A check
@@ -176,8 +181,25 @@ plan.run(inputs={"price": 1.0})
 ## When a node raises
 
 Your function's own exception reaches you unchanged, with a note naming the node (see
-[Running a graph](running.md#exceptions-from-your-functions)). Lineage queries raise
+[Running a graph](running.md#exceptions-from-your-functions)). With
+[`with_output_type_checks`](writing-nodes.md#checking-results), a result its annotation refuses fails the node with a
+`TypeError` of its own, `score: returned int, expected float`, noted the same way; a node that raises keeps its own
+error. Lineage queries raise
 `ValueError: unknown nodes: ...` for a name that isn't in the graph.
+
+## When a hook raises
+
+A [hook](hooks.md) that raises stops the run once every hook has seen the event. One error is raised as itself.
+Several are one `ExceptionGroup`, and a node's own exception is never lost: it comes first, with its `in node` note,
+then the hooks' errors in the order they were raised. A group led by a node's error says so, as in
+`node 'boom' failed and hooks raised`. See [A hook that raises](hooks.md#a-hook-that-raises).
+
+`with_hooks` refuses a hook it can't call when you attach it: a `TypeError` for an object that is no `fnloom.Hook`,
+or for a method that can't take one event or is an `async def`, and a `ValueError` for a hook given twice
+([Checked when attached](hooks.md#checked-when-attached)).
+
+fnloom does not log a failed node. To have each one logged, with its inputs and traceback, attach
+[`fnloom.LogFailures`](hooks.md#logging-failures).
 
 An `AsyncDriver` raises a failed node's exception the same way, after cancelling the nodes still running (see
 [Async](running.md#async)). On an `AsyncDriver`, a sync node that returns a coroutine or another awaitable is an

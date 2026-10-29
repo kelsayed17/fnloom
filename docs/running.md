@@ -128,6 +128,101 @@ they differ.
     `execute` keeps the 128 most recently used plans, keyed by the outputs and the input and override names. Repeated
     calls of the same shape skip compiling, so `prepare` mostly saves you the cache lookup.
 
+## Result builders
+
+`execute` returns a dict. `Builder.with_result_builder(build)` sets a function, or any callable, that gets that dict
+and makes what `execute` returns instead:
+
+```python
+def pairs(outputs: dict[str, object]) -> list[str]:
+    return [f"{name}={value}" for name, value in outputs.items()]
+
+
+listed = fnloom.Builder().with_modules(pricing).with_result_builder(pairs).build()
+listed.execute(["total", "price"], inputs={"price": 2.5, "quantity": 4})
+# -> ['total=10.0', 'price=2.5']
+```
+
+- **What it gets.** Each requested output once, in the order you asked for it, with the inputs and overrides you
+  requested as outputs, as Hamilton's result builder gets them (Q19).
+- **Where it applies.** `PreparedPlan.run` builds too, and so do the async driver's `execute` and `run`. Hamilton's
+  async driver silently drops a `ResultBuilder` subclass.
+- **Typed.** `Builder`, `Driver`, `AsyncDriver` and their plans take the built type as a parameter, so a type checker
+  sees `execute` return `list[str]` here, and `dict[str, object]` with no builder.
+- **One per builder.** A second `with_result_builder` is a `ValueError` naming both (Q24). Hamilton raises at `build()`.
+- **A builder that raises** fails the run with its own error. [Hooks](hooks.md) still get the raw dict, as
+  `RunEnd.results`, with `ok=False` and that error.
+- **It travels with the driver**, as hooks do: through `copy`, `rebuild()`, `build_async` and pickling. It pickles by
+  Python's own rules, so a lambda makes the driver fail to pickle.
+
+`raw_execute(final_vars, *, inputs=None, overrides=None)` and `PreparedPlan.run_raw(*, inputs=None, overrides=None)`
+skip the builder and return the dict. Every hook fires, as for `execute`. On an `AsyncDriver` both are coroutines.
+
+```python
+listed.raw_execute(["total"], inputs={"price": 2.5, "quantity": 4})
+# -> {'total': 10.0}
+```
+
+### pandas and polars frames
+
+fnloom ships no DataFrame builder, and needs neither library (Q89). Pass the frame class itself:
+
+```python
+# file: sales.py
+import pandas as pd
+
+
+def prices() -> pd.Series:
+    return pd.Series([1.0, 2.0, 3.0])
+
+
+def quantities() -> pd.Series:
+    return pd.Series([1, 2, 3])
+
+
+def returns() -> pd.Series:
+    return pd.Series([1, 0])
+
+
+def revenue(prices: pd.Series, quantities: pd.Series) -> pd.Series:
+    return prices * quantities
+```
+
+```python
+import pandas
+import sales
+
+frames = fnloom.Builder().with_modules(sales).with_result_builder(pandas.DataFrame)
+frames.build().execute(["revenue", "quantities"]).to_dict("list")
+# -> {'revenue': [1.0, 4.0, 9.0], 'quantities': [1, 2, 3]}
+```
+
+`with_result_builder(polars.DataFrame)` is the polars form. Either builds by the library's own rules, not by those of
+Hamilton's `PandasDataFrameResult`:
+
+- a DataFrame output is not flattened into `output.column` columns: pandas refuses a frame as one column;
+- no warning about the outputs' index types is logged;
+- outputs that are all scalars need an index in pandas, where Hamilton makes a one-row frame.
+
+pandas itself still outer-joins Series of different lengths or indexes, padding the gaps with NaN and turning integers
+into floats, as Hamilton does. To refuse that instead, check the indexes in a builder of your own:
+
+```python
+def frame(outputs: dict[str, object]) -> pandas.DataFrame:
+    """One column per output; Series on different indexes are refused."""
+    indexes = [v.index for v in outputs.values() if isinstance(v, pandas.Series)]
+    if any(not index.equals(indexes[0]) for index in indexes[1:]):
+        raise ValueError(f"outputs on different indexes: {', '.join(outputs)}")
+    return pandas.DataFrame(outputs)
+
+
+strict = fnloom.Builder().with_modules(sales).with_result_builder(frame).build()
+strict.execute(["quantities", "returns"])
+# raises ValueError: outputs on different indexes: quantities, returns
+```
+
+polars has no index, and refuses columns of different lengths itself.
+
 ## Validate
 
 `validate` checks a request the way `execute` would, but runs nothing. It returns every problem as one line, sorted,
@@ -332,6 +427,36 @@ both.execute(["basket_total"], inputs={"prices": [1, 2.5]})
 
 `fnloom.value_matches(declared, value, deep=True, widen=True)` answers as a driver with both settings.
 
+### Custom value checks
+
+`Builder.with_value_check(check)` admits values the default check refuses. `check(declared, value)` gets the declared
+type and the value, and admits the value by returning a true value. Checks are cumulative: they're tried in the order
+given, until one admits the value. One that returns `False` refuses nothing the default admits, unlike Hamilton's
+`validate_input`, which replaces the default check (Q21):
+
+```python
+import decimal
+
+
+def decimal_floats(declared: object, value: object) -> bool:
+    """A Decimal may stand for a float."""
+    return declared is float and isinstance(value, decimal.Decimal)
+
+
+exact = fnloom.Builder().with_modules(pricing).with_value_check(decimal_floats).build()
+exact.execute(["total"], inputs={"price": decimal.Decimal("2.5"), "quantity": 4})
+# -> {'total': decimal.Decimal('10.0')}
+exact.validate(["total"], inputs={"price": "2.5", "quantity": 4})
+# -> ['price: expected float, got str']
+```
+
+A check is called only for a value the default refuses, so a value that fits costs nothing more. It applies to
+inputs, overrides, extracted fields, [results](writing-nodes.md#checking-results) and `validate`, but never to
+edges, which compare types, not values (Q10). An annotation that didn't resolve at build (Q81) is passed as its
+`unresolved` type, and still raises its `TypeError` unless a check admits the value. A check that raises isn't
+caught: its exception fails the run as it is or, checking a result, fails the node. It pickles by Python's own
+rules, as a [hook](hooks.md) does.
+
 ### Unsupported annotations
 
 Anything else refuses every value. Two examples are a plain protocol (one not marked
@@ -463,7 +588,7 @@ The view is made once, when the graph is built, and annotations are evaluated th
 A driver pickles, and copies with `copy.deepcopy`, so you can hand it to a `concurrent.futures.ProcessPoolExecutor`
 or any other tool that pickles its arguments. It is pickled as the recipe it was built from: the names of its
 modules and their namespaces, the functions given to `with_functions`, by module and qualified name, every setting,
-its config, and its cache store. Loading it
+its config, its cache store and its result builder. Loading it
 imports those modules by name and builds the driver again, so its compiled plans don't travel; each process compiles
 its own.
 
@@ -505,6 +630,12 @@ fnloom can't make your own code safe:
   reads them.
 - **Your store.** A store of your own must be safe to call from several threads at once
   ([Stores](caching.md#stores)).
+- **Your hooks and result builder.** A hook sees the runs of every thread that uses its driver, and the result
+  builder builds each of their results, so one that keeps state must be safe to call from several threads at once
+  ([Hooks](hooks.md), [Result builders](#result-builders)).
+- **Your value checks.** An output check, and so a custom value check (`with_value_check`) it calls, runs with its
+  node: for a plain function on an `AsyncDriver` with `sync_nodes="thread"`, in the worker thread, so a value check
+  that keeps state must be safe to call from several threads at once.
 
 ## Rebuilding after an edit
 
@@ -548,6 +679,12 @@ broken.execute(["ratio"], inputs={"numerator": 1, "denominator": 0})
 ```
 
 Python prints the note, `in node 'ratio'`, under the traceback. It's also in the exception's `__notes__`.
+
+## Hooks
+
+`Builder.with_hooks(...)` attaches hooks that see each run start and end, and each node it calls, with the node's
+arguments and its result or error. A driver with no hooks runs exactly as without them. The [Hooks](hooks.md) guide
+has the events, their order, and what happens when a hook raises.
 
 ## Async
 

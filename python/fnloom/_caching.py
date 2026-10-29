@@ -34,8 +34,9 @@ from fnloom._scan import core_inputs
 from fnloom._stores import MISSING, CacheStore, CacheWarning, Format, MemoryCache
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Callable, Generator, Mapping, Sequence
 
+    from fnloom._hooks import Dispatch
     from fnloom._scan import NodeDef
 
 # The key schema version, the first part of every static key part.
@@ -80,6 +81,10 @@ _NO_KEYS: Mapping[str, bytes | None] = MappingProxyType(_EMPTY_KEYS)
 
 # The outcome of a `recompute` node with a key, or one that only a run would know.
 _RECOMPUTE = CacheOutcome("miss", "policy recompute")
+
+# The outcomes of a `default` node the store holds, and of one it does not.
+_HIT = CacheOutcome("hit", None)
+_MISS = CacheOutcome("miss", None)
 
 # The outcome of an extracted field with a key: run when needed, never stored.
 _EXTRACTED = CacheOutcome(
@@ -348,6 +353,11 @@ class Begun:
         warned: The nodes this run has already warned about.
         values: Receives every value the run computes, for an enclosing run;
             `None` for none.
+        outcomes: For a reported run only, the cache outcome of each node it
+            reports, by name; `None` otherwise.
+        loaded: For a reported run, the hits the store held, in plan order: not
+            the values an inner run computed or loaded, which it reported.
+        computed: For a reported run, the nodes `plan` computes, in its order.
     """
 
     plan: _core.Plan
@@ -357,6 +367,9 @@ class Begun:
     pending: _core.Keys | None
     warned: set[str]
     values: dict[str, object] | None
+    outcomes: dict[str, CacheOutcome] | None = None
+    loaded: tuple[str, ...] = ()
+    computed: tuple[str, ...] = ()
 
 
 class _Preparer(Protocol):
@@ -457,12 +470,14 @@ class CacheRun:
             if self._behaviors[name] == "recompute" and name in consumed
         )
         self._nested = None
+        self._levels: tuple[CacheRun, ...] = (self,)
         if self._first:
             first = list(self._first)
             nested = graph.prepare(first, self._inputs, sorted(override_names))
             self._nested = CacheRun(
                 cache, graph, nested, first, input_names, override_names
             )
+            self._levels = (self, *self._nested._levels)  # noqa: SLF001  # the same class
         # Insertion order is recency order: a hit moves its plan to the end.
         self._plans: dict[frozenset[str], _core.Plan] = {}
         self._plans_lock = threading.Lock()
@@ -473,10 +488,18 @@ class CacheRun:
         return self._nested
 
     def run(
-        self, inputs: dict[str, object], overrides: dict[str, object]
+        self,
+        inputs: dict[str, object],
+        overrides: dict[str, object],
+        observers: Sequence[_core.ObserverBase] = (),
+        /,
     ) -> dict[str, object]:
-        """Runs the plan, already checked, through the store; the outputs, sorted."""
-        return self._finished(self.begin(inputs, overrides), inputs)
+        """Runs the plan, already checked, through the store; the outputs, sorted.
+
+        `observers` see the nodes the final core run computes: not a hit, nor a
+        node of the nested run.
+        """
+        return self._finished(self.begin(inputs, overrides), inputs, observers)
 
     def _execute(
         self,
@@ -492,12 +515,24 @@ class CacheRun:
         )
         return self._finished(begun, inputs)
 
-    def _finished(self, begun: Begun, inputs: dict[str, object]) -> dict[str, object]:
-        """Runs a begun run's plan, storing each value as its node succeeds."""
-        on_value = begun.pending
+    def _finished(
+        self,
+        begun: Begun,
+        inputs: dict[str, object],
+        observers: Sequence[_core.ObserverBase] = (),
+        on_value: Callable[[str, object], None] | _core.Keys | None = None,
+    ) -> dict[str, object]:
+        """Runs a begun run's plan, storing each value as its node succeeds.
+
+        `on_value`, when given, takes each value instead: by default the binding's
+        keys store it, or else `finish` does.
+        """
+        if on_value is None:
+            on_value = begun.pending
         result = begun.plan.run(
             inputs,
             begun.overrides,
+            observers,
             on_value=functools.partial(self.finish, begun)
             if on_value is None
             else on_value,
@@ -517,6 +552,7 @@ class CacheRun:
         warned: set[str] | None = None,
         values: dict[str, object] | None = None,
         native: bool = True,
+        reasons: dict[str, str] | None = None,
     ) -> Begun:
         """Everything a cached run does before its core run: versions, keys, hits.
 
@@ -527,6 +563,12 @@ class CacheRun:
         every value the run computes or loads. With `native`, a plain
         `MemoryCache` is walked and written in the binding; without, every store
         call goes through `finish`.
+
+        `reasons`, when given, holds why each input and override with no version
+        has none, from `versions`, and makes the run a reported one: it is walked
+        in Python, so its keys are known, and `Begun` carries the outcome of each
+        node it reports, its hits and the nodes it computes. It receives why each
+        `recompute` node run first has no version, if so.
         """
         warned = set() if warned is None else warned
         if versions is None:
@@ -535,26 +577,206 @@ class CacheRun:
             known = {}
             if self._nested is not None:
                 self._nested._execute(inputs, overrides, dict(versions), warned, known)  # noqa: SLF001  # the same class
-        for name in self._first:
-            versions[name] = _version(known[name], name, warned)
+        if reasons is None:
+            for name in self._first:
+                versions[name] = _version(known[name], name, warned)
+        else:
+            versions.update(self._first_versions(known, warned, reasons))
         keys: Mapping[str, bytes | None]
         pending: _core.Keys | None = None
-        if native and self._native is not None and not known and values is None:
+        if (
+            native
+            and self._native is not None
+            and not known
+            and values is None
+            and reasons is None
+        ):
             pending, hits = self._key_plan.walk(versions, self._native)
             keys = _NO_KEYS
         else:
             keys = self._key_plan.keys(versions)
             hits = self._frontier(keys, known, warned)
+        if reasons is not None:
+            return self._reported_begun(
+                overrides, hits, keys, warned, values, reasons, known
+            )
         if not hits:
             return Begun(self._plan, overrides, hits, keys, pending, warned, values)
         plan = self._plan_for(frozenset(hits))
         return Begun(plan, {**overrides, **hits}, hits, keys, pending, warned, values)
+
+    def _first_versions(
+        self, known: Mapping[str, object], warned: set[str], reasons: dict[str, str]
+    ) -> dict[str, bytes | None]:
+        """The version of each `recompute` node run first, from its result.
+
+        `reasons` receives why each one with none has none, as for an input.
+        """
+        versions: dict[str, bytes | None] = {}
+        for name in self._first:
+            version = _version_or_reason(known[name], name, warned)
+            if isinstance(version, bytes):
+                versions[name] = version
+            else:
+                versions[name] = None
+                reasons[name] = version
+        return versions
+
+    def _reported_begun(  # noqa: PLR0913, PLR0917  # what `begin` found
+        self,
+        overrides: dict[str, object],
+        hits: dict[str, object],
+        keys: Mapping[str, bytes | None],
+        warned: set[str],
+        values: dict[str, object] | None,
+        reasons: Mapping[str, str],
+        known: Mapping[str, object],
+    ) -> Begun:
+        """A reported run's `Begun`: its hits, the nodes it computes, their outcomes.
+
+        A value in `known`, which an inner run computed or loaded and reported, is
+        no hit of this one's.
+        """
+        plan = self._plan_for(frozenset(hits)) if hits else self._plan
+        loaded = tuple(n for n in self._node_keys if n in hits and n not in known)
+        computed = tuple(n for n, action in plan.steps() if action == "compute")
+        outcomes = self._outcomes(keys, reasons, None)
+        reported = dict.fromkeys(loaded, _HIT)
+        reported.update((name, outcomes[name]) for name in computed)
+        return Begun(
+            plan,
+            {**overrides, **hits},
+            hits,
+            keys,
+            None,
+            warned,
+            values,
+            reported,
+            loaded,
+            computed,
+        )
 
     def versions(
         self, inputs: dict[str, object], overrides: dict[str, object], warned: set[str]
     ) -> dict[str, bytes | None]:
         """The fingerprint of every input and override a key reads; see `begin`."""
         return self._versions(inputs, overrides, warned)
+
+    def reported_levels(
+        self,
+        inputs: dict[str, object],
+        overrides: dict[str, object],
+        dispatch: Dispatch,
+        start: Callable[[tuple[str, ...]], None],
+    ) -> Generator[tuple[CacheRun, Begun], dict[str, object]]:
+        """A reported run's levels, innermost first, for either driver to run.
+
+        The one copy of what both drivers do around their runs, so they fire the
+        same events. The innermost level looks its hits up first; then `start`
+        fires `before_run` with the nodes the run reports, or with none, and the
+        error raised, when the lookups raise. Each level then reports its hits to
+        `dispatch` and is yielded with its `Begun`, for the caller to run its plan
+        and send back every value the run computed or loaded, the next level's
+        `known`.
+        """
+        levels = self._levels
+        warned: set[str] = set()
+        reasons: dict[str, str] = {}
+        known: dict[str, object] = {}
+        try:
+            versions = self._versions(inputs, overrides, warned, reasons)
+            begun = self._begin_reported(
+                levels[-1], inputs, overrides, known, versions, warned, reasons
+            )
+        except BaseException:
+            start(())
+            raise
+        start(self._reported(begun, levels[-1]))
+        for at, level in enumerate(reversed(levels)):
+            if at:
+                begun = self._begin_reported(
+                    level, inputs, overrides, known, versions, warned, reasons
+                )
+            dispatch.loaded(begun)
+            known = yield level, begun
+
+    def _begin_reported(  # noqa: PLR0913, PLR0917  # the request, and what the run has so far
+        self,
+        level: CacheRun,
+        inputs: dict[str, object],
+        overrides: dict[str, object],
+        known: dict[str, object],
+        versions: dict[str, bytes | None],
+        warned: set[str],
+        reasons: dict[str, str],
+    ) -> Begun:
+        """`level.begin` for a reported run whose outermost level is this one.
+
+        `known` holds the values of the level run before it; an inner level gets
+        copies of `versions` and `reasons`, and collects its values for the next.
+        """
+        outer = level is self
+        return level.begin(
+            inputs,
+            overrides,
+            known=known,
+            versions=versions if outer else dict(versions),
+            warned=warned,
+            values=None if outer else {},
+            native=False,
+            reasons=reasons if outer else dict(reasons),
+        )
+
+    def _reported(self, begun: Begun, level: CacheRun) -> tuple[str, ...]:
+        """The nodes a reported run reports, in order, once `level` has begun.
+
+        When `level` is this run, exactly its hits and then the nodes it computes.
+        When it is an inner run, which runs first because its `recompute` nodes key
+        what reads them, the hits of the outer levels are known only once it ran:
+        its own nodes, then every other node the plan could report, in plan order.
+        """
+        listed = begun.loaded + begun.computed
+        if level is self:
+            return listed
+        seen = set(listed)
+        return listed + tuple(n for n in self._node_keys if n not in seen)
+
+    def hooked(
+        self,
+        inputs: dict[str, object],
+        overrides: dict[str, object],
+        dispatch: Dispatch,
+        start: Callable[[tuple[str, ...]], None],
+    ) -> dict[str, object]:
+        """`run`, reporting every node to `dispatch`, a run's own dispatcher.
+
+        Runs `reported_levels`: each level's nodes report through `dispatch`'s
+        observers, and a node whose `after_node` raised is not stored (`kept`).
+        """
+        levels = self.reported_levels(inputs, overrides, dispatch, start)
+        level, begun = next(levels)
+        while True:
+            result = level._finished(  # noqa: SLF001  # the same class
+                begun,
+                inputs,
+                dispatch.observers(),
+                functools.partial(level.kept, begun, dispatch),
+            )
+            try:
+                level, begun = levels.send(
+                    result if begun.values is None else begun.values
+                )
+            except StopIteration:
+                return result
+
+    def kept(self, begun: Begun, dispatch: Dispatch, name: str, value: object) -> None:
+        """`finish`, unless `dispatch`'s hooks refused the value (R8).
+
+        The core calls `on_value` after every observer, even one that raised: a
+        node whose `after_node` raised is discarded, so it is not stored.
+        """
+        if not dispatch.refused:
+            self.finish(begun, name, value)
 
     def finish(self, begun: Begun, name: str, value: object) -> None:
         """Stores node `name`'s `value`, which it just computed, under its key.
@@ -601,17 +823,34 @@ class CacheRun:
         # No result, so no version: every key reading one is `None`.
         versions.update(dict.fromkeys(self._first))
         keys = self._key_plan.keys(versions)
+        return dict(sorted(self._outcomes(keys, reasons, warned).items()))
+
+    def _outcomes(
+        self,
+        keys: Mapping[str, bytes | None],
+        reasons: Mapping[str, str],
+        warned: set[str] | None,
+    ) -> dict[str, CacheOutcome]:
+        """Each computed node's outcome, by name, in plan order.
+
+        With `warned`, `explain`'s: each `default` node with a key is looked up,
+        and what reads a `recompute` node run first is `unknown`. Without, a run's,
+        once its walk found the hits: such a node is a miss, the caller marking
+        the hits, and a `recompute` node run first is read like an input.
+        """
         outcomes: dict[str, CacheOutcome] = {}
         # Plan order, so each node's sources have their outcomes already.
         for name, k in self._node_keys.items():
             key = keys[name]
             if key is None:
-                outcome = self._keyless(k, reasons, outcomes)
+                outcome = self._keyless(k, reasons, outcomes, ran=warned is None)
             elif not k.stored:
                 outcome = _EXTRACTED
             elif k.behavior == "default":
-                found = self._get(key, name, warned) is not MISSING
-                outcome = CacheOutcome("hit" if found else "miss", None)
+                found = (
+                    warned is not None and self._get(key, name, warned) is not MISSING
+                )
+                outcome = _HIT if found else _MISS
             else:
                 outcome = _RECOMPUTE
             # A `recompute` node always runs, so it is a miss whether or not its
@@ -619,18 +858,21 @@ class CacheRun:
             if k.behavior == "recompute" and outcome.status == "unknown":
                 outcome = _RECOMPUTE
             outcomes[name] = outcome
-        return dict(sorted(outcomes.items()))
+        return outcomes
 
     def _keyless(
         self,
         k: NodeKey,
         reasons: Mapping[str, str],
         outcomes: Mapping[str, CacheOutcome],
+        *,
+        ran: bool,
     ) -> CacheOutcome:
         """Why a node has no key: its own reason, else the first source it reads.
 
         An uncacheable source outweighs one with no known version yet, since the
-        node is uncacheable whatever that version turns out to be.
+        node is uncacheable whatever that version turns out to be. When the
+        `recompute` nodes run first `ran`, each has its version, or its reason.
         """
         if k.static is None:
             return CacheOutcome("uncacheable", k.reason)
@@ -638,7 +880,7 @@ class CacheRun:
         for _, source, _ in k.params:
             if source is None:
                 continue
-            if source in self._first:
+            if source in self._first and not ran:
                 found = CacheOutcome(
                     "unknown", f"downstream of recompute node {source!r}"
                 )

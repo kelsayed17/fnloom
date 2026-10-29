@@ -4,6 +4,7 @@ import sys
 import sysconfig
 import threading
 from concurrent.futures import ThreadPoolExecutor
+from typing import override
 
 import pytest
 
@@ -171,3 +172,94 @@ def test_one_driver_across_threads() -> None:
     explained = driver.explain_cache(["gathered"], inputs={"n": 15 * 1_000 + 3})
     assert explained["gathered"].status == "hit"
     assert driver.execute(["gathered"], inputs={"n": 3}) == {"gathered": _gathered(3)}
+
+
+class _Recording(fnloom.Hook):
+    """Records every event as a tuple whose second item is its run's id."""
+
+    def __init__(self) -> None:
+        self.events: list[tuple[object, ...]] = []
+        self._lock = threading.Lock()
+
+    def _add(self, *event: object) -> None:
+        with self._lock:
+            self.events.append(event)
+
+    @override
+    def before_run(self, event: fnloom.RunStart) -> None:
+        self._add("before_run", event.run_id, event.nodes)
+
+    @override
+    def before_node(self, event: fnloom.NodeStart) -> None:
+        status = None if event.cache is None else event.cache.status
+        self._add("before_node", event.run_id, event.node.name, status)
+
+    @override
+    def after_node(self, event: fnloom.NodeEnd) -> None:
+        status = None if event.cache is None else event.cache.status
+        self._add("after_node", event.run_id, event.node.name, status, event.ok)
+
+    @override
+    def after_run(self, event: fnloom.RunEnd) -> None:
+        self._add("after_run", event.run_id, event.ok)
+
+
+def _check_whole(run: list[tuple[object, ...]]) -> list[object]:
+    """Asserts one run's events are whole and in order; returns its nodes' statuses."""
+    first, *middle, last = run
+    assert first[0] == "before_run", run
+    assert last == ("after_run", first[1], True), run
+    assert len(middle) % 2 == 0, run
+    befores, afters = middle[::2], middle[1::2]
+    assert all(event[0] == "before_node" for event in befores), run
+    assert all(event[0] == "after_node" for event in afters), run
+    # Each node's after_node comes right after its before_node, with its outcome.
+    for before, after in zip(befores, afters, strict=True):
+        assert after[2:4] == before[2:4], run
+        assert after[4] is True, run
+    # The nodes reported are exactly those `before_run` announced, in its order.
+    assert tuple(event[2] for event in befores) == first[2], run
+    return [event[3] for event in befores]
+
+
+def test_one_hook_shared_by_threads_sees_each_run_whole() -> None:
+    """16 threads over one hooked, cached driver: each run's events are whole.
+
+    Grouped by `run_id`, a run's events are `before_run`, each node's pair in
+    the order `before_run` named them, then `after_run`: nothing missing, and
+    nothing from another run in between.
+    """
+    hook = _Recording()
+    driver = (
+        fnloom.Builder()
+        .with_modules(make_module("hooked_mixed", MIXED))
+        .with_modules(make_module("hooked_shifted", SHIFTED), namespace="shifted")
+        .with_config({"region": "eu"})
+        .with_cache(fnloom.MemoryCache())
+        .with_hooks(hook)
+        .build()
+    )
+    plan = driver.prepare(["gathered"], inputs={"n": 0})
+    start = threading.Barrier(MIXED_THREADS)
+
+    def work(thread: int) -> None:
+        start.wait()
+        for run in range(MIXED_RUNS):
+            n = thread * 1_000 + run % REPEAT
+            if run % 2:
+                result = driver.execute(["gathered", "high"], inputs={"n": n})
+            else:
+                result = plan.run(inputs={"n": n})
+            assert result["gathered"] == _gathered(n), (thread, run, result)
+
+    with ThreadPoolExecutor(MIXED_THREADS) as pool:
+        for future in [pool.submit(work, thread) for thread in range(MIXED_THREADS)]:
+            future.result()
+
+    runs: dict[object, list[tuple[object, ...]]] = {}
+    for event in hook.events:
+        runs.setdefault(event[1], []).append(event)
+    assert len(runs) == MIXED_THREADS * MIXED_RUNS
+    statuses = [status for run in runs.values() for status in _check_whole(run)]
+    # The cache both stored and hit while the threads ran.
+    assert {"hit", "miss"} <= set(statuses)

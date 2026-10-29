@@ -1,6 +1,7 @@
 """The user-facing `Builder`, `Driver`, `PreparedPlan`, and their async forms."""
 
 import copy
+import functools
 import importlib
 import inspect
 import sys
@@ -9,12 +10,13 @@ import typing
 
 # Imported for real, not under TYPE_CHECKING: the public signatures annotate with
 # them, and `inspect.signature` resolves those annotations at run time.
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
+from dataclasses import replace
 from types import MappingProxyType, ModuleType
 from typing import Any, Literal, NoReturn, Protocol, TypedDict, Unpack, override
 
-from fnloom import _async, _core, _types
+from fnloom import _async, _core, _hooks, _types
 from fnloom._caching import Cache, CacheOutcome, CacheRun
 from fnloom._decorators import Source
 from fnloom._defaults import default_problems
@@ -29,11 +31,13 @@ from fnloom._functions import (
     references,
     unimportable,
 )
+from fnloom._hooks import Hook
 from fnloom._namespaces import checked_namespace
 from fnloom._requests import ABSENT, requested, suggest
 from fnloom._requests import output_names as _requested_names
 from fnloom._scan import LeftOut, NodeDef, core_inputs, resolve, scan
 from fnloom._stores import CacheStore
+from fnloom._types import ValueCheck
 from fnloom._view import (
     InputView,
     NodeView,
@@ -46,7 +50,11 @@ from fnloom._view import (
 type _PlanKey = tuple[tuple[str, ...], frozenset[str], frozenset[str]]
 # A request's final_vars (a list or tuple, copied), its input and override names,
 # and its plan.
-type _LastRequest = tuple[Sequence[str], frozenset[str], frozenset[str], PreparedPlan]
+type _LastRequest[R] = tuple[
+    Sequence[str], frozenset[str], frozenset[str], PreparedPlan[R]
+]
+# What `Builder.with_result_builder` sets: it gets the raw outputs, in request order.
+type _ResultBuilder[R] = Callable[[dict[str, object]], R]
 # A checked name, its declared type, the classes `isinstance` checks it against
 # when the type is a plain class or a union of them (`None` for any other type),
 # and the type's check, made when the plan is prepared (`_types.check_of`).
@@ -60,9 +68,16 @@ class _Runnable(Protocol):
     """What a prepared plan runs: a native plan, or a cached run over one."""
 
     def run(
-        self, inputs: dict[str, Any], overrides: dict[str, Any], /
+        self,
+        inputs: dict[str, Any],
+        overrides: dict[str, Any],
+        observers: Sequence[_core.ObserverBase] = (),
+        /,
     ) -> dict[str, object]:
-        """Runs with checked values; exactly the outputs, keyed by name, sorted."""
+        """Runs with checked values; exactly the outputs, keyed by name, sorted.
+
+        `observers` see each node the core computes.
+        """
         ...
 
 
@@ -174,23 +189,23 @@ def _mismatches(checks: Sequence[_Check], values: Mapping[str, object]) -> list[
     """A line for each checked value that does not fit its declared type.
 
     A value checked against an annotation that did not resolve gets an
-    `_UnresolvedLine` saying to import it at run time (Q81).
+    `_UnresolvedLine` saying to import it at run time (Q81). A value check the
+    builder added (Q21) that raises is not caught.
     """
     found: list[str] = []
     for name, declared, cls, matches in checks:
         value = values[name]
         # A plain class answers for `None` too: `isinstance(None, int)` is False,
         # and only `object`, `NoneType` and a union with it take it (Q79).
-        if cls is not None:
-            if isinstance(value, cls):
+        if cls is not None and isinstance(value, cls):
+            continue
+        # Refused by class: the check answers the same, or a custom check admits.
+        try:
+            if matches(value):
                 continue
-        else:
-            try:
-                if matches(value):
-                    continue
-            except _types.UnresolvedError as error:
-                found.append(_UnresolvedLine(f"{name}: {error}"))
-                continue
+        except _types.UnresolvedError as error:
+            found.append(_UnresolvedLine(f"{name}: {error}"))
+            continue
         found.append(
             f"{name}: expected {inspect.formatannotation(declared)}, "
             f"got {inspect.formatannotation(type(value))}{_inside(declared, value)}"
@@ -212,6 +227,88 @@ def _inside(declared: object, value: object) -> str:
         if not variadic and len(value) != len(args):
             return " (its length does not fit)"
     return " (an item does not fit)"
+
+
+def _output_checked(
+    nodes: list[NodeDef],
+    rules: _types.Rules,
+    value_checks: tuple[_types.ValueCheck, ...],
+    *,
+    awaits: bool,
+) -> list[NodeDef]:
+    """`nodes`, each one's payload checking its result against its return type (Q87).
+
+    A node returning `Any` or `object` is kept as it is, and so is an extracted
+    field's node, whose payload checks its value already. With `awaits`, for the
+    async driver, a sync node's awaitable result is passed on unchecked, so the
+    driver refuses it with its own guided error.
+    """
+    return [
+        node
+        if is_generated(node) or _types.checks_everything(node.returns)
+        else replace(node, payload=_returning(node, rules, value_checks, awaits=awaits))
+        for node in nodes
+    ]
+
+
+def _returning(
+    node: NodeDef,
+    rules: _types.Rules,
+    value_checks: tuple[_types.ValueCheck, ...],
+    *,
+    awaits: bool,
+) -> Callable[..., object]:
+    """`node`'s payload, its result checked as an input would be; see `_output_checked`.
+
+    A mismatch is a `TypeError` raised as the node's own failure, so the core
+    notes the node on it, and `after_node` gets it. A node that raises raises
+    its own error, never checked. An `async def` node's awaited result is
+    checked, by a coroutine function the async driver awaits as it would the
+    node's own. With `awaits`, a sync node's awaitable result is not checked:
+    the async driver refuses it, saying to make the node an `async def`, and
+    closes it, so it never warns as never awaited.
+    """
+    name, declared, payload = node.name, node.returns, node.payload
+    classes, matches = _types.admitting(
+        declared, _types.check_of(declared, rules), value_checks
+    )
+
+    def checked(value: object) -> object:
+        # Refused by class, or no plain class: the check, custom ones included.
+        try:
+            if matches(value):
+                return value
+        except _types.UnresolvedError as error:
+            msg = f"{name}: {error}"
+            raise TypeError(msg) from None
+        msg = (
+            f"{name}: returned {inspect.formatannotation(type(value))}, "
+            f"expected {inspect.formatannotation(declared)}"
+            f"{_inside(declared, value)}"
+        )
+        raise TypeError(msg)
+
+    if _async.awaits(node):
+        awaited = typing.cast("Callable[..., Awaitable[object]]", payload)
+
+        async def call_async(**kwargs: object) -> object:
+            value = await awaited(**kwargs)
+            if classes is not None and isinstance(value, classes):
+                return value
+            return checked(value)
+
+        return call_async
+
+    def call(**kwargs: object) -> object:
+        value = payload(**kwargs)
+        if classes is not None and isinstance(value, classes):
+            return value
+        if awaits and inspect.isawaitable(value):
+            # The async driver's own refusal, which names the fix, applies.
+            return value
+        return checked(value)
+
+    return call
 
 
 def _edge_mismatches(functions: Mapping[str, NodeView]) -> list[str]:
@@ -261,13 +358,14 @@ def _input_views(views: NodeViews) -> dict[str, InputView]:
     }
 
 
-class PreparedPlan:
+class PreparedPlan[R = dict[str, object]]:
     """A plan compiled for fixed outputs and fixed input and override names.
 
-    Pickled or copied, a plan is its driver and its request: loading it rebuilds
-    the driver (see `Driver`) and prepares the same request again. Pickled together
-    with its driver, or with other plans of one driver, they share one rebuilt
-    driver.
+    `R` is what `run` returns: the raw dict, unless the driver has a result
+    builder (`Builder.with_result_builder`). Pickled or copied, a plan is its
+    driver and its request: loading it rebuilds the driver (see `Driver`) and
+    prepares the same request again. Pickled together with its driver, or with
+    other plans of one driver, they share one rebuilt driver.
     """
 
     def __init__(
@@ -295,15 +393,17 @@ class PreparedPlan:
         self._input_names = input_names
         self._override_names = override_names
         self._input_checks, self._override_checks = checks
+        # The driver's result builder, which only a subclass applies.
+        self._build: _ResultBuilder[R] | None = None
         # The driver that prepared this plan, which pickling rebuilds it through.
-        self._driver: Driver | None = None
+        self._driver: Driver[R] | None = None
         # This plan as an `AsyncDriver` runs it, made on its first async use.
-        self._async: AsyncPreparedPlan | None = None
+        self._async: AsyncPreparedPlan[R] | None = None
 
     @override
     def __reduce__(
         self,
-    ) -> tuple[Callable[..., PreparedPlan], tuple[Driver, _PlanKey]]:
+    ) -> tuple[Callable[..., PreparedPlan[R]], tuple[Driver[R], _PlanKey]]:
         """The driver and the request, prepared again on load; see the class."""
         if self._driver is None:
             msg = "cannot pickle a PreparedPlan made without a Driver"
@@ -313,7 +413,7 @@ class PreparedPlan:
             (self._outputs, self._input_names, self._override_names),
         )
 
-    def __copy__(self) -> PreparedPlan:
+    def __copy__(self) -> PreparedPlan[R]:
         """The plan itself: nothing about a plan changes once it is compiled."""
         return self
 
@@ -322,14 +422,32 @@ class PreparedPlan:
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
-    ) -> dict[str, object]:
+    ) -> R:
         """Runs the plan; raises `ValueError` if the input or override names differ.
 
         `ValueError` too, listing each one, when an input the plan reads or an
         override does not fit its node's type (unless the driver was built
         without input type checks); a `TypeError` instead when one of them is
         checked against an annotation that did not resolve at build (Q81). The
-        result holds each requested output once, in the order first requested.
+        result holds each requested output once, in the order first requested,
+        or is what the driver's result builder makes of that dict (Q19).
+        """
+        # This class runs only without a result builder, so `R` is the raw dict.
+        given_inputs, given_overrides = self._checked(inputs, overrides)
+        values = self._plan.run(given_inputs, given_overrides)
+        if self._sorted:
+            return values  # ty: ignore[invalid-return-type]  # `R` is the raw dict here
+        return {name: values[name] for name in self._outputs}  # ty: ignore[invalid-return-type]  # `R` is the raw dict here
+
+    def run_raw(
+        self,
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Runs as `run` does, but returns the raw dict, skipping any result builder.
+
+        Every hook fires, as for `run` (Q19).
         """
         given_inputs, given_overrides = self._checked(inputs, overrides)
         values = self._plan.run(given_inputs, given_overrides)
@@ -363,15 +481,7 @@ class PreparedPlan:
             given_inputs.keys() != self._input_names
             or given_overrides.keys() != self._override_names
         ):
-            problems = [
-                _difference(kind, prepared, frozenset(given))
-                for kind, prepared, given in (
-                    ("inputs", self._input_names, given_inputs),
-                    ("overrides", self._override_names, given_overrides),
-                )
-                if prepared != frozenset(given)
-            ]
-            raise ValueError("; ".join(problems))
+            self._refuse_names(given_inputs, given_overrides)
         if self._input_checks or self._override_checks:
             mismatches = _mismatches(self._input_checks, given_inputs)
             mismatches += _mismatches(self._override_checks, given_overrides)
@@ -379,9 +489,259 @@ class PreparedPlan:
                 _raise_mismatches(mismatches)
         return given_inputs, given_overrides
 
+    def _refuse_names(
+        self, given_inputs: dict[str, Any], given_overrides: dict[str, Any]
+    ) -> NoReturn:
+        """Raises the `ValueError` for input or override names that differ."""
+        problems = [
+            _difference(kind, prepared, frozenset(given))
+            for kind, prepared, given in (
+                ("inputs", self._input_names, given_inputs),
+                ("overrides", self._override_names, given_overrides),
+            )
+            if prepared != frozenset(given)
+        ]
+        raise ValueError("; ".join(problems))
 
-class Driver:
+
+class _BuiltPlan[R](PreparedPlan[R]):
+    """A `PreparedPlan` of a driver with a result builder and no hooks.
+
+    Chosen when the plan is compiled, so a driver with no builder never runs
+    this. `run` builds what `run_raw` returns; an error the builder raises is
+    raised as it is.
+    """
+
+    def __init__(  # noqa: PLR0913  # the prepared plan's parts, and its builder
+        self,
+        plan: _Runnable,
+        outputs: Sequence[str],
+        input_names: frozenset[str],
+        override_names: frozenset[str],
+        checks: tuple[Sequence[_Check], Sequence[_Check]],
+        *,
+        build: _ResultBuilder[R],
+    ) -> None:
+        """A prepared plan whose `run` returns what `build` makes of its outputs."""
+        super().__init__(plan, outputs, input_names, override_names, checks)
+        self._build = self._finish = build
+
+    @override
+    def run(
+        self,
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+    ) -> R:
+        """Runs as `PreparedPlan.run_raw` does, then builds the result."""
+        return self._finish(self.run_raw(inputs=inputs, overrides=overrides))
+
+
+class _HookedPlan[R](PreparedPlan[R]):
+    """A `PreparedPlan` of a driver with hooks: its runs fire the hooks' events.
+
+    Chosen when the plan is compiled, so a driver with no hooks never runs this.
+    A run checks its names first, which fires nothing, then fires `before_run`,
+    raises a failed value check, runs, and fires `after_run` (decision 4). The
+    values are checked before `before_run`, which then lists no nodes when they
+    fail, since none will run; their error is raised after it. A cached run
+    looks its hits up before `before_run`, which lists them first, then reports
+    each hit and each node it runs with its cache outcome (decision 7). A
+    result builder runs once the outputs are in, before `after_run`, which gets
+    the raw outputs either way; an error it raises fails the run (Q19).
+    """
+
+    def __init__(  # noqa: PLR0913  # the prepared plan's parts, and its hooks
+        self,
+        plan: _Runnable,
+        outputs: Sequence[str],
+        input_names: frozenset[str],
+        override_names: frozenset[str],
+        checks: tuple[Sequence[_Check], Sequence[_Check]],
+        *,
+        hooks: _hooks.Hooks,
+        views: _hooks.Views,
+        build: _ResultBuilder[R] | None,
+    ) -> None:
+        """A prepared plan whose runs call `hooks`, reporting the nodes of `views`."""
+        super().__init__(plan, outputs, input_names, override_names, checks)
+        self._build = build
+        self._hooks = hooks
+        self._views = views
+
+    @override
+    def run(
+        self,
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+    ) -> R:
+        """Runs the plan as `PreparedPlan.run` does, firing the hooks' events."""
+        return self._fired(inputs, overrides, self._build)  # ty: ignore[invalid-return-type]  # the raw dict is `R` when there is no builder
+
+    @override
+    def run_raw(
+        self,
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Runs as `run` does, firing every hook, but skips the result builder."""
+        return typing.cast("dict[str, object]", self._fired(inputs, overrides, None))
+
+    def _fired(
+        self,
+        inputs: Mapping[str, object] | None,
+        overrides: Mapping[str, object] | None,
+        build: _ResultBuilder[object] | None,
+    ) -> object:
+        """A run that fires the hooks' events, and its outputs as `build` makes them."""
+        given_inputs, given_overrides, mismatches = self._opened(inputs, overrides)
+        plan = self._plan
+        cached = isinstance(plan, CacheRun)
+        dispatch = _hooks.Dispatch(self._hooks, self._views, {} if cached else None)
+        error: BaseException | None = None
+        try:
+            if mismatches:
+                self._refuse_values(dispatch, given_inputs, given_overrides, mismatches)
+            start = self._starter(dispatch, given_inputs, given_overrides)
+            if isinstance(plan, CacheRun):
+                values = plan.hooked(given_inputs, given_overrides, dispatch, start)
+            else:
+                start(self._views.names)
+                values = plan.run(given_inputs, given_overrides, dispatch.observers())
+        except BaseException as caught:  # noqa: BLE001  # raised by `end`, after `after_run`
+            error = caught
+        else:
+            if not self._sorted:
+                values = {name: values[name] for name in self._outputs}
+            return _ended(dispatch, values, build)
+        dispatch.end(False, error, None)  # noqa: FBT003  # the dispatcher's interface
+        # `end` raises the error itself, or the errors that replace it.
+        raise error
+
+    def _opened(
+        self,
+        inputs: Mapping[str, object] | None,
+        overrides: Mapping[str, object] | None,
+    ) -> tuple[dict[str, Any], dict[str, Any], list[str] | BaseException]:
+        """The inputs and overrides as dicts, once their names fit, and mismatches.
+
+        The value checks are worked out here, so `RunStart.nodes` is empty when
+        they fail and no node will run (R5); `_refuse_values` raises them after
+        `before_run`, as Hamilton raises them. A custom value check that raises
+        is carried the same way, as its error, so the hooks see it too.
+        """
+        given_inputs = inputs if type(inputs) is dict else _as_dict(inputs)
+        given_overrides = overrides if type(overrides) is dict else _as_dict(overrides)
+        if (
+            given_inputs.keys() != self._input_names
+            or given_overrides.keys() != self._override_names
+        ):
+            self._refuse_names(given_inputs, given_overrides)
+        mismatches: list[str] | BaseException = []
+        if self._input_checks or self._override_checks:
+            try:
+                mismatches = _mismatches(self._input_checks, given_inputs)
+                mismatches += _mismatches(self._override_checks, given_overrides)
+            except BaseException as raised:  # noqa: BLE001  # raised by `_refuse_values`, after `before_run`
+                mismatches = raised
+        return given_inputs, given_overrides, mismatches
+
+    def _starter(
+        self,
+        dispatch: _hooks.Dispatch,
+        inputs: dict[str, Any],
+        overrides: dict[str, Any],
+    ) -> Callable[[tuple[str, ...]], None]:
+        """What fires `before_run`, given the nodes the run reports.
+
+        Those are the plan's, `self._views.names`, unless the run is cached: then
+        they are known once its hits are (decision 7).
+        """
+        return functools.partial(dispatch.start, self._outputs, inputs, overrides)
+
+    def _refuse_values(
+        self,
+        dispatch: _hooks.Dispatch,
+        inputs: dict[str, Any],
+        overrides: dict[str, Any],
+        mismatches: list[str] | BaseException,
+    ) -> NoReturn:
+        """Fires `before_run` with no nodes, since none will run, then raises.
+
+        What it raises is the mismatches' error, or, unwrapped, the error a
+        custom value check raised.
+        """
+        dispatch.start(self._outputs, inputs, overrides, ())
+        if isinstance(mismatches, BaseException):
+            raise mismatches
+        _raise_mismatches(mismatches)
+
+
+def _ended(
+    dispatch: _hooks.Dispatch,
+    values: dict[str, object],
+    build: _ResultBuilder[object] | None,
+) -> object:
+    """Builds a hooked run's outputs, then fires `after_run` with the raw ones.
+
+    The builder gets its own copy of the outputs, so `after_run` gets them as
+    computed. A builder that raises fails the run: `after_run` gets `ok=False`,
+    its error and the raw outputs, and `end` raises the error, after any a hook
+    adds (Q19).
+    Both drivers end a hooked run here, so the builder runs in one place.
+    """
+    if build is None:
+        # Outside any `except`, so nothing `end` raises gets a `__context__`.
+        # Its own copy, so a hook that keeps `RunEnd.results` never sees what
+        # the caller later changes in the dict returned.
+        dispatch.end(True, None, dict(values))  # noqa: FBT003  # the dispatcher's interface
+        return values
+    try:
+        # A copy, as Hamilton's `**outputs` is: what the builder changes in it
+        # never reaches `RunEnd.results`.
+        built = build(dict(values))
+    except BaseException as caught:  # noqa: BLE001  # raised by `end`, after `after_run`
+        failure = caught
+    else:
+        dispatch.end(True, None, values)  # noqa: FBT003  # the dispatcher's interface
+        return built
+    dispatch.end(False, failure, values)  # noqa: FBT003  # the dispatcher's interface
+    # `end` raises the builder's error itself, or a group holding it.
+    raise failure
+
+
+def _named(build: object) -> str:
+    """A result builder as an error names it: its qualified name, or its class's."""
+    name = getattr(build, "__qualname__", None)
+    return name if isinstance(name, str) else f"a {type(build).__qualname__}"
+
+
+def _checked_value_checks(
+    checks: Sequence[_types.ValueCheck],
+) -> tuple[_types.ValueCheck, ...]:
+    """`checks` as a tuple; `TypeError` naming the first that can't be called."""
+    for check in checks:
+        if not callable(check):
+            msg = f"a value check must be callable, not {check!r}"
+            raise TypeError(msg)
+    return tuple(checks)
+
+
+def _checked_builder[R](build: _ResultBuilder[R] | None) -> _ResultBuilder[R] | None:
+    """`build`, once it is callable or `None`; a `TypeError` otherwise."""
+    if build is not None and not callable(build):
+        msg = f"a result builder must be callable, not {build!r}"
+        raise TypeError(msg)
+    return build
+
+
+class Driver[R = dict[str, object]]:
     """Executes a graph of nodes, caching one compiled plan per request shape.
+
+    `R` is what `execute` returns: the raw dict, unless the builder set a result
+    builder (`Builder.with_result_builder`).
 
     The cache keeps the `PLAN_CACHE_SIZE` most recently used plans. Make a driver with
     `Builder` (or its shorthand `build`); the constructor takes an already built
@@ -406,6 +766,9 @@ class Driver:
         cache: Cache | None = None,
         config: Mapping[str, object] | None = None,
         rules: _types.Rules = _types.SHALLOW,
+        hooks: Sequence[Hook] = (),
+        result_builder: _ResultBuilder[R] | None = None,
+        value_checks: Sequence[ValueCheck] = (),
     ) -> None:
         """Wraps a native graph; `Builder` is the way to make one from modules.
 
@@ -414,6 +777,12 @@ class Driver:
         effect without `check_inputs`), and `strict_overrides` refuses an override
         of an input that is not supplied (Q75). `rules` are the opt-in rules the
         input and override checks follow: deep checks and numeric widening.
+        `hooks` watch every run, checked as `Builder.with_hooks` checks them.
+        `result_builder` makes what `execute` returns from the raw outputs, as
+        `Builder.with_result_builder` sets it. `value_checks` admit an input or
+        override the default check refuses, as `Builder.with_value_check` adds
+        them; the output checks and extracted fields' checks are in the graph's
+        payloads already.
         """
         self._graph = graph
         # The modules it was built from, each once: `Builder` sets them.
@@ -425,7 +794,20 @@ class Driver:
         self._check_overrides = check_overrides
         self._strict_overrides = strict_overrides
         self._rules = rules
+        self._value_checks = _checked_value_checks(value_checks)
         self._cache = cache
+        self._hook_list = _hooks.checked(hooks)
+        if self._hook_list and nodes is None:
+            # A hook's events carry the nodes' views, so a run needs them.
+            msg = (
+                "hooks need the graph's node views: pass nodes= with hooks=, "
+                "or make the driver with Builder(...).with_hooks(...).build()"
+            )
+            raise TypeError(msg)
+        # The methods the runs call; `None` when no hook overrides any, so a
+        # driver with none compiles plain plans.
+        self._hooks = _hooks.Hooks.of(self._hook_list)
+        self._build = _checked_builder(result_builder)
         self._config = (
             config
             if isinstance(config, MappingProxyType)
@@ -439,16 +821,18 @@ class Driver:
             nodes if isinstance(nodes, NodeViews) else NodeViews(nodes or {}, {})
         )
         # Insertion order is recency order: a hit moves its plan to the end.
-        self._plans: dict[_PlanKey, PreparedPlan] = {}
+        self._plans: dict[_PlanKey, PreparedPlan[R]] = {}
         self._plans_lock = threading.Lock()
         # The last request and its plan, which is the most recently used one, so a
         # repeat of it, the common case in a loop, skips the key and the lock.
-        self._last: _LastRequest | None = None
+        self._last: _LastRequest[R] | None = None
         # The builder that built this driver, which pickling rebuilds it from.
-        self._builder: Builder | None = None
+        self._builder: Builder[R] | None = None
 
     @override
-    def __reduce__(self) -> tuple[Callable[[Builder], Driver], tuple[Builder]]:
+    def __reduce__(
+        self,
+    ) -> tuple[Callable[[Builder[Any]], Driver[Any]], tuple[Builder[R]]]:
         """The builder, built again on load; see the class."""
         if self._builder is None:
             msg = (
@@ -458,16 +842,16 @@ class Driver:
             raise TypeError(msg)
         return Builder.build, (self._builder,)
 
-    def rebuild(self) -> Driver:
+    def rebuild(self) -> Driver[R]:
         """A new driver, built again from this driver's builder (Q83).
 
         The same as `build` on that builder: its modules, functions, namespaces,
-        config, cache store and every setting. A module is scanned again, so after
-        `importlib.reload` the new driver runs the edited code, and its code
-        versions are read again, so a shared store misses on an edited node. This
-        driver keeps the code it was built with. A function given to
-        `with_functions` is the object given, so give a reloaded one to a new
-        builder. `TypeError` for a driver made from a native graph.
+        config, cache store, result builder and every setting. A module is
+        scanned again, so after `importlib.reload` the new driver runs the edited
+        code, and its code versions are read again, so a shared store misses on
+        an edited node. This driver keeps the code it was built with. A function
+        given to `with_functions` is the object given, so give a reloaded one to
+        a new builder. `TypeError` for a driver made from a native graph.
         """
         if self._builder is None:
             msg = (
@@ -477,7 +861,7 @@ class Driver:
             raise TypeError(msg)
         return self._builder.build()
 
-    def __copy__(self) -> Driver:
+    def __copy__(self) -> Driver[R]:
         """A driver over the same graph, store and settings, with no compiled plans.
 
         Cheap, unlike pickling: nothing is rebuilt, and a driver made from a native
@@ -492,12 +876,20 @@ class Driver:
             cache=self._cache,
             config=self._config,
             rules=self._rules,
+            hooks=self._hook_list,
+            result_builder=self._build,
+            value_checks=self._value_checks,
         )
         copied._modules = self._modules
         copied._builder = self._builder
         copied._unmatched = self._unmatched
         copied._left_out = self._left_out
         return copied
+
+    @property
+    def hooks(self) -> tuple[Hook, ...]:
+        """The hooks watching this driver's runs, in the order they are called."""
+        return self._hook_list
 
     @property
     def config(self) -> Mapping[str, object]:
@@ -517,7 +909,7 @@ class Driver:
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
-    ) -> PreparedPlan:
+    ) -> PreparedPlan[R]:
         """Returns the plan for this request shape, compiling it on first use.
 
         A function in `final_vars` means its node (Q30); see `output_names`.
@@ -550,7 +942,7 @@ class Driver:
                 self._last = (key[0], key[1], key[2], prepared)
         return prepared
 
-    def _compile(self, key: _PlanKey) -> PreparedPlan:
+    def _compile(self, key: _PlanKey) -> PreparedPlan[R]:
         outputs, input_names, override_names = key
         if self._unmatched and (
             absent := sorted({name for name in outputs if name in self._unmatched})
@@ -582,9 +974,34 @@ class Driver:
             runnable = CacheRun(
                 self._cache, self._graph, plan, outputs, input_names, override_names
             )
-        prepared = PreparedPlan(runnable, outputs, input_names, override_names, checks)
+        build = self._build
+        prepared: PreparedPlan[R]
+        if self._hooks is not None:
+            prepared = _HookedPlan(
+                runnable,
+                outputs,
+                input_names,
+                override_names,
+                checks,
+                hooks=self._hooks,
+                views=self._reported(plan),
+                build=build,
+            )
+        elif build is not None:
+            prepared = _BuiltPlan(
+                runnable, outputs, input_names, override_names, checks, build=build
+            )
+        else:
+            prepared = PreparedPlan(
+                runnable, outputs, input_names, override_names, checks
+            )
         prepared._driver = self  # noqa: SLF001  # the driver's own plan
         return prepared
+
+    def _reported(self, plan: _core.Plan) -> _hooks.Views:
+        """The nodes `plan` computes, in the order it computes them, for its hooks."""
+        computed = [node for node, action in plan.steps() if action == "compute"]
+        return _hooks.Views(computed, self._nodes)
 
     def _checks(
         self, plan: _core.Plan, override_names: frozenset[str]
@@ -630,11 +1047,16 @@ class Driver:
         """Each of `names` with its node's type; a name with no view goes unchecked.
 
         Each distinct type's check is made once (`_types.checks_of`), here, when a
-        plan is prepared.
+        plan is prepared, and admits what a custom value check admits (Q21).
         """
         # By type, not view: the views of many inputs are never made at all.
         typed = [(n, self._nodes.type_of(n)) for n in names if n in self._nodes]
         checks = _types.checks_of((declared for _, declared in typed), self._rules)
+        if self._value_checks:
+            checks = [
+                _types.admitting(declared, check, self._value_checks)
+                for (_, declared), check in zip(typed, checks, strict=True)
+            ]
         return tuple(
             (n, declared, classes, matches)
             for (n, declared), (classes, matches) in zip(typed, checks, strict=True)
@@ -829,17 +1251,82 @@ class Driver:
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
-    ) -> dict[str, object]:
+    ) -> R:
         """Computes `final_vars`, reusing the cached plan for the same request shape.
 
-        The result holds each requested output once, in the order first requested.
+        The result holds each requested output once, in the order first requested,
+        or is what the result builder makes of that dict (Q19).
         A function in `final_vars` stands for the node it makes in this driver,
         matched by identity (Q30): the result is still keyed by the node's name.
         `TypeError` when it makes several nodes, as a `@parameterize` function does,
         and `ValueError` when it makes none.
         """
-        plan = self.prepare(final_vars, inputs=inputs, overrides=overrides)
+        try:
+            plan = self.prepare(final_vars, inputs=inputs, overrides=overrides)
+        except ValueError as error:
+            self._refuse(final_vars, inputs, overrides, error)
         return plan.run(inputs=inputs, overrides=overrides)
+
+    def raw_execute(
+        self,
+        final_vars: Sequence[str | Callable[..., object]],
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Computes `final_vars` as `execute` does, skipping the result builder.
+
+        Returns the raw dict, each requested output once, in the order first
+        requested; every hook fires, as for `execute` (Q19).
+        """
+        try:
+            plan = self.prepare(final_vars, inputs=inputs, overrides=overrides)
+        except ValueError as error:
+            self._refuse(final_vars, inputs, overrides, error)
+        return plan.run_raw(inputs=inputs, overrides=overrides)
+
+    def _refuse(
+        self,
+        final_vars: Sequence[str | Callable[..., object]],
+        inputs: Mapping[str, object] | None,
+        overrides: Mapping[str, object] | None,
+        error: ValueError,
+    ) -> NoReturn:
+        """Raises `error`, which `prepare` raised, once the hooks see it if they may.
+
+        A value check of the request, not its shape, fires `before_run` and
+        `after_run` first (decision 4); a shape error fires nothing.
+        """
+        if self._hooks is None or not str(error).startswith(_UNSUPPLIED):
+            raise error
+        self._refuse_after_hooks(self._hooks, final_vars, inputs, overrides, error)
+
+    def _refuse_after_hooks(
+        self,
+        hooks: _hooks.Hooks,
+        final_vars: Sequence[str | Callable[..., object]],
+        inputs: Mapping[str, object] | None,
+        overrides: Mapping[str, object] | None,
+        error: ValueError,
+    ) -> NoReturn:
+        """Fires a run that `error`, a missing or refused input, stops at its checks.
+
+        The request's shape is good, so its plan only lacks a value: as Hamilton
+        does, `before_run` fires, then `after_run` with the error. No node is
+        reported, since none will run.
+        """
+        outputs = tuple(
+            dict.fromkeys(_requested_names(final_vars, self._nodes, self._unmatched))
+        )
+        dispatch = _hooks.Dispatch(hooks, _hooks.Views((), self._nodes), None)
+        try:
+            dispatch.start(outputs, _as_dict(inputs), _as_dict(overrides), ())
+        except BaseException as caught:  # noqa: BLE001  # raised by `end`, after `after_run`
+            failure: BaseException = caught
+        else:
+            failure = error
+        dispatch.end(False, failure, None)  # noqa: FBT003  # the dispatcher's interface
+        raise failure
 
     def explain_cache(
         self,
@@ -941,17 +1428,18 @@ class Driver:
         return sorted({*names, *self._graph.downstream_of(list(names))})
 
 
-class AsyncPreparedPlan:
+class AsyncPreparedPlan[R = dict[str, object]]:
     """A plan an `AsyncDriver` compiled: `PreparedPlan`, with `run` a coroutine.
 
     Compiled for the same outputs and names, and checked the same way, as a
-    `PreparedPlan`; pickled as its driver and its request, as one is.
+    `PreparedPlan`; pickled as its driver and its request, as one is. `R` is
+    what `run` returns, as for `PreparedPlan`.
     """
 
     def __init__(
         self,
-        prepared: PreparedPlan,
-        driver: AsyncDriver,
+        prepared: PreparedPlan[R],
+        driver: AsyncDriver[R],
         schedule: _async.Schedule | _async.CachedSchedule,
     ) -> None:
         """The async form of `prepared`, run by `schedule`, for `driver`."""
@@ -963,7 +1451,7 @@ class AsyncPreparedPlan:
     @override
     def __reduce__(
         self,
-    ) -> tuple[Callable[..., AsyncPreparedPlan], tuple[AsyncDriver, _PlanKey]]:
+    ) -> tuple[Callable[..., AsyncPreparedPlan[R]], tuple[AsyncDriver[R], _PlanKey]]:
         """The driver and the request, prepared again on load; see the class."""
         prepared = self._prepared
         key: _PlanKey = (
@@ -973,7 +1461,7 @@ class AsyncPreparedPlan:
         )
         return _prepare_async_again, (self._driver, key)
 
-    def __copy__(self) -> AsyncPreparedPlan:
+    def __copy__(self) -> AsyncPreparedPlan[R]:
         """The plan itself: nothing about a plan changes once it is compiled."""
         return self
 
@@ -982,19 +1470,144 @@ class AsyncPreparedPlan:
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
-    ) -> dict[str, object]:
+    ) -> R:
         """Runs on the running loop; checked and returned as `PreparedPlan.run` is.
 
         The first node to fail cancels every node still running and raises its own
         exception, with a note naming it (Q66).
+        """
+        # This class runs only without a result builder, so `R` is the raw dict.
+        given_inputs, given_overrides = self._prepared._checked(inputs, overrides)  # noqa: SLF001  # the plan this wraps
+        values = await self._schedule.run(given_inputs, given_overrides)
+        return {name: values[name] for name in self._outputs}  # ty: ignore[invalid-return-type]  # `R` is the raw dict here
+
+    async def run_raw(
+        self,
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Runs as `run` does, but returns the raw dict, skipping any result builder.
+
+        Every hook fires, as for `run` (Q19).
         """
         given_inputs, given_overrides = self._prepared._checked(inputs, overrides)  # noqa: SLF001  # the plan this wraps
         values = await self._schedule.run(given_inputs, given_overrides)
         return {name: values[name] for name in self._outputs}
 
 
-class AsyncDriver:
+class _BuiltAsyncPlan[R](AsyncPreparedPlan[R]):
+    """An `AsyncPreparedPlan` of a driver with a result builder and no hooks.
+
+    Chosen when the plan is prepared, so a driver with no builder never runs
+    this. `run` builds what `run_raw` returns, as `_BuiltPlan.run` does.
+    """
+
+    def __init__(
+        self,
+        prepared: PreparedPlan[R],
+        driver: AsyncDriver[R],
+        schedule: _async.Schedule | _async.CachedSchedule,
+        build: _ResultBuilder[R],
+    ) -> None:
+        """The async form of `prepared`, whose `run` returns what `build` makes."""
+        super().__init__(prepared, driver, schedule)
+        self._finish = build
+
+    @override
+    async def run(
+        self,
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+    ) -> R:
+        """Runs as `AsyncPreparedPlan.run_raw` does, then builds the result."""
+        return self._finish(await self.run_raw(inputs=inputs, overrides=overrides))
+
+
+class _HookedAsyncPlan[R](AsyncPreparedPlan[R]):
+    """An `AsyncPreparedPlan` of a driver with hooks: its runs fire their events.
+
+    Chosen when the plan is prepared, so a driver with no hooks never runs this.
+    A run fires the events `_HookedPlan.run` fires, through the same dispatcher,
+    in the same order around the checks; its nodes report as they run (Q86).
+    Its result builder runs where `_HookedPlan`'s does, before `after_run`.
+    """
+
+    def __init__(
+        self,
+        prepared: _HookedPlan[R],
+        driver: AsyncDriver[R],
+        schedule: _async.Schedule | _async.CachedSchedule,
+    ) -> None:
+        """The async form of `prepared`, whose hooks its runs fire."""
+        super().__init__(prepared, driver, schedule)
+        self._hooked = prepared
+
+    @override
+    async def run(
+        self,
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+    ) -> R:
+        """Runs as `AsyncPreparedPlan.run` does, firing the hooks' events."""
+        build = self._hooked._build  # noqa: SLF001  # the plan this wraps
+        return await self._fired(inputs, overrides, build)  # ty: ignore[invalid-return-type]  # the raw dict is `R` when there is no builder
+
+    @override
+    async def run_raw(
+        self,
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Runs as `run` does, firing every hook, but skips the result builder."""
+        raw = await self._fired(inputs, overrides, None)
+        return typing.cast("dict[str, object]", raw)
+
+    async def _fired(
+        self,
+        inputs: Mapping[str, object] | None,
+        overrides: Mapping[str, object] | None,
+        build: _ResultBuilder[object] | None,
+    ) -> object:
+        """A run that fires the hooks' events, and its outputs as `build` makes them."""
+        prepared = self._hooked
+        given_inputs, given_overrides, mismatches = prepared._opened(inputs, overrides)  # noqa: SLF001  # the plan this wraps
+        schedule = self._schedule
+        cached = isinstance(schedule, _async.CachedSchedule)
+        hooks, views = prepared._hooks, prepared._views  # noqa: SLF001  # the plan this wraps
+        dispatch = _hooks.Dispatch(hooks, views, {} if cached else None)
+        error: BaseException | None = None
+        try:
+            if mismatches:
+                prepared._refuse_values(  # noqa: SLF001  # the plan this wraps
+                    dispatch, given_inputs, given_overrides, mismatches
+                )
+            start = prepared._starter(dispatch, given_inputs, given_overrides)  # noqa: SLF001  # the plan this wraps
+            if isinstance(schedule, _async.CachedSchedule):
+                values = await schedule.hooked(
+                    given_inputs, given_overrides, dispatch, start
+                )
+            else:
+                start(views.names)
+                values = await schedule.hooked(given_inputs, given_overrides, dispatch)
+        except BaseException as caught:  # noqa: BLE001  # raised by `end`, after `after_run`
+            error = caught
+        else:
+            results = {name: values[name] for name in self._outputs}
+            return _ended(dispatch, results, build)
+        dispatch.end(False, error, None)  # noqa: FBT003  # the dispatcher's interface
+        # `end` raises the error itself, or the errors that replace it.
+        raise error
+
+
+class AsyncDriver[R = dict[str, object]]:
     """Executes a graph whose nodes may be `async def`: `execute` is a coroutine.
+
+    `R` is what `execute` returns, as for `Driver`: the result builder is used
+    here too (Q19).
 
     Made by `Builder.build_async`, which is synchronous. It plans, checks requests
     and keeps plans as `Driver` does, with the same errors (Q67). A coroutine
@@ -1008,7 +1621,7 @@ class AsyncDriver:
 
     def __init__(
         self,
-        driver: Driver,
+        driver: Driver[R],
         nodes: Mapping[str, NodeDef],
         *,
         sync_nodes: Literal["thread", "inline"] = "thread",
@@ -1019,12 +1632,12 @@ class AsyncDriver:
         self._sync_nodes: Literal["thread", "inline"] = sync_nodes
         self._calls = _async.calls(nodes, sync_nodes)
         # The builder that built this driver, which pickling rebuilds it from.
-        self._builder: Builder | None = None
+        self._builder: Builder[R] | None = None
 
     @override
     def __reduce__(
         self,
-    ) -> tuple[Callable[..., AsyncDriver], tuple[Builder, str]]:
+    ) -> tuple[Callable[..., AsyncDriver[R]], tuple[Builder[R], str]]:
         """The builder and `sync_nodes`, built again on load; see the class."""
         if self._builder is None:
             msg = (
@@ -1034,7 +1647,7 @@ class AsyncDriver:
             raise TypeError(msg)
         return _build_async_again, (self._builder, self._sync_nodes)
 
-    def rebuild(self) -> AsyncDriver:
+    def rebuild(self) -> AsyncDriver[R]:
         """A new driver, built again from this driver's builder and `sync_nodes`.
 
         See `Driver.rebuild`. `TypeError` for a driver made from a `Driver`.
@@ -1047,13 +1660,21 @@ class AsyncDriver:
             raise TypeError(msg)
         return self._builder.build_async(sync_nodes=self._sync_nodes)
 
-    def __copy__(self) -> AsyncDriver:
+    def __copy__(self) -> AsyncDriver[R]:
         """A driver over the same graph and settings, with no compiled plans."""
         copied = AsyncDriver(
             copy.copy(self._driver), self._nodes, sync_nodes=self._sync_nodes
         )
         copied._builder = self._builder
         return copied
+
+    @property
+    def hooks(self) -> tuple[Hook, ...]:
+        """The hooks given to the builder; see `Driver.hooks`.
+
+        Its runs fire the same events as a `Driver`'s, on the loop's thread (Q86).
+        """
+        return self._driver.hooks
 
     @property
     def config(self) -> Mapping[str, object]:
@@ -1100,7 +1721,7 @@ class AsyncDriver:
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
-    ) -> AsyncPreparedPlan:
+    ) -> AsyncPreparedPlan[R]:
         """Returns the plan for this request shape, compiling it on first use.
 
         Synchronous: compiling awaits nothing. The plans are kept as `Driver`
@@ -1118,7 +1739,13 @@ class AsyncDriver:
             else:
                 msg = f"an AsyncDriver cannot run {type(runnable).__name__}"
                 raise TypeError(msg)
-            plan = AsyncPreparedPlan(prepared, self, schedule)
+            build = prepared._build  # noqa: SLF001  # this driver's own plan
+            if isinstance(prepared, _HookedPlan):
+                plan = _HookedAsyncPlan(prepared, self, schedule)
+            elif build is not None:
+                plan = _BuiltAsyncPlan(prepared, self, schedule, build)
+            else:
+                plan = AsyncPreparedPlan(prepared, self, schedule)
             # Two threads may both get here: either plan will do, and one is kept.
             prepared._async = plan  # noqa: SLF001  # this driver's own plan
         return plan
@@ -1142,15 +1769,36 @@ class AsyncDriver:
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
-    ) -> dict[str, object]:
+    ) -> R:
         """Computes `final_vars`; checked and returned as `Driver.execute`.
 
         The result holds each requested output once, in the order first requested
-        (Q11). The first node to fail cancels every node still running and raises
-        its own exception, with a note naming it (Q66).
+        (Q11), or is what the result builder makes of that dict (Q19). The first
+        node to fail cancels every node still running and raises its own
+        exception, with a note naming it (Q66).
         """
-        plan = self.prepare(final_vars, inputs=inputs, overrides=overrides)
+        try:
+            plan = self.prepare(final_vars, inputs=inputs, overrides=overrides)
+        except ValueError as error:
+            self._driver._refuse(final_vars, inputs, overrides, error)  # noqa: SLF001  # this driver's own
         return await plan.run(inputs=inputs, overrides=overrides)
+
+    async def raw_execute(
+        self,
+        final_vars: Sequence[str | Callable[..., object]],
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        """Computes `final_vars` as `execute` does, skipping the result builder.
+
+        See `Driver.raw_execute`: every hook fires, and the raw dict is returned.
+        """
+        try:
+            plan = self.prepare(final_vars, inputs=inputs, overrides=overrides)
+        except ValueError as error:
+            self._driver._refuse(final_vars, inputs, overrides, error)  # noqa: SLF001  # this driver's own
+        return await plan.run_raw(inputs=inputs, overrides=overrides)
 
     def explain_cache(
         self,
@@ -1165,12 +1813,14 @@ class AsyncDriver:
         )
 
 
-def _build_async_again(builder: Builder, sync_nodes: str) -> AsyncDriver:
+def _build_async_again[R](builder: Builder[R], sync_nodes: str) -> AsyncDriver[R]:
     """A pickled `AsyncDriver`, built again by its builder."""
     return builder.build_async(sync_nodes=_async.checked_sync_nodes(sync_nodes))
 
 
-def _prepare_async_again(driver: AsyncDriver, key: _PlanKey) -> AsyncPreparedPlan:
+def _prepare_async_again[R](
+    driver: AsyncDriver[R], key: _PlanKey
+) -> AsyncPreparedPlan[R]:
     """Prepares a pickled async plan's request on its rebuilt driver."""
     outputs, input_names, override_names = key
     return driver.prepare(
@@ -1182,6 +1832,9 @@ def _prepare_async_again(driver: AsyncDriver, key: _PlanKey) -> AsyncPreparedPla
 
 # How the core's missing-input error starts.
 _MISSING = "missing inputs: "
+# How the errors for an input a request lacks start: one missing, or an override
+# refused under strict overrides (Q75), which is Hamilton's missing input.
+_UNSUPPLIED = (_MISSING, "override of input ")
 
 
 def _unknown(kind: str, names: Sequence[str], candidates: Sequence[str]) -> str:
@@ -1302,7 +1955,7 @@ def _unmatched_edges(nodes: Sequence[NodeDef], unmatched: Mapping[str, str]) -> 
     return "\n".join(unmatched[name] for name in sorted(read))
 
 
-def _prepare_again(driver: Driver, key: _PlanKey) -> PreparedPlan:
+def _prepare_again[R](driver: Driver[R], key: _PlanKey) -> PreparedPlan[R]:
     """Prepares a pickled plan's request on its rebuilt driver."""
     outputs, input_names, override_names = key
     return driver.prepare(
@@ -1382,17 +2035,19 @@ def _unimportable_module(module: ModuleType) -> str | None:
     )
 
 
-def _builder_of(  # noqa: PLR0913, PLR0917  # pickle passes each part positionally
+def _builder_of[R](  # noqa: PLR0913, PLR0917  # pickle passes each part positionally
     names: tuple[str, ...],
     settings: _Settings,
     store: CacheStore | None,
     config: Mapping[str, object] | None = None,
     functions: tuple[FunctionReference, ...] = (),
     namespaces: tuple[str | None, ...] = (),
-) -> Builder:
+    result_builder: _ResultBuilder[R] | None = None,
+) -> Builder[R]:
     """A pickled builder, its modules imported again by name, its functions too.
 
     `namespaces` holds each module's namespace, in order, or is empty for none.
+    `result_builder` pickles by Python's own rules, as a hook does.
     """
     modules = tuple(importlib.import_module(name) for name in names)
     return Builder(
@@ -1401,6 +2056,7 @@ def _builder_of(  # noqa: PLR0913, PLR0917  # pickle passes each part positional
         store=store,
         config=config,
         functions=from_references(functions),
+        result_builder=result_builder,
         **settings,
     )
 
@@ -1414,10 +2070,17 @@ class _Changes(TypedDict, total=False):
     declared_inputs: tuple[str, ...]
     deep_type_checks: bool
     numeric_widening: bool
+    hooks: tuple[Hook, ...]
+    output_type_checks: bool
+    value_checks: tuple[_types.ValueCheck, ...]
 
 
 class _Settings(TypedDict):
-    """A builder's switches, which pickling and copying carry as one value."""
+    """A builder's switches, which pickling and copying carry as one value.
+
+    Hooks and value checks pickle by Python's own rules: an unpicklable one
+    makes the builder, and its drivers, unpicklable.
+    """
 
     check_inputs: bool
     check_overrides: bool
@@ -1425,15 +2088,20 @@ class _Settings(TypedDict):
     declared_inputs: tuple[str, ...]
     deep_type_checks: bool
     numeric_widening: bool
+    hooks: tuple[Hook, ...]
+    output_type_checks: bool
+    value_checks: tuple[_types.ValueCheck, ...]
 
 
-class Builder:
+class Builder[R = dict[str, object]]:
     """Accumulates modules and functions, then builds a `Driver`.
 
     Its methods return new builders. A builder pickles as the names of its
     modules, which must import them, each module's namespace, the module and
     qualified name of each function `with_functions` gave it, which must find it
-    again, its settings, its config and its store, which must pickle too.
+    again, its settings, its config, its store and its result builder, which
+    must pickle too. `R` is what its drivers' `execute` returns: the raw dict,
+    or what `with_result_builder` sets.
     """
 
     def __init__(  # noqa: PLR0913  # keyword-only switches, one per builder setting
@@ -1450,6 +2118,10 @@ class Builder:
         numeric_widening: bool = False,
         store: CacheStore | None = None,
         config: Mapping[str, object] | None = None,
+        hooks: Sequence[Hook] = (),
+        result_builder: _ResultBuilder[R] | None = None,
+        output_type_checks: bool = False,
+        value_checks: Sequence[ValueCheck] = (),
     ) -> None:
         """Starts with the given modules (none by default), checking input types.
 
@@ -1461,10 +2133,14 @@ class Builder:
         `config`, copied, selects `@config.when*` variants (see `with_config`).
         The other settings are those of `without_input_type_checks`,
         `without_override_type_checks`, `with_strict_overrides`,
-        `with_declared_inputs`, `with_deep_type_checks` and
-        `with_numeric_widening`. `TypeError` when an item of `modules` is not a
-        module, or of `declared_inputs` is not a `str`; see `with_functions` for
-        the errors `functions` raises.
+        `with_declared_inputs`, `with_deep_type_checks`,
+        `with_numeric_widening`, `with_hooks`, `with_result_builder`,
+        `with_output_type_checks` and `with_value_check`.
+        `TypeError` when an item of `modules` is not a module, or of
+        `declared_inputs` is not a `str`; see `with_functions` for the errors
+        `functions` raises, `with_hooks` for those of `hooks`,
+        `with_result_builder` for that of `result_builder`, and
+        `with_value_check` for that of `value_checks`.
         """
         self._modules = _checked_modules(modules)
         self._namespaces = _checked_namespaces(namespaces, len(self._modules))
@@ -1474,6 +2150,10 @@ class Builder:
         self._strict_overrides = strict_overrides
         self._declared_inputs = _checked_names(declared_inputs)
         self._rules = _types.Rules(deep=deep_type_checks, widen=numeric_widening)
+        self._hooks = _hooks.checked(hooks)
+        self._result_builder = _checked_builder(result_builder)
+        self._output_type_checks = output_type_checks
+        self._value_checks = _checked_value_checks(value_checks)
         self._store = store
         # Never changed once made: `with_config` makes a new dict.
         self._config: dict[str, object] = (
@@ -1484,7 +2164,7 @@ class Builder:
     def __reduce__(
         self,
     ) -> tuple[
-        Callable[..., Builder],
+        Callable[..., Builder[R]],
         tuple[
             tuple[str, ...],
             _Settings,
@@ -1492,6 +2172,7 @@ class Builder:
             dict[str, object],
             tuple[FunctionReference, ...],
             tuple[str | None, ...],
+            _ResultBuilder[R] | None,
         ],
     ]:
         """The modules' names and namespaces, the functions' references, the settings.
@@ -1514,6 +2195,7 @@ class Builder:
             self._config,
             references(self._functions),
             self._namespaces,
+            self._result_builder,
         )
 
     def _settings(self) -> _Settings:
@@ -1525,6 +2207,9 @@ class Builder:
             "declared_inputs": self._declared_inputs,
             "deep_type_checks": self._rules.deep,
             "numeric_widening": self._rules.widen,
+            "hooks": self._hooks,
+            "output_type_checks": self._output_type_checks,
+            "value_checks": self._value_checks,
         }
 
     def _with(
@@ -1536,18 +2221,19 @@ class Builder:
         store: CacheStore | None = None,
         config: Mapping[str, object] | None = None,
         **settings: Unpack[_Changes],
-    ) -> Builder:
+    ) -> Builder[R]:
         """A new builder: this one's settings, each given one replaced.
 
         `functions`, when given, are already checked, as this builder's are, so
         they are set rather than checked again: adding functions one call at a
-        time stays linear in checks.
+        time stays linear in checks. The result builder is kept.
         """
         built = Builder(
             self._modules if modules is None else modules,
             namespaces=self._namespaces if namespaces is None else namespaces,
             store=self._store if store is None else store,
             config=self._config if config is None else config,
+            result_builder=self._result_builder,
             **{**self._settings(), **settings},
         )
         # Already checked, by this builder or `with_functions`.
@@ -1556,7 +2242,7 @@ class Builder:
 
     def with_modules(
         self, *modules: ModuleType, namespace: str | None = None
-    ) -> Builder:
+    ) -> Builder[R]:
         """Returns a new builder with `modules` appended to this one's.
 
         With `namespace`, a non-empty dotted identifier path such as `"eu"` or
@@ -1577,7 +2263,7 @@ class Builder:
             namespaces=(*self._namespaces, *(checked,) * len(modules)),
         )
 
-    def with_functions(self, *items: Callable[..., object] | NodeSpec) -> Builder:
+    def with_functions(self, *items: Callable[..., object] | NodeSpec) -> Builder[R]:
         """Returns a new builder with `items` appended to this one's functions (Q72).
 
         Each item is a function, plain or decorated, which makes the nodes it would
@@ -1597,7 +2283,7 @@ class Builder:
         """
         return self._with(functions=(*self._functions, *checked_functions(items)))
 
-    def with_config(self, config: Mapping[str, object]) -> Builder:
+    def with_config(self, config: Mapping[str, object]) -> Builder[R]:
         """Returns a new builder with `config` merged into a copy of this one's.
 
         A key given again takes its later value. The config selects among
@@ -1607,7 +2293,7 @@ class Builder:
         """
         return self._with(config={**self._config, **_checked_config(config)})
 
-    def without_input_type_checks(self) -> Builder:
+    def without_input_type_checks(self) -> Builder[R]:
         """Returns a new builder whose driver skips input and override type checks.
 
         Edge checks, between a node and the parameters it feeds, stay on (Q10).
@@ -1615,7 +2301,7 @@ class Builder:
         """
         return self._with(check_inputs=False)
 
-    def without_override_type_checks(self) -> Builder:
+    def without_override_type_checks(self) -> Builder[R]:
         """Returns a new builder whose driver skips override type checks only (Q22).
 
         Input checks stay on, and so do edge checks. For overriding a node with a
@@ -1624,7 +2310,7 @@ class Builder:
         """
         return self._with(check_overrides=False)
 
-    def with_strict_overrides(self) -> Builder:
+    def with_strict_overrides(self) -> Builder[R]:
         """Returns a new builder whose driver refuses an unsupplied overridden input.
 
         An override naming an input is refused, as Hamilton refuses it, unless the
@@ -1634,7 +2320,7 @@ class Builder:
         """
         return self._with(strict_overrides=True)
 
-    def with_declared_inputs(self, *names: str) -> Builder:
+    def with_declared_inputs(self, *names: str) -> Builder[R]:
         """Returns a new builder that must declare every input of its graph (Q75).
 
         Cumulative: names given again are added. Building fails, with one sorted
@@ -1644,7 +2330,7 @@ class Builder:
         """
         return self._with(declared_inputs=(*self._declared_inputs, *names))
 
-    def with_deep_type_checks(self) -> Builder:
+    def with_deep_type_checks(self) -> Builder[R]:
         """Returns a new builder whose checks read every item of a collection.
 
         Only a value of a standard class (`list`, `dict`, `set`, `tuple`,
@@ -1663,7 +2349,7 @@ class Builder:
         """
         return self._with(deep_type_checks=True)
 
-    def with_numeric_widening(self) -> Builder:
+    def with_numeric_widening(self) -> Builder[R]:
         """Returns a new builder whose checks let a number stand for a wider one.
 
         An `int` (not a `bool`) and a numpy integer or floating scalar fit
@@ -1677,7 +2363,87 @@ class Builder:
         """
         return self._with(numeric_widening=True)
 
-    def with_cache(self, store: CacheStore) -> Builder:
+    def with_output_type_checks(self) -> Builder[R]:
+        """Returns a new builder whose driver checks each node's result (Q87).
+
+        Each result is checked against the node's return annotation by the
+        rules of the input checks: `None` only for a type that admits it (Q79),
+        fixed tuples, `NewType`s and generics by value, deep checks and numeric
+        widening when they are on, and any `with_value_check`. A mismatch fails
+        the node with `TypeError: x: returned str, expected int`, so
+        `after_node` gets `ok=False` and that error. A node that raises keeps
+        its own error. An `async def` node's awaited result is checked.
+
+        The checks are made at build, around the nodes that need one: a node
+        returning `Any` or `object` costs nothing, and without this setting no
+        result is checked, as in Hamilton (H6.14). An extracted field is
+        checked either way (Q61), and its producer's result too with this
+        setting. A cache hit's value is not checked again.
+        """
+        return self._with(output_type_checks=True)
+
+    def with_value_check(self, check: ValueCheck) -> Builder[R]:
+        """Returns a new builder whose checks also admit what `check` admits (Q21).
+
+        `check(declared, value)` is called with the declared type and the
+        value, only for a value the default check refuses, so a value that fits
+        costs nothing more. When it returns a true value, the value is admitted.
+        Cumulative: checks are tried in the order given, until one admits.
+        It applies to inputs, overrides, extracted fields, output checks and
+        `validate`; never to edges, which compare types (Q10). An annotation
+        that did not resolve (Q81) is passed as its `Unresolved`, and refused
+        as Q81 says unless a check admits the value. An exception `check`
+        raises is not caught: it fails the run, or, in an output check, the
+        node. `TypeError` when `check` can't be called. It pickles by Python's
+        own rules, as a hook does.
+        """
+        return self._with(value_checks=(*self._value_checks, check))
+
+    def with_hooks(self, *hooks: Hook) -> Builder[R]:
+        """Returns a new builder whose driver calls `hooks` on every run (Q84).
+
+        Cumulative: the hooks are added after this builder's. Every event calls
+        the hooks in the order given, after-events too, and only the methods a
+        hook overrides. Checked here: an object that is no `fnloom.Hook`, or an
+        overridden method that can't take one positional event or is an `async
+        def`, is a `TypeError` naming each; the same hook given twice is a
+        `ValueError`. See the hooks guide for the events and for a hook that
+        raises (Q23). An `AsyncDriver` calls them too (Q86).
+        """
+        return self._with(hooks=(*self._hooks, *hooks))
+
+    def with_result_builder[T](self, build: _ResultBuilder[T]) -> Builder[T]:
+        """Returns a new builder whose drivers' `execute` returns `build(outputs)`.
+
+        `outputs` is the raw dict: each requested output once, in request order,
+        inputs and overrides requested as outputs included, as Hamilton gives
+        its result builder (Q19). `PreparedPlan.run` and the async driver's
+        `execute` and `run` build too; `raw_execute` and `run_raw` don't. Hooks
+        get the raw dict as `RunEnd.results`. An error `build` raises fails the
+        run, and `after_run` gets it with the raw `results`.
+
+        One per builder: a second is a `ValueError` naming both (Q24). A `build`
+        that can't be called is a `TypeError`. It pickles by Python's own rules,
+        as a hook does.
+        """
+        if self._result_builder is not None:
+            msg = (
+                f"a builder has one result builder: {_named(self._result_builder)} "
+                f"is set, so {_named(build)} is refused"
+            )
+            raise ValueError(msg)
+        built = Builder(
+            self._modules,
+            namespaces=self._namespaces,
+            store=self._store,
+            config=self._config,
+            result_builder=build,
+            **self._settings(),
+        )
+        built._functions = self._functions
+        return built
+
+    def with_cache(self, store: CacheStore) -> Builder[R]:
         """Returns a new builder whose driver caches every node's result in `store`.
 
         A node's `@cache` policy changes how it is cached. Each run computes every
@@ -1693,7 +2459,7 @@ class Builder:
             raise TypeError(msg)
         return self._with(store=store)
 
-    def build(self) -> Driver:
+    def build(self) -> Driver[R]:
         """Scans the modules and returns a `Driver`; `ValueError` on a bad node.
 
         A module that contributes no node is a `ValueError` too, naming the module
@@ -1719,7 +2485,7 @@ class Builder:
 
     def build_async(
         self, *, sync_nodes: Literal["thread", "inline"] = "thread"
-    ) -> AsyncDriver:
+    ) -> AsyncDriver[R]:
         """Scans the modules and returns an `AsyncDriver`; synchronous (Q12).
 
         As `build`, but an `async def` node is accepted, and awaited when run.
@@ -1761,7 +2527,7 @@ class Builder:
             functions=self._functions,
             namespaces=self._namespaces,
         )
-        nodes = resolve(scanned.nodes, self._rules)
+        nodes = resolve(scanned.nodes, self._rules, self._value_checks)
         unmatched = scanned.unmatched
         if unmatched:
             # A field of a forward-referenced `TypedDict` is first known resolved.
@@ -1772,6 +2538,10 @@ class Builder:
         views = node_views(
             nodes, frozenset(node.name for node in nodes if is_generated(node))
         )
+        if self._output_type_checks:
+            nodes = _output_checked(
+                nodes, self._rules, self._value_checks, awaits=awaits
+            )
         graph = _graph_of(nodes)
         if mismatches := _edge_mismatches(views.functions):
             raise ValueError("\n".join(mismatches))
@@ -1790,7 +2560,7 @@ class Builder:
         unmatched: dict[str, str],
         left_out: LeftOut,
         cache: Cache | None,
-    ) -> Driver:
+    ) -> Driver[R]:
         """This builder's driver over a scanned graph."""
         driver = Driver(
             graph,
@@ -1801,6 +2571,9 @@ class Builder:
             cache=cache,
             config=MappingProxyType(self._config),
             rules=self._rules,
+            hooks=self._hooks,
+            result_builder=self._result_builder,
+            value_checks=self._value_checks,
         )
         driver._modules = tuple(dict.fromkeys(self._modules))  # noqa: SLF001  # the builder's own driver
         driver._unmatched = unmatched  # noqa: SLF001  # the builder's own driver

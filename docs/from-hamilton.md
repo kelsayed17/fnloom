@@ -92,6 +92,22 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `htypes.check_input_type(t, v)` | Public, with Hamilton's rules | `fnloom.value_matches(t, v)` answers as the input check, and `fnloom.type_matches(produced, expected)` as the edge check ([What the checks understand](running.md#what-the-checks-understand)) |
 | An override's value | Not type checked | Checked as an input is; `without_override_type_checks()` skips only the override checks (Q22) |
 | After `importlib.reload(module)` | A new `Builder` to see the edit | `driver.rebuild()` builds again with every setting; the old driver keeps its old code, as Hamilton's does (Q83) |
+| `with_adapters(...)` with `NodeExecutionHook` and `GraphExecutionHook` | `run_before_node_execution(**kwargs)` and its kin, each taking keyword arguments; the after-graph hook gets no request | `with_hooks(...)` with a `fnloom.Hook`: `before_run`, `before_node`, `after_node` and `after_run`, each taking one frozen event, and `RunEnd` repeats the request ([Hooks](hooks.md), Q84) |
+| An object that is no adapter, or one given twice, in `with_adapters` | Ignored; called once | `TypeError`; `ValueError` (Q84) |
+| A hook method that can't take its arguments, or an `async def` hook on the sync driver | Fails at the first call; never awaited | `TypeError` naming the method, from `with_hooks` (Q84) |
+| `with_adapters(MyResult())`, a `ResultBuilder` whose `build_result(**outputs)` makes the result | It gets the outputs as keywords | `with_result_builder(build)`: any callable, given the outputs as one dict, in the same order. `execute`'s type follows it ([Result builders](running.md#result-builders), Q19) |
+| `with_adapters(base.PandasDataFrameResult())` | Flattens frame outputs into `output.column` columns and logs index warnings | No pandas builder: `with_result_builder(pandas.DataFrame)`, or `polars.DataFrame`, builds by the library's own rules ([pandas and polars frames](running.md#pandas-and-polars-frames), Q89) |
+| Two result builders | `ValueError` at `build()`, naming the method | `ValueError` from the second `with_result_builder`, naming both (Q24) |
+| `with_adapters(lifecycle.FunctionInputOutputTypeChecker())` | Checks inputs and results by `isinstance` rules of its own: crashes on fixed tuples, parameterized generics and `NewType`s, and reports a failing node as returning `None` | `with_output_type_checks()` checks every result by the input checks' rules; a node that raises keeps its own error. Inputs and overrides are always checked ([Checking results](writing-nodes.md#checking-results), Q87) |
+| An `EdgeConnectionHook` whose `validate_input` (`do_validate_input`) decides an input's type | Replaces the default check, so it can refuse a correct value | `with_value_check(check)` adds to the default: `check(declared, value)` is asked only about a value the default refuses, and can only admit it. It applies to overrides, extracted fields, results and `validate` too ([Custom value checks](running.md#custom-value-checks), Q21) |
+| `raw_execute(final_vars, overrides, display_graph, inputs)` | Positional, with a `display_graph` flag | `raw_execute(final_vars, *, inputs, overrides)`, and `PreparedPlan.run_raw` (Q19) |
+| `with_adapters(lifecycle.PrintLn())` | Prints each node's name and time, and with `verbosity=2` its inputs and result | No built-in: a three-line hook, a `fnloom.Hook` subclass whose `after_node(self, event)` prints `event.node.name` and `event.result` or `event.error` ([Hooks](hooks.md)) |
+| A failing node logged at ERROR | Always, with a support banner | Off by default; `with_hooks(fnloom.LogFailures())` logs the node and its inputs, each cut to 50 characters ([Logging failures](hooks.md#logging-failures), Q88) |
+| `GraphConstructionHook`'s `run_after_graph_construction` | Called with the built graph | Read `driver.nodes` after `build()` |
+| `lifecycle.NoEdgeAndInputTypeChecking()` | Turns off the input and edge checks | `without_input_type_checks()`; edges are always checked, at build (Q10) |
+| A `StaticValidator`, refusing a node or the graph at build | `run_to_validate_node` and `run_to_validate_graph` | Not yet. Until then, check `driver.nodes` after `build()` and raise |
+| `NodeExecutionMethod`, and `lifecycle.default.GracefulErrorAdapter` built on it | Replaces how a node is called; the graceful adapter keeps running past a failure, skipping what depends on it | Not yet: both are on the [roadmap](plans/2026-10-28-roadmap-ahead-of-hamilton.md). A failing node fails the run, and `after_node` sees its error and inputs |
+| `TaskExecutionHook` and the other task hooks | Hooks on dynamic execution's tasks | None: fnloom has no dynamic execution yet |
 
 </div>
 
@@ -120,6 +136,13 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | An input nobody supplied, requested as an output | `None` for it | `ValueError: missing inputs: 'x' (requested as an output)` (Q78) |
 | One driver shared between threads | Works, undocumented | A documented guarantee, stress-tested on the default and free-threaded builds ([Threads](running.md#threads)) |
 | A function passed where a module goes | An empty graph | `TypeError` (Q52) |
+| A hook that raises | The later hooks of the event are skipped; a raising before-graph hook skips after-graph too | Every hook sees the event, and after-run always fires (Q23) |
+| A node returning a value its annotation refuses | Never checked by default | Never checked by default either; `with_output_type_checks()` fails the node with a `TypeError` (Q87) |
+| A failing node and a raising after-node or after-graph hook | The hook's error, with the node's only in `__context__` | One `ExceptionGroup`, the node's error first (Q23) |
+| Hooks on a cache hit | Fire as if the node ran, for the hit and every node upstream of it, with nothing saying it was a hit | The hit reports once, with `cache` set to its outcome, `inputs=None` and the loaded value; nodes only hits need report nothing ([Hooks](hooks.md#with-a-cache), Q85) |
+| A sync hook on the async driver | Called when a node is scheduled, with `Task`s for its arguments and result; a failing node is reported a success | Called as the node starts and finishes, on the loop's thread, with real values and `ok=False` for a failure (Q86) |
+| What after-graph gets as `results` with a result builder | The built result | `RunEnd.results` is always the raw dict (Q19) |
+| A `ResultBuilder` on the async driver | Silently dropped: `execute` returns the dict | Used, as on the sync driver (Q19) |
 | A module with no nodes, such as a package that only re-exports | Builds; its nodes are unknown at `execute` | `ValueError` at build, saying why each function was skipped (Q53) |
 | A row naming no parameter of its function | `InvalidDecoratorException` | `ValueError`, when decorating (Q33) |
 | A row's defaulted parameter bound to an unsupplied `source()` | `KeyError` when run | The default applies (Q35) |
@@ -166,11 +189,12 @@ value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](
 
 fnloom is pre-alpha. The core, the native path, `@parameterize` and its sugar, `@tag`, `@config`, `@extract_fields`,
 `@extract_columns`, `@exclude`, graph inspection, `validate`, graphs from plain functions, namespaces, type checks,
-result caching and the async driver are done. These Hamilton
+result caching, the async driver, hooks, result builders, output checks and custom value checks are done. These Hamilton
 features come next, roughly in this order:
 
-1. **Adapters and lifecycle hooks**, and result builders.
-2. **Graph visualisation.**
-3. **Dynamic execution**, materializers, `@subdag`, `@check_output` and `@pipe`.
+1. **Graph visualisation.**
+2. **Dynamic execution**, materializers, `@subdag`, `@check_output` and `@pipe`.
+3. **Node-execution wrappers** (`NodeExecutionMethod`, `GracefulErrorAdapter`) and `StaticValidator`. Hooks see every
+   node, but can't change how one is called or let a run continue past a failure.
 
 If your pipeline depends on one of these, it's worth waiting for it before you switch.

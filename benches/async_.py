@@ -6,8 +6,9 @@ the median over its processes. It prints to stdout on purpose: the rows are the
 output, so redirect them to a file.
 
 Each graph is timed with every node an `async def`, and with every node a plain
-function. fnloom runs it in both `sync_nodes` modes; Hamilton through
-`async_driver.Builder`, whose result is a dict.
+function. fnloom runs it in both `sync_nodes` modes, each with and without a hook
+overriding all four methods; Hamilton through `async_driver.Builder`, whose result
+is a dict.
 """
 
 import asyncio
@@ -36,17 +37,26 @@ from benches.generate import (
     make_request,
     module_source,
 )
+from benches.hooks import Counting
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine, Mapping, Sequence
     from types import ModuleType
 
-type Runtime = Literal["hamilton", "fnloom-thread", "fnloom-inline"]
+type Runtime = Literal[
+    "hamilton",
+    "fnloom-thread",
+    "fnloom-inline",
+    "fnloom-thread-hooked",
+    "fnloom-inline-hooked",
+]
 type Nodes = Literal["async", "sync"]
 
 CASES: tuple[tuple[Shape, int], ...] = (
     ("chain", 100),
     ("chain", 1000),
+    ("fan_in", 100),
+    ("fan_in", 1000),
     ("layered", 100),
     ("layered", 1000),
 )
@@ -108,9 +118,15 @@ async def _fnloom_runs(
     inputs: Mapping[str, object],
     runtime: Runtime,
 ) -> Callable[[], Awaitable[Mapping[str, object]]]:
-    """A prepared plan's `run` on a new driver; nothing timed."""
-    mode = "thread" if runtime == "fnloom-thread" else "inline"
-    driver = fnloom.Builder().with_modules(module).build_async(sync_nodes=mode)
+    """A prepared plan's `run` on a new driver; nothing timed.
+
+    A `-hooked` runtime adds a hook overriding all four methods.
+    """
+    mode = "thread" if runtime.startswith("fnloom-thread") else "inline"
+    builder = fnloom.Builder().with_modules(module)
+    if runtime.endswith("-hooked"):
+        builder = builder.with_hooks(Counting())
+    driver = builder.build_async(sync_nodes=mode)
     plan = driver.prepare(outputs, inputs=inputs)
     return lambda: plan.run(inputs=inputs)
 

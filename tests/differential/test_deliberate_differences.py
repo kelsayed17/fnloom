@@ -4,6 +4,7 @@ import asyncio
 import collections.abc
 import importlib.util
 import inspect
+import logging
 import os
 import pickle
 import subprocess
@@ -12,12 +13,12 @@ import textwrap
 import types
 import warnings
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, TypedDict, cast
+from typing import TYPE_CHECKING, Annotated, Any, TypedDict, cast, override
 
 import pytest
 from hamilton import async_driver as hamilton_async
 from hamilton import driver as hamilton_driver
-from hamilton import htypes
+from hamilton import htypes, lifecycle
 from hamilton.function_modifiers import hamilton_exclude
 from hamilton.function_modifiers.base import InvalidDecoratorException
 from hamilton.lifecycle import NoEdgeAndInputTypeChecking
@@ -31,7 +32,15 @@ from harness import (
     run_fnloom,
     run_hamilton,
 )
-from test_semantics import DELIBERATE
+from test_semantics import (
+    DELIBERATE,
+    HOOKED_GRAPH,
+    FnloomRecorder,
+    FnloomSeen,
+    HamiltonRecorder,
+    HamiltonSeen,
+    HookEntry,
+)
 from type_matrix import (
     TYPES,
     Base,
@@ -3624,3 +3633,748 @@ def test_q83_rebuild_after_reload(
     assert asyncio.run(built_async.rebuild().execute(["c"], inputs={"x": 1})) == {
         "c": 10011
     }
+
+
+@pytest.mark.deliberate("Q84")
+def test_q84_typed_events_checked_when_attached() -> None:
+    """Hamilton passes keywords and checks nothing; fnloom, events checked early."""
+    module = make_module("q84_hooked", HOOKED_GRAPH)
+    log: list[HookEntry] = []
+    hamilton_hook = HamiltonRecorder("H", log)
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_adapters(hamilton_hook, object(), hamilton_hook)  # ty: ignore[invalid-argument-type]  # the case under test
+        .build()
+    )
+    assert hamilton.execute(["c"], inputs={"x": 1}) == {"c": 7}
+    # A non-adapter is ignored, and the instance given twice is called once.
+    assert [stage for _, stage, _ in log].count("before_run") == 1
+    before, end = hamilton_hook.calls[0], hamilton_hook.calls[-1]
+    assert {"final_vars", "inputs", "overrides", "execution_path"} <= before.keys()
+    assert not {"final_vars", "inputs", "overrides"} & end.keys()
+    assert sorted(before["execution_path"]) == ["a", "b", "c"]
+    # A defaulted parameter left alone is absent from a node's arguments in both.
+    assert hamilton_hook.calls[1]["node_kwargs"] == {"x": 1}
+
+    ours = FnloomRecorder("F", [])
+    built = fnloom.Builder().with_modules(module).with_hooks(ours).build()
+    assert built.execute(["c"], inputs={"x": 1}) == {"c": 7}
+    start, finish = ours.events[0], ours.events[-1]
+    assert isinstance(start, fnloom.RunStart)
+    assert isinstance(finish, fnloom.RunEnd)
+    assert (start.nodes, finish.outputs, dict(finish.inputs)) == (
+        ("a", "b", "c"),
+        ("c",),
+        {"x": 1},
+    )
+    with pytest.raises(TypeError, match=r"object is not a fnloom\.Hook"):
+        fnloom.Builder().with_hooks(cast("fnloom.Hook", object()))
+    with pytest.raises(ValueError, match="the same FnloomRecorder is given twice"):
+        fnloom.Builder().with_hooks(ours, ours)
+
+    # A signature that can't take the call: Hamilton fails at the first call.
+    class Narrow(lifecycle.NodeExecutionHook):
+        @override
+        def run_before_node_execution(self, *, node_name: str) -> None:  # ty: ignore[invalid-method-override]  # the case under test
+            """Takes too little."""
+
+        @override
+        def run_after_node_execution(self, **kwargs: Any) -> None:
+            """Takes everything."""
+
+    narrow = hamilton_driver.Builder().with_modules(module).with_adapters(Narrow())
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        narrow.build().execute(["c"], inputs={"x": 1})
+
+    class NarrowHook(fnloom.Hook):
+        @override
+        def before_node(self) -> None:  # ty: ignore[invalid-method-override]  # the case under test
+            """Takes nothing."""
+
+    with pytest.raises(TypeError, match=r"NarrowHook\.before_node must take the event"):
+        fnloom.Builder().with_hooks(NarrowHook())
+
+    # An `async def` hook on the sync driver: Hamilton never awaits it.
+    ran: list[str] = []
+
+    class Awaiting(lifecycle.NodeExecutionHook):
+        @override
+        async def run_before_node_execution(self, **kwargs: Any) -> None:
+            ran.append(kwargs["node_name"])
+
+        @override
+        def run_after_node_execution(self, **kwargs: Any) -> None:
+            """Takes everything."""
+
+    awaiting = hamilton_driver.Builder().with_modules(module).with_adapters(Awaiting())
+    with pytest.warns(RuntimeWarning, match="was never awaited"):
+        assert awaiting.build().execute(["a"], inputs={"x": 1}) == {"a": 2}
+    assert ran == []
+
+    class AwaitingHook(fnloom.Hook):
+        @override
+        async def before_node(self, event: fnloom.NodeStart) -> None:  # ty: ignore[invalid-method-override]  # the case under test
+            ran.append(event.node.name)
+
+    with pytest.raises(TypeError, match=r"AwaitingHook\.before_node is an async def"):
+        fnloom.Builder().with_hooks(AwaitingHook())
+
+
+# Each node records that it ran in another module, found by name, so no code
+# version reads a mutable global.
+_Q85_GRAPH = """
+def a(x: int) -> int:
+    __import__("differential_q85_log").RAN.append("a")
+    return x + 1
+
+
+def b(a: int) -> int:
+    __import__("differential_q85_log").RAN.append("b")
+    return a * 2
+"""
+
+
+@pytest.mark.deliberate("Q85")
+def test_q85_cache_outcomes_on_node_events(tmp_path: Path) -> None:
+    """Hamilton fires hit nodes' hooks as if they ran; fnloom reports each outcome."""
+    ran = cast("list[str]", make_module("differential_q85_log", "RAN = []").RAN)
+    module = _file_module(tmp_path / "src", "differential_q85", _Q85_GRAPH)
+    log: list[HookEntry] = []
+    hook = HamiltonRecorder("H", log)
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_cache(path=tmp_path / "hamilton")
+        .with_adapters(hook)
+        .build()
+    )
+    assert hamilton.execute(["b"], inputs={"x": 1}) == {"b": 4}
+    first, first_calls = list(log), list(hook.calls)
+    log.clear()
+    hook.calls.clear()
+    ran.clear()
+    assert hamilton.execute(["b"], inputs={"x": 1}) == {"b": 4}
+    # No node ran, yet every node, `a` upstream of the hit too, reports as if it had,
+    # with the same arguments and result, and nothing saying it was a hit.
+    assert ran == []
+    assert log == first
+    nodes = [i for i, (_, stage, _) in enumerate(log) if stage.endswith("_node")]
+    for i in nodes:
+        for key in ("node_name", "node_kwargs", "result", "success"):
+            assert hook.calls[i].get(key) == first_calls[i].get(key)
+        assert not [key for key in hook.calls[i] if "cache" in key]
+
+    ours = FnloomRecorder("F", [])
+    built = (
+        fnloom.Builder()
+        .with_modules(module)
+        .with_cache(DiskCache(tmp_path / "fnloom"))
+        .with_hooks(ours)
+        .build()
+    )
+    assert built.execute(["b"], inputs={"x": 1}) == {"b": 4}
+    miss = CacheOutcome("miss", None)
+    assert [(e.node.name, e.cache) for e in ours.events[1:-1]] == [
+        ("a", miss),
+        ("a", miss),
+        ("b", miss),
+        ("b", miss),
+    ]
+    ours.events.clear()
+    ran.clear()
+    assert built.execute(["b"], inputs={"x": 1}) == {"b": 4}
+    # Only the hit reports, paired, with no inputs and its loaded value.
+    assert ran == []
+    start, hit_start, hit_end, end = ours.events
+    assert start.nodes == end.nodes == ("b",)
+    hit = CacheOutcome("hit", None)
+    assert (hit_start.node.name, hit_start.inputs, hit_start.cache) == ("b", None, hit)
+    assert (hit_end.inputs, hit_end.cache, hit_end.ok, hit_end.result) == (
+        None,
+        hit,
+        True,
+        4,
+    )
+
+
+class _Raising(HamiltonRecorder):
+    """A Hamilton recorder that raises in one stage, after logging it.
+
+    A node stage raises for node `at` only.
+    """
+
+    def __init__(
+        self, name: str, log: list[HookEntry], stage: str, at: str | None = None
+    ) -> None:
+        super().__init__(name, log)
+        self.stage = stage
+        self.at = at
+
+    @override
+    def _record(self, stage: str, node: str | None, kwargs: dict[str, Any]) -> None:
+        super()._record(stage, node, kwargs)
+        if stage == self.stage and self.at in {None, node}:
+            msg = f"{self.name} {stage}"
+            raise RuntimeError(msg)
+
+
+class _RaisingHook(FnloomRecorder):
+    """The fnloom hook that raises as `_Raising` does."""
+
+    def __init__(
+        self, name: str, log: list[HookEntry], stage: str, at: str | None = None
+    ) -> None:
+        super().__init__(name, log)
+        self.stage = stage
+        self.at = at
+
+    @override
+    def _record(self, stage: str, node: str | None, event: object) -> None:
+        super()._record(stage, node, event)
+        if stage == self.stage and self.at in {None, node}:
+            msg = f"{self.name} {stage}"
+            raise RuntimeError(msg)
+
+
+def _raising_logs(
+    stage: str, final_vars: list[str], at: str | None = None
+) -> tuple[list[HookEntry], BaseException, list[HookEntry], BaseException]:
+    """Runs both with a raising hook `A` and a recorder `B`: their logs and errors."""
+    module = make_module("q23_hooked", HOOKED_GRAPH)
+    hamilton_log: list[HookEntry] = []
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_adapters(
+            _Raising("A", hamilton_log, stage, at), HamiltonRecorder("B", hamilton_log)
+        )
+        .build()
+    )
+    with pytest.raises(BaseException) as hamilton_error:  # noqa: PT011  # compared below
+        hamilton.execute(cast("Any", final_vars), inputs={"x": 1})
+    log: list[HookEntry] = []
+    built = (
+        fnloom.Builder()
+        .with_modules(module)
+        .with_hooks(_RaisingHook("A", log, stage, at), FnloomRecorder("B", log))
+        .build()
+    )
+    with pytest.raises(BaseException) as error:  # noqa: PT011  # compared below
+        built.execute(final_vars, inputs={"x": 1})
+    return hamilton_log, hamilton_error.value, log, error.value
+
+
+@pytest.mark.deliberate("Q23")
+def test_q23_every_hook_sees_the_event_and_no_error_is_masked() -> None:
+    """Hamilton skips a stage's later hooks and masks a node's error; fnloom doesn't."""
+    # A raising before-node hook: Hamilton skips B's, then runs after-graph.
+    hamilton_log, hamilton_error, log, error = _raising_logs("before_node", ["c"])
+    assert ("B", "before_node", "a") not in hamilton_log
+    assert hamilton_log[-2:] == [("A", "after_run", None), ("B", "after_run", None)]
+    assert ("B", "before_node", "a") in log
+    assert log[-2:] == hamilton_log[-2:]
+    assert str(hamilton_error) == str(error) == "A before_node"
+
+    # A raising before-graph hook: Hamilton skips every other hook, after-graph too.
+    hamilton_log, hamilton_error, log, error = _raising_logs("before_run", ["c"])
+    assert hamilton_log == [("A", "before_run", None)]
+    assert log == [
+        ("A", "before_run", None),
+        ("B", "before_run", None),
+        ("A", "after_run", None),
+        ("B", "after_run", None),
+    ]
+    assert str(hamilton_error) == str(error) == "A before_run"
+
+    # A node fails, and an after-node hook raises: Hamilton raises the hook's error,
+    # with the node's only in `__context__`; fnloom raises both, the node's first.
+    hamilton_log, hamilton_error, log, error = _raising_logs(
+        "after_node", ["after_boom"], "boom"
+    )
+    assert str(hamilton_error) == "A after_node"
+    assert isinstance(hamilton_error.__context__, ValueError)
+    assert str(hamilton_error.__context__) == "bad 2"
+    assert isinstance(error, ExceptionGroup)
+    node_error, hook_error = error.exceptions
+    assert (type(node_error), str(node_error)) == (ValueError, "bad 2")
+    assert str(hook_error) == "A after_node"
+    assert ("B", "after_node", "boom") not in hamilton_log
+    assert ("B", "after_node", "boom") in log
+
+
+_Q86_GRAPH = """
+import asyncio
+
+
+async def slow(x: int) -> int:
+    for _ in range(5):
+        await asyncio.sleep(0)
+    return x + 1
+
+
+async def fast(x: int) -> int:
+    await asyncio.sleep(0)
+    return x + 2
+
+
+def total(fast: int, slow: int) -> int:
+    return fast + slow
+
+
+async def bad(x: int) -> int:
+    await asyncio.sleep(0)
+    raise ValueError("async bad")
+"""
+
+
+@pytest.mark.deliberate("Q86")
+@pytest.mark.filterwarnings(_HAMILTON_ASYNC_WARNING)
+def test_q86_async_hooks_fire_as_nodes_run_with_values() -> None:
+    """Hamilton's sync hooks fire at scheduling, with tasks; fnloom's as nodes run."""
+    module = make_module("differential_q86", _Q86_GRAPH)
+    hamilton_log: list[HookEntry] = []
+    hamilton_hook = HamiltonRecorder("H", hamilton_log)
+
+    async def hamilton_runs() -> tuple[dict[str, Any], BaseException]:
+        pending: object = (
+            hamilton_async.Builder()
+            .with_modules(module)
+            .with_adapters(hamilton_hook)
+            .build()
+        )
+        built = await cast("Coroutine[Any, Any, hamilton_async.AsyncDriver]", pending)
+        result = await built.execute(["total"], inputs={"x": 1})
+        try:
+            await built.execute(["bad"], inputs={"x": 1})
+        except ValueError as error:
+            return result, error
+        pytest.fail("Hamilton's bad node did not raise")
+
+    result, hamilton_error = asyncio.run(hamilton_runs())
+    assert result == {"total": 5}
+    # Each node is reported as it is scheduled, in an order that changes with
+    # `PYTHONHASHSEED`: its after-node comes before the other node starts, though
+    # `slow` and `fast` run at once and `fast` finishes first.
+    assert hamilton_log[0] == ("H", "before_run", None)
+    pairs = [hamilton_log[i : i + 2] for i in (1, 3, 5)]
+    assert all(
+        [stage for _, stage, _ in pair] == ["before_node", "after_node"]
+        and pair[0][2] == pair[1][2]
+        for pair in pairs
+    )
+    assert [pair[0][2] for pair in pairs][2] == "total"
+    assert {pair[0][2] for pair in pairs[:2]} == {"slow", "fast"}
+    calls = hamilton_hook.calls
+    # `total`'s arguments, and every result, are tasks.
+    assert {type(v) for v in calls[5]["node_kwargs"].values()} == {asyncio.Task}
+    assert isinstance(calls[2]["result"], asyncio.Task)
+    # A failing node is reported a success, with its task as the result.
+    failed = calls[-2]
+    assert failed["node_name"] == "bad"
+    assert (failed["success"], failed["error"]) == (True, None)
+    assert isinstance(failed["result"], asyncio.Task)
+    assert calls[-1]["success"] is False
+    assert calls[-1]["error"] is hamilton_error
+
+    log: list[HookEntry] = []
+    ours = FnloomRecorder("F", log)
+    driver = fnloom.Builder().with_modules(module).with_hooks(ours).build_async()
+    assert asyncio.run(driver.execute(["total"], inputs={"x": 1})) == {"total": 5}
+    # Each node reports as it starts and as it finishes.
+    assert log == [
+        ("F", "before_run", None),
+        ("F", "before_node", "fast"),
+        ("F", "before_node", "slow"),
+        ("F", "after_node", "fast"),
+        ("F", "after_node", "slow"),
+        ("F", "before_node", "total"),
+        ("F", "after_node", "total"),
+        ("F", "after_run", None),
+    ]
+    # `nodes` is the plan's order (R1), and the events carry values.
+    assert ours.events[0].nodes == ("fast", "slow", "total")
+    assert dict(ours.events[5].inputs) == {"fast": 3, "slow": 2}
+    assert [e.result for e in ours.events[3:5]] == [3, 2]
+    log.clear()
+    with pytest.raises(ValueError, match="async bad") as raised:
+        asyncio.run(driver.execute(["bad"], inputs={"x": 1}))
+    failed_end = ours.events[-2]
+    assert (failed_end.ok, failed_end.error, failed_end.result) == (
+        False,
+        raised.value,
+        None,
+    )
+    assert (ours.events[-1].ok, ours.events[-1].error) == (False, raised.value)
+
+
+class _BuildError(Exception):
+    """What a raising result builder raises, in Hamilton and in fnloom."""
+
+
+class _HamiltonRefuse(lifecycle.ResultBuilder):
+    """A Hamilton result builder that always raises."""
+
+    @override
+    def build_result(self, **outputs: Any) -> Any:
+        raise _BuildError(sorted(outputs))
+
+
+def _refuse(outputs: dict[str, object]) -> object:
+    """A fnloom result builder that always raises."""
+    raise _BuildError(sorted(outputs))
+
+
+@pytest.mark.deliberate("Q19")
+@pytest.mark.filterwarnings(_HAMILTON_ASYNC_WARNING)
+def test_q19_hooks_get_the_raw_results_and_the_async_driver_builds() -> None:
+    """Hamilton's after-graph gets the built result, and its async driver drops it."""
+    module = make_module("differential_q19", HOOKED_GRAPH)
+    hamilton_hook = HamiltonRecorder("H", [])
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_adapters(hamilton_hook, HamiltonSeen())
+        .build()
+    )
+    assert hamilton.execute(["c"], inputs={"x": 1}) == ("built", 1)
+    assert hamilton_hook.calls[-1]["results"] == ("built", 1)
+    # A builder that raises: after-graph gets the raw dict, in both (KEEP).
+    failing = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_adapters(hamilton_hook, _HamiltonRefuse())
+        .build()
+    )
+    with pytest.raises(_BuildError) as hamilton_raised:
+        failing.execute(["c"], inputs={"x": 1})
+    end = hamilton_hook.calls[-1]
+    assert (end["success"], end["error"], end["results"]) == (
+        False,
+        hamilton_raised.value,
+        {"c": 7},
+    )
+
+    async def hamilton_async_run() -> object:
+        pending: object = (
+            hamilton_async.Builder()
+            .with_modules(module)
+            .with_adapters(HamiltonSeen())
+            .build()
+        )
+        built = await cast("Coroutine[Any, Any, hamilton_async.AsyncDriver]", pending)
+        return await built.execute(["c"], inputs={"x": 1})
+
+    # The async driver silently drops a `ResultBuilder` subclass.
+    assert asyncio.run(hamilton_async_run()) == {"c": 7}
+
+    ours = FnloomRecorder("F", [])
+    builder = fnloom.Builder().with_modules(module).with_hooks(ours)
+    assert builder.with_result_builder(FnloomSeen()).build().execute(
+        ["c"], inputs={"x": 1}
+    ) == ("built", 1)
+    assert dict(ours.events[-1].results) == {"c": 7}
+    with pytest.raises(_BuildError) as raised:
+        builder.with_result_builder(_refuse).build().execute(["c"], inputs={"x": 1})
+    finish = ours.events[-1]
+    assert (finish.ok, finish.error, dict(finish.results)) == (
+        False,
+        raised.value,
+        {"c": 7},
+    )
+    built_async = builder.with_result_builder(FnloomSeen()).build_async()
+    assert asyncio.run(built_async.execute(["c"], inputs={"x": 1})) == ("built", 1)
+
+
+@pytest.mark.deliberate("Q24")
+def test_q24_one_result_builder_refused_at_the_call() -> None:
+    """Hamilton refuses two builders at `build()`, naming the method; fnloom, both."""
+    module = make_module("differential_q24", HOOKED_GRAPH)
+    two = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_adapters(HamiltonSeen(), HamiltonSeen())
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"Multiple adapters cannot \(currently\) implement the same lifecycle "
+        r"method\. Sync methods: \['do_build_result'\]",
+    ):
+        two.build()
+    # Hooks layer in both: two of one stage are fine.
+    log: list[HookEntry] = []
+    hooked = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_adapters(HamiltonRecorder("A", log), HamiltonRecorder("B", log))
+        .build()
+    )
+    assert hooked.execute(["a"], inputs={"x": 1}) == {"a": 2}
+
+    first = fnloom.Builder().with_modules(module).with_result_builder(FnloomSeen())
+    with pytest.raises(
+        ValueError,
+        match=r"^a builder has one result builder: a FnloomSeen is set, "
+        r"so _refuse is refused",
+    ):
+        first.with_result_builder(_refuse)
+
+
+@pytest.mark.deliberate("Q89")
+def test_q89_no_pandas_builder_and_the_recipe_pads_nothing() -> None:
+    """Hamilton's frame flattens and NaN-pads; fnloom's recipe refuses the padding."""
+    pandas = pytest.importorskip("pandas")
+    from hamilton import base  # noqa: PLC0415  # only this test needs it
+
+    module = make_module(
+        "differential_q89",
+        """
+import pandas as pd
+
+
+def longer() -> pd.Series:
+    return pd.Series([1, 2, 3])
+
+
+def shorter() -> pd.Series:
+    return pd.Series([10, 20])
+
+
+def table() -> pd.DataFrame:
+    return pd.DataFrame({"p": [1, 2, 3], "q": [4, 5, 6]})
+""",
+    )
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_adapters(base.PandasDataFrameResult())
+        .build()
+    )
+    padded = hamilton.execute(["longer", "shorter"])
+    assert padded["shorter"].isna().tolist() == [False, False, True]
+    assert str(padded["shorter"].dtype) == "float64"
+    flattened = hamilton.execute(["table", "longer"])
+    assert list(flattened.columns) == ["table.p", "table.q", "longer"]
+
+    assert not hasattr(fnloom, "PandasDataFrameResult")
+    # The recipe in docs/running.md, "Result builders".
+
+    def frame(outputs: dict[str, object]) -> object:
+        indexes = [v.index for v in outputs.values() if isinstance(v, pandas.Series)]
+        if any(not index.equals(indexes[0]) for index in indexes[1:]):
+            msg = f"outputs on different indexes: {', '.join(outputs)}"
+            raise ValueError(msg)
+        return pandas.DataFrame(outputs)
+
+    ours = fnloom.Builder().with_modules(module).with_result_builder(frame).build()
+    with pytest.raises(
+        ValueError, match="outputs on different indexes: longer, shorter"
+    ):
+        ours.execute(["longer", "shorter"])
+    # No column is flattened: pandas refuses a frame as one column.
+    with pytest.raises(ValueError, match="Data must be 1-dimensional"):
+        ours.execute(["table", "longer"])
+
+
+Q87_RESULTS = """
+from collections.abc import Callable
+from typing import NewType
+
+UserId = NewType("UserId", int)
+
+
+def pair() -> tuple[int, str]:
+    return (1, "a")
+
+
+def short_pair() -> tuple[int, str]:
+    return (1,)
+
+
+def call() -> Callable[[int], int]:
+    return abs
+
+
+def frozen() -> frozenset[str]:
+    return frozenset({"a"})
+
+
+def user() -> UserId:
+    return UserId(3)
+
+
+def int_for_float() -> float:
+    return 1
+
+
+def fails() -> int:
+    raise ValueError("original failure")
+"""
+
+
+@pytest.mark.deliberate("Q87")
+def test_q87_output_checks_follow_the_input_rules_and_keep_a_nodes_error() -> None:
+    """Hamilton's checker crashes, misreads tuples and masks failures; fnloom's not."""
+    from hamilton.lifecycle import default  # noqa: PLC0415  # only this test needs it
+
+    module = make_module("differential_q87", Q87_RESULTS)
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_adapters(default.FunctionInputOutputTypeChecker())
+        .build()
+    )
+    # A correct fixed tuple is refused, and a short one accepted (#1749).
+    with pytest.raises(TypeError, match=r"Node pair returned a result of type"):
+        hamilton.execute(["pair"])
+    assert hamilton.execute(["short_pair"]) == {"short_pair": (1,)}
+    # Parameterized generics and NewTypes crash the check (#1738).
+    for name in ("call", "frozen"):
+        with pytest.raises(TypeError, match=r"parameterized generic"):
+            hamilton.execute([name])
+    with pytest.raises(TypeError, match=r"isinstance\(\) arg 2 must be a type"):
+        hamilton.execute(["user"])
+    with pytest.raises(TypeError, match=r"Node int_for_float returned a result"):
+        hamilton.execute(["int_for_float"])
+    # A failing node is reported as returning `None`; its error only in context.
+    with pytest.raises(
+        TypeError, match=r"Node fails returned a result of type"
+    ) as info:
+        hamilton.execute(["fails"])
+    assert isinstance(info.value.__context__, ValueError)
+
+    checked = fnloom.Builder().with_modules(module).with_output_type_checks()
+    ours = checked.build()
+    got = ours.execute(["pair", "call", "frozen", "user"])
+    assert got["pair"] == (1, "a")
+    assert got["user"] == 3  # noqa: PLR2004  # the NewType's value
+    with pytest.raises(
+        TypeError,
+        match=r"^short_pair: returned tuple, expected tuple\[int, str\] "
+        r"\(its length does not fit\)",
+    ):
+        ours.execute(["short_pair"])
+    with pytest.raises(
+        TypeError, match=r"^int_for_float: returned int, expected float"
+    ):
+        ours.execute(["int_for_float"])
+    widened = checked.with_numeric_widening().build()
+    assert widened.execute(["int_for_float"]) == {"int_for_float": 1}
+    with pytest.raises(ValueError, match=r"^original failure") as error:
+        ours.execute(["fails"])
+    assert error.value.__notes__ == ["in node 'fails'"]
+
+
+Q21_GRAPH = """
+def a(x: int) -> int:
+    return x + 1
+"""
+
+
+@pytest.mark.deliberate("Q21")
+def test_q21_a_custom_value_check_adds_to_the_default() -> None:
+    """Hamilton's `validate_input` replaces the default; fnloom's check only admits."""
+
+    class AlwaysFalse(lifecycle.EdgeConnectionHook):
+        @override
+        def check_edge_types_match(
+            self, type_from: type, type_to: type, **kwargs: Any
+        ) -> bool:
+            return False
+
+        @override
+        def validate_input(
+            self, node_type: type, input_value: Any, **kwargs: Any
+        ) -> bool:
+            return False
+
+    class AlwaysTrue(AlwaysFalse):
+        @override
+        def validate_input(
+            self, node_type: type, input_value: Any, **kwargs: Any
+        ) -> bool:
+            return True
+
+    module = make_module("differential_q21", Q21_GRAPH)
+
+    def hamilton_with(adapter: lifecycle.EdgeConnectionHook) -> hamilton_driver.Driver:
+        return (
+            hamilton_driver.Builder()
+            .with_modules(module)
+            .with_adapters(adapter)
+            .build()
+        )
+
+    # Refusing replaces the default: a correct value is refused.
+    with pytest.raises(ValueError, match=r"Type requirement mismatch"):
+        hamilton_with(AlwaysFalse()).execute(["a"], inputs={"x": 1})
+    # Admitting replaces it too: a wrong value reaches the node.
+    with pytest.raises(TypeError, match=r"can only concatenate str"):
+        hamilton_with(AlwaysTrue()).execute(["a"], inputs={"x": "s"})
+
+    def never(declared: object, value: object) -> bool:  # noqa: ARG001  # a check's signature
+        return False
+
+    def always(declared: object, value: object) -> bool:  # noqa: ARG001  # a check's signature
+        return True
+
+    refusing = fnloom.Builder().with_modules(module).with_value_check(never).build()
+    assert refusing.execute(["a"], inputs={"x": 1}) == {"a": 2}
+    with pytest.raises(ValueError, match=r"^x: expected int, got str"):
+        refusing.execute(["a"], inputs={"x": "s"})
+    admitting = fnloom.Builder().with_modules(module).with_value_check(always).build()
+    assert admitting.validate(["a"], inputs={"x": "s"}) == []
+    with pytest.raises(TypeError, match=r"can only concatenate str"):
+        admitting.execute(["a"], inputs={"x": "s"})
+
+
+_Q88_GRAPH = """
+def a(x: int) -> int:
+    return x + 1
+
+def boom(a: int, big: list, s: str = "dflt") -> int:
+    raise RuntimeError("bad")
+"""
+
+
+@pytest.mark.deliberate("Q88")
+def test_q88_failures_are_logged_only_on_request(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Hamilton always logs a failure at ERROR; fnloom does when asked."""
+    module = make_module("q88_logged", _Q88_GRAPH)
+    big = list(range(100))
+    cut = repr(big)[:50] + "..."
+    inputs = {"x": 1, "big": big}
+
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    with caplog.at_level(logging.DEBUG), pytest.raises(RuntimeError, match="bad"):
+        hamilton.execute(["boom"], inputs=inputs)
+    logged = [
+        r for r in caplog.records if r.name == "hamilton.execution.graph_functions"
+    ]
+    errors = [r for r in logged if r.levelno == logging.ERROR]
+    assert len(errors) == 1
+    assert errors[0].exc_info is not None
+    assert "boom" in errors[0].getMessage()
+    assert cut in errors[0].getMessage()
+    # The defaulted `s` is not among the inputs.
+    assert "dflt" not in errors[0].getMessage()
+
+    caplog.clear()
+    quiet = fnloom.Builder().with_modules(module).build()
+    with caplog.at_level(logging.DEBUG), pytest.raises(RuntimeError, match="bad"):
+        quiet.execute(["boom"], inputs=inputs)
+    assert not [r for r in caplog.records if r.name.startswith(("fnloom", "hamilton"))]
+
+    caplog.clear()
+    loud = (
+        fnloom.Builder().with_modules(module).with_hooks(fnloom.LogFailures()).build()
+    )
+    with caplog.at_level(logging.DEBUG), pytest.raises(RuntimeError, match="bad"):
+        loud.execute(["boom"], inputs=inputs)
+    (record,) = [r for r in caplog.records if r.name == "fnloom"]
+    assert record.levelno == logging.ERROR
+    assert record.getMessage() == f"node 'boom' failed; inputs: a=2, big={cut}"
+    assert record.exc_info is not None
+    assert "dflt" not in record.getMessage()

@@ -319,6 +319,100 @@ so the `thread` column isn't a like-for-like comparison. For a graph of cheap sy
 the remedy, and it's the fastest column. A dedicated executor and dropping the per-call context copy were tried. Each
 saved 1 to 2% of the round trip, within noise, so neither was kept.
 
+## Hooks
+
+A [hook](hooks.md) costs a run nothing until one is attached: a driver with no hooks, output checks, value checks or
+result builder runs the code it ran before hooks existed. With one attached, every node a run reports makes two events
+and two Python calls. The hook timed here overrides all four methods and only counts the events
+(`benches/hooks.py`), so what it measures is the hooks' own cost.
+
+**Unhooked runs are unchanged.** `benches.run` and `benches.async_` were run on the commit before hooks (`1374b99`) and
+with them, one after the other on the same machine and release build. Steady execution moved by 0.94× to 1.06×
+across all 56 fnloom rows of `benches.run`, a median of 1.00×, and every async row by 0.99× to 1.02×: within noise.
+At 1,000 nodes, steady execute with input checks on (ms, before / after):
+
+| shape | n | `benches.run` |
+| --- | ---: | --- |
+| chain | 1,000 | 0.132 / 0.136 |
+| fan_in | 1,000 | 0.336 / 0.338 |
+| layered | 1,000 | 0.178 / 0.179 |
+| rows | 1,000 | 0.142 / 0.134 |
+| extract | 1,000 | 0.587 / 0.587 |
+| types | 1,000 | 0.481 / 0.485 |
+
+**A hook costs about 2 µs per node, on both drivers.** Steady execution with the hook, minus without it, divided by
+the nodes the run reports: 1.92 to 1.98 µs per node on the 1,000-node chain, layered and `rows` graphs and on
+`extract` (whose 1,000 fields report as producer, fields and consumers: 2,001 nodes). A run adds about 5 µs of its
+own, for `before_run` and `after_run`: `fan_in` and `types`, one node each, pay 6.5 to 9 µs a run, which is within
+noise at 10,000 parameters. On `AsyncDriver`, `benches.async_` gives 1.76 to 1.84 µs per node on the loop, in either
+`sync_nodes` mode for `async def` nodes and `inline` for plain ones. With `sync_nodes="thread"` it is 2.3 to 3.3 µs
+per node, since the events are made on the loop's thread around each round trip to the worker.
+
+For comparison, an unhooked node costs about 0.13 µs, so a hooked run of trivial nodes is about 15 times slower than
+an unhooked one. Hamilton's own run costs about 2.5 to 3.5 µs per node with no adapter at all.
+
+**A hooked run is still faster than an unhooked Hamilton run.** `benches.run`, with input checks on, milliseconds,
+Hamilton / fnloom hooked / fnloom unhooked; the last column is the hook's cost. A cell marked ‡ is one where hooked
+fnloom was slower than Hamilton in that single sample:
+
+| shape | n | first execute | steady execute | hook cost |
+| --- | ---: | --- | --- | ---: |
+| chain | 10 | 0.073 / 0.105 / 0.038 ‡ | 0.033 / 0.026 / 0.002 | 2.35 µs a node |
+| chain | 100 | 0.282 / 0.340 / 0.047 ‡ | 0.254 / 0.208 / 0.014 | 1.95 µs a node |
+| chain | 1,000 | `RecursionError` / 3.067 / 0.288 | `RecursionError` / 2.056 / 0.136 | 1.92 µs a node |
+| chain | 10,000 | `RecursionError` / 32.1 / 3.300 | `RecursionError` / 20.8 / 1.379 | 1.95 µs a node |
+| fan_in | 10 | 0.063 / 0.054 / 0.034 | 0.031 / 0.008 / 0.002 | 6.5 µs a run |
+| fan_in | 100 | 0.269 / 0.132 / 0.099 | 0.241 / 0.023 / 0.015 | 7.3 µs a run |
+| fan_in | 1,000 | 2.585 / 1.177 / 0.982 | 2.520 / 0.347 / 0.338 | 9.1 µs a run |
+| fan_in | 10,000 | 44.9 / 32.5 / 29.7 | 44.4 / 22.3 / 22.3 | within noise |
+| layered | 10 | 0.063 / 0.071 / 0.033 ‡ | 0.035 / 0.026 / 0.002 | 2.33 µs a node |
+| layered | 100 | 0.396 / 0.354 / 0.054 | 0.355 / 0.213 / 0.018 | 1.94 µs a node |
+| layered | 1,000 | 3.637 / 3.220 / 0.348 | 3.499 / 2.109 / 0.179 | 1.93 µs a node |
+| layered | 10,000 | `RecursionError` / 34.2 / 3.879 | `RecursionError` / 21.5 / 1.792 | 1.97 µs a node |
+| rows | 10 | 0.066 / 0.072 / 0.029 ‡ | 0.035 / 0.025 / 0.002 | 2.29 µs a node |
+| rows | 100 | 0.334 / 0.354 / 0.048 ‡ | 0.288 / 0.211 / 0.014 | 1.97 µs a node |
+| rows | 1,000 | `RecursionError` / 3.097 / 0.279 | `RecursionError` / 2.049 / 0.134 | 1.92 µs a node |
+| rows | 10,000 | `RecursionError` / 31.7 / 3.159 | `RecursionError` / 20.9 / 1.336 | 1.96 µs a node |
+| extract | 10 | 0.107 / 0.110 / 0.038 ‡ | 0.071 / 0.051 / 0.006 | 2.14 µs a node |
+| extract | 100 | 1.183 / 0.712 / 0.134 | 1.151 / 0.452 / 0.058 | 1.96 µs a node |
+| extract | 1,000 | 66.7 / 6.833 / 1.156 | 66.9 / 4.545 / 0.587 | 1.98 µs a node |
+| extract | 10,000 | 6,290.3 / 72.6 / 13.8 | 6,321.4 / 46.8 / 6.440 | 2.02 µs a node |
+| types | 10 | 0.080 / 0.085 / 0.069 ‡ | 0.037 / 0.010 / 0.003 | 7.1 µs a run |
+| types | 100 | 0.334 / 0.167 / 0.132 | 0.296 / 0.037 / 0.030 | 7.5 µs a run |
+| types | 1,000 | 3.095 / 1.367 / 1.172 | 3.060 / 0.492 / 0.485 | 7.0 µs a run |
+| types | 10,000 | 50.5 / 34.5 / 31.6 | 49.9 / 23.8 / 23.8 | within noise |
+
+Measured on the machine above, with CPython 3.14.8 and a release build, on 2026-10-28. Steady execution with the
+hook is faster than Hamilton's `execute` on every graph, by 1.22× (`chain`, 100) to 135× (`extract`, 10,000), and
+it runs the graphs where Hamilton raises. The narrow margin is on chains of trivial nodes, where both costs are per
+node and fnloom's hooked node, about 2.1 µs, is close to Hamilton's unhooked one, about 2.5 µs.
+
+**The first execute of a small graph is slower with a hook.** On the seven cells marked ‡, all at 10 or 100 nodes, a
+hooked fnloom's first `execute` took 3% to 43% longer than Hamilton's, one sample each. The first `execute` compiles
+the plan, and a hooked plan also makes each reported node's view and its input re-keying, once per plan; a prepared
+plan, or a second `execute` of the same request, pays none of it again. Unhooked, fnloom's first `execute` is faster
+than Hamilton's on every graph.
+
+On `AsyncDriver`, a hooked run is faster than Hamilton's async driver on every row of `benches.async_`, by 1.5× to
+23×, except where the unhooked `thread` mode already is not ([Async](#async)): the layered graph of plain functions
+with `sync_nodes="thread"`, at 2.652 against 2.140 ms (100 nodes) and 26.0 against 22.3 ms (1,000), steady. With
+`inline`, the remedy there, the same rows take 0.253 and 2.517 ms.
+
+**With a cache.** A hooked run on `MemoryCache` walks the keys in Python, not natively, since the hooks need each
+node's outcome, so it pays more than the hook alone. `benches.cache`, runtime `fnloom-hooked` (ms, cold / warm,
+medians over seven fresh processes):
+
+| shape | n | fnloom, uncached | fnloom, memory | fnloom hooked, uncached | fnloom hooked, memory | Hamilton, memory |
+| --- | ---: | --- | --- | --- | --- | --- |
+| chain | 200 | 0.031 / 0.027 | 0.076 / 0.020 | 0.426 / 0.415 | 0.637 / 0.056 | 16.1 / 13.9 |
+| layered | 1,000 | 0.188 / 0.179 | 0.383 / 0.083 | 2.168 / 2.137 | 3.150 / 0.246 | 95.4 / 88.2 |
+
+A hooked cold run costs about 1.0 µs per node more than a hooked uncached one (the Python walk, the keys and the
+stores), and about 2.8 µs per node more than an unhooked cold run. A hooked warm run loads the requested outputs and
+reports them as hits: 0.056 ms for the chain, one hit, and 0.246 ms for the layered graph, ten hits. That is 0.04 to
+0.16 ms more than unhooked, the cost of the Python walk; making the native walk return its keys would remove it. A
+hooked cached run is still 25 to 360 times faster than Hamilton's in memory.
+
 ## Why fan-in is fast
 
 A node with `n` parameters is called with `n` keyword arguments. CPython binds a keyword to a parameter by identity
@@ -336,7 +430,7 @@ uv run python -m benches.run > bench.jsonl 2> bench.stderr
 uv run python -m benches.run extract > extract.jsonl 2> bench.stderr   # only the shapes named
 ```
 
-It prints 72 JSON lines to stdout (`shape`, `n`, `runtime`, `input_checks`, `build_ms`,
+It prints 104 JSON lines to stdout (`shape`, `n`, `runtime`, `input_checks`, `build_ms`,
 `first_execute_ms`, `steady_execute_ms`, `prepare_ms`, `error`, `error_phase`).
 Hamilton prints a help banner to stderr whenever it raises, hence the second redirect.
 Each runtime's answer is checked against the shape's closed form, and a
@@ -348,11 +442,11 @@ The cached runs have their own script, which starts a fresh process per sample:
 uv run python -m benches.cache > cache.jsonl
 ```
 
-It prints 18 JSON lines (`shape`, `n`, `runtime`, `store`, `cold_ms`, `warm_ms`, `warm_loads`, `processes`, `error`),
-one per shape, runtime (`fnloom`, `fnloom-async` or `hamilton`) and store (`none`, `memory` or `disk`). `warm_loads` is
-how many entries a warm `fnloom` run loads, counted on a separate, untimed driver. The graphs are written to files and
-imported, since Hamilton's cache versions a function by its source, and every answer is checked against the shape's
-closed form.
+It prints 24 JSON lines (`shape`, `n`, `runtime`, `store`, `cold_ms`, `warm_ms`, `warm_loads`, `processes`, `error`),
+one per shape, runtime (`fnloom`, `fnloom-hooked`, `fnloom-async` or `hamilton`) and store (`none`, `memory` or
+`disk`). `fnloom-hooked` is `fnloom` with the counting hook. `warm_loads` is how many entries a warm `fnloom` run
+loads, counted on a separate, untimed driver. The graphs are written to files and imported, since Hamilton's cache
+versions a function by its source, and every answer is checked against the shape's closed form.
 
 The async runs have their own script too, also a fresh process per sample:
 
@@ -360,9 +454,9 @@ The async runs have their own script too, also a fresh process per sample:
 uv run python -m benches.async_ > async.jsonl
 ```
 
-It prints 24 JSON lines (`shape`, `n`, `nodes`, `runtime`, `first_ms`, `run_ms`, `processes`, `error`), one per
-shape, kind of node (`async` or `sync`) and runtime (`hamilton`, `fnloom-thread` or `fnloom-inline`). Every answer
-is checked against the shape's closed form.
+It prints 60 JSON lines (`shape`, `n`, `nodes`, `runtime`, `first_ms`, `run_ms`, `processes`, `error`), one per
+shape, kind of node (`async` or `sync`) and runtime (`hamilton`, `fnloom-thread`, `fnloom-inline`,
+`fnloom-thread-hooked` or `fnloom-inline-hooked`). Every answer is checked against the shape's closed form.
 
 ### What is timed
 
@@ -377,7 +471,8 @@ All times use `time.perf_counter_ns`, in milliseconds. Graph generation is not t
 - A runtime that raises records the exception class in `error` and the phase in `error_phase` (`build`,
   `first_execute`, `steady_execute` or `prepare`). Timings of earlier phases are kept; the rest are null.
 - `input_checks`: Hamilton is always `true`, as it ships. fnloom is measured twice per graph, with the checks on and
-  with `Builder.without_input_type_checks()`.
+  with `Builder.without_input_type_checks()`, and a third time as `fnloom (hooked)`, checks on, with a hook that
+  overrides all four methods and counts the events (`benches/hooks.py`).
 - Argument copies (`[*outputs]`, `dict(inputs)`) are made once, outside the timed regions.
 
 ### Shapes
@@ -408,7 +503,8 @@ environment: the `rust:1.99.1` image on aarch64 Linux. A change that costs instr
 The Python run path is measured by [CodSpeed](https://codspeed.io) as well. `benchmarks/` holds pytest benchmarks of
 a prepared plan's steady `run` on each generated shape, `Driver.execute` on a repeated request, cached runs against a
 `MemoryCache` (warm and cold), the async driver in both `sync_nodes` modes, `@extract_fields`, `@extract_columns` and
-`@config`, and `Builder.build` on a 1,000-node graph. The extension is built in release mode first, so the numbers
+`@config`, hooked runs of a 1,000-node chain on both drivers (with and without output checks, and cached, warm and
+cold), and `Builder.build` on a 1,000-node graph. The extension is built in release mode first, so the numbers
 are those of the optimised build.
 
 CodSpeed counts simulated CPU instructions and allocations instead of reading a clock, so a result is stable on a shared

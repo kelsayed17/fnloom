@@ -98,7 +98,7 @@ ignore = [
     "UP037", # a quoted name nested in a generic is a case under test
 ]
 # Public signatures resolve under `inspect.signature`, so their annotations' names exist at run time.
-"python/fnloom/{driver,_stores,_view}.py" = [
+"python/fnloom/{driver,_hooks,_stores,_view}.py" = [
     "TC001", # an application import naming a public annotation is imported for real
     "TC003", # likewise a standard library import
 ]

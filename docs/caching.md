@@ -416,6 +416,10 @@ same way, runs nothing, and returns every computed node of the plan, by name, wi
 `explain_cache` consults the store for **every** `default`-policy node with a key, including nodes upstream of a hit,
 which a run would neither load nor run. With a `DiskCache`, that reads every such entry from disk.
 
+A run tells [hooks](hooks.md#with-a-cache) the same outcomes, with the same reasons, as each node it loads or runs
+reports. A run knows what its `recompute` nodes returned, so a node downstream of one is a `hit` or a `miss` there,
+never `unknown`; a node only the hits need is neither loaded nor run, so it reports nothing.
+
 ## Stores
 
 A store is any object with three methods, the `fnloom.CacheStore` protocol: `get(key)` returns the value or
