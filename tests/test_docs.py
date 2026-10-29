@@ -167,3 +167,51 @@ def test_every_docs_site_link_resolves(page: Path) -> None:
         if not guide.exists() or (match[2] and match[2] not in _anchors(guide)):
             broken.append(match[0])
     assert not broken, f"{page.name}: broken docs-site links {broken}"
+
+
+# The comparison tables of `from-hamilton.md` whose rows each name their evidence.
+COMPARISON_TABLES = ("Decorators", "What changes in your code", "Caching")
+REGISTER = DOCS / "quirk-register.md"
+REGISTER_ROW = re.compile(r"^\| (Q\d+) \|", re.MULTILINE)
+CITED = re.compile(r"\bQ\d+\b")
+EVIDENCE = re.compile(r"\.(?:deliberate|keeps)\(\"(Q\d+)\"\)")
+
+
+def _comparison_rows() -> list[tuple[str, str]]:
+    """Each body row of the comparison tables, with its table's heading."""
+    rows: list[tuple[str, str]] = []
+    heading = ""
+    for line in (DOCS / "from-hamilton.md").read_text(encoding="utf-8").splitlines():
+        if line.startswith("## "):
+            heading = line.removeprefix("## ")
+        elif heading in COMPARISON_TABLES and line.startswith("| "):
+            rows.append((heading, line))
+    # Drop each table's header row: the one followed by its `| --- |` separator.
+    return [
+        row
+        for row, after in zip(rows, [*rows[1:], ("", "")], strict=True)
+        if not row[1].startswith("| ---") and not after[1].startswith("| ---")
+    ]
+
+
+def test_every_comparison_row_cites_a_register_row() -> None:
+    """Each comparison row names at least one register row, and only real ones."""
+    known = set(REGISTER_ROW.findall(REGISTER.read_text(encoding="utf-8")))
+    rows = _comparison_rows()
+    assert len(rows) >= len(COMPARISON_TABLES)
+    uncited = [f"{table}: {row[:80]}" for table, row in rows if not CITED.search(row)]
+    unknown = sorted({q for _, row in rows for q in CITED.findall(row)} - known)
+    assert not uncited, "rows citing no register row:\n" + "\n".join(uncited)
+    assert not unknown, f"cited but not in the register: {unknown}"
+
+
+def test_every_cited_row_has_a_differential_test() -> None:
+    """Each register row a comparison row cites has a `deliberate` or `keeps` test."""
+    tested = {
+        q
+        for path in (ROOT / "tests" / "differential").glob("test_*.py")
+        for q in EVIDENCE.findall(path.read_text(encoding="utf-8"))
+    }
+    cited = {q for _, row in _comparison_rows() for q in CITED.findall(row)}
+    untested = sorted(cited - tested, key=lambda q: int(q[1:]))
+    assert not untested, f"cited rows with no differential test: {untested}"

@@ -39,18 +39,18 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 
 | Hamilton 1.90.0 | fnloom |
 | --- | --- |
-| `from hamilton.function_modifiers import parameterize, source, value` | `from fnloom import parameterize, source, value` |
-| `@parameterize(row={"param": source("node")})` | The same |
-| `@parameterize(row={"param": value(v)})` | The same. `v` is passed as is, never copied, as in Hamilton |
+| `from hamilton.function_modifiers import parameterize, source, value` | `from fnloom import parameterize, source, value` (Q151) |
+| `@parameterize(row={"param": source("node")})` | The same (Q151) |
+| `@parameterize(row={"param": value(v)})` | The same. `v` is passed as is, never copied, as in Hamilton (Q151) |
 | `@tag(owner="data")` | The same, imported from `fnloom`. A value must be a `str`, not a list (Q36) |
-| `@cache(behavior="recompute")`, `@cache(behavior="disable")` | The same, imported from `fnloom` ([Caching](#caching)) |
+| `@cache(behavior="recompute")`, `@cache(behavior="disable")` | The same, imported from `fnloom` ([Caching](#caching)) (Q152) |
 | `@cache(behavior="ignore")` on a producer | `@cache(ignore=("name",))` on the consumer instead (Q50) |
-| `@cache(format=...)` | The same, imported from `fnloom`: a format's name, or a `fnloom.Format` ([Caching](caching.md#stores)) |
-| `target_=...` | Not there. fnloom adds `version=` to pin a code version |
-| `@config.when`, `when_not`, `when_in`, `when_not_in` | The same, imported from `fnloom`, with the same `foo__variant` naming ([Config](writing-nodes.md#config)) |
+| `@cache(format=...)` | The same, imported from `fnloom`: a format's name, or a `fnloom.Format` ([Caching](caching.md#stores)) (Q55) |
+| `target_=...` | Not there. fnloom adds `version=` to pin a code version (Q147) |
+| `@config.when`, `when_not`, `when_in`, `when_not_in` | The same, imported from `fnloom`, with the same `foo__variant` naming ([Config](writing-nodes.md#config)) (Q153) |
 | `@config.when(name="x")` | The same on `when`, `when_not` and `when_in`. On `when_not_in`, Hamilton reads `name` as a config key, while fnloom reads it as the node name, as on the other forms (Q59) |
-| `@config.default` | Not in Hamilton: the variant used when no other matches |
-| `@config(lambda cfg: ...)` | Not there |
+| `@config.default` | Not in Hamilton: the variant used when no other matches (Q154) |
+| `@config(lambda cfg: ...)` | Not there (Q148) |
 | `@extract_fields({"a": int})`, `@extract_fields("a", "b")`, `@extract_fields()` | The same, imported from `fnloom` ([Extracting fields](writing-nodes.md#extracting-fields)). A `Mapping[str, T]` return works too (Q61) |
 | `@extract_fields(..., fill_with=v)` | The same, but the producer's mapping is never changed, and `None` is a fill (Q62) |
 | `@extract_columns("a", ("b", "doc"))` | The same, imported from `fnloom` ([Extracting columns](writing-nodes.md#extracting-columns)), with no pandas extension to load. A mapping or any value with `in` and `[]` works too (Q64) |
@@ -68,8 +68,8 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `@mutate(target)` and `apply_to(target, ...)` | The same, imported from `fnloom`; a target in another module works when both are built (Q107) |
 | `@inject(param=source("x"))` | The same, imported from `fnloom` ([Bindings and decorators from config](writing-nodes.md#bindings-and-decorators-from-config), Q109) |
 | `@resolve(when=ResolveAt.CONFIG_AVAILABLE, decorate_with=...)` with `hamilton.enable_power_user_mode` | `@fnloom.resolve(decorate_with)`, with no power-user mode (Q110) |
-| `@pipe`, `@flow`, `collapse=True`, `@check_output(schema=...)` | Not there: `pipe` is a deprecated alias of `pipe_input`, `flow` doesn't exist in 1.90.0, `collapse=True` raises `NotImplementedError` there, and a pandera schema is a custom check |
-| `@pipe_input(..., namespace=...)`, `.named(name, namespace=...)`, `@pipe_output(..., on_output=...)` | Not there: a step's node is always `<node>.<label>`, and `.on_output(...)` on each step picks the fields |
+| `@pipe`, `@flow`, `collapse=True`, `@check_output(schema=...)` | Not there: `pipe` is a `pipe_input` that silently drops `collapse`, `flow` doesn't exist in 1.90.0, `collapse=True` raises `NotImplementedError` there, and a pandera schema is a custom check (Q155, Q114) |
+| `@pipe_input(..., namespace=...)`, `.named(name, namespace=...)`, `@pipe_output(..., on_output=...)` | Not there: a step's node is always `<node>.<label>`, and `.on_output(...)` on each step picks the fields (Q140) |
 
 </div>
 
@@ -99,7 +99,7 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `what_is_the_path_between(a, b)` | `HamiltonNode` objects in an order that changes with `PYTHONHASHSEED`; the error names one unknown name | Sorted-by-dependency names, ties broken by name; both endpoints included, as in Hamilton; the error names every unknown name (Q70) |
 | `graph_modules` | A tuple, keeping a module given twice | `driver.modules`: each module once, in build order (Q70) |
 | `list_available_variables()` | Every node, including inputs, as objects | `driver.nodes` for the nodes; `driver.inputs()` for the inputs with their types, requiredness and consumers; `driver.outputs()` for the nodes nothing reads (Q70) |
-| `htypes.check_input_type(t, v)` | Public, with Hamilton's rules | `fnloom.value_matches(t, v)` answers as the input check, and `fnloom.type_matches(produced, expected)` as the edge check ([What the checks understand](running.md#what-the-checks-understand)) |
+| `htypes.check_input_type(t, v)` | Public, with Hamilton's rules | `fnloom.value_matches(t, v)` answers as the input check, and `fnloom.type_matches(produced, expected)` as the edge check ([What the checks understand](running.md#what-the-checks-understand)) (Q156) |
 | An override's value | Not type checked | Checked as an input is; `without_override_type_checks()` skips only the override checks (Q22) |
 | After `importlib.reload(module)` | A new `Builder` to see the edit | `driver.rebuild()` builds again with every setting; the old driver keeps its old code, as Hamilton's does (Q83) |
 | `with_adapters(...)` with `NodeExecutionHook` and `GraphExecutionHook` | `run_before_node_execution(**kwargs)` and its kin, each taking keyword arguments; the after-graph hook gets no request | `with_hooks(...)` with a `fnloom.Hook`: `before_run`, `before_node`, `after_node` and `after_run`, each taking one frozen event, and `RunEnd` repeats the request ([Hooks](hooks.md), Q84) |
@@ -111,20 +111,20 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `with_adapters(lifecycle.FunctionInputOutputTypeChecker())` | Checks inputs and results by `isinstance` rules of its own: crashes on fixed tuples, parameterized generics and `NewType`s, and reports a failing node as returning `None` | `with_output_type_checks()` checks every result by the input checks' rules; a node that raises keeps its own error. Inputs and overrides are always checked ([Checking results](writing-nodes.md#checking-results), Q87) |
 | An `EdgeConnectionHook` whose `validate_input` (`do_validate_input`) decides an input's type | Replaces the default check, so it can refuse a correct value | `with_value_check(check)` adds to the default: `check(declared, value)` is asked only about a value the default refuses, and can only admit it. It applies to overrides, extracted fields, results and `validate` too ([Custom value checks](running.md#custom-value-checks), Q21) |
 | `raw_execute(final_vars, overrides, display_graph, inputs)` | Positional, with a `display_graph` flag | `raw_execute(final_vars, *, inputs, overrides)`, and `PreparedPlan.run_raw` (Q19) |
-| `with_adapters(lifecycle.PrintLn())` | Prints each node's name and time, and with `verbosity=2` its inputs and result | No built-in: a three-line hook, a `fnloom.Hook` subclass whose `after_node(self, event)` prints `event.node.name` and `event.result` or `event.error` ([Hooks](hooks.md)) |
+| `with_adapters(lifecycle.PrintLn())` | Prints each node's name and time, and with `verbosity=2` its inputs and result | No built-in: a three-line hook, a `fnloom.Hook` subclass whose `after_node(self, event)` prints `event.node.name` and `event.result` or `event.error` ([Hooks](hooks.md)) (Q142) |
 | A failing node logged at ERROR | Always, with a support banner | Off by default; `with_hooks(fnloom.LogFailures())` logs the node and its inputs, each cut to 50 characters ([Logging failures](hooks.md#logging-failures), Q88) |
-| `GraphConstructionHook`'s `run_after_graph_construction` | Called with the built graph | Read `driver.nodes` after `build()` |
+| `GraphConstructionHook`'s `run_after_graph_construction` | Called with the built graph | Read `driver.nodes` after `build()` (Q145) |
 | `lifecycle.NoEdgeAndInputTypeChecking()` | Turns off the input and edge checks | `without_input_type_checks()`; edges are always checked, at build (Q10) |
 | A `StaticValidator`, refusing a node or the graph at build | `run_to_validate_node` and `run_to_validate_graph` | Not planned: check `driver.nodes` after `build()` and raise ([`StaticValidator`](#staticvalidator), Q117) |
 | `NodeExecutionMethod` (`run_to_execute_node`) | Replaces how a node is called; one per driver | `with_node_wrappers(*wrappers)`: any number, an ordered chain, each `wrapper(node, call, inputs)` ([Node wrappers](running.md#node-wrappers), Q111) |
-| `lifecycle.default.GracefulErrorAdapter` | Keeps running past a failure, skipping what depends on it | Not yet: on the [roadmap](plans/2026-10-28-roadmap-ahead-of-hamilton.md). A failing node fails the run, and `after_node` sees its error and inputs |
-| `TaskExecutionHook` and the other task hooks | Hooks on dynamic execution's tasks | None: fnloom has no dynamic execution yet |
+| `lifecycle.default.GracefulErrorAdapter` | Keeps running past a failure, skipping what depends on it | Not yet: on the [roadmap](plans/2026-10-28-roadmap-ahead-of-hamilton.md). A failing node fails the run, and `after_node` sees its error and inputs (Q157) |
+| `TaskExecutionHook` and the other task hooks | Hooks on dynamic execution's tasks | None: fnloom has no dynamic execution yet (Q157) |
 | `display_all_functions()`, `display_upstream_of(*names)`, `display_downstream_of(*names)` | A `graphviz.Digraph`, or `None` and a logged traceback without the graphviz package; node order follows `PYTHONHASHSEED` | `draw()`, `draw_upstream_of(*names)`, `draw_downstream_of(*names)`: a `fnloom.Drawing`, whose `to_dot()` and `to_mermaid()` need nothing installed and give the same text every run ([Drawing](drawing.md), Q90, Q94) |
 | `visualize_path_between(a, b, strict_path_visualization=True)` | The path, and its nodes' parents unless strict | `draw_path_between(a, b, context=False)`; with `context=True`, the parents are drawn and marked `context` (Q90) |
 | `visualize_execution(final_vars, inputs=, overrides=, bypass_validation=True)` | The run's nodes; an input requested as an output is unmarked | `draw_execution(final_vars, inputs=, overrides=, validate=False)`; that input is marked `output` (Q92) |
 | A type in a drawing | `list`, `dict`, `Union` | The whole annotation, `dict[str, list[int]]` (Q91) |
 | `output_file_path="graph.svg"`, `keep_dot=True` | Renders through the graphviz package | `drawing.render("graph.svg")` runs Graphviz's `dot`; `render("graph.dot")` writes the DOT text with nothing installed (Q94) |
-| `graphviz_kwargs`, `custom_style_function`, `show_schema` | Style the `Digraph` | None: edit the DOT text, or build your own from `Drawing.nodes` |
+| `graphviz_kwargs`, `custom_style_function`, `show_schema` | Style the `Digraph` | None: edit the DOT text, or build your own from `Drawing.nodes` (Q139) |
 | `export_execution(final_vars, inputs, overrides)` | A JSON string; an input carries a consumer's source and version | `export(final_vars, *, inputs=, overrides=)`, or `export()` for the whole graph: a `dict` with a format version, config, the request's names, code versions and a graph version ([Exporting](drawing.md#exporting), Q95, Q96) |
 | The `hamilton` CLI: `build`, `view`, `validate`, `version`, `diff` | Needs `typer`; files compiled alone; config only from a context file | `fnloom draw`, `export`, `validate` and `diff OLD.json NEW.json`, with `--config`, `--input`, `--override` and `--context`; modules import their siblings ([The CLI](drawing.md#the-cli), Q97, Q98) |
 
@@ -191,15 +191,15 @@ value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](
 
 | | Hamilton 1.90.0 | fnloom |
 | --- | --- | --- |
-| Turning it on | `Builder().with_cache(path=...)` | `Builder().with_cache(fnloom.DiskCache(path))`, or `fnloom.MemoryCache()` |
-| Per-node behavior | `@cache(behavior=...)`, or lists of names given to `with_cache` | `@cache(behavior=...)` on the function only |
+| Turning it on | `Builder().with_cache(path=...)` | `Builder().with_cache(fnloom.DiskCache(path))`, or `fnloom.MemoryCache()` (Q158) |
+| Per-node behavior | `@cache(behavior=...)`, or lists of names given to `with_cache` | `@cache(behavior=...)` on the function only (Q143) |
 | `ignore` | `@cache(behavior="ignore")` on the producer hides it from every consumer | `@cache(ignore=("name",))` on a consumer, per parameter; the producer is `disable` (Q50) |
 | A code version | The function's source, hashed on every run | Its code, helpers, constants and libraries, read once at build (Q16, Q48) |
-| A helper or global the node reads | Not seen | Seen; a mutable global makes the node uncacheable unless it gives `@cache(version=...)` |
+| A helper or global the node reads | Not seen | Seen; a mutable global makes the node uncacheable unless it gives `@cache(version=...)` (Q48) |
 | A value that cannot be hashed, nested in a list | A constant hash | The nodes reading it run, and `explain_cache` says why (Q47) |
 | `@cache(format=...)` | Formats from a registry of data savers; an unknown name fails every run; `json` turns a tuple into a list on a hit | `"pickle"`, `"json"` or a `fnloom.Format`, checked at build (Q55); `json` stores only what loads back exactly (Q54) |
 | A corrupt stored entry | Fails the run | A miss, with a `CacheWarning` (Q51) |
-| What a run did with each node | A log that reports a hit on every lookup | `driver.explain_cache(...)` |
+| What a run did with each node | A log that reports a hit on every lookup | `driver.explain_cache(...)` (Q159) |
 | A cache on the async driver | Fails at build | The same keys, store and `explain_cache` as the sync driver (Q68) |
 
 </div>
