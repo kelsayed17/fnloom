@@ -4593,7 +4593,8 @@ def test_q94_drawing_needs_nothing(
     caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
     """Hamilton without graphviz returns `None` and logs; fnloom's text needs none."""
-    assert importlib.util.find_spec("graphviz") is None
+    if importlib.util.find_spec("graphviz") is not None:
+        pytest.skip("the graphviz package is installed")
     module = load_fixture("diamond")
     hamilton = hamilton_driver.Builder().with_modules(module).build()
     target = tmp_path / "graph.svg"
@@ -4724,3 +4725,91 @@ def test_q96_versions_see_the_code_a_function_reads() -> None:
     assert fnloom_versions[0][1]["x"] is None
     assert fnloom_versions[0][0] != fnloom_versions[1][0]
     assert fnloom_versions[0][1]["a"] != fnloom_versions[1][1]["a"]
+
+
+_Q97_FLOW = """
+from {package} import config
+from q97_helper import double
+
+def a(x: int) -> int:
+    return double(x)
+
+@config.when(mode="fast")
+def b__fast(a: int) -> int:
+    return a
+"""
+
+
+@pytest.mark.deliberate("Q97")
+def test_q97_cli_loading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Hamilton's CLI compiles a file alone and drops `@config.when` nodes."""
+    from hamilton.cli import commands as hamilton_commands  # noqa: PLC0415  # its CLI only
+
+    from fnloom._cli import main  # noqa: PLC0415  # the command under test
+
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    (tmp_path / "q97_helper.py").write_text(
+        "def double(v: int) -> int:\n    return v * 2\n"
+    )
+    hamilton_file = tmp_path / "q97_hamilton.py"
+    hamilton_file.write_text(_Q97_FLOW.format(package="hamilton.function_modifiers"))
+    with pytest.raises(ModuleNotFoundError, match="q97_helper"):
+        hamilton_commands.build([hamilton_file])
+    # Without its sibling import, a context-free build has no `b`.
+    alone = tmp_path / "q97_alone.py"
+    alone.write_text(
+        _Q97_FLOW.format(package="hamilton.function_modifiers")
+        .replace("from q97_helper import double\n", "")
+        .replace("double(x)", "x")
+    )
+    built = hamilton_commands.build([alone])
+    assert "b" not in {n.name for n in built.list_available_variables()}
+
+    fnloom_file = tmp_path / "q97_fnloom.py"
+    fnloom_file.write_text(_Q97_FLOW.format(package="fnloom"))
+    assert main(["export", str(fnloom_file), "--config", "mode=fast"]) == 0
+    names = [n["name"] for n in json.loads(capsys.readouterr().out)["nodes"]]
+    assert names == ["x", "a", "b"]
+
+
+_Q98_OLD = """
+def a(x: int) -> int:
+    return x + 1
+"""
+
+
+@pytest.mark.deliberate("Q98")
+def test_q98_diff_compares_inputs_as_inputs(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Hamilton reports an input as edited with its consumer; fnloom doesn't."""
+    from hamilton.cli import logic as hamilton_logic  # noqa: PLC0415  # its CLI only
+
+    from fnloom._cli import main  # noqa: PLC0415  # the command under test
+
+    new_source = _Q98_OLD.replace("x + 1", "x + 2")
+    old_module = _module_from_file(tmp_path, "q98_old", _Q98_OLD)
+    new_module = _module_from_file(tmp_path, "q98_new", new_source)
+    versions = [
+        hamilton_logic.hash_hamilton_nodes(
+            hamilton_driver.Builder().with_modules(module).build()
+        )
+        for module in (old_module, new_module)
+    ]
+    hamilton_diff = hamilton_logic.diff_versions(
+        current_map=versions[1], reference_map=versions[0]
+    )
+    assert sorted(hamilton_diff["edit"]) == ["a", "x"]
+
+    paths = []
+    for name, module in (("old", old_module), ("new", new_module)):
+        path = tmp_path / f"{name}.json"
+        path.write_text(json.dumps(fnloom.build(module).export()))
+        paths.append(str(path))
+    assert main(["diff", *paths]) == 1
+    found = json.loads(capsys.readouterr().out)
+    assert found["changed"] == {"a": ["version"]}

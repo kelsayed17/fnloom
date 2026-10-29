@@ -9,10 +9,11 @@ value: a request's inputs and overrides are listed by name only, config values a
 import hashlib
 import inspect
 import json
+import re
 from typing import TYPE_CHECKING, Any
 
 from fnloom._codeversion import UncacheableError, code_version
-from fnloom._decorators import Source, Value
+from fnloom._decorators import Source, Value, decorations
 from fnloom._drawing import condition_text
 from fnloom._fingerprint import fingerprint
 from fnloom._types import Unresolved
@@ -52,10 +53,47 @@ def export(  # noqa: PLR0913  # one argument per part of the document
         "format": FORMAT,
         "fnloom": version,
         "graph_version": _graph_version(nodes, views),
-        "config": {key: repr(config[key]) for key in sorted(config)},
+        "config": {key: stable_repr(config[key]) for key in sorted(config)},
         "request": None if request is None else dict(request),
         "nodes": nodes,
     }
+
+
+# A default `repr`'s address, which changes with every process.
+_ADDRESS = re.compile(r" at 0x[0-9a-fA-F]+")
+
+
+def stable_repr(value: object) -> str:
+    """`repr(value)`, the same in every process: sets sorted, addresses dropped.
+
+    A set's members come in the order the hash seed gives, and an object's
+    default `repr` names its address; neither says anything about the value.
+    """
+    if isinstance(value, (set, frozenset)):
+        members = ", ".join(sorted(stable_repr(member) for member in value))
+        if type(value) is set:
+            return f"{{{members}}}" if value else "set()"
+        return f"{type(value).__name__}({{{members}}})" if value else "frozenset()"
+    if type(value) is dict:
+        pairs = (f"{stable_repr(k)}: {stable_repr(v)}" for k, v in value.items())
+        return f"{{{', '.join(pairs)}}}"
+    if type(value) is list:
+        return f"[{', '.join(stable_repr(item) for item in value)}]"
+    if type(value) is tuple:
+        items = [stable_repr(item) for item in value]
+        return f"({items[0]},)" if len(items) == 1 else f"({', '.join(items)})"
+    return _ADDRESS.sub("", repr(value))
+
+
+def _holds_a_set(value: object) -> bool:
+    """Whether `value` is or holds a set, in a list, tuple or dict."""
+    if isinstance(value, (set, frozenset)):
+        return True
+    if type(value) is dict:
+        return any(_holds_a_set(k) or _holds_a_set(v) for k, v in value.items())
+    if type(value) is list or type(value) is tuple:
+        return any(_holds_a_set(item) for item in value)
+    return False
 
 
 def type_text(annotation: object) -> str:
@@ -105,6 +143,10 @@ def _node(
         entry["version"], unversioned = versions[key]
         if unversioned is not None:
             entry["unversioned"] = unversioned
+        if (
+            policy := decorations(origin).cache
+        ) is not None and policy.version is not None:
+            entry["pinned"] = policy.version
     return entry
 
 
@@ -114,7 +156,7 @@ def _param(param: Param) -> dict[str, Any]:
         "name": param.name,
         "slot": param.slot,
         "reads": binding.name if isinstance(binding, Source) else None,
-        "value": repr(binding.value) if isinstance(binding, Value) else None,
+        "value": stable_repr(binding.value) if isinstance(binding, Value) else None,
         "required": param.required,
         "type": type_text(param.annotation),
     }
@@ -128,7 +170,15 @@ def _source(fn: Callable[..., object]) -> str | None:
 
 
 def _version(fn: Callable[..., object]) -> tuple[str | None, str | None]:
-    """`fn`'s code version in hex, or `None` and why it has none (Q96)."""
+    """`fn`'s code version in hex, or `None` and why it has none (Q96).
+
+    A version pinned with `@cache(version=...)` stands for the code, as the
+    result cache takes it: the hex is a hash of the pin.
+    """
+    policy = decorations(fn).cache
+    if policy is not None and policy.version is not None:
+        pinned = json.dumps([FORMAT, "pinned", policy.version])
+        return hashlib.sha256(pinned.encode()).hexdigest(), None
     try:
         return code_version(fn).hex(), None
     except UncacheableError as error:
@@ -142,8 +192,11 @@ def _graph_version(
 ) -> str | None:
     """A hash of every node's name, kind, type, params, conditions and version.
 
-    `None` when a node is unversioned, or a `value()` it is bound to has no
-    fingerprint: a change there could not be seen (Q96).
+    Tags and docs are left out: they don't change what a node computes. A
+    `value()` is hashed by its fingerprint, or by its sorted text when it holds a
+    set, whose fingerprint follows the hash seed. `None` when a node is
+    unversioned, or a `value()` it is bound to has no fingerprint: a change there
+    could not be seen (Q96).
     """
     parts: list[object] = []
     for node in nodes:
@@ -155,10 +208,16 @@ def _graph_version(
             if isinstance(binding, Source):
                 bound.append([param.name, param.slot, binding.name, param.required])
                 continue
-            try:
-                value = fingerprint(binding.value).hex()
-            except Exception:  # noqa: BLE001  # unfingerprintable: no graph version
-                return None
+            if _holds_a_set(binding.value):
+                # A set's fingerprint follows the hash seed; its sorted text doesn't.
+                if _ADDRESS.search(repr(binding.value)):
+                    return None  # a member known only by its address
+                value = stable_repr(binding.value)
+            else:
+                try:
+                    value = fingerprint(binding.value).hex()
+                except Exception:  # noqa: BLE001  # unfingerprintable: no graph version
+                    return None
             bound.append([param.name, param.slot, None, value])
         named = [node[key] for key in ("name", "kind", "type")]
         parts.append([*named, bound, node["config"], node["version"]])
@@ -171,9 +230,10 @@ def diff(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
 
     `added` and `removed` are names, sorted; `changed` maps each node in both to
     the fields that differ, of `kind`, `type`, `params`, `config`, `tags` and
-    `version`. `unversioned` names each node in both whose change can't be seen
-    because a side has no version and nothing else differs. `ValueError` for a
-    document of another format.
+    `version`. `unversioned` names each function node in both that a side has no
+    version for and that differs in nothing else, its version aside: a change in
+    its code can't be seen. The documents' own `config` and `request` are not
+    compared, only their nodes. `ValueError` for a document of another format.
     """
     for side, document in (("old", old), ("new", new)):
         if document.get("format") != FORMAT:
@@ -186,8 +246,8 @@ def diff(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
     for name in sorted(before.keys() & after.keys()):
         a, b = before[name], after[name]
         fields = [f for f in _COMPARED if a.get(f) != b.get(f)]
-        functions = a["kind"] == b["kind"] == "function"
-        blind = functions and (a["version"] is None or b["version"] is None)
+        functions = a.get("kind") == b.get("kind") == "function"
+        blind = functions and (a.get("version") is None or b.get("version") is None)
         if blind and fields in ([], ["version"]):
             unversioned.append(name)
         elif fields:

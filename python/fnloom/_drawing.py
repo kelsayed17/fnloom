@@ -15,7 +15,7 @@ import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Literal, override
+from typing import TYPE_CHECKING, Literal, Protocol, override
 
 from fnloom._types import Unresolved
 from fnloom._view import topological
@@ -31,6 +31,16 @@ type Orient = Literal["LR", "TB", "RL", "BT"]
 type Kind = Literal["function", "input"]
 
 _ORIENTS = ("LR", "TB", "RL", "BT")
+
+# The formats `render` writes as `to_dot()`'s text: Graphviz's own suffixes.
+_DOT_SUFFIXES = frozenset({"dot", "gv"})
+
+
+class _Printer(Protocol):
+    """The part of IPython's pretty printer `_repr_pretty_` uses."""
+
+    def text(self, obj: str) -> None: ...
+
 
 # A label's type line longer than this is cut, as Hamilton cuts at 80 (Q91).
 _TYPE_WIDTH = 80
@@ -132,27 +142,39 @@ class Drawing:
     ) -> Path:
         """Writes the drawing to `path` and returns it (Q94).
 
-        `format` defaults to the path's suffix: `"svg"` for `graph.svg`. `"dot"`
-        writes `to_dot()`'s text and `"mmd"` `to_mermaid()`'s, needing nothing.
+        `format` defaults to the path's suffix, in lower case: `"svg"` for
+        `graph.svg`. `"dot"` and `"gv"` write `to_dot()`'s text, never Graphviz's
+        laid-out DOT, and `"mmd"` writes `to_mermaid()`'s (with no legend),
+        needing nothing.
         Any other format is made by Graphviz's `dot` executable, which must be on
         `PATH`: `FileNotFoundError` when it isn't, saying how to get it, and
         `RuntimeError` with `dot`'s own message when it fails, as for a format it
-        doesn't know. `ValueError` for no format and a path with no suffix.
+        doesn't know. `ValueError` for no format and a path with no suffix, and
+        `FileNotFoundError` naming the folder when `path`'s folder doesn't exist.
         """
         target = Path(path)
-        chosen = format if format is not None else target.suffix.removeprefix(".")
+        given = format if format is not None else target.suffix.lower()
+        chosen = given.removeprefix(".")
         if not chosen:
             msg = f"give a format, or a path with a suffix such as .svg: {target}"
             raise ValueError(msg)
+        if not target.parent.is_dir():
+            msg = f"no folder to write {target.name} in: {target.parent}"
+            raise FileNotFoundError(msg)
         if chosen == "mmd":
             target.write_text(self.to_mermaid(orient=orient), encoding="utf-8")
             return target
         text = self.to_dot(orient=orient, legend=legend)
-        if chosen == "dot":
+        if chosen in _DOT_SUFFIXES:
             target.write_text(text, encoding="utf-8")
             return target
         target.write_bytes(_graphviz(text, chosen))
         return target
+
+    def _repr_pretty_(self, printer: _Printer, cycle: bool) -> None:  # noqa: FBT001  # IPython's signature
+        """The DOT text, which IPython shows when there is no SVG."""
+        del cycle  # a drawing holds no drawing, so never a cycle
+        printer.text(self.to_dot())
 
     def _repr_svg_(self) -> str | None:
         """An SVG for Jupyter, or `None` without Graphviz, so it shows the text."""
@@ -310,7 +332,14 @@ def _dot_legend(nodes: Sequence[DrawnNode]) -> list[str]:
 
 
 # Mermaid's entity codes for the characters a quoted label can't hold as they are.
-_MERMAID_ESCAPES = {"#": "#35;", '"': "#quot;", "<": "#lt;", ">": "#gt;"}
+_MERMAID_ESCAPES = {
+    "#": "#35;",
+    '"': "#quot;",
+    "<": "#lt;",
+    ">": "#gt;",
+    "&": "#38;",
+    "`": "#96;",
+}
 
 
 def _mermaid_label(node: DrawnNode) -> str:
@@ -326,7 +355,7 @@ _MERMAID_STYLES = {
     "function": "fill:#b4d8e4,stroke:#333333",
     "input": "fill:#ffffff,stroke:#333333,stroke-dasharray:5 5",
     "output": "fill:#FFC857",
-    "override": "fill:#dddddd",
+    "override": "stroke-dasharray:2 2,stroke-width:3px",
     "path": "stroke:red,stroke-width:2px",
     "context": "fill:#eeeeee,stroke:#999999,color:#777777",
 }

@@ -81,4 +81,6 @@ def test_the_regressed_callables_are_covered() -> None:
         "Drawing.to_dot",
         "Driver.export",
         "AsyncDriver.export",
+        "Drawing.render",
+        "Drawing.to_mermaid",
     }

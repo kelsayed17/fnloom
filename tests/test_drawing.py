@@ -596,3 +596,88 @@ def test_render_runs_graphviz(tmp_path: Path) -> None:
     assert "<svg" in repr_svg
     with pytest.raises(RuntimeError, match="dot failed"):
         drawing.render(tmp_path / "graph.nope")
+
+
+def _fake_dot(folder: Path, script: str) -> None:
+    """A `dot` executable in `folder` running `script` in Python."""
+    path = folder / "dot"
+    path.write_text(f"#!{sys.executable}\n{textwrap.dedent(script)}")
+    path.chmod(0o755)
+
+
+def test_render_runs_dot_from_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The `dot` on PATH gets `-T<format>` and the DOT text; its stdout is written."""
+    _fake_dot(
+        tmp_path,
+        """
+        import sys
+        text = sys.stdin.read()
+        sys.stdout.write(sys.argv[1] + "|" + str(len(text)))
+        """,
+    )
+    monkeypatch.setenv("PATH", str(tmp_path))
+    drawing = _driver().draw()
+    out = drawing.render(tmp_path / "graph.SVG")
+    assert out.read_text() == f"-Tsvg|{len(drawing.to_dot())}"
+    pdf = drawing.render(tmp_path / "graph.out", format=".pdf")
+    assert pdf.read_text().startswith("-Tpdf|")
+    assert drawing._repr_svg_() == f"-Tsvg|{len(drawing.to_dot())}"  # Jupyter's hook
+
+
+def test_a_failing_dot_is_a_runtime_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Its stderr in the message; nothing is written."""
+    _fake_dot(
+        tmp_path,
+        """
+        import sys
+        sys.stderr.write("Format: nope not recognized\\n")
+        sys.exit(1)
+        """,
+    )
+    monkeypatch.setenv("PATH", str(tmp_path))
+    drawing = _driver().draw()
+    with pytest.raises(RuntimeError, match="dot failed: Format: nope not recognized"):
+        drawing.render(tmp_path / "graph.nope")
+    assert not (tmp_path / "graph.nope").exists()
+    assert drawing._repr_svg_() is None  # Jupyter's hook
+
+
+def test_render_suffixes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Suffixes in any case; `.gv` is DOT text; a missing folder is named."""
+    monkeypatch.setattr(shutil, "which", lambda _: None)
+    drawing = _driver().draw()
+    assert drawing.render(tmp_path / "g.GV").read_text() == drawing.to_dot()
+    assert drawing.render(tmp_path / "g.DOT").read_text() == drawing.to_dot()
+    assert drawing.render(tmp_path / "g.MMD").read_text() == drawing.to_mermaid()
+    with pytest.raises(FileNotFoundError, match=r"no folder to write g\.svg in"):
+        drawing.render(tmp_path / "none" / "g.svg")
+
+
+def test_ipython_shows_the_dot_text() -> None:
+    """Without an SVG, IPython's pretty printer gets the DOT text."""
+    shown: list[str] = []
+
+    class Printer:
+        def text(self, obj: str) -> None:
+            shown.append(obj)
+
+    drawing = _driver().draw()
+    drawing._repr_pretty_(Printer(), cycle=False)  # IPython's hook
+    assert shown == [drawing.to_dot()]
+
+
+def test_mermaid_escapes_a_namespaced_tricky_label() -> None:
+    """`&`, backticks, `|`, a newline and a condition stay inside one label."""
+    node = DrawnNode(
+        name="ns.a",
+        kind="function",
+        type="int",
+        title="a & `b` | c\nd",
+        condition="mode == 'x'",
+    )
+    text = Drawing((node,), ()).to_mermaid()
+    assert "  n0[\"a #38; #96;b#96; | c d<br>int<br>mode == 'x'\"]" in text

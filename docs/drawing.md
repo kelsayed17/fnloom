@@ -179,4 +179,45 @@ version, such as one reading a mutable global, has `version` `None` and an `unve
 `graph_version` hashes every node's name, kind, type, wiring, conditions and version, so it changes when any of them
 does, and it is `None` when some node is unversioned.
 
-The `fnloom diff` command compares two exports.
+A value's text is the same in every process: a set's members are sorted, and an address in a default `repr` is
+dropped. A `value()` holding an object known only by its address has no fingerprint, so `graph_version` is `None`.
+The version has the result cache's limits: a global `frozenset` of strings a function reads is versioned in the order
+the hash seed gives, so pass a sorted tuple, or fix `PYTHONHASHSEED`, for a version that holds across processes. Tags
+and docs don't change what a node computes, so `graph_version` leaves them out; `fnloom diff` still reports them.
+
+## The CLI
+
+The `fnloom` command, also `python -m fnloom`, draws, exports, validates and compares graphs. It needs nothing but
+fnloom. Each module is a dotted name, imported from the current folder as `python -m` would, or a `.py` path, imported
+with its own folder on `sys.path` so it can import its siblings. `MODULE@NS` gives a module's nodes the namespace
+`NS`.
+
+```bash
+fnloom draw prices.py --config region=eu > prices.dot
+fnloom draw prices.py --config region=eu --upstream subtotal --format mermaid
+fnloom draw prices.py --config region=eu --execution --outputs total \
+    --input price=9.5 --input quantity=2 -o run.svg
+fnloom validate prices.py --config region=eu --outputs total --input price=9.5
+fnloom export prices.py --context run.toml -o before.json
+fnloom diff before.json after.json
+```
+
+| Option | What it gives |
+| --- | --- |
+| `--config KEY=VALUE` | a config entry; `VALUE` is JSON, or else a plain string |
+| `--input KEY=VALUE`, `--override KEY=VALUE` | an input or an override of a run, read the same way |
+| `--outputs a,b` | the outputs of a run |
+| `--context FILE` | a `.json` or `.toml` file with the tables `config`, `inputs` and `overrides` and the list `outputs`; a flag wins over its entry |
+
+A `@config.when` node is built as `Builder` builds it: without its key in the config it is left out, so give the key
+with `--config`.
+
+| Command | Does |
+| --- | --- |
+| `draw` | the whole graph, or `--upstream NODE...`, `--downstream NODE...`, `--path FROM TO` (`--no-context` for the path alone) or `--execution`; `--format dot` (the default) or `mermaid` to stdout, or any format Graphviz makes to `-o FILE`; `--orient`, `--no-legend`, `--no-validate` |
+| `export` | the graph, or the run `--outputs` makes, as JSON, to stdout or `-o FILE` |
+| `validate` | every problem a run of `--outputs` would raise, one per line; status 1 if there is any |
+| `diff OLD NEW` | what changed between two exports, as JSON; status 0 for no change, 1 for a change, 2 for a file that is no export |
+
+stdout carries only the result. An error is one line on stderr, `fnloom: TypeName: message`, with status 1; a command
+line that can't be run gets argparse's message and status 2.

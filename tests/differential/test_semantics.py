@@ -172,8 +172,13 @@ def _hamilton_drawn(module: ModuleType, scope: str, names: Sequence[str]) -> set
             strict_path_visualization=scope == "strict",
             show_legend=False,
         )
+    return _boxed(drawn.nodes)
+
+
+def _boxed(nodes: Sequence[tuple[str, str, object]]) -> set[str]:
+    """The names Hamilton drew: its nodes, and each input in an input box."""
     found: set[str] = set()
-    for name, label, _ in drawn.nodes:
+    for name, label, _ in nodes:
         if name.startswith("_") and name.endswith("_inputs"):
             found.update(_INPUT_ROW.findall(label))
         else:
@@ -254,6 +259,7 @@ def test_drawings_show_the_same_nodes(
         ("optional", ["scaled"], {"a": 1, "factor": 2}, {}),
     ],
 )
+@pytest.mark.usefixtures("fake_graphviz")
 def test_execution_drawings_show_the_same_nodes(
     fixture: str,
     outputs: list[str],
@@ -263,11 +269,15 @@ def test_execution_drawings_show_the_same_nodes(
     """The computed nodes, the inputs read and the overrides, as Hamilton's (Q92)."""
     module = load_fixture(fixture)
     hamilton = hamilton_driver.Builder().with_modules(module).build()
-    nodes, user = hamilton.graph.get_upstream_nodes(outputs, inputs, overrides)
+    drawn = hamilton.visualize_execution(
+        outputs, inputs=inputs, overrides=overrides, show_legend=False
+    )
     drawing = fnloom.build(module).draw_execution(
         outputs, inputs=inputs, overrides=overrides
     )
-    assert {n.name for n in drawing.nodes} == {n.name for n in nodes | user}
+    assert {n.name for n in drawing.nodes} == _boxed(drawn.nodes)
+    marked = {n.name for n in drawing.nodes if "output" in n.marks}
+    assert marked == {n for n in outputs if n not in inputs}
 
 
 @pytest.mark.parametrize(

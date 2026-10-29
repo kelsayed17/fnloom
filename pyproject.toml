@@ -27,6 +27,9 @@ classifiers = [
     "Typing :: Typed",
 ]
 
+[project.scripts]
+fnloom = "fnloom._cli:run"
+
 [project.urls]
 Homepage = "https://github.com/kelsayed17/fnloom"
 Documentation = "https://kelsayed17.github.io/fnloom/"

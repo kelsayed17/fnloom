@@ -1,0 +1,309 @@
+"""The `fnloom` command: loading, requests, each command's output, and errors."""
+
+import json
+import subprocess
+import sys
+import textwrap
+from typing import TYPE_CHECKING
+
+import pytest
+
+from fnloom._cli import main
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+FLOW = """
+from fnloom import config
+from helper import double
+
+def a(x: int) -> int:
+    return double(x)
+
+def b(a: int, y: int = 2) -> int:
+    return a * y
+
+@config.when(mode="fast")
+def c__fast(b: int) -> int:
+    return b + 1
+"""
+
+HELPER = """
+def double(v: int) -> int:
+    return v * 2
+"""
+
+
+@pytest.fixture
+def flow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """`flow.py` beside the `helper.py` it imports; `sys.path` restored after."""
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    (tmp_path / "helper.py").write_text(textwrap.dedent(HELPER))
+    path = tmp_path / "flow.py"
+    path.write_text(textwrap.dedent(FLOW))
+    return path
+
+
+def _run(capsys: pytest.CaptureFixture[str], *argv: str) -> tuple[int, str, str]:
+    status = main(list(argv))
+    out, err = capsys.readouterr()
+    return status, out, err
+
+
+def test_a_file_with_a_sibling_import_builds(
+    flow: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Its folder goes on `sys.path`, so `from helper import ...` works (Q97)."""
+    status, out, err = _run(capsys, "draw", str(flow), "--upstream", "b")
+    assert (status, err) == (0, "")
+    assert out.startswith("digraph {")
+    assert '"a" -> "b"' in out
+
+
+def test_config_selects_a_variant(
+    flow: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Without --config the variant is left out, as in Python; with it, built."""
+    _, without, _ = _run(capsys, "export", str(flow))
+    assert "c" not in [n["name"] for n in json.loads(without)["nodes"]]
+    status, out, _ = _run(capsys, "export", str(flow), "--config", "mode=fast")
+    document = json.loads(out)
+    assert status == 0
+    assert document["config"] == {"mode": "'fast'"}
+    assert "c" in [n["name"] for n in document["nodes"]]
+
+
+def test_a_dotted_name_and_a_namespace(
+    flow: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A dotted name imports from the current folder; `@ns` namespaces it."""
+    monkeypatch.chdir(flow.parent)
+    status, out, err = _run(capsys, "draw", "flow@ns", "--format", "mermaid")
+    assert (status, err) == (0, "")
+    assert '  n1["ns.a<br>int"]' in out
+
+
+def test_values_are_json_or_strings(
+    flow: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`x=3` is the int 3; a value that isn't JSON is a plain string."""
+    status, out, _ = _run(
+        capsys,
+        "validate",
+        str(flow),
+        "--outputs",
+        "b",
+        "--input",
+        "x=3",
+        "--input",
+        "y=many",
+    )
+    assert status == 1
+    assert out == "y: expected int, got str\n"
+    status, out, _ = _run(
+        capsys, "validate", str(flow), "--outputs", "b", "--input", "x=3"
+    )
+    assert (status, out) == (0, "")
+
+
+def test_a_context_file(
+    flow: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """JSON or TOML with config, inputs, overrides and outputs; flags win."""
+    toml = tmp_path / "run.toml"
+    toml.write_text(
+        'outputs = ["c"]\n[config]\nmode = "fast"\n'
+        "[inputs]\nx = 1\n[overrides]\nb = 4\n"
+    )
+    status, out, _ = _run(capsys, "export", str(flow), "--context", str(toml))
+    document = json.loads(out)
+    assert status == 0
+    assert document["request"] == {
+        "outputs": ["c"],
+        "inputs": ["x"],
+        "overrides": ["b"],
+    }
+    data = tmp_path / "run.json"
+    data.write_text(json.dumps({"config": {"mode": "slow"}, "outputs": ["b"]}))
+    status, out, _ = _run(
+        capsys,
+        "export",
+        str(flow),
+        "--context",
+        str(data),
+        "--config",
+        "mode=fast",
+        "--outputs",
+        "c",
+        "--input",
+        "x=1",
+    )
+    document = json.loads(out)
+    assert document["config"] == {"mode": "'fast'"}
+    assert document["request"]["outputs"] == ["c"]
+
+
+@pytest.mark.parametrize(
+    ("content", "suffix", "message"),
+    [
+        ('{"nope": 1}', ".json", "unknown keys nope"),
+        ('{"outputs": "c"}', ".json", "outputs must be a list"),
+        ("[1]", ".json", "must hold a table"),
+        ("{", ".json", "--context"),
+        ("x =", ".toml", "--context"),
+        ("{}", ".yaml", "must be a .json or .toml file"),
+    ],
+)
+def test_a_bad_context_file_is_a_usage_error(  # noqa: PLR0913  # the case and fixtures
+    flow: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    *,
+    content: str,
+    suffix: str,
+    message: str,
+) -> None:
+    """Status 2, argparse's way, naming what is wrong."""
+    path = tmp_path / f"context{suffix}"
+    path.write_text(content)
+    with pytest.raises(SystemExit) as exited:
+        main(["export", str(flow), "--context", str(path)])
+    assert exited.value.code == 2  # noqa: PLR2004  # argparse's usage status
+    _, err = capsys.readouterr()
+    assert message in err
+
+
+def test_each_draw_scope(flow: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Downstream, path with and without context, and a run."""
+    _, down, _ = _run(capsys, "draw", str(flow), "--downstream", "a", "--no-legend")
+    assert '"y" [' in down
+    assert "cluster_legend" not in down
+    _, path, _ = _run(capsys, "draw", str(flow), "--path", "a", "b", "--no-context")
+    assert '"y" [' not in path
+    _, run, _ = _run(
+        capsys,
+        "draw",
+        str(flow),
+        "--execution",
+        "--outputs",
+        "b",
+        "--input",
+        "x=1",
+        "--orient",
+        "TB",
+    )
+    assert "rankdir=TB" in run
+    assert '"b" [label="b\\nint" fillcolor="#FFC857"]' in run
+    status, _, err = _run(capsys, "draw", str(flow), "--execution", "--outputs", "b")
+    assert status == 1
+    assert err == "fnloom: ValueError: missing inputs: 'x' (needed by 'a')\n"
+    status, out, _ = _run(
+        capsys, "draw", str(flow), "--execution", "--outputs", "b", "--no-validate"
+    )
+    assert status == 0
+    assert '"x" [' in out
+
+
+def test_writing_to_a_file(
+    flow: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`-o` writes the text there and prints nothing."""
+    target = tmp_path / "graph.mmd"
+    status, out, _ = _run(
+        capsys, "draw", str(flow), "--format", "mermaid", "-o", str(target)
+    )
+    assert (status, out) == (0, "")
+    assert target.read_text().startswith("flowchart LR\n")
+    exported = tmp_path / "graph.json"
+    _run(capsys, "export", str(flow), "-o", str(exported))
+    assert json.loads(exported.read_text())["format"] == "fnloom.export/1"
+
+
+def test_errors_go_to_stderr_with_status_1(
+    flow: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """One line on stderr, nothing on stdout (Q98)."""
+    status, out, err = _run(capsys, "export", str(flow), "--outputs", "nope")
+    assert (status, out) == (1, "")
+    assert err == "fnloom: ValueError: unknown outputs: 'nope'\n"
+    status, out, err = _run(capsys, "draw", "no_such_module_anywhere")
+    assert (status, out) == (1, "")
+    assert err.startswith("fnloom: ModuleNotFoundError: ")
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["draw"],
+        ["draw", "flow.py", "--upstream", "a", "--downstream", "b"],
+        ["draw", "missing.py"],
+        ["draw", "flow.py", "--format", "svg"],
+        ["draw", "flow.py", "--config", "mode"],
+        ["validate", "flow.py"],
+        ["draw", "flow.py@"],
+    ],
+)
+def test_usage_errors_have_status_2(
+    flow: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+) -> None:
+    """Status 2, argparse's, for a command line that can't be run."""
+    monkeypatch.chdir(flow.parent)
+    with pytest.raises(SystemExit) as exited:
+        main(argv)
+    assert exited.value.code == 2  # noqa: PLR2004  # argparse's usage status
+    out, err = capsys.readouterr()
+    assert out == ""
+    assert "error" in err
+
+
+def test_diff(flow: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    """Status 0 when nothing changed, 1 when something did, 2 on a bad file."""
+    old = tmp_path / "old.json"
+    _run(capsys, "export", str(flow), "-o", str(old))
+    status, out, _ = _run(capsys, "diff", str(old), str(old))
+    assert status == 0
+    assert json.loads(out) == {
+        "added": [],
+        "removed": [],
+        "changed": {},
+        "unversioned": [],
+    }
+    flow.write_text(flow.read_text() + "\ndef d(b: int) -> int:\n    return b\n")
+    for name in ("flow", "helper"):
+        sys.modules.pop(name, None)
+    new = tmp_path / "new.json"
+    _run(capsys, "export", str(flow), "-o", str(new))
+    status, out, _ = _run(capsys, "diff", str(old), str(new))
+    assert status == 1
+    assert json.loads(out)["added"] == ["d"]
+    bad = tmp_path / "bad.json"
+    bad.write_text("{}")
+    status, out, err = _run(capsys, "diff", str(old), str(bad))
+    assert (status, out) == (2, "")
+    assert "not an fnloom export" in err
+    status, _, err = _run(capsys, "diff", str(old), str(tmp_path / "none.json"))
+    assert status == 2  # noqa: PLR2004  # a file it can't read
+    assert err.startswith("fnloom: FileNotFoundError")
+
+
+def test_python_dash_m(flow: Path) -> None:
+    """`python -m fnloom` is the same command."""
+    done = subprocess.run(  # noqa: S603  # our own interpreter
+        [sys.executable, "-m", "fnloom", "draw", str(flow), "--upstream", "a"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert done.returncode == 0, done.stderr
+    assert done.stdout.startswith("digraph {")
+    failed = subprocess.run(  # noqa: S603  # our own interpreter
+        [sys.executable, "-m", "fnloom", "export", str(flow), "--outputs", "nope"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert (failed.returncode, failed.stdout) == (1, "")
+    assert failed.stderr == "fnloom: ValueError: unknown outputs: 'nope'\n"

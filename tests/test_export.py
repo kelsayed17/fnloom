@@ -274,3 +274,129 @@ def test_the_document_does_not_depend_on_the_hash_seed() -> None:
         for seed in ("0", "1", "2")
     }
     assert len(texts) == 1
+
+
+SETS = """
+from fnloom import parameterize, value
+
+class Marker:
+    pass
+
+@parameterize(tagged={"labels": value(frozenset({"alpha", "beta", "gamma"}))})
+def labelled(x: int, labels: frozenset) -> int:
+    return x
+
+@parameterize(marked={"marker": value(Marker())})
+def marking(x: int, marker: Marker) -> int:
+    return x
+"""
+
+_SEEDED_SETS = textwrap.dedent(
+    """
+    import json, sys
+    sys.path.insert(0, sys.argv[1])
+    from helpers import make_module
+    from test_export import SETS
+    import fnloom
+    module = make_module("exported_sets", SETS)
+    config = {"names": {"p", "q", "r"}, "thing": object()}
+    builder = fnloom.Builder().with_functions(module.labelled)
+    tagged = builder.with_config(config).build()
+    print(json.dumps(tagged.export(), sort_keys=True))
+    print(json.dumps(fnloom.build(module).export(), sort_keys=True))
+    """
+)
+
+
+def test_sets_and_addresses_do_not_change_the_text() -> None:
+    """Sets sorted and addresses dropped, under three seeds; a set value versioned."""
+    tests = os.path.dirname(__file__)  # noqa: PTH120  # a plain path for the child
+    texts = {
+        subprocess.run(  # noqa: S603  # our own interpreter and script
+            [sys.executable, "-c", _SEEDED_SETS, tests],
+            env={**os.environ, "PYTHONHASHSEED": seed},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for seed in ("0", "1", "2")
+    }
+    assert len(texts) == 1
+    tagged, whole = (json.loads(line) for line in texts.pop().splitlines())
+    assert tagged["config"] == {
+        "names": "{'p', 'q', 'r'}",
+        "thing": "<object object>",
+    }
+    assert tagged["graph_version"] is not None
+    labels = _nodes(tagged)["tagged"]["params"][1]["value"]
+    assert labels == "frozenset({'alpha', 'beta', 'gamma'})"
+    # A value known only by its address can't be versioned.
+    assert whole["graph_version"] is None
+    assert _nodes(whole)["marked"]["params"][1]["value"].startswith("<")
+    assert " at 0x" not in _nodes(whole)["marked"]["params"][1]["value"]
+
+
+def test_stable_repr() -> None:
+    """Containers through, sets sorted, a one-item tuple kept a tuple."""
+    assert _export.stable_repr({"b": [1, (2,)], "a": set()}) == (
+        "{'b': [1, (2,)], 'a': set()}"
+    )
+    assert _export.stable_repr(frozenset()) == "frozenset()"
+    assert _export.stable_repr({3, 1, 2}) == "{1, 2, 3}"
+
+
+def test_a_pinned_version() -> None:
+    """`@cache(version=...)` stands for the code, as the result cache takes it."""
+    source = _MUTABLE.replace(
+        "def capped", "from fnloom import cache\n\n@cache(version='v1')\ndef capped"
+    )
+    document = _driver(source, "exported_pinned").export()
+    capped = _nodes(document)["capped"]
+    assert capped["pinned"] == "v1"
+    assert capped["version"] is not None
+    assert "unversioned" not in capped
+    assert document["graph_version"] is not None
+    bumped = _driver(source.replace("'v1'", "'v2'"), "exported_bumped").export()
+    assert bumped["graph_version"] != document["graph_version"]
+
+
+_KINDS = """
+from typing import TYPE_CHECKING
+
+from fnloom import group, parameterize, source
+
+if TYPE_CHECKING:
+    from decimal import Decimal
+
+def frame(x: int) -> dict:
+    return {"c1": [x], "c2": [x]}
+
+@parameterize(total={"parts": group(source("x"), source("y"))})
+def summed(parts: list[int]) -> int:
+    return sum(parts)
+
+def money(x: int) -> "Decimal":
+    return x
+"""
+
+
+def test_every_kind_of_node_exports() -> None:
+    """Group slots, an unresolved type and a node made with `fnloom.node`."""
+    module = make_module("exported_kinds", _KINDS)
+
+    def plain(total: int) -> int:
+        return total
+
+    driver = (
+        fnloom.Builder()
+        .with_modules(module)
+        .with_functions(fnloom.node(plain, name="renamed"))
+        .build()
+    )
+    document = driver.export()
+    nodes = _nodes(document)
+    assert [p["slot"] for p in nodes["total"]["params"]] == [0, 1]
+    assert [p["reads"] for p in nodes["total"]["params"]] == ["x", "y"]
+    assert nodes["money"]["type"] == "Decimal"
+    assert nodes["renamed"]["function"].endswith("plain")
+    assert json.loads(json.dumps(document)) == document
