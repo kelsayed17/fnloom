@@ -93,4 +93,28 @@ driver.draw_path_between("total", "subtotal")
 # raises ValueError: no path from 'total' to 'subtotal'
 ```
 
+## A run
+
+`draw_execution` takes what `execute` takes and draws what it would compute: the nodes it runs and the inputs it
+reads, the requested outputs marked `output` and each override marked `override`. Nothing only an override needed is
+drawn:
+
+```python
+run = driver.draw_execution(
+    ["total"], inputs={"price": 9.5, "quantity": 2}, overrides={"shipping": 0.0}
+)
+{node.name: sorted(node.marks) for node in run.nodes}
+# -> {'price': [], 'quantity': [], 'subtotal': [], 'shipping': ['override'], 'tax': [], 'total': ['output']}
+```
+
+It refuses what `validate` refuses, every problem in one `ValueError`, so a drawing never shows a run that can't
+happen. `validate=False` draws as if every required input were supplied:
+
+```python
+driver.draw_execution(["total"])
+# raises ValueError: missing inputs: 'price' (needed by 'subtotal'); 'quantity' (needed by 'subtotal')
+[node.name for node in driver.draw_execution(["total"], validate=False).nodes][:3]
+# -> ['price', 'quantity', 'subtotal']
+```
+
 The async driver draws the same drawings.

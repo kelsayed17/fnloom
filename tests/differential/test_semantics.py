@@ -169,6 +169,34 @@ def _hamilton_drawn(module: ModuleType, scope: str, names: Sequence[str]) -> set
 
 
 @pytest.mark.parametrize(
+    ("fixture", "outputs", "inputs", "overrides"),
+    [
+        ("diamond", ["join"], {"a": 1}, {}),
+        ("diamond", ["left", "right"], {"a": 1}, {}),
+        ("diamond", ["join"], {}, {"root": 2}),
+        ("chain", ["c"], {"a": 1}, {}),
+        ("override", ["top"], {}, {"mid": 3}),
+        ("optional", ["scaled"], {"a": 1}, {}),
+        ("optional", ["scaled"], {"a": 1, "factor": 2}, {}),
+    ],
+)
+def test_execution_drawings_show_the_same_nodes(
+    fixture: str,
+    outputs: list[str],
+    inputs: dict[str, object],
+    overrides: dict[str, object],
+) -> None:
+    """The computed nodes, the inputs read and the overrides, as Hamilton's (Q92)."""
+    module = load_fixture(fixture)
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    nodes, user = hamilton.graph.get_upstream_nodes(outputs, inputs, overrides)
+    drawing = fnloom.build(module).draw_execution(
+        outputs, inputs=inputs, overrides=overrides
+    )
+    assert {n.name for n in drawing.nodes} == {n.name for n in nodes | user}
+
+
+@pytest.mark.parametrize(
     ("fixture", "scope", "names"),
     [
         ("diamond", "upstream", ["join"]),

@@ -14,7 +14,16 @@ from collections.abc import Awaitable, Callable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import replace
 from types import MappingProxyType, ModuleType
-from typing import Any, Literal, NoReturn, Protocol, TypedDict, Unpack, override
+from typing import (
+    Any,
+    Literal,
+    NamedTuple,
+    NoReturn,
+    Protocol,
+    TypedDict,
+    Unpack,
+    override,
+)
 
 from fnloom import _async, _core, _hooks, _types
 from fnloom._caching import Cache, CacheOutcome, CacheRun
@@ -106,6 +115,21 @@ class _GraphLike(Protocol):
     ) -> _core.Plan:
         """Compiles a plan for the outputs, given the input and override names."""
         ...
+
+
+class _Shape(NamedTuple):
+    """A request's names, checked against the graph before any plan is made.
+
+    `lines` say what is wrong with them, one problem each. `planned` are the
+    known outputs, once each, in request order; `supplied` and `overridden` the
+    known input and override names.
+    """
+
+    key: _PlanKey
+    lines: list[str]
+    planned: list[str]
+    supplied: frozenset[str]
+    overridden: frozenset[str]
 
 
 class _Request:
@@ -1090,6 +1114,54 @@ class Driver[R = dict[str, object]]:
             hints += _left_out_hints(line, self._left_out)
         return hints
 
+    def _shape(
+        self,
+        final_vars: Sequence[str | Callable[..., object]],
+        inputs: Mapping[str, object] | None,
+        overrides: Mapping[str, object] | None,
+    ) -> _Shape:
+        """A request's names, and a line for each that is wrong, before any plan.
+
+        The lines cover functions no node comes from (Q30), outputs no
+        `@config.when*` variant gave, and unknown outputs, inputs and overrides.
+        `TypeError` for a malformed request, as `validate` documents.
+        """
+        wrong: list[str] = []
+        for kind, values in (("inputs", inputs), ("overrides", overrides)):
+            if values is not None and not isinstance(values, Mapping):
+                wrong.append(
+                    f"{kind} must be a mapping of names to values, "
+                    f"got {type(values).__name__}"
+                )
+        if wrong:
+            raise TypeError("; ".join(wrong))
+        outputs, absent_functions = requested(final_vars, self._nodes, self._unmatched)
+        key: _PlanKey = (outputs, _names(inputs), _names(overrides))
+        _, input_names, override_names = key
+        wanted = list(dict.fromkeys(outputs))
+        lines = [ABSENT + culprit for culprit in absent_functions]
+        lines += [
+            self._unmatched[n] for n in sorted(set(wanted) & self._unmatched.keys())
+        ]
+        # An output no variant gave has its own line; an input or override named
+        # like one is unknown, as `execute` says.
+        unknown = {
+            kind: self._unknown_names(kind, key)
+            for kind in ("outputs", "inputs", "overrides")
+        }
+        unknown["outputs"] = [n for n in unknown["outputs"] if n not in self._unmatched]
+        nodes = list(self._nodes)
+        lines += [
+            _unknown(kind, names, nodes) for kind, names in unknown.items() if names
+        ]
+        return _Shape(
+            key=key,
+            lines=lines,
+            planned=[n for n in wanted if n in self._nodes],
+            supplied=input_names.difference(unknown["inputs"]),
+            overridden=override_names.difference(unknown["overrides"]),
+        )
+
     def _unknown_names(self, kind: str, key: _PlanKey) -> list[str]:
         """The names of request `key` of `kind` the graph lacks, sorted.
 
@@ -1163,37 +1235,10 @@ class Driver[R = dict[str, object]]:
         or `overrides` that is not a mapping, naming both when both are not, which
         `execute` refuses too.
         """
-        wrong: list[str] = []
-        for kind, values in (("inputs", inputs), ("overrides", overrides)):
-            if values is not None and not isinstance(values, Mapping):
-                wrong.append(
-                    f"{kind} must be a mapping of names to values, "
-                    f"got {type(values).__name__}"
-                )
-        if wrong:
-            raise TypeError("; ".join(wrong))
-        outputs, absent_functions = requested(final_vars, self._nodes, self._unmatched)
-        key: _PlanKey = (outputs, _names(inputs), _names(overrides))
-        _, input_names, override_names = key
-        wanted = list(dict.fromkeys(outputs))
-        lines = [ABSENT + culprit for culprit in absent_functions]
-        lines += [
-            self._unmatched[n] for n in sorted(set(wanted) & self._unmatched.keys())
-        ]
-        # An output no variant gave has its own line; an input or override named
-        # like one is unknown, as `execute` says.
-        unknown = {
-            kind: self._unknown_names(kind, key)
-            for kind in ("outputs", "inputs", "overrides")
-        }
-        unknown["outputs"] = [n for n in unknown["outputs"] if n not in self._unmatched]
-        nodes = list(self._nodes)
-        lines += [
-            _unknown(kind, names, nodes) for kind, names in unknown.items() if names
-        ]
-        planned = [n for n in wanted if n in self._nodes]
-        supplied = input_names.difference(unknown["inputs"])
-        overridden = override_names.difference(unknown["overrides"])
+        shape = self._shape(final_vars, inputs, overrides)
+        lines = shape.lines
+        planned, supplied, overridden = shape.planned, shape.supplied, shape.overridden
+        input_names = shape.key[1]
         plan: _core.Plan | None
         try:
             plan = self._graph.prepare(planned, sorted(supplied), sorted(overridden))
@@ -1476,6 +1521,49 @@ class Driver[R = dict[str, object]]:
         if context:
             marks |= with_context(self._nodes, path)
         return drawing(self._nodes, marks, marks)
+
+    def draw_execution(
+        self,
+        final_vars: Sequence[str | Callable[..., object]],
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+        validate: bool = True,
+    ) -> Drawing:
+        """A drawing of what `execute` would compute for this request (Q92).
+
+        The nodes the run computes and the inputs it reads, the requested outputs
+        marked `output` (an input requested as one included), and each override
+        marked `override`; nothing only an override needed is drawn. Arguments
+        are `execute`'s, a function in `final_vars` included (Q30).
+
+        With `validate`, every problem `validate` finds is raised in one
+        `ValueError`, its lines joined, so a drawing never shows a run that
+        can't happen. `validate=False` draws from the names alone, as if every
+        required input were supplied; an unknown name is still a `ValueError`,
+        and a malformed request a `TypeError`.
+        """
+        shape = self._shape(final_vars, inputs, overrides)
+        if validate:
+            problems = self.validate(final_vars, inputs=inputs, overrides=overrides)
+            if problems:
+                raise ValueError("\n".join(problems))
+            supplied = shape.supplied
+        else:
+            if shape.lines:
+                raise ValueError("\n".join(sorted(shape.lines)))
+            required = {n for n, view in self.inputs().items() if view.required}
+            supplied = shape.supplied | required
+        plan = self._graph.prepare(
+            shape.planned, sorted(supplied - shape.overridden), sorted(shape.overridden)
+        )
+        drawn = [
+            node for node, action in plan.steps() if action != "skip_optional_input"
+        ]
+        marks: dict[str, list[Mark]] = {name: ["override"] for name in shape.overridden}
+        for name in shape.planned:
+            marks.setdefault(name, []).append("output")
+        return drawing(self._nodes, drawn, marks)
 
     def _check_drawn(self, names: Sequence[object]) -> None:
         """`TypeError` for no names or a non-`str`; `ValueError` for unknown ones."""
@@ -1797,6 +1885,19 @@ class AsyncDriver[R = dict[str, object]]:
     ) -> Drawing:
         """The nodes on a path; see `Driver.draw_path_between`."""
         return self._driver.draw_path_between(upstream, downstream, context=context)
+
+    def draw_execution(
+        self,
+        final_vars: Sequence[str | Callable[..., object]],
+        *,
+        inputs: Mapping[str, object] | None = None,
+        overrides: Mapping[str, object] | None = None,
+        validate: bool = True,
+    ) -> Drawing:
+        """What a run would compute; see `Driver.draw_execution`."""
+        return self._driver.draw_execution(
+            final_vars, inputs=inputs, overrides=overrides, validate=validate
+        )
 
     def prepare(
         self,

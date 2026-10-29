@@ -321,3 +321,78 @@ def test_the_text_does_not_depend_on_the_hash_seed() -> None:
         for seed in ("0", "1", "2")
     }
     assert len(texts) == 1
+
+
+def test_draw_execution_marks_outputs() -> None:
+    """What the run computes and reads, its outputs marked (Q92)."""
+    drawing = _driver().draw_execution(["c", "d"], inputs={"x": 1})
+    assert _names(drawing) == ["x", "a", "b", "c", "d"]
+    assert _marked(drawing) == {"c": {"output"}, "d": {"output"}}
+
+
+def test_draw_execution_with_an_override() -> None:
+    """The override marked, and nothing only it needed (Review Focus 2)."""
+    drawing = _driver().draw_execution(["c"], inputs={"x": 1}, overrides={"b": 3})
+    assert _names(drawing) == ["b", "c"]
+    assert _marked(drawing) == {"b": {"override"}, "c": {"output"}}
+    assert drawing.edges == (("b", "c"),)
+
+
+def test_draw_execution_marks_an_input_requested_as_an_output() -> None:
+    """Hamilton leaves it unmarked in a box; fnloom draws and marks it."""
+    drawing = _driver().draw_execution(["x", "a"], inputs={"x": 1})
+    assert _marked(drawing) == {"x": {"output"}, "a": {"output"}}
+
+
+def test_draw_execution_draws_a_supplied_optional_input_only() -> None:
+    """A defaulted input is drawn when supplied, since only then is it read."""
+    driver = _driver()
+    assert "y" not in _names(driver.draw_execution(["b"], inputs={"x": 1}))
+    assert "y" in _names(driver.draw_execution(["b"], inputs={"x": 1, "y": 3}))
+
+
+def test_draw_execution_takes_functions() -> None:
+    """A function stands for its node, as in `execute` (Q30)."""
+    module = _probe()
+    driver = fnloom.Builder().with_modules(module).with_config({"mode": "fast"}).build()
+    by_function = driver.draw_execution([module.c], inputs={"x": 1})
+    assert by_function == driver.draw_execution(["c"], inputs={"x": 1})
+
+
+def test_draw_execution_validates() -> None:
+    """Every problem `validate` finds, in one ValueError, unless told not to."""
+    driver = _driver()
+    with pytest.raises(ValueError, match=r"missing inputs: 'x' \(needed by 'a'\)"):
+        driver.draw_execution(["c"])
+    with pytest.raises(ValueError, match="x: expected int, got str"):
+        driver.draw_execution(["c"], inputs={"x": "s"})
+    lines = driver.validate(["c", "nope"], inputs={"x": "s"})
+    with pytest.raises(ValueError, match="unknown outputs") as caught:
+        driver.draw_execution(["c", "nope"], inputs={"x": "s"})
+    assert str(caught.value) == "\n".join(lines)
+    drawn = driver.draw_execution(["c"], validate=False)
+    assert _names(drawn) == ["x", "a", "b", "c"]
+    assert driver.draw_execution(["c"], inputs={"x": "s"}, validate=False) == drawn
+
+
+def test_draw_execution_checks_names_without_validating() -> None:
+    """Unknown names and a malformed request are refused either way."""
+    driver = _driver()
+    with pytest.raises(ValueError, match="unknown outputs: 'nope'"):
+        driver.draw_execution(["nope"], validate=False)
+    with pytest.raises(ValueError, match="unknown overrides: 'nada'"):
+        driver.draw_execution(["c"], overrides={"nada": 1}, validate=False)
+    with pytest.raises(TypeError):
+        driver.draw_execution("c", validate=False)
+    with pytest.raises(TypeError, match="inputs must be a mapping"):
+        driver.draw_execution(["c"], inputs=["x"], validate=False)  # ty: ignore[invalid-argument-type]
+
+
+def test_the_async_driver_draws_executions_the_same() -> None:
+    """The async driver's execution drawing is the sync driver's."""
+    module = _probe()
+    built = fnloom.Builder().with_modules(module).with_config({"mode": "fast"})
+    inputs, overrides = {"x": 1}, {"b": 2}
+    assert built.build_async().draw_execution(
+        ["c", "d"], inputs=inputs, overrides=overrides
+    ) == built.build().draw_execution(["c", "d"], inputs=inputs, overrides=overrides)

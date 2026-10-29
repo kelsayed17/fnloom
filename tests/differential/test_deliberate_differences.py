@@ -4564,3 +4564,27 @@ def test_q93_inputs_and_config() -> None:
     assert ("x", "a") in built.draw().edges
     assert ("x", "b") in built.draw().edges
     assert next(n for n in nodes if n.name == "c").condition == "mode == 'fast'"
+
+
+@pytest.mark.deliberate("Q92")
+@pytest.mark.usefixtures("fake_graphviz")
+def test_q92_execution_drawings() -> None:
+    """Hamilton boxes an input requested as an output, unmarked; fnloom marks it."""
+    module = load_fixture("chain")
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    drawn = hamilton.visualize_execution(["a", "b"], inputs={"a": 1}, show_legend=False)
+    names = {name: attrs for name, _, attrs in drawn.nodes}
+    assert "a" not in names
+    assert names["b"]["fillcolor"] == "#FFC857"
+    assert "_b_inputs" in names
+    built = fnloom.build(module)
+    marked = {
+        n.name: n.marks for n in built.draw_execution(["a", "b"], inputs={"a": 1}).nodes
+    }
+    assert marked == {"a": {"output"}, "b": {"output"}}
+    # Both validate; Hamilton's error names its bypass, fnloom's is `validate`'s.
+    with pytest.raises(ValueError, match="bypass_validation=True"):
+        hamilton.visualize_execution(["c"])
+    with pytest.raises(ValueError, match="missing inputs") as caught:
+        built.draw_execution(["c"])
+    assert str(caught.value) == "\n".join(built.validate(["c"]))
