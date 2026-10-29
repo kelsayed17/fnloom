@@ -81,13 +81,16 @@ The design fails, even if every test passes, if:
 ```python
 from fnloom import Collect, Parallelizable
 
-def tickers(universe: str) -> Parallelizable[str]:
-    yield from load_universe(universe)          # or: return [...]
 
-def prices(tickers: str, day: date) -> float:    # runs once per ticker; `day` is shared
+def tickers(universe: str) -> Parallelizable[str]:
+    yield from load_universe(universe)  # or: return [...]
+
+
+def prices(tickers: str, day: date) -> float:  # runs once per ticker; `day` is shared
     return fetch(tickers, day)
 
-def total(prices: Collect[float]) -> float:      # prices is a list[float], in ticker order
+
+def total(prices: Collect[float]) -> float:  # prices is a list[float], in ticker order
     return sum(prices)
 ```
 
@@ -380,6 +383,7 @@ The [Threads](../running.md#threads) guarantees hold and extend to parallel runs
 
 ```python
 from fnloom import ABSENT, Absent
+
 
 def quote(ticker: str) -> float | Absent:
     q = feed.get(ticker)
