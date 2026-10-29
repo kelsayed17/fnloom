@@ -820,3 +820,19 @@ def test_a_frame_with_nan_fails_range() -> None:
     frame = pandas.DataFrame({"a": [1.0, numpy.nan], "b": [2.0, 3.0]})
     with pytest.raises(ValidationError):
         driver.execute(["a"], inputs={"v": frame})
+
+
+def test_allow_none_true_keeps_only_the_builtin() -> None:
+    """A custom check named `allow_none` still runs on None."""
+    module = _any_module("allow_none_custom")
+    ran: list[object] = []
+
+    def allow_none(value: object) -> bool:
+        ran.append(value)
+        return False
+
+    check_output(allow_none=True)(module.a)  # ty: ignore[unresolved-attribute]
+    fnloom.check_output_custom(allow_none)(module.a)  # ty: ignore[unresolved-attribute]
+    driver = fnloom.build(module)  # ty: ignore[invalid-argument-type]
+    assert driver.execute(["a"], inputs={"v": None}) == {"a": None}
+    assert ran == []

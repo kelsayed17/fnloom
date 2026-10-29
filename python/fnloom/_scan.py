@@ -956,9 +956,7 @@ def scan(
     if given:
         groups.setdefault(None, []).extend(given)  # ty: ignore[invalid-argument-type]  # specs join the plain group
     entries: list[_Entry] = [
-        (namespace, _resolved_entry(entry, config))
-        for namespace, group in groups.items()
-        for entry in group
+        (namespace, entry) for namespace, group in groups.items() for entry in group
     ]
     selecting = gathered.selecting
     if any(
@@ -966,19 +964,26 @@ def scan(
         for e in given
     ):
         selecting = {*selecting, None}
+    unmatched: dict[str, str] = {}
+    if selecting:
+        namespaced = any(namespace is not None for namespace in groups)
+        entries, selection = _selected(
+            entries, gathered.configured, config, namespaced=namespaced
+        )
+        unmatched = selection.unmatched
+    # Only the functions the config kept are resolved, so an unselected
+    # variant's `@resolve` never runs (Q110).
+    resolved = {id(entry): _resolved_entry(entry, config) for _, entry in entries}
+    entries = [(namespace, resolved[id(entry)]) for namespace, entry in entries]
+    given = [resolved.get(id(entry), entry) for entry in given]
     # Each namespace's names, from every function given under it, unselected
-    # variants too: reading a name no variant gave is the unmatched error.
+    # variants too: reading a name no variant gave is the unmatched error. A
+    # resolved function's names are its resolved decorators'.
     names = {
-        namespace: _names_in(namespace, group)
+        namespace: _names_in(namespace, [resolved.get(id(e), e) for e in group])
         for namespace, group in groups.items()
         if namespace is not None
     }
-    unmatched: dict[str, str] = {}
-    if selecting:
-        entries, selection = _selected(
-            entries, gathered.configured, config, namespaced=bool(names)
-        )
-        unmatched = selection.unmatched
     seen = _made(entries, given, names, awaits=awaits)
     # A node a plain function or another variant defines is not missing.
     missing = {n: why for n, why in unmatched.items() if n not in seen}

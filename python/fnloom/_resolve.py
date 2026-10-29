@@ -22,6 +22,9 @@ from fnloom._decorators import (
     group_check,
 )
 
+# Annotations as written: a name imported only under TYPE_CHECKING is no error.
+_FORWARD = annotationlib.Format.FORWARDREF
+
 # The attribute a resolved copy names its function by, so a request, a view and
 # a hook see the function as written.
 ORIGINAL = "__fnloom_original__"
@@ -48,8 +51,7 @@ def inject[F: Callable[..., object]](**bindings: Binding) -> Callable[[F], F]:
         if current.injected is not None:
             msg = "function already has @inject; give all its bindings to one"
             raise ValueError(msg)
-        forward = annotationlib.Format.FORWARDREF
-        params = set(inspect.signature(fn, annotation_format=forward).parameters)
+        params = set(inspect.signature(fn, annotation_format=_FORWARD).parameters)
         _check_rows({"inject": frozen}, params)
         group_check(fn, {"inject": frozen})
         setattr(fn, _ATTRIBUTE, replace(current, injected=frozen))
@@ -75,7 +77,9 @@ def resolve[F: Callable[..., object]](
         given = type(decorate_with).__name__
         msg = f"resolve takes a function of config keys, got {given}"
         raise TypeError(msg)
-    params = inspect.signature(decorate_with).parameters.values()
+    params = inspect.signature(
+        decorate_with, annotation_format=_FORWARD
+    ).parameters.values()
     unnamed = [
         p.name
         for p in params
@@ -123,8 +127,8 @@ _FORBIDDEN = (
     ("resolvers", "@resolve"),
 )
 
-# One resolved copy at a time: a decorator reads and writes the copy's record.
-_LOCK = threading.Lock()
+# One resolved copy at a time, re-entrant: a resolver may build a driver itself.
+_LOCK = threading.RLock()
 
 
 def resolved(
@@ -144,7 +148,12 @@ def resolved(
         for resolver in resolvers:
             for decorator in reversed(_decorators(where, resolver, config)):
                 before = decorations(copy)
-                if decorator(copy) is not copy:
+                try:
+                    applied = decorator(copy)
+                except Exception as error:
+                    error.add_note(f"in {where}")
+                    raise
+                if applied is not copy:
                     msg = f"{where}: a decorator returned another object"
                     raise TypeError(msg)
                 after = decorations(copy)
@@ -164,7 +173,7 @@ def _decorators(
     where: str, resolver: Callable[..., object], config: Mapping[str, object]
 ) -> Sequence[Callable[..., object]]:
     """What `resolver` returns for `config`, as decorators to apply, first outermost."""
-    params = inspect.signature(resolver).parameters.values()
+    params = inspect.signature(resolver, annotation_format=_FORWARD).parameters.values()
     missing = sorted(
         p.name for p in params if p.default is p.empty and p.name not in config
     )
@@ -172,7 +181,11 @@ def _decorators(
         listed = ", ".join(repr(k) for k in missing)
         msg = f"{where}: the config has no {listed}"
         raise ValueError(msg)
-    made = resolver(**{p.name: config[p.name] for p in params if p.name in config})
+    try:
+        made = resolver(**{p.name: config[p.name] for p in params if p.name in config})
+    except Exception as error:
+        error.add_note(f"in {where}")
+        raise
     found: list[object] = list(made) if isinstance(made, (list, tuple)) else [made]
     if wrong := [type(d).__name__ for d in found if not callable(d)]:
         listed = ", ".join(wrong)

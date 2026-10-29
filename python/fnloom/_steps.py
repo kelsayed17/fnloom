@@ -8,6 +8,7 @@ any other. A step's first parameter takes the value; the rest are bound with
 default: it is never a graph input (Q105).
 """
 
+import annotationlib
 import inspect
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -25,6 +26,10 @@ if TYPE_CHECKING:
     from types import ModuleType
 
     from fnloom._config import ConditionKind
+
+
+# Annotations as written: a name imported only under TYPE_CHECKING is no error.
+_FORWARD = annotationlib.Format.FORWARDREF
 
 _NO_TAGS = MappingProxyType[str, str]({})
 
@@ -103,7 +108,7 @@ def step(fn: Callable[..., object], *args: object, **bindings: object) -> Step:
         msg = f"step {name}: an async def can't be a step"
         raise TypeError(msg)
     try:
-        signature = inspect.signature(fn)
+        signature = inspect.signature(fn, annotation_format=_FORWARD)
     except TypeError, ValueError:
         msg = f"step {name}: it has no signature to call it by"
         raise TypeError(msg) from None
@@ -207,7 +212,7 @@ def pipe_input[F: Callable[..., object]](
         if current.pipe_input is not None:
             msg = "function already has a @pipe_input; give all its steps to one"
             raise ValueError(msg)
-        params = list(inspect.signature(fn).parameters)
+        params = list(inspect.signature(fn, annotation_format=_FORWARD).parameters)
         if not params:
             msg = f"pipe_input on {_named(fn)}: it has no parameter to feed"
             raise TypeError(msg)
@@ -280,7 +285,9 @@ def _step_node(
 ) -> NodeDef:
     """`s` as a node `name`, its first parameter reading `reads`."""
     hints = resolved_hints(s.fn)
-    params_in_order = list(inspect.signature(s.fn).parameters)
+    params_in_order = list(
+        inspect.signature(s.fn, annotation_format=_FORWARD).parameters
+    )
     first = params_in_order[0]
     params = [Param(first, Source(reads), True, opaque(hints[first]))]  # noqa: FBT003  # `required`
     for param in params_in_order[1:]:

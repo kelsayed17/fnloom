@@ -91,6 +91,7 @@ def test_the_regressed_callables_are_covered() -> None:
         "apply_to",
         "inject",
         "resolve",
+        "Builder.with_node_wrappers",
         "Validator",
         "Drawing.to_mermaid",
     }

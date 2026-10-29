@@ -413,6 +413,22 @@ reports them as hits: 0.056 ms for the chain, one hit, and 0.246 ms for the laye
 0.16 ms more than unhooked, the cost of the Python walk; making the native walk return its keys would remove it. A
 hooked cached run is still 25 to 360 times faster than Hamilton's in memory.
 
+## Checks and wrappers
+
+An [output check](writing-nodes.md#checking-values) or a [node wrapper](running.md#node-wrappers) costs a run nothing
+until one is added: a graph with neither builds the same payloads it did before Plan 8. With one, each checked or
+wrapped node makes one more Python call around its own. On a 1,000-node chain, prepared once and run 200 times (the
+median of each, ms, the development build of `scripts/check.sh`, so slower than a release build in absolute terms):
+
+| run | ms | per node |
+| --- | ---: | ---: |
+| plain | 0.67 | |
+| every node with one `check_output_custom` check | 2.04 | 1.4 µs |
+| every node through one pass-through wrapper | 1.89 | 1.2 µs |
+| every node through two | 2.05 | 1.4 µs |
+
+`benchmarks/test_checks_wrappers.py` measures the checked and the wrapped runs under CodSpeed.
+
 ## Why fan-in is fast
 
 A node with `n` parameters is called with `n` keyword arguments. CPython binds a keyword to a parameter by identity

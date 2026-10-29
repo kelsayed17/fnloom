@@ -48,7 +48,14 @@ def export(  # noqa: PLR0913  # one argument per part of the document
     """
     versions: dict[int, tuple[str | None, str | None]] = {}
     nodes = [
-        _node(drawn.name, sorted(drawn.marks), views[drawn.name], inputs, versions)
+        _node(
+            drawn.name,
+            sorted(drawn.marks),
+            views[drawn.name],
+            inputs,
+            versions,
+            built_from=getattr(views, "built_from", {}).get(drawn.name),
+        )
         for drawn in drawing.nodes
     ]
     return {
@@ -221,14 +228,21 @@ def type_text(annotation: object) -> str:
     return inspect.formatannotation(annotation)
 
 
-def _node(
+def _node(  # noqa: PLR0913  # the node's parts, and its build's
     name: str,
     marks: list[str],
     view: NodeView,
     inputs: Mapping[str, InputView],
     versions: dict[int, tuple[str | None, str | None]],
+    *,
+    built_from: Callable[..., object] | None = None,
 ) -> dict[str, Any]:
-    """One node's entry; an input's has no source or version (Q95)."""
+    """One node's entry; an input's has no source or version (Q95).
+
+    `built_from` is the function the node was built from when it isn't the
+    view's `origin`, a `@resolve` copy: its decorations, such as a pinned
+    version, are the ones that apply.
+    """
     entry: dict[str, Any] = {
         "name": name,
         "kind": "input" if view.is_input else "function",
@@ -255,14 +269,15 @@ def _node(
         qualname = getattr(origin, "__qualname__", type(origin).__qualname__)
         entry["function"] = f"{origin.__module__}.{qualname}"
         entry["source"] = _source(origin)
-        key = id(origin)
+        built = origin if built_from is None else built_from
+        key = id(built)
         if key not in versions:
-            versions[key] = _version(origin)
+            versions[key] = _version(built)
         entry["version"], unversioned = versions[key]
         if unversioned is not None:
             entry["unversioned"] = unversioned
         if (
-            policy := decorations(origin).cache
+            policy := decorations(built).cache
         ) is not None and policy.version is not None:
             entry["pinned"] = policy.version
     return entry

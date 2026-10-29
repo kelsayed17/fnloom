@@ -11,6 +11,7 @@ except a one-shot iterator, which is refused; numpy and pandas values are read
 through their own vectorised methods, found by duck typing.
 """
 
+import annotationlib
 import collections.abc
 import contextvars
 import inspect
@@ -33,6 +34,10 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Sequence
 
     from fnloom._scan import NodeDef
+
+
+# Annotations as written: a name imported only under TYPE_CHECKING is no error.
+_FORWARD = annotationlib.Format.FORWARDREF
 
 type Importance = Literal["fail", "warn"]
 
@@ -617,7 +622,7 @@ def _from_function(
         msg = f"check {name} is an async def; checks run synchronously"
         raise TypeError(msg)
     try:
-        params = inspect.signature(fn).parameters
+        params = inspect.signature(fn, annotation_format=_FORWARD).parameters
     except TypeError, ValueError:
         msg = f"check {name} has no signature to call it by"
         raise TypeError(msg) from None

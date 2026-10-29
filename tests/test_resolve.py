@@ -224,3 +224,68 @@ def piped(v: int) -> int:
     driver = fnloom.build(make_module("injected_piped", source_text))
     assert driver.nodes["piped.with_inc"].dependencies == ("a",)
     assert driver.execute(["piped"], inputs={"a": 1}) == {"piped": 2}
+
+
+def test_an_unselected_variant_s_resolver_never_runs() -> None:
+    """Only the variants the config keeps are resolved."""
+    source_text = """
+from fnloom import config, resolve, tag
+
+@config.when(mode="a")
+@resolve(lambda needed: tag(n=needed))
+def var__a(x: int) -> int:
+    return x
+
+@config.when(mode="b")
+def var__b(x: int) -> int:
+    return x * 2
+"""
+    module = make_module("resolve_variant", source_text)
+    driver = fnloom.Builder().with_modules(module).with_config({"mode": "b"}).build()
+    assert driver.execute(["var"], inputs={"x": 1}) == {"var": 2}
+
+
+def test_resolved_fields_are_namespace_names() -> None:
+    """A field a resolved `@extract_fields` adds is read within the namespace."""
+    source_text = """
+from fnloom import extract_fields, resolve
+
+@resolve(lambda: extract_fields({"p": int}))
+def fields(x: int) -> dict:
+    return {"p": x}
+
+def reads_p(p: int) -> int:
+    return p
+"""
+    module = make_module("resolve_namespaced", source_text)
+    driver = fnloom.Builder().with_modules(module, namespace="ns").build()
+    assert driver.nodes["ns.reads_p"].dependencies == ("ns.p",)
+    assert driver.execute(["ns.reads_p"], inputs={"x": 4}) == {"ns.reads_p": 4}
+
+
+def test_export_reads_the_resolved_decorators() -> None:
+    """A `@cache(version=...)` a resolver applies is the exported pin."""
+    source_text = """
+import fnloom
+
+@fnloom.resolve(lambda: fnloom.cache(version="v9"))
+def a(x: int) -> int:
+    return x
+"""
+    driver = fnloom.build(make_module("resolve_export", source_text))
+    (node,) = [n for n in driver.export()["nodes"] if n["name"] == "a"]
+    assert node["pinned"] == "v9"
+
+
+def test_a_resolver_s_own_error_names_it() -> None:
+    """Its exception, with a note saying which `@resolve` raised it."""
+    source_text = """
+import fnloom
+
+@fnloom.resolve(lambda: fnloom.tag(n=3))
+def a(x: int) -> int:
+    return x
+"""
+    with pytest.raises(TypeError) as caught:
+        fnloom.build(make_module("resolve_raising", source_text))
+    assert "in resolve on a" in caught.value.__notes__

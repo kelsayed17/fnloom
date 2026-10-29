@@ -5218,3 +5218,37 @@ def test_q110_resolve_needs_no_power_user_mode(tmp_path: Path) -> None:
                 _Q110_RESOLVED.format(package="fnloom", extra=", resolve", when=""),
             )
         ).build()
+
+
+@pytest.mark.deliberate("Q111")
+def test_q111_wrappers_chain() -> None:
+    """Hamilton refuses a second `NodeExecutionMethod`; fnloom chains any number."""
+
+    class Twice(lifecycle.NodeExecutionMethod):
+        @override
+        def run_to_execute_node(
+            self, *, node_callable: Any, node_kwargs: dict[str, Any], **kwargs: Any
+        ) -> Any:
+            del kwargs
+            return node_callable(**node_kwargs)
+
+    module = load_fixture("chain")
+    with pytest.raises(ValueError, match="do_node_execute"):
+        hamilton_driver.Builder().with_modules(module).with_adapters(
+            Twice(), Twice()
+        ).build()
+    order: list[str] = []
+
+    def first(node: object, call: Callable[[], object], inputs: object) -> object:
+        del node, inputs
+        order.append("first")
+        return call()
+
+    def second(node: object, call: Callable[[], object], inputs: object) -> object:
+        del node, inputs
+        order.append("second")
+        return call()
+
+    built = fnloom.Builder().with_modules(module).with_node_wrappers(first, second)
+    assert built.build().execute(["b"], inputs={"a": 1}) == {"b": 2}
+    assert order == ["first", "second"]
