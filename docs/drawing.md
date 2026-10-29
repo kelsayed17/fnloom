@@ -189,8 +189,9 @@ and docs don't change what a node computes, so `graph_version` leaves them out; 
 
 The `fnloom` command, also `python -m fnloom`, draws, exports, validates and compares graphs. It needs nothing but
 fnloom. Each module is a dotted name, imported from the current folder as `python -m` would, or a `.py` path, imported
-with its own folder on `sys.path` so it can import its siblings. `MODULE@NS` gives a module's nodes the namespace
-`NS`.
+with its own folder on `sys.path` so it can import its siblings. A module inside a package needs its dotted name, for
+its relative imports. `MODULE@NS` gives a module's nodes the namespace `NS`. Without `--format`, `-o` writes the format
+its suffix names.
 
 ```bash
 fnloom draw prices.py --config region=eu > prices.dot
@@ -219,5 +220,6 @@ with `--config`.
 | `validate` | every problem a run of `--outputs` would raise, one per line; status 1 if there is any |
 | `diff OLD NEW` | what changed between two exports, as JSON; status 0 for no change, 1 for a change, 2 for a file that is no export |
 
-stdout carries only the result. An error is one line on stderr, `fnloom: TypeName: message`, with status 1; a command
-line that can't be run gets argparse's message and status 2.
+stdout carries only the result. An error goes to stderr as `fnloom: TypeName: message`, with status 1; a command line
+that can't be run gets argparse's message and status 2. A `--input x=1` is the number 1, as JSON reads it; quote it,
+`--input 'x="1"'`, for the string.

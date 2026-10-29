@@ -7,7 +7,9 @@ a line on stderr, with exit status 1, or 2 for a usage error.
 
 import argparse
 import importlib
+import importlib.util
 import json
+import os
 import sys
 import tomllib
 from pathlib import Path
@@ -32,22 +34,51 @@ class _UsageError(Exception):
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    """Runs the command `argv` names (default `sys.argv[1:]`); its exit status."""
+    """Runs the command `argv` names (default `sys.argv[1:]`); its exit status.
+
+    Never raises `SystemExit`: a usage error, `--help` included, is returned as
+    argparse's status, so an in-process caller always gets an `int`.
+    """
     parser = _parser()
-    args = parser.parse_args(argv)
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as exited:
+        return exited.code if isinstance(exited.code, int) else 2
     command = cast("Callable[[argparse.Namespace], int]", args.command)
     try:
         return command(args)
     except _UsageError as error:
-        parser.exit(2, f"{parser.prog}: error: {error}\n")
+        parser.print_usage(sys.stderr)
+        sys.stderr.write(f"{parser.prog}: error: {error}\n")
+        return 2
+    except BrokenPipeError:
+        # The reader went away (`fnloom draw ... | head`): nothing to report.
+        _quiet_stdout()
+        return 1
     except Exception as error:  # noqa: BLE001  # every failure: one report, status 1
         _report(error)
         return 1
 
 
 def run() -> NoReturn:
-    """The console script: `main`, its status the process's."""
-    raise SystemExit(main())
+    """The console script: `main`, its status the process's; 130 on Ctrl-C."""
+    try:
+        status = main()
+        # Flushed here, so a reader gone before the last write is caught below.
+        sys.stdout.flush()
+    except BrokenPipeError:
+        _quiet_stdout()
+        status = 1
+    except KeyboardInterrupt:
+        status = 130
+    raise SystemExit(status)
+
+
+def _quiet_stdout() -> None:
+    """Points stdout at the null device: exiting then flushes into no closed pipe."""
+    null = os.open(os.devnull, os.O_WRONLY)
+    os.dup2(null, sys.stdout.fileno())
+    os.close(null)
 
 
 def _report(error: BaseException) -> None:
@@ -85,8 +116,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     draw.add_argument(
         "--format",
-        default="dot",
-        help="dot (default), mermaid, or an image format Graphviz makes: svg, png, pdf",
+        type=str.lower,
+        help="dot or mermaid, or an image format Graphviz makes: svg, png, pdf; "
+        "by default dot to stdout, or what -o's suffix names",
     )
     draw.add_argument("--orient", default="LR", choices=("LR", "TB", "RL", "BT"))
     draw.add_argument("--no-legend", action="store_true", help="leave out the legend")
@@ -179,7 +211,8 @@ class _Request:
             **context.get("overrides", {}),
             **_pairs(args.override, "--override"),
         }
-        outputs = [n for item in args.outputs for n in item.split(",") if n]
+        outputs = [n.strip() for item in args.outputs for n in item.split(",")]
+        outputs = [n for n in outputs if n]
         self.outputs: list[str] = outputs or list(context.get("outputs", []))
         builder = fnloom.Builder()
         for spec in args.modules:
@@ -196,6 +229,12 @@ class _Request:
 
 
 def _draw(args: argparse.Namespace) -> int:
+    if args.no_context and not args.path:
+        msg = "--no-context goes with --path"
+        raise _UsageError(msg)
+    if args.no_validate and not args.execution:
+        msg = "--no-validate goes with --execution"
+        raise _UsageError(msg)
     request = _Request(args)
     driver = request.driver
     if args.upstream:
@@ -210,15 +249,17 @@ def _draw(args: argparse.Namespace) -> int:
         )
     else:
         drawing = driver.draw()
-    text_format = _TEXT_FORMATS.get(args.format)
     if args.output is not None:
+        # No --format: the file's suffix says, as `render` reads it.
+        chosen = None if args.format is None else _TEXT_FORMATS.get(args.format)
         drawing.render(
             args.output,
-            format=text_format or args.format,
+            format=chosen or args.format,
             orient=args.orient,
             legend=not args.no_legend,
         )
         return 0
+    text_format = _TEXT_FORMATS.get(args.format or "dot")
     if text_format is None:
         msg = f"--format {args.format} is an image: give a file with -o"
         raise _UsageError(msg)
@@ -254,7 +295,7 @@ def _diff(args: argparse.Namespace) -> int:
     for path in (args.old, args.new):
         try:
             documents.append(json.loads(path.read_text(encoding="utf-8")))
-        except (OSError, ValueError) as error:
+        except (OSError, ValueError) as error:  # unreadable, or not JSON
             _report(error)
             return 2
     try:
@@ -277,27 +318,68 @@ def _write(text: str, output: Path | None) -> None:
 def _module(spec: str) -> tuple[ModuleType, str | None]:
     """The module `spec` names, imported, and the namespace after an `@`.
 
-    A `.py` path is imported by its stem with its folder first on `sys.path`, so
-    a sibling import works (Q97). A dotted name is imported with the current
-    folder on `sys.path`, as `python -m` has it.
+    `@NS` is read as a namespace only when `NS` is a dotted name, so a folder
+    named `a@b` is still a folder. A `.py` path is loaded under its stem with its
+    folder first on `sys.path`, so a sibling import works (Q97); a module of that
+    name already imported from another file is a usage error rather than a
+    silent swap. A dotted name is imported with the current folder on
+    `sys.path`, as `python -m` has it; a package's module needs its dotted name,
+    for its relative imports.
     """
-    target, at, namespace = spec.rpartition("@") if "@" in spec else (spec, "", "")
-    if at and not namespace:
+    target, namespace = _split_namespace(spec)
+    if not target.lower().endswith(".py"):
+        folder = str(Path.cwd())
+        if folder not in sys.path:
+            sys.path.insert(0, folder)
+        return importlib.import_module(target), namespace
+    return _load_file(target), namespace
+
+
+def _split_namespace(spec: str) -> tuple[str, str | None]:
+    """`spec` and no namespace, or what precedes `@NS` and `NS`, a dotted name."""
+    head, at, tail = spec.rpartition("@")
+    if not at:
+        return spec, None
+    if not tail:
         msg = f"no namespace after '@' in {spec!r}"
         raise _UsageError(msg)
-    if target.endswith(".py"):
-        path = Path(target).resolve()
-        if not path.is_file():
-            msg = f"no such module file: {target}"
-            raise _UsageError(msg)
-        folder = str(path.parent)
-        name = path.stem
-    else:
-        folder = str(Path.cwd())
-        name = target
-    if folder not in sys.path:
-        sys.path.insert(0, folder)
-    return importlib.import_module(name), namespace or None
+    if all(part.isidentifier() for part in tail.split(".")):
+        return head, tail
+    return spec, None
+
+
+def _load_file(target: str) -> ModuleType:
+    """The `.py` file `target`, loaded under its stem, its folder on `sys.path`."""
+    path = Path(target).resolve()
+    if not path.is_file():
+        msg = f"no such module file: {target}"
+        raise _UsageError(msg)
+    if str(path.parent) not in sys.path:
+        sys.path.insert(0, str(path.parent))
+    name = path.stem
+    loaded = sys.modules.get(name)
+    if loaded is not None:
+        where = getattr(loaded, "__file__", None)
+        if where is not None and Path(where).resolve() == path:
+            return loaded
+        source = f" from {where}" if where else ""
+        msg = (
+            f"{target}: a module named {name!r} is already imported{source}; "
+            "rename the file, or give its dotted name"
+        )
+        raise _UsageError(msg)
+    found = importlib.util.spec_from_file_location(name, path)
+    if found is None or found.loader is None:
+        msg = f"cannot load {target} as a module"
+        raise _UsageError(msg)
+    module = importlib.util.module_from_spec(found)
+    sys.modules[name] = module
+    try:
+        found.loader.exec_module(module)
+    except BaseException:
+        del sys.modules[name]
+        raise
+    return module
 
 
 def _pairs(items: Sequence[str], flag: str) -> dict[str, object]:
@@ -323,9 +405,9 @@ def _context(path: Path) -> dict[str, Any]:
         msg = f"cannot read --context {path}: {error.strerror}"
         raise _UsageError(msg) from None
     try:
-        if path.suffix == ".toml":
+        if path.suffix.lower() == ".toml":
             loaded = tomllib.loads(raw.decode())
-        elif path.suffix == ".json":
+        elif path.suffix.lower() == ".json":
             loaded = json.loads(raw)
         else:
             msg = f"--context must be a .json or .toml file, got {path.name}"
@@ -347,4 +429,7 @@ def _context(path: Path) -> dict[str, Any]:
             name = "a table" if kind is dict else "a list"
             msg = f"--context {path}: {key} must be {name}"
             raise _UsageError(msg)
+    if not all(isinstance(name, str) for name in loaded.get("outputs", [])):
+        msg = f"--context {path}: outputs must be a list of names"
+        raise _UsageError(msg)
     return loaded

@@ -236,8 +236,15 @@ def diff(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
     compared, only their nodes. `ValueError` for a document of another format.
     """
     for side, document in (("old", old), ("new", new)):
-        if document.get("format") != FORMAT:
+        if not isinstance(document, dict) or document.get("format") != FORMAT:
             msg = f"{side}: not an fnloom export ({FORMAT})"
+            raise ValueError(msg)
+        nodes = document.get("nodes")
+        if not isinstance(nodes, list) or not all(
+            isinstance(node, dict) and isinstance(node.get("name"), str)
+            for node in nodes
+        ):
+            msg = f"{side}: an fnloom export's nodes must be a list of named entries"
             raise ValueError(msg)
     before = {node["name"]: node for node in old["nodes"]}
     after = {node["name"]: node for node in new["nodes"]}

@@ -3,7 +3,8 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** approved 2026-10-28, in progress on `claude/plan-7-viz-cli`.
+**Status:** done, 2026-10-28, on `claude/plan-7-viz-cli`, merge pending. [As built](#as-built) records where the build
+went beyond the plan or narrowed it.
 
 **Goal:** close the roadmap's step 6. That means:
 
@@ -341,4 +342,59 @@ Q98).
 
 ## As built
 
-Filled in when the plan is done.
+- **`DrawnNode.title`** is a field decision 2 didn't list: what the label shows for the node, its `display_name` tag
+  or its name, so a reader of `Drawing.nodes` sees the label without reading tags.
+- **Legend ids step aside.** A node may be named like a legend entry (`@extract_columns("legend: function")`), so an
+  entry's id gets underscores until no drawn node has it.
+- **`draw_execution(validate=False)`** supplies only the inputs the run would miss, as `validate` finds them, not every
+  input some consumer requires: an input another node requires but this run skips is not drawn, and an optional input
+  requested as an output is drawn rather than refused. An override `with_strict_overrides()` refuses is still refused,
+  since that refusal is by names alone. A cached driver draws every node the plan has; hits are known only at run
+  time.
+- **Validate's request checks are shared.** `Driver._shape` holds the checks of a request's names that `validate`
+  ran inline, and `draw_execution` uses it; `validate` behaves as before.
+- **`render`** reads the suffix in any case, writes `.gv` as DOT text like `.dot` (both are Graphviz's suffixes; never
+  its laid-out DOT), writes `.mmd` as Mermaid, and raises `FileNotFoundError` naming the folder when the path's folder
+  doesn't exist, before running `dot`. `_repr_pretty_` gives IPython the DOT text when there is no SVG; without it
+  IPython would show the dataclass's `repr`. Mermaid escapes `&` and backticks too, and marks an override by its
+  outline, as DOT does, not by a fill.
+- **Decision 7 was wrong about defaulted inputs.** It said Hamilton drops an unsupplied defaulted input from an export
+  while fnloom keeps it. In a validated run neither exports it, since the run never reads it. With `validate=False`,
+  fnloom exports the inputs the run would miss, supplied or not. Q95 doesn't claim the difference.
+- **Hamilton's export also crashes** on a function Python has no source for (one made by `exec`): `OSError`. fnloom
+  exports `source: null`. Q95 records it.
+- **Export text is the same in every process.** A config value's or `value()` binding's text is `stable_repr`: sets
+  sorted, and the address in a default `repr` dropped. A `value()` holding a set is hashed into `graph_version` by that
+  sorted text, since a set of strings' fingerprint follows the hash seed; one holding an object known only by its
+  address makes `graph_version` `null`. A function reading a global `frozenset` of strings keeps the result cache's
+  limit (its code version follows the seed); the guide says so.
+- **Pinned versions.** A `@cache(version="v1")` function exports a version hashed from the pin and `"pinned": "v1"`,
+  as the result cache takes the pin; without this, a pinned function reading a mutable global would export as
+  unversioned.
+- **Each parameter exports its `type` and `slot`**, so a `group(...)` parameter's items are told apart.
+- **`graph_version` leaves out tags and docs**, which don't change what a node computes; `diff` still reports a tag
+  change. It also leaves out an `@extract_columns` `fill_with`, which the result cache keys on: a known gap, since
+  `NodeView` doesn't carry the extractor.
+- **`diff`** compares nodes only, not the documents' `config` or `request`, and refuses a document that isn't an
+  export's shape with a `ValueError`, which the CLI turns into status 2.
+- **The CLI's namespace is `MODULE@NS`**, not a `--namespace` flag after the module: argparse can't attach a flag to a
+  positional. `@` starts a namespace only when a dotted name follows it, so a folder named `a@b` stays a folder.
+- **The CLI loads a `.py` path under its stem** with `spec_from_file_location`, and refuses one whose stem is already
+  imported from another file (`json.py`, or two files named `flow.py`) as a usage error, rather than silently using the
+  module already loaded.
+- **`main` always returns a status**, `--help` and usage errors included, so an in-process caller never sees
+  `SystemExit`; the console script exits with it. A closed pipe (`fnloom draw ... | head`) ends quietly with status 1,
+  and Ctrl-C with 130. Without `--format`, `draw -o FILE` writes the format the suffix names.
+  `--no-context` without `--path`, `--no-validate` without `--execution`, and `outputs` in a context file that aren't
+  names are usage errors.
+- **`validate` prints its problems on stdout**, one per line: they are the command's result. Errors are on stderr.
+- **Differential tests drive Hamilton's own drawing methods** through a stand-in `graphviz` module
+  (`FAKE_GRAPHVIZ` in `tests/differential/harness.py`), since the development environment has no graphviz package.
+  The CLI rows test Hamilton's `hamilton.cli.commands` and `logic`, which need no `typer`; Hamilton's stdout and
+  `--json-out` behaviour (H7.13) is from the catalogue's probes.
+- **Rendering is tested on CI** with a stand-in `dot` executable on `PATH`; the tests that run the real Graphviz skip
+  where it isn't installed.
+- **DOT ids escape backslashes**, so a node named with a backslash shows it doubled in Graphviz's own output. Names
+  with backslashes are rare, and the drawing itself is right.
+- **Register rows:** Q90 (drawing methods and `Drawing`), Q91 (labels), Q92 (execution drawings), Q93 (inputs and
+  config), Q94 (no dependency, `render`), Q95 (export), Q96 (versions), Q97 (the CLI) and Q98 (CLI output and `diff`).

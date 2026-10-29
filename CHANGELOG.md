@@ -107,6 +107,23 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - CodSpeed benchmarks of the Python run path in `benchmarks/` (`uv run pytest benchmarks`): prepared runs on every
   generated shape, repeated `Driver.execute`, cached runs, the async driver, extraction, config and `Builder.build`.
   CI runs them once on every pull request, and measures them under CodSpeed when `CODSPEED_ENABLED` is set.
+- Drawing. `draw()`, `draw_upstream_of(*names)`, `draw_downstream_of(*names)`, `draw_path_between(upstream,
+  downstream, *, context=True)` and `draw_execution(final_vars, *, inputs=None, overrides=None, validate=True)` on both
+  drivers return a `fnloom.Drawing`: its `nodes`, each a `fnloom.DrawnNode` with its title, whole type, `@config.when`
+  conditions and marks (`output`, `override`, `path`, `context`), in topological order, and its `edges`. Each input is
+  one node; config is never drawn. `to_dot()` and `to_mermaid()` write the text with nothing installed, the same under
+  every `PYTHONHASHSEED`. `render(path)` writes `.dot`, `.gv` and `.mmd` as text and any other format through
+  Graphviz's `dot` executable, with a `FileNotFoundError` saying how to install it when it is missing. In Jupyter a
+  drawing shows as an SVG, or as its DOT text. Hamilton's drawings need the graphviz package and, without it, return
+  `None` and log a traceback (Q90 to Q94).
+- `Driver.export(final_vars=None, *, inputs=None, overrides=None, validate=True)` and `AsyncDriver.export` describe the
+  graph, or the run `execute` would make, as a JSON-ready `fnloom.export/1` document: each node's type, bindings,
+  tags, conditions, source and code version, inputs as inputs, and a `graph_version` that changes with any name,
+  wiring, type or code. No value is exported (Q95, Q96).
+- The `fnloom` command, also `python -m fnloom`: `draw`, `export`, `validate`, and `diff OLD.json NEW.json` of two
+  exports, with `--config`, `--input`, `--override`, `--outputs` and a JSON or TOML `--context`. Modules are dotted
+  names or `.py` paths, which may import their siblings; `MODULE@NS` namespaces one. stdout carries only the result,
+  an error goes to stderr with status 1, and `diff` exits 0, 1 or 2. It needs no dependency (Q97, Q98).
 
 ### Changed
 

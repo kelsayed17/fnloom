@@ -1,8 +1,8 @@
 # Roadmap: ahead of Hamilton everywhere
 
 **Status:** in progress, 2026-10-28. Plans 1–4, the Plan 4 follow-up and Plan 3 are merged and released in 0.2.0.
-Plan 5 is merged (#24), not yet released. Plan 6 is on its own branch, merge pending; a row below marked done or fixed
-in Plan 6 describes that branch. Plans 7 and later are not built.
+Plans 5 and 6 are merged (#24, #25), not yet released. Plan 7 is on its own branch, merge pending; a row below marked
+done or fixed in Plan 7 describes that branch. Plans 8 and later are not built.
 
 **Goal:** for every capability Hamilton 1.90.0 offers, fnloom has an equivalent that is at least as good, or a
 written decision explaining why it doesn't. "At least as good" means: same intent; behaviour proven differentially
@@ -28,9 +28,9 @@ and the design's change log takes a row when the item is approved.
 | `list_available_variables()` | every node with its type, tags and whether it is an input | Done in Plan 5: `Driver.nodes` holds all of this, and `Driver.inputs()` and `Driver.outputs()` (*new*) answer the two common questions (Q70) |
 | `validate_inputs(...)`, `validate_execution(...)` | check a request without running it | Done in Plan 5: `Driver.validate(...)` (*new*) runs the name and type checks and returns every problem rather than the first, with a suggestion for each misspelled name (Q71) |
 | `what_is_the_path_between(a, b)` | nodes on any path from `a` to `b` | Done in Plan 5: in topological order on every hash seed, naming every unknown endpoint (Q70) |
-| `display_all_functions`, `display_upstream_of`, `display_downstream_of`, `visualize_path_between`, `visualize_execution` | graphviz drawings | Plan 7: DOT text with no dependency; `graphviz` optional for rendering |
+| `display_all_functions`, `display_upstream_of`, `display_downstream_of`, `visualize_path_between`, `visualize_execution` | graphviz drawings | Done in Plan 7: `draw`, `draw_upstream_of`, `draw_downstream_of`, `draw_path_between` and `draw_execution` on both drivers return a `fnloom.Drawing`, whose DOT and Mermaid text need nothing installed and never depend on the hash seed; `render` runs Graphviz's `dot` for an image, with no Python dependency (Q90–Q94) |
 | `materialize`, `validate_materialization`, `visualize_materialization` | write outputs through data savers | Not built in (design §2 non-goal). Plan 6's hooks make it writable outside fnloom: an `after_run` hook gets the raw outputs as `RunEnd.results` and can write them, and a result builder can too (Q84, Q19) |
-| `raw_execute`, `export_execution` | execute without a result builder; export a run's graph | `raw_execute` done in Plan 6: `Driver.raw_execute`, `PreparedPlan.run_raw` and the async equivalents return the raw dict, skipping the result builder and firing every hook (Q19). `export_execution`: Plan 7 |
+| `raw_execute`, `export_execution` | execute without a result builder; export a run's graph | `raw_execute` done in Plan 6: `Driver.raw_execute`, `PreparedPlan.run_raw` and the async equivalents return the raw dict, skipping the result builder and firing every hook (Q19). `export_execution` done in Plan 7: `Driver.export(...)` describes the graph or a run as a versioned JSON document, with code versions and a graph version (Q95, Q96) |
 | `config`, `graph_modules`, `adapter` | what the driver was built from | `config` done in Plan 3: `Driver.config`, a read-only copy (Q56). `modules` done in Plan 5: each module once (Q70). Done in Plan 6: `Driver.hooks`, the hooks in call order (Q84); the result builder, output checks and value checks are builder settings that pickling, `copy`, `rebuild()` and `build_async` carry |
 | `has_cycles` | report a cycle | Not needed: fnloom refuses a cycle at build, naming it (Q27) |
 | `AsyncDriver` | `async def` nodes | Done in Plan 3: `Builder.build_async()`, with caching (Q11–Q13, Q65–Q69) |
@@ -113,7 +113,7 @@ behind); **n/a** (fnloom has no such feature yet; the plan builds it without the
 | A default on a parameter silently makes an input optional, and adding a node of that name anywhere silently replaces the default; two functions with different defaults for one input pass | fixed (Plan 5) | A build-time error when a node shadows a default, or when defaults for one input differ, with `@defaults(...)` as the per-parameter opt-out (Q76) |
 | Every public helper in a module becomes a node, and its parameters phantom inputs; the escape hatch `@hamilton_exclude` is barely documented | fixed (Plan 5) | `@exclude`, bare or called, and `__all__` honoured when a module defines it (Q73). No warning for a node nothing consumes: a graph's outputs are exactly such nodes, so `Driver.outputs()` lists them instead (plan 5, decision 6) |
 | One flat namespace per driver: two modules can't define the same node, one input name has one type driver-wide, and Hamilton's opt-in override is last-wins, which mis-wires silently | fixed (Plan 5) | `Builder.with_modules(..., namespace="ns")` names a module's nodes `ns.<name>`; nothing is last-wins (Q74) |
-| A graph can only be written as Python functions in importable modules: no graph from a list of functions (#1268), and none from data without generating code | fixed (Plan 5) | `Builder.with_functions(*fns)` uses the functions themselves, with no synthetic module, and `fnloom.node(fn, name=, bind=)` is the node-definition API (Q72). A serialised, data-only format waits for Plan 7's export |
+| A graph can only be written as Python functions in importable modules: no graph from a list of functions (#1268), and none from data without generating code | fixed (Plan 5) | `Builder.with_functions(*fns)` uses the functions themselves, with no synthetic module, and `fnloom.node(fn, name=, bind=)` is the node-definition API (Q72). Plan 7's `Driver.export()` writes a graph as data (`fnloom.export/1`); building a graph back from it is not planned, since its nodes are code |
 | `@parameterize` nodes exist only in the built graph, invisible to static tools | fixed | `NodeView.origin` and `module` (Q34) |
 | Inspection returns a mix of node objects and names, includes config entries as inputs, and has no topological order (#1293, #836) | fixed | `Driver.nodes`, names, topological order (Q26, Q28) |
 | Execution order depends on the order of outputs and parameters | fixed | Q26 |
@@ -182,8 +182,8 @@ behind); **n/a** (fnloom has no such feature yet; the plan builds it without the
 | numpy and pandas required, 180–290 ms import (seconds with autoload); undeclared `packaging` silently disables pandas support | fixed | Q14, Q20: no dependencies, about 30 ms import |
 | Import reads `~/.hamilton.conf` and writes the environment; telemetry stubs warn | fixed | No import-time I/O |
 | Messages name the old `sf-hamilton` distribution; deprecated spellings and internals exported | fixed | 23 public names |
-| Visualisation without graphviz returns `None` and writes nothing; `has_cycles` changes answer with networkx installed | n/a, fixed | Plan 7 raises an `ImportError` naming the extra, and DOT/Mermaid text needs nothing; cycles refused at build (Q27) |
-| The CLI can't build or diff a graph that needs config or overrides | n/a | Plan 7: a CLI over `Builder` arguments |
+| Visualisation without graphviz returns `None` and writes nothing; `has_cycles` changes answer with networkx installed | fixed (Plan 7), fixed | DOT and Mermaid text need nothing, and `render` without Graphviz raises a `FileNotFoundError` saying how to install it; there is no extra to name, since rendering runs the `dot` executable (Q94); cycles refused at build (Q27) |
+| The CLI can't build or diff a graph that needs config or overrides | fixed (Plan 7) | `fnloom draw`, `export`, `validate` and `diff` take `--config`, `--input`, `--override`, `--outputs` and a JSON or TOML `--context`; modules import their siblings, and `diff` compares two exports (Q97, Q98) |
 | Two core releases in 18 months; fixes sit unreleased | — | A release on every merged plan; the changelog and wheels are automated (#13) |
 
 ### Beyond Hamilton
@@ -210,12 +210,13 @@ tests against Hamilton for every kept behaviour; benchmarks for anything on the 
    `what_is_the_path_between`, functions in `final_vars`, `with_functions`, `with_strict_overrides()`,
    `with_declared_inputs(...)`, namespacing, `@exclude`, public `value_matches` and `type_matches`, the
    `@parameterize` row forms, and the wiring and types rows of the ledger.
-5. **Plan 6: hooks and result builders.** Done, merge pending: `fnloom.Hook` with pre/post node and pre/post graph
+5. **Plan 6: hooks and result builders.** Done: `fnloom.Hook` with pre/post node and pre/post graph
    events on both drivers (Q84, Q86), `fnloom.LogFailures` as the failure hook (Q88), cache outcomes on the node
    events (Q85), an opt-in output check (Q87), additive value checks (Q21), result builders and `raw_execute` (Q19,
    Q24, Q89).
-6. **Plan 7: drawing and the CLI.** DOT text for the graph, upstream, downstream, path between and an execution;
-   export a run; a CLI.
+6. **Plan 7: drawing and the CLI.** Done, merge pending: DOT and Mermaid text for the graph, upstream, downstream,
+   path between and an execution, with no dependency (Q90–Q94); `export` of the graph or a run, with code versions
+   (Q95, Q96); the `fnloom` command (Q97, Q98).
 7. **Plan 8: v1.x decorators.** Output validators, step injection, and dependency injection by config.
 8. **Plan 9: the long tail.** A decision per remaining Hamilton decorator, each a register row.
 9. **Design, then Plan 10: dynamic execution**, together with the "Beyond Hamilton" designs.

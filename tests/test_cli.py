@@ -148,6 +148,7 @@ def test_a_context_file(
     [
         ('{"nope": 1}', ".json", "unknown keys nope"),
         ('{"outputs": "c"}', ".json", "outputs must be a list"),
+        ('{"outputs": [1]}', ".json", "outputs must be a list of names"),
         ("[1]", ".json", "must hold a table"),
         ("{", ".json", "--context"),
         ("x =", ".toml", "--context"),
@@ -166,10 +167,8 @@ def test_a_bad_context_file_is_a_usage_error(  # noqa: PLR0913  # the case and f
     """Status 2, argparse's way, naming what is wrong."""
     path = tmp_path / f"context{suffix}"
     path.write_text(content)
-    with pytest.raises(SystemExit) as exited:
-        main(["export", str(flow), "--context", str(path)])
-    assert exited.value.code == 2  # noqa: PLR2004  # argparse's usage status
-    _, err = capsys.readouterr()
+    status, out, err = _run(capsys, "export", str(flow), "--context", str(path))
+    assert (status, out) == (2, "")
     assert message in err
 
 
@@ -241,6 +240,9 @@ def test_errors_go_to_stderr_with_status_1(
         ["draw", "flow.py", "--config", "mode"],
         ["validate", "flow.py"],
         ["draw", "flow.py@"],
+        ["draw", "flow.py", "--no-context"],
+        ["draw", "flow.py", "--no-validate"],
+        ["draw", "flow.py", "--execution"],
     ],
 )
 def test_usage_errors_have_status_2(
@@ -251,11 +253,8 @@ def test_usage_errors_have_status_2(
 ) -> None:
     """Status 2, argparse's, for a command line that can't be run."""
     monkeypatch.chdir(flow.parent)
-    with pytest.raises(SystemExit) as exited:
-        main(argv)
-    assert exited.value.code == 2  # noqa: PLR2004  # argparse's usage status
-    out, err = capsys.readouterr()
-    assert out == ""
+    status, out, err = _run(capsys, *argv)
+    assert (status, out) == (2, "")
     assert "error" in err
 
 
@@ -307,3 +306,105 @@ def test_python_dash_m(flow: Path) -> None:
     )
     assert (failed.returncode, failed.stdout) == (1, "")
     assert failed.stderr == "fnloom: ValueError: unknown outputs: 'nope'\n"
+
+
+def test_help_returns_its_status(capsys: pytest.CaptureFixture[str]) -> None:
+    """`main` returns an `int` for `--help` too, never raising `SystemExit`."""
+    assert main(["--help"]) == 0
+    assert "draw" in capsys.readouterr().out
+
+
+def test_an_image_by_the_suffix(
+    flow: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """With `-o` and no `--format`, the suffix names the format, in any case."""
+    dot = tmp_path / "dot"
+    dot.write_text(f"#!{sys.executable}\nimport sys\nsys.stdout.write(sys.argv[1])\n")
+    dot.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    status, _, err = _run(capsys, "draw", str(flow), "-o", str(tmp_path / "g.svg"))
+    assert (status, err) == (0, "")
+    assert (tmp_path / "g.svg").read_text() == "-Tsvg"
+    _run(capsys, "draw", str(flow), "--format", "PNG", "-o", str(tmp_path / "g.out"))
+    assert (tmp_path / "g.out").read_text() == "-Tpng"
+    _run(capsys, "draw", str(flow), "-o", str(tmp_path / "g.dot"))
+    assert (tmp_path / "g.dot").read_text().startswith("digraph {")
+
+
+def test_an_override_flag_and_spaced_outputs(
+    flow: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--override` overrides; `--outputs "a, b"` names `a` and `b`."""
+    status, out, _ = _run(
+        capsys, "export", str(flow), "--outputs", "a, b", "--override", "a=3"
+    )
+    assert status == 0
+    assert json.loads(out)["request"] == {
+        "outputs": ["a", "b"],
+        "inputs": [],
+        "overrides": ["a"],
+    }
+
+
+def test_a_file_named_like_an_imported_module_is_refused(
+    flow: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A `json.py`, or a second `flow.py`, is no silent swap for the first."""
+    shadow = tmp_path / "json.py"
+    shadow.write_text("def j(x: int) -> int:\n    return x\n")
+    status, _, err = _run(capsys, "draw", str(shadow))
+    assert status == 2  # noqa: PLR2004  # a usage error
+    assert "a module named 'json' is already imported" in err
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "flow.py").write_text("def z(x: int) -> int:\n    return x\n")
+    status, _, err = _run(capsys, "draw", str(flow), str(other / "flow.py"))
+    assert status == 2  # noqa: PLR2004  # a usage error
+    assert "a module named 'flow' is already imported" in err
+
+
+def test_an_at_sign_in_a_folder_is_part_of_the_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Only `@` and a dotted name after it is a namespace."""
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    folder = tmp_path / "a@b"
+    folder.mkdir()
+    (folder / "at_flow.py").write_text("def a(x: int) -> int:\n    return x\n")
+    status, out, err = _run(capsys, "draw", str(folder / "at_flow.py"))
+    assert (status, err) == (0, "")
+    assert '"a" [' in out
+    status, out, _ = _run(capsys, "draw", f"{folder / 'at_flow.py'}@ns")
+    assert '"ns.a" [' in out
+
+
+@pytest.mark.parametrize("content", ["[]", '{"format": "fnloom.export/1"}'])
+def test_diff_of_a_malformed_export_is_status_2(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], content: str
+) -> None:
+    """A file that isn't an export's shape is a bad file, as a missing one is."""
+    good = tmp_path / "good.json"
+    good.write_text(json.dumps({"format": "fnloom.export/1", "nodes": []}))
+    bad = tmp_path / "bad.json"
+    bad.write_text(content)
+    status, out, err = _run(capsys, "diff", str(good), str(bad))
+    assert (status, out) == (2, "")
+    assert err.startswith("fnloom: ValueError: new:")
+
+
+def test_a_closed_pipe_is_quiet(flow: Path) -> None:
+    """`fnloom draw ... | head -1` reports no error."""
+    head = subprocess.Popen(  # noqa: S603  # our own interpreter
+        [sys.executable, "-m", "fnloom", "draw", str(flow)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    assert head.stdout is not None
+    head.stdout.close()
+    _, err = head.communicate()
+    assert err == b""

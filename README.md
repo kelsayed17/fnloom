@@ -161,7 +161,9 @@ uv run maturin develop --release
 - ✅ `@config.when*`, `@extract_fields`, `@extract_columns`, and an async driver that caches too
 - ✅ [Hooks](https://kelsayed17.github.io/fnloom/hooks/) before and after a run and each node, result builders,
   output checks and custom value checks
-- 🔜 Visualisation, then dynamic execution
+- ✅ [Drawing](https://kelsayed17.github.io/fnloom/drawing/) as DOT or Mermaid text, export as JSON, and the `fnloom`
+  command
+- 🔜 Dynamic execution
 
 The [design](https://kelsayed17.github.io/fnloom/design/2026-10-26-fnloom-design/) has the full plan. The name is
 provisional, pending a trademark check before the first release.

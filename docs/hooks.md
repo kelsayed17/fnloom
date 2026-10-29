@@ -279,6 +279,47 @@ logs
 
 Hamilton always logs a failure at `ERROR`, with a banner, then asks the reader to join its Slack (Q88).
 
+## Recording a run
+
+`Driver.export` describes a run before it happens, by names alone ([Exporting](drawing.md#exporting)). To keep a
+record of what a run did, a hook can write each node's outcome as it ends, for example one JSON line per node:
+
+```python
+import json
+import time
+
+
+class RunRecord(fnloom.Hook):
+    """One JSON line per node: its name, whether it succeeded, and how long it took."""
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+        self._started: dict[str, float] = {}
+
+    def before_node(self, event: fnloom.NodeStart) -> None:
+        self._started[event.node.name] = time.perf_counter()
+
+    def after_node(self, event: fnloom.NodeEnd) -> None:
+        seconds = time.perf_counter() - self._started.pop(event.node.name)
+        record = {
+            "run": event.run_id,
+            "node": event.node.name,
+            "ok": event.ok,
+            "error": None if event.error is None else repr(event.error),
+            "seconds": round(seconds, 6),
+        }
+        self.lines.append(json.dumps(record))
+
+
+record = RunRecord()
+recorded = fnloom.Builder().with_modules(orders).with_hooks(record).build()
+recorded.execute(["total"], inputs={"price": 20.0, "quantity": 3})
+[json.loads(line)["node"] for line in record.lines]
+# -> ['subtotal', 'shipping', 'total']
+```
+
+Write the lines to a file instead to keep them; values are left out here, since they need not be JSON.
+
 ## Carrying hooks
 
 A driver's hooks travel with it. `copy.copy` and `rebuild()` keep the same hook objects. Pickling, and

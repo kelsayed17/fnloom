@@ -108,6 +108,14 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | A `StaticValidator`, refusing a node or the graph at build | `run_to_validate_node` and `run_to_validate_graph` | Not yet. Until then, check `driver.nodes` after `build()` and raise |
 | `NodeExecutionMethod`, and `lifecycle.default.GracefulErrorAdapter` built on it | Replaces how a node is called; the graceful adapter keeps running past a failure, skipping what depends on it | Not yet: both are on the [roadmap](plans/2026-10-28-roadmap-ahead-of-hamilton.md). A failing node fails the run, and `after_node` sees its error and inputs |
 | `TaskExecutionHook` and the other task hooks | Hooks on dynamic execution's tasks | None: fnloom has no dynamic execution yet |
+| `display_all_functions()`, `display_upstream_of(*names)`, `display_downstream_of(*names)` | A `graphviz.Digraph`, or `None` and a logged traceback without the graphviz package; node order follows `PYTHONHASHSEED` | `draw()`, `draw_upstream_of(*names)`, `draw_downstream_of(*names)`: a `fnloom.Drawing`, whose `to_dot()` and `to_mermaid()` need nothing installed and give the same text every run ([Drawing](drawing.md), Q90, Q94) |
+| `visualize_path_between(a, b, strict_path_visualization=True)` | The path, and its nodes' parents unless strict | `draw_path_between(a, b, context=False)`; with `context=True`, the parents are drawn and marked `context` (Q90) |
+| `visualize_execution(final_vars, inputs=, overrides=, bypass_validation=True)` | The run's nodes; an input requested as an output is unmarked | `draw_execution(final_vars, inputs=, overrides=, validate=False)`; that input is marked `output` (Q92) |
+| A type in a drawing | `list`, `dict`, `Union` | The whole annotation, `dict[str, list[int]]` (Q91) |
+| `output_file_path="graph.svg"`, `keep_dot=True` | Renders through the graphviz package | `drawing.render("graph.svg")` runs Graphviz's `dot`; `render("graph.dot")` writes the DOT text with nothing installed (Q94) |
+| `graphviz_kwargs`, `custom_style_function`, `show_schema` | Style the `Digraph` | None: edit the DOT text, or build your own from `Drawing.nodes` |
+| `export_execution(final_vars, inputs, overrides)` | A JSON string; an input carries a consumer's source and version | `export(final_vars, *, inputs=, overrides=)`, or `export()` for the whole graph: a `dict` with a format version, config, the request's names, code versions and a graph version ([Exporting](drawing.md#exporting), Q95, Q96) |
+| The `hamilton` CLI: `build`, `view`, `validate`, `version`, `diff` | Needs `typer`; files compiled alone; config only from a context file | `fnloom draw`, `export`, `validate` and `diff OLD.json NEW.json`, with `--config`, `--input`, `--override` and `--context`; modules import their siblings ([The CLI](drawing.md#the-cli), Q97, Q98) |
 
 </div>
 
@@ -189,12 +197,11 @@ value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](
 
 fnloom is pre-alpha. The core, the native path, `@parameterize` and its sugar, `@tag`, `@config`, `@extract_fields`,
 `@extract_columns`, `@exclude`, graph inspection, `validate`, graphs from plain functions, namespaces, type checks,
-result caching, the async driver, hooks, result builders, output checks and custom value checks are done. These Hamilton
-features come next, roughly in this order:
+result caching, the async driver, hooks, result builders, output checks, custom value checks, drawing, export and the
+CLI are done. These Hamilton features come next, roughly in this order:
 
-1. **Graph visualisation.**
-2. **Dynamic execution**, materializers, `@subdag`, `@check_output` and `@pipe`.
-3. **Node-execution wrappers** (`NodeExecutionMethod`, `GracefulErrorAdapter`) and `StaticValidator`. Hooks see every
+1. **Dynamic execution**, materializers, `@subdag`, `@check_output` and `@pipe`.
+2. **Node-execution wrappers** (`NodeExecutionMethod`, `GracefulErrorAdapter`) and `StaticValidator`. Hooks see every
    node, but can't change how one is called or let a run continue past a failure.
 
 If your pipeline depends on one of these, it's worth waiting for it before you switch.
