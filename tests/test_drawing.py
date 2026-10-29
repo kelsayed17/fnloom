@@ -674,3 +674,18 @@ def test_mermaid_escapes_a_namespaced_tricky_label() -> None:
     )
     text = Drawing((node,), ()).to_mermaid()
     assert "  n0[\"a #38; #96;b#96; | c d<br>int<br>mode == 'x'\"]" in text
+
+
+def test_render_reads_a_format_in_any_case(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`format="DOT"`, `"MMD"` and `".GV"` are text; `"SVG"` reaches dot as svg."""
+    fake_dot(tmp_path, "import sys\nsys.stdout.write(sys.argv[1])\n")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    drawing = _driver().draw()
+    assert drawing.render(tmp_path / "a", format="DOT").read_text() == drawing.to_dot()
+    assert drawing.render(tmp_path / "b", format="MMD").read_text() == (
+        drawing.to_mermaid()
+    )
+    assert drawing.render(tmp_path / "c", format=".GV").read_text() == drawing.to_dot()
+    assert drawing.render(tmp_path / "d", format="SVG").read_text() == "-Tsvg"

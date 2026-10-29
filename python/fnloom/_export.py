@@ -6,10 +6,12 @@ value: a request's inputs and overrides are listed by name only, config values a
 `value()` bindings as `repr`.
 """
 
+import dataclasses
 import hashlib
 import inspect
 import json
 import re
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from fnloom._codeversion import UncacheableError, code_version
@@ -19,7 +21,7 @@ from fnloom._fingerprint import fingerprint
 from fnloom._types import Unresolved
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Sequence
 
     from fnloom._drawing import Drawing
     from fnloom._view import InputView, NodeView, Param
@@ -63,37 +65,98 @@ def export(  # noqa: PLR0913  # one argument per part of the document
 _ADDRESS = re.compile(r" at 0x[0-9a-fA-F]+")
 
 
-def stable_repr(value: object) -> str:
+def stable_repr(value: object, seen: frozenset[int] = frozenset()) -> str:  # noqa: PLR0911  # one return per kind
     """`repr(value)`, the same in every process: sets sorted, addresses dropped.
 
     A set's members come in the order the hash seed gives, and an object's
     default `repr` names its address; neither says anything about the value.
+    Sets, mappings, lists, tuples, named tuples and dataclass instances are
+    written part by part, so a set inside any of them is sorted too; anything
+    else is its own `repr`, its addresses dropped. A container holding itself
+    shows `...` there, as `repr` does.
     """
+    if id(value) in seen:
+        return "..."
+    inner = seen | {id(value)}
+    name = type(value).__name__
+
+    def each(items: Iterable[object]) -> list[str]:
+        return [stable_repr(item, inner) for item in items]
+
     if isinstance(value, (set, frozenset)):
-        members = ", ".join(sorted(stable_repr(member) for member in value))
+        members = ", ".join(sorted(each(value)))
         if type(value) is set:
             return f"{{{members}}}" if value else "set()"
-        return f"{type(value).__name__}({{{members}}})" if value else "frozenset()"
-    if type(value) is dict:
-        pairs = (f"{stable_repr(k)}: {stable_repr(v)}" for k, v in value.items())
-        return f"{{{', '.join(pairs)}}}"
-    if type(value) is list:
-        return f"[{', '.join(stable_repr(item) for item in value)}]"
-    if type(value) is tuple:
-        items = [stable_repr(item) for item in value]
-        return f"({items[0]},)" if len(items) == 1 else f"({', '.join(items)})"
+        return f"{name}({{{members}}})" if value else f"{name}()"
+    if isinstance(value, Mapping):
+        pairs = ", ".join(
+            f"{stable_repr(k, inner)}: {stable_repr(v, inner)}"
+            for k, v in value.items()
+        )
+        return f"{{{pairs}}}" if type(value) is dict else f"{name}({{{pairs}}})"
+    if isinstance(value, tuple) and hasattr(value, "_fields"):
+        fields = getattr(value, "_fields")  # noqa: B009  # a named tuple's
+        named = ", ".join(
+            f"{field}={text}" for field, text in zip(fields, each(value), strict=True)
+        )
+        return f"{name}({named})"
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        shown = [f for f in dataclasses.fields(value) if f.repr]
+        named = ", ".join(
+            f"{f.name}={stable_repr(getattr(value, f.name), inner)}" for f in shown
+        )
+        return f"{name}({named})"
+    if isinstance(value, list):
+        listed = f"[{', '.join(each(value))}]"
+        return listed if type(value) is list else f"{name}({listed})"
+    if isinstance(value, tuple):
+        items = each(value)
+        listed = f"({items[0]},)" if len(items) == 1 else f"({', '.join(items)})"
+        return listed if type(value) is tuple else f"{name}({listed})"
     return _ADDRESS.sub("", repr(value))
 
 
+def _parts(value: object) -> list[object]:
+    """What `stable_repr` writes `value` from, or `[]` for a value it writes whole."""
+    if isinstance(value, (set, frozenset, list, tuple)):
+        return list(value)
+    if isinstance(value, Mapping):
+        return [part for pair in value.items() for part in pair]
+    if dataclasses.is_dataclass(value) and not isinstance(value, type):
+        return [getattr(value, f.name) for f in dataclasses.fields(value) if f.repr]
+    return []
+
+
 def _holds_a_set(value: object) -> bool:
-    """Whether `value` is or holds a set, in a list, tuple or dict."""
-    if isinstance(value, (set, frozenset)):
-        return True
-    if type(value) is dict:
-        return any(_holds_a_set(k) or _holds_a_set(v) for k, v in value.items())
-    if type(value) is list or type(value) is tuple:
-        return any(_holds_a_set(item) for item in value)
+    """Whether `value` is or holds a set, anywhere `stable_repr` looks."""
+    waiting, seen = [value], set[int]()
+    while waiting:
+        current = waiting.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, (set, frozenset)):
+            return True
+        waiting.extend(_parts(current))
     return False
+
+
+def value_version(value: object) -> str | None:
+    """A `value()` binding's version: what `graph_version` and `diff` compare.
+
+    Its fingerprint in hex; for a value holding a set, whose fingerprint follows
+    the hash seed, a hash of its `stable_repr` instead. `None` when it has no
+    fingerprint, or holds a set beside something known only by its address.
+    """
+    if _holds_a_set(value):
+        if _ADDRESS.search(repr(value)):
+            return None
+        text = json.dumps([FORMAT, "text", stable_repr(value)])
+        return hashlib.sha256(text.encode()).hexdigest()
+    try:
+        return fingerprint(value).hex()
+    except Exception:  # noqa: BLE001  # unfingerprintable: no version
+        return None
 
 
 def type_text(annotation: object) -> str:
@@ -157,6 +220,9 @@ def _param(param: Param) -> dict[str, Any]:
         "slot": param.slot,
         "reads": binding.name if isinstance(binding, Source) else None,
         "value": stable_repr(binding.value) if isinstance(binding, Value) else None,
+        "value_version": (
+            value_version(binding.value) if isinstance(binding, Value) else None
+        ),
         "required": param.required,
         "type": type_text(param.annotation),
     }
@@ -193,8 +259,7 @@ def _graph_version(
     """A hash of every node's name, kind, type, params, conditions and version.
 
     Tags and docs are left out: they don't change what a node computes. A
-    `value()` is hashed by its fingerprint, or by its sorted text when it holds a
-    set, whose fingerprint follows the hash seed. `None` when a node is
+    `value()` is hashed by its `value_version`. `None` when a node is
     unversioned, or a `value()` it is bound to has no fingerprint: a change there
     could not be seen (Q96).
     """
@@ -203,21 +268,15 @@ def _graph_version(
         if node["kind"] == "function" and node["version"] is None:
             return None
         bound: list[object] = []
-        for param in views[node["name"]].params:
+        params = views[node["name"]].params
+        for param, entry in zip(params, node["params"], strict=True):
             binding = param.binding
             if isinstance(binding, Source):
                 bound.append([param.name, param.slot, binding.name, param.required])
                 continue
-            if _holds_a_set(binding.value):
-                # A set's fingerprint follows the hash seed; its sorted text doesn't.
-                if _ADDRESS.search(repr(binding.value)):
-                    return None  # a member known only by its address
-                value = stable_repr(binding.value)
-            else:
-                try:
-                    value = fingerprint(binding.value).hex()
-                except Exception:  # noqa: BLE001  # unfingerprintable: no graph version
-                    return None
+            value = entry["value_version"]
+            if value is None:
+                return None
             bound.append([param.name, param.slot, None, value])
         named = [node[key] for key in ("name", "kind", "type")]
         parts.append([*named, bound, node["config"], node["version"]])
@@ -231,12 +290,15 @@ def diff(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
     `added` and `removed` are names, sorted; `changed` maps each node in both to
     the fields that differ, of `kind`, `type`, `params`, `config`, `tags`,
     `version` and `marks` (a run's output or override). `unversioned` names
-    each function node in both that a side has no version for and that differs
-    in nothing else, its version aside: a change in its code can't be seen.
-    `warnings` says, for each document with no `graph_version`, which nodes
-    leave it blind (Q96). The documents' own `config` and `request` are not
-    compared, only their nodes. `ValueError` for a document of another format,
-    or one naming a node twice.
+    each function node in both that differs in nothing else, its version aside,
+    and that a side has no version for, or a `value()` without a
+    `value_version`: a change there can't be seen.
+    `graph_version_changed` is whether both documents have a `graph_version`
+    and they differ. `warnings` says, for each document with no
+    `graph_version`, which nodes leave it blind (Q96), and when the graph
+    versions differ though no node entry does. The documents' own `config`
+    and `request` are not compared, only their nodes. `ValueError` for a
+    document of another format, or one naming a node twice.
     """
     for side, document in (("old", old), ("new", new)):
         if not isinstance(document, dict) or document.get("format") != FORMAT:
@@ -260,8 +322,7 @@ def diff(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
     for name in sorted(before.keys() & after.keys()):
         a, b = before[name], after[name]
         fields = [f for f in _COMPARED if a.get(f) != b.get(f)]
-        functions = a.get("kind") == b.get("kind") == "function"
-        blind = functions and (a.get("version") is None or b.get("version") is None)
+        blind = _is_blind(a) or _is_blind(b)
         if blind and fields in ([], ["version"]):
             unversioned.append(name)
         elif fields:
@@ -272,22 +333,37 @@ def diff(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
         for side, document in (("old", old), ("new", new))
         if document.get("graph_version") is None
     ]
+    versions = (old.get("graph_version"), new.get("graph_version"))
+    moved = None not in versions and versions[0] != versions[1]
+    added = sorted(after.keys() - before.keys())
+    removed = sorted(before.keys() - after.keys())
+    if moved and not (added or removed or changed):
+        blind.append(
+            "the graph_versions differ, though no node's exported entry does: "
+            "a change the entries don't show"
+        )
     return {
-        "added": sorted(after.keys() - before.keys()),
-        "removed": sorted(before.keys() - after.keys()),
+        "added": added,
+        "removed": removed,
         "changed": changed,
         "unversioned": unversioned,
+        "graph_version_changed": moved,
         "warnings": blind,
     }
 
 
+def _is_blind(node: Mapping[str, Any]) -> bool:
+    """Whether a change in `node` could hide: no code version, or no value version."""
+    if node.get("kind") != "function":
+        return False
+    if node.get("version") is None:
+        return True
+    return any(
+        param.get("value") is not None and param.get("value_version") is None
+        for param in node.get("params") or ()
+    )
+
+
 def _unversioned(document: Mapping[str, Any]) -> list[str]:
-    """The function nodes of `document` that have no version, or `["a value()"]`."""
-    names: list[str] = [
-        str(node["name"])
-        for node in document["nodes"]
-        if node.get("kind") == "function" and node.get("version") is None
-    ]
-    if not names:
-        return ["a value() with no fingerprint"]
-    return names
+    """The nodes of `document` that a change could hide in, by name."""
+    return [str(node["name"]) for node in document["nodes"] if _is_blind(node)]

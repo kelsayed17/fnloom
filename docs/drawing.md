@@ -223,6 +223,9 @@ fnloom diff before.json after.json
 | `--outputs a,b` | the outputs of a run |
 | `--context FILE` | a `.json` or `.toml` file with the tables `config`, `inputs` and `overrides` and the list `outputs`; a flag wins over its entry |
 
+`--outputs`, `--input` and `--override` describe a run, so `draw` takes them only with `--execution`, and `export`
+takes `--input` and `--override` only with `--outputs`; given elsewhere, they are a usage error.
+
 A `@config.when` node is built as `Builder` builds it: without its key in the config it is left out when nothing reads
 it, and is otherwise a `ValueError` naming the key (Q57). Give the key with `--config`.
 

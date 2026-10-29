@@ -23,7 +23,7 @@ if TYPE_CHECKING:
     from types import ModuleType
 
 # The formats `draw` writes as text itself; any other is an image by Graphviz.
-_TEXT_FORMATS = {"dot": "dot", "mermaid": "mmd"}
+_TEXT_FORMATS = {"dot": "dot", "gv": "dot", "mermaid": "mmd", "mmd": "mmd"}
 
 # What a context file may hold, and the type of each.
 _CONTEXT_KEYS = {"config": dict, "inputs": dict, "overrides": dict, "outputs": list}
@@ -37,7 +37,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     """Runs the command `argv` names (default `sys.argv[1:]`); its exit status.
 
     Never raises `SystemExit`: a usage error, `--help` included, is returned as
-    argparse's status, so an in-process caller always gets an `int`.
+    argparse's status, and a loaded module's `sys.exit(n)` as `n`, so an
+    in-process caller always gets an `int`. A `.py` module already loaded from
+    the same file by an earlier call in the process is used again, not reloaded.
     """
     parser = _parser()
     try:
@@ -55,9 +57,20 @@ def main(argv: Sequence[str] | None = None) -> int:
         # The reader went away (`fnloom draw ... | head`): nothing to report.
         _quiet_stdout()
         return 1
+    except SystemExit as exited:
+        # A loaded module called `sys.exit`: its status, as Python would give it.
+        return _exit_status(exited)
     except Exception as error:  # noqa: BLE001  # every failure: one report, status 1
         _report(error)
         return 1
+
+
+def _exit_status(exited: SystemExit) -> int:
+    """The status `exited` stands for: `None` is 0, a message is printed and 1."""
+    if exited.code is None or isinstance(exited.code, int):
+        return exited.code or 0
+    sys.stderr.write(f"{exited.code}\n")
+    return 1
 
 
 def run() -> NoReturn:
@@ -230,13 +243,20 @@ class _Request:
         return {"inputs": self.inputs, "overrides": self.overrides}
 
 
-def _draw(args: argparse.Namespace) -> int:
+def _check_draw_flags(args: argparse.Namespace) -> None:
+    """A usage error for a flag that goes with a scope `draw` wasn't given."""
+    if not args.execution:
+        _refuse_run_flags(args, "with draw, they go with --execution")
     if args.no_context and not args.path:
         msg = "--no-context goes with --path"
         raise _UsageError(msg)
     if args.no_validate and not args.execution:
         msg = "--no-validate goes with --execution"
         raise _UsageError(msg)
+
+
+def _draw(args: argparse.Namespace) -> int:
+    _check_draw_flags(args)
     request = _Request(args)
     driver = request.driver
     if args.upstream:
@@ -273,6 +293,8 @@ def _draw(args: argparse.Namespace) -> int:
 
 
 def _export_command(args: argparse.Namespace) -> int:
+    if not args.outputs:
+        _refuse_run_flags(args, "they describe a run: give --outputs too")
     request = _Request(args)
     if request.outputs:
         document = request.driver.export(
@@ -309,7 +331,24 @@ def _diff(args: argparse.Namespace) -> int:
     for warning in found["warnings"]:
         sys.stderr.write(f"fnloom: warning: {warning}\n")
     changed = found["added"] or found["removed"] or found["changed"]
-    return 1 if changed or found["unversioned"] else 0
+    moved = found["graph_version_changed"]
+    return 1 if changed or moved or found["unversioned"] else 0
+
+
+def _refuse_run_flags(args: argparse.Namespace, why: str) -> None:
+    """A usage error naming each run flag given where no run is made."""
+    given = [
+        flag
+        for flag, value in (
+            ("--outputs", args.outputs),
+            ("--input", args.input),
+            ("--override", args.override),
+        )
+        if value
+    ]
+    if given:
+        msg = f"{', '.join(given)} given, but no run is made; {why}"
+        raise _UsageError(msg)
 
 
 def _write(text: str, output: Path | None) -> None:
@@ -359,8 +398,6 @@ def _load_file(target: str) -> ModuleType:
     if not path.is_file():
         msg = f"no such module file: {target}"
         raise _UsageError(msg)
-    if str(path.parent) not in sys.path:
-        sys.path.insert(0, str(path.parent))
     name = path.stem
     if name in sys.stdlib_module_names:
         msg = (
@@ -384,6 +421,9 @@ def _load_file(target: str) -> ModuleType:
         msg = f"cannot load {target} as a module"
         raise _UsageError(msg)
     module = importlib.util.module_from_spec(found)
+    # Its folder goes on `sys.path` only now, once the file is accepted.
+    if str(path.parent) not in sys.path:
+        sys.path.insert(0, str(path.parent))
     sys.modules[name] = module
     try:
         found.loader.exec_module(module)

@@ -142,7 +142,7 @@ class Drawing:
     ) -> Path:
         """Writes the drawing to `path` and returns it (Q94).
 
-        `format` defaults to the path's suffix, in lower case: `"svg"` for
+        `format`, or else the path's suffix, is read in lower case: `"svg"` for
         `graph.svg`. `"dot"` and `"gv"` write `to_dot()`'s text, never Graphviz's
         laid-out DOT, and `"mmd"` writes `to_mermaid()`'s (with no legend),
         needing nothing.
@@ -153,8 +153,8 @@ class Drawing:
         `FileNotFoundError` naming the folder when `path`'s folder doesn't exist.
         """
         target = Path(path)
-        given = format if format is not None else target.suffix.lower()
-        chosen = given.removeprefix(".")
+        given = format if format is not None else target.suffix
+        chosen = given.lower().removeprefix(".")
         if not chosen:
             msg = f"give a format, or a path with a suffix such as .svg: {target}"
             raise ValueError(msg)

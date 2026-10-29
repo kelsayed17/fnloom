@@ -270,6 +270,7 @@ def test_diff(flow: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
         "removed": [],
         "changed": {},
         "unversioned": [],
+        "graph_version_changed": False,
         "warnings": [],
     }
     flow.write_text(flow.read_text() + "\ndef d(b: int) -> int:\n    return b\n")
@@ -461,3 +462,76 @@ def test_a_file_named_like_a_standard_module_is_refused(
     status, _, err = _run(capsys, "draw", str(path))
     assert status == 2  # noqa: PLR2004  # a usage error
     assert "standard library module's name" in err
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["export", "flow.py", "--override", "a=3"],
+        ["export", "flow.py", "--input", "x=1"],
+        ["draw", "flow.py", "--outputs", "a", "--input", "x=oops"],
+        ["draw", "flow.py", "--upstream", "a", "--override", "a=3"],
+    ],
+)
+def test_run_flags_without_a_run_are_usage_errors(
+    flow: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    argv: list[str],
+) -> None:
+    """A flag of a run, where no run is made, is refused, not dropped."""
+    monkeypatch.chdir(flow.parent)
+    status, out, err = _run(capsys, *argv)
+    assert (status, out) == (2, "")
+    assert "no run is made" in err
+
+
+def test_formats_in_any_case_and_mmd_to_stdout(
+    flow: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--format mmd` and `--format MERMAID` print Mermaid; `GV` prints DOT."""
+    _, mermaid, _ = _run(capsys, "draw", str(flow), "--format", "mmd")
+    assert mermaid.startswith("flowchart LR\n")
+    _, upper, _ = _run(capsys, "draw", str(flow), "--format", "MERMAID")
+    assert upper == mermaid
+    _, dot, _ = _run(capsys, "draw", str(flow), "--format", "GV")
+    assert dot.startswith("digraph {")
+    target = tmp_path / "graph.out"
+    _run(capsys, "draw", str(flow), "--format", "MMD", "-o", str(target))
+    assert target.read_text() == mermaid
+
+
+_EXITING = """
+import sys
+sys.exit({code})
+"""
+
+
+@pytest.mark.parametrize(("code", "status"), [("3", 3), ("None", 0), ("'bye'", 1)])
+def test_a_module_calling_sys_exit_gives_a_status(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    code: str,
+    status: int,
+) -> None:
+    """`main` returns the status, never raising `SystemExit`."""
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    path = tmp_path / "exiting_flow.py"
+    path.write_text(_EXITING.format(code=code))
+    found, _, err = _run(capsys, "draw", str(path))
+    assert found == status
+    assert ("bye" in err) == (code == "'bye'")
+    assert "exiting_flow" not in sys.modules
+
+
+def test_a_refused_file_leaves_sys_path_alone(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The file's folder joins `sys.path` only once the file is accepted."""
+    path = tmp_path / "statistics.py"
+    path.write_text("def a(x: int) -> int:\n    return x\n")
+    before = list(sys.path)
+    status, _, _ = _run(capsys, "draw", str(path))
+    assert status == 2  # noqa: PLR2004  # a usage error
+    assert sys.path == before

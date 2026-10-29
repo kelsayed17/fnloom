@@ -368,6 +368,21 @@ Q98).
   sorted text, since a set of strings' fingerprint follows the hash seed; one holding an object known only by its
   address makes `graph_version` `null`. A function reading a global `frozenset` of strings keeps the result cache's
   limit (its code version follows the seed); the guide says so.
+- **Maintainer's review of the PR.** Five fixes, each with a regression test:
+    - **`diff` sees a value its text hides.** Each `value()` parameter exports a `value_version`: its fingerprint, or a
+      hash of its sorted text when it holds a set. `diff` compares it with the rest of `params`, so an array changed
+      past its `repr`'s elision shows as changed. A value with no version makes its node `unversioned`. `diff` also
+      reports `graph_version_changed`, and warns when the graph versions differ though no entry does; either makes the
+      CLI's status 1.
+    - **`stable_repr` walks every container it can see into:** set and mapping subclasses, `OrderedDict`, named tuples,
+      list and tuple subclasses, and dataclass instances. A set inside any of them is sorted, in the text and in the
+      `value_version`, under every hash seed.
+    - **Run flags without a run are usage errors.** `--outputs`, `--input` and `--override` on `export` without
+      `--outputs`, or on `draw` without `--execution`, exit 2 rather than being dropped.
+    - **Formats in any case.** `render` lowercases `format` as well as the suffix; the CLI prints `mmd` and `gv` to
+      stdout like `mermaid` and `dot`.
+    - **`main` returns a status when a loaded module calls `sys.exit`**, and a refused file leaves `sys.path` alone. A
+      `.py` file loaded by an earlier `main` call in the process is used again, not reloaded.
 - **Pinned versions.** A `@cache(version="v1")` function exports a version hashed from the pin and `"pinned": "v1"`,
   as the result cache takes the pin; without this, a pinned function reading a mutable global would export as
   unversioned.

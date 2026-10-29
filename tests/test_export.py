@@ -75,6 +75,7 @@ def test_a_function_node() -> None:
             "slot": None,
             "reads": "x",
             "value": None,
+            "value_version": None,
             "required": True,
             "type": "int",
         }
@@ -217,6 +218,7 @@ def test_diff() -> None:
         "removed": [],
         "changed": {},
         "unversioned": [],
+        "graph_version_changed": False,
         "warnings": [],
     }
 
@@ -417,3 +419,137 @@ def test_diff_compares_marks_and_refuses_a_name_twice() -> None:
     twice = {**old, "nodes": [*old["nodes"], old["nodes"][0]]}
     with pytest.raises(ValueError, match="new: nodes named twice: 'x'"):
         _export.diff(old, twice)
+
+
+_ARRAY = """
+from fnloom import parameterize, value
+
+class Opaque:
+    def __init__(self, n: int) -> None:
+        self.n = n
+
+@parameterize(scaled={{"k": value(list(range(2000)))}})
+def scale(x: int, k: list) -> int:
+    return x
+
+@parameterize(held={{"thing": value({thing})}})
+def hold(x: int, thing: object) -> int:
+    return x
+"""
+
+
+def test_diff_sees_a_value_whose_text_hides_the_change() -> None:
+    """A changed `value()` shows under `changed`, though its text may not."""
+    old = _driver(_ARRAY.format(thing="1"), "exported_array_old").export()
+    edited = _ARRAY.replace(
+        "list(range(2000))", "[*range(1000), 7, *range(1001, 2000)]"
+    )
+    new = _driver(edited.format(thing="1"), "exported_array_new").export()
+    found = _export.diff(old, new)
+    assert found["changed"] == {"scaled": ["params"]}
+    assert found["graph_version_changed"] is True
+    scaled = _nodes(new)["scaled"]["params"][1]
+    assert (
+        scaled["value_version"] != _nodes(old)["scaled"]["params"][1]["value_version"]
+    )
+
+
+def test_diff_warns_when_only_the_graph_version_moved() -> None:
+    """A safety net: differing graph versions with equal entries still say so."""
+    old = _driver().export()
+    new = {**old, "graph_version": "0" * 64}
+    found = _export.diff(old, new)
+    assert found["graph_version_changed"] is True
+    assert found["warnings"] == [
+        (
+            "the graph_versions differ, though no node's exported entry does: "
+            "a change the entries don't show"
+        )
+    ]
+
+
+SEEDED_CONTAINERS = """
+import collections
+import dataclasses
+import typing
+
+from fnloom import parameterize, value
+
+@dataclasses.dataclass(frozen=True)
+class D:
+    names: frozenset
+
+class P(typing.NamedTuple):
+    names: frozenset
+
+ORDERED = collections.OrderedDict(names=frozenset({"alpha", "beta", "gamma"}))
+
+@parameterize(
+    in_dataclass={"held": value(D(frozenset({"alpha", "beta", "gamma"})))},
+    in_namedtuple={"held": value(P(frozenset({"alpha", "beta", "gamma"})))},
+    in_ordered={"held": value(ORDERED)},
+)
+def hold(x: int, held: object) -> int:
+    return x
+"""
+
+_SEEDED_CONTAINERS = textwrap.dedent(
+    """
+    import collections, json, sys
+    sys.path.insert(0, sys.argv[1])
+    from helpers import make_module
+    from test_export import SEEDED_CONTAINERS
+    import fnloom
+    module = make_module("exported_containers", SEEDED_CONTAINERS)
+    config = {
+        "ordered": collections.OrderedDict(s=frozenset({"p", "q", "r"})),
+        "named": module.P(frozenset({"p", "q", "r"})),
+    }
+    driver = fnloom.Builder().with_modules(module).with_config(config).build()
+    print(json.dumps(driver.export(), sort_keys=True))
+    """
+)
+
+
+def test_sets_inside_any_container_do_not_change_the_text() -> None:
+    """Dataclasses, named tuples and OrderedDicts too, under three seeds (finding 2)."""
+    tests = os.path.dirname(__file__)  # noqa: PTH120  # a plain path for the child
+    texts = {
+        subprocess.run(  # noqa: S603  # our own interpreter and script
+            [sys.executable, "-c", _SEEDED_CONTAINERS, tests],
+            env={**os.environ, "PYTHONHASHSEED": seed},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for seed in ("0", "1", "2", "3")
+    }
+    assert len(texts) == 1
+    document = json.loads(texts.pop())
+    assert document["graph_version"] is not None
+    assert document["config"]["named"] == "P(names=frozenset({'p', 'q', 'r'}))"
+    assert document["config"]["ordered"] == (
+        "OrderedDict({'s': frozenset({'p', 'q', 'r'})})"
+    )
+    held = _nodes(document)["in_dataclass"]["params"][1]["value"]
+    assert held == "D(names=frozenset({'alpha', 'beta', 'gamma'}))"
+
+
+def test_stable_repr_of_a_container_holding_itself() -> None:
+    """`...` where it recurs, as `repr` writes it."""
+    looped: list[object] = [1]
+    looped.append(looped)
+    assert _export.stable_repr(looped) == "[1, ...]"
+
+
+def test_a_value_known_only_by_its_address_is_unversioned() -> None:
+    """Its text can't tell two apart, so diff lists it, never as unchanged."""
+    old = _driver(_ARRAY.format(thing="Opaque(1)"), "exported_opaque").export()
+    new = _driver(_ARRAY.format(thing="Opaque(2)"), "exported_opaque").export()
+    held = _nodes(old)["held"]["params"][1]
+    assert held["value"] == _nodes(new)["held"]["params"][1]["value"]
+    assert held["value_version"] is None
+    found = _export.diff(old, new)
+    assert found["unversioned"] == ["held"]
+    assert found["changed"] == {}
+    assert old["graph_version"] is None
