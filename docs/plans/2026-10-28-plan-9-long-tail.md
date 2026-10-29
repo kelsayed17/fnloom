@@ -105,8 +105,9 @@ Each decision becomes a register row, starting at Q112. Change any before the bu
       and `@parameterize` can't stack on the loader (H9.12).
 5. **`@load_from`, `@save_to` and materializers: not planned (Q116).**
     - **The fnloom way:**
-        - **Loading:** a plain loader node per source, `@parameterize`d for several. Its value is type-checked on
-          its edge, which Hamilton's isn't (H9.15).
+        - **Loading:** a plain loader node per source, `@parameterize`d for several. Its annotation is checked
+          against each reader's at build, and its value at run with `with_output_type_checks()` (Q87); Hamilton's
+          loaded values get neither (H9.15).
         - **Saving:**
             - an `after_run` hook writing `RunEnd.results` (Q84);
             - or a saver node requested with the outputs, as a Hamilton saver node must be (H9.16).
@@ -236,3 +237,7 @@ docs/plans/2026-10-28-roadmap-ahead-of-hamilton.md, README.md, docs/index.md, CH
   reads, each listed, sorted.
 - **Known follow-ups, unchanged:** `fingerprint` hashes dicts in insertion order, and `class_version` can't tell
   exec-defined classes apart.
+- **Task 1 review fixes.** A plain call is checked by a static checker, and its result at run by
+  `with_output_type_checks()` (Q113, Q116), not by default. The `@subdag` recipe is the `bind=` one plus the
+  `source()` final node; the glue-module form was left out, as `bind=` replaces it. Q114's "nothing checks it at run"
+  claim has no Hamilton-side test, since it needs the dataframe-type registry patched.

@@ -115,7 +115,7 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | A failing node logged at ERROR | Always, with a support banner | Off by default; `with_hooks(fnloom.LogFailures())` logs the node and its inputs, each cut to 50 characters ([Logging failures](hooks.md#logging-failures), Q88) |
 | `GraphConstructionHook`'s `run_after_graph_construction` | Called with the built graph | Read `driver.nodes` after `build()` |
 | `lifecycle.NoEdgeAndInputTypeChecking()` | Turns off the input and edge checks | `without_input_type_checks()`; edges are always checked, at build (Q10) |
-| A `StaticValidator`, refusing a node or the graph at build | `run_to_validate_node` and `run_to_validate_graph` | Not yet. Until then, check `driver.nodes` after `build()` and raise |
+| A `StaticValidator`, refusing a node or the graph at build | `run_to_validate_node` and `run_to_validate_graph` | Not planned: check `driver.nodes` after `build()` and raise ([`StaticValidator`](#staticvalidator), Q117) |
 | `NodeExecutionMethod` (`run_to_execute_node`) | Replaces how a node is called; one per driver | `with_node_wrappers(*wrappers)`: any number, an ordered chain, each `wrapper(node, call, inputs)` ([Node wrappers](running.md#node-wrappers), Q111) |
 | `lifecycle.default.GracefulErrorAdapter` | Keeps running past a failure, skipping what depends on it | Not yet: on the [roadmap](plans/2026-10-28-roadmap-ahead-of-hamilton.md). A failing node fails the run, and `after_node` sees its error and inputs |
 | `TaskExecutionHook` and the other task hooks | Hooks on dynamic execution's tasks | None: fnloom has no dynamic execution yet |
@@ -264,8 +264,8 @@ Hamilton makes it a namespaced input. A `bind=` key no node reads is a `ValueErr
 
 ### `@does`
 
-Call the function. The node is named, typed and cached as written, and the two signatures are type-checked like any
-call (Q113):
+Call the function. The node is named, typed and cached as written. A static checker checks the call against the
+replacing function's signature, and `with_output_type_checks()` checks the result at run (Q113):
 
 ```python
 # file: summing.py
@@ -323,6 +323,7 @@ def frame(rows: int) -> dict:
 ```
 
 ```python
+import fnloom
 import framed
 from fnloom import ValidationError
 
@@ -336,7 +337,7 @@ driver.execute(["frame"], inputs={"rows": 2})
 ### `@dataloader` and `@datasaver`
 
 A loader is a function that returns the data. If you also want its metadata as a node, return both and split them
-with `@extract_fields`. `@tag` marks the node for `Driver.nodes` and drawings (Q115):
+with `@extract_fields`. `@tag` marks the nodes in `Driver.nodes` and the export (Q115):
 
 ```python
 # file: loading.py
@@ -354,6 +355,7 @@ def total_loaded(data: list) -> int:
 ```
 
 ```python
+import fnloom
 import loading
 
 fnloom.build(loading).execute(["total_loaded", "metadata"])
@@ -364,9 +366,9 @@ A saver is a node that writes and returns what it wrote, or a hook (below).
 
 ### `@load_from`, `@save_to` and materializers
 
-Load in a node. Its value is type-checked on the edge to each reader, which Hamilton's loaded values are not. Save
-from an `after_run` hook, which gets the run's raw outputs. A saver node requested with the outputs works too, just
-as a Hamilton saver node writes only when requested (Q116):
+Load in a node. Its annotation is checked against each reader's at build, and its value at run with
+`with_output_type_checks()` (Q87), neither of which Hamilton's loaded values get. Save
+from an `after_run` hook, which gets the run's raw outputs (Q116):
 
 ```python
 # file: stored.py
@@ -384,9 +386,11 @@ def total_stored(numbers: dict) -> int:
 
 ```python
 import json
+import shutil
 import tempfile
 from pathlib import Path
 
+import fnloom
 import stored
 
 
@@ -415,9 +419,10 @@ driver.execute(["total_stored"], inputs={"in_path": str(folder / "in.json")})
 # -> {'total_stored': 3}
 (folder / "out.json").read_text(encoding="utf-8")
 # -> '{"total_stored": 3}'
+shutil.rmtree(folder)
 ```
 
-To choose the source at run time, use a `@config.when` variant per source, or a value given as an input.
+To choose the source per build, use a `@config.when` variant per source; to choose it per run, give the path as an input.
 
 ### `StaticValidator`
 

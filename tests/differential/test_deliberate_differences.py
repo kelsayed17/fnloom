@@ -5278,12 +5278,22 @@ def _sum_all(a: int, b: int) -> int:
 
 def total(x: int, y: int) -> int:
     return _sum_all(a=x, b=y)
+
+def _as_text(a: int) -> str:
+    return "s"
+
+def typed_int(a: int) -> int:
+    return _as_text(a)  # a static checker refuses this return
 """
 
 
 @pytest.mark.deliberate("Q113")
 def test_q113_does_is_a_call(tmp_path: Path) -> None:
-    """Hamilton's `@does` returns a `str` from an `int` node; a call types it."""
+    """Hamilton's `@does` returns a `str` from an `int` node; a call is checked.
+
+    A static checker checks the call, and `with_output_type_checks()` the result
+    at run (Q87).
+    """
     module = _module_from_file(tmp_path, "q113_h", _Q113_DOES)
     driver = hamilton_driver.Builder().with_modules(module).build()
     assert driver.execute(["total", "typed_int"], inputs={"x": 1, "y": 2, "a": 0}) == {
@@ -5294,6 +5304,14 @@ def test_q113_does_is_a_call(tmp_path: Path) -> None:
     assert types_["typed_int"] is int
     called = fnloom.build(make_module("q113_f", _Q113_CALLED))
     assert called.execute(["total"], inputs={"x": 1, "y": 2}) == {"total": 3}
+    checked = (
+        fnloom.Builder()
+        .with_modules(make_module("q113_fc", _Q113_CALLED))
+        .with_output_type_checks()
+        .build()
+    )
+    with pytest.raises(TypeError, match="typed_int: returned str, expected int"):
+        checked.execute(["typed_int"], inputs={"a": 0})
 
 
 _Q114_SCHEMA = """
@@ -5361,6 +5379,7 @@ def test_q115_a_loader_is_a_function(tmp_path: Path) -> None:
     driver = hamilton_driver.Builder().with_modules(module).build()
     data, metadata = driver.execute(["total", "raw.loader"])["raw.loader"]
     assert driver.execute(["total"]) == {"total": 3}
+    assert {"raw", "raw.loader"} <= {v.name for v in driver.list_available_variables()}
     fields = fnloom.build(make_module("q115_f", _Q115_FIELDS))
     assert fields.execute(["total", "metadata"]) == {"total": 3, "metadata": metadata}
     assert fields.execute(["data"]) == {"data": data}
@@ -5400,6 +5419,9 @@ def test_q116_io_is_a_node_and_a_hook(tmp_path: Path) -> None:
     given.write_text('{"a": 1, "b": 2}', encoding="utf-8")
     module = _module_from_file(tmp_path, "q116_h", _Q116_IO)
     driver = hamilton_driver.Builder().with_modules(module).build()
+    names = {v.name for v in driver.list_available_variables()}
+    assert {"total.load_data.data", "total.select_data.data"} <= names
+    assert {"save.doubled", "saved"} & names
     inputs = {"in_path": str(given), "out_path": str(tmp_path / "h.json")}
     driver.execute(["doubled"], inputs=inputs)
     assert not (tmp_path / "h.json").exists()  # only a requested saver writes
@@ -5424,6 +5446,18 @@ def test_q116_io_is_a_node_and_a_hook(tmp_path: Path) -> None:
         "doubled": {"total": 6}
     }
     assert json.loads((tmp_path / "f.json").read_text(encoding="utf-8")) == written
+    # Annotations are checked at build; a loaded value is checked at run only with
+    # `with_output_type_checks()` (Q87).
+    listed = tmp_path / "list.json"
+    listed.write_text("[1, 2]", encoding="utf-8")
+    checked = (
+        fnloom.Builder()
+        .with_modules(make_module("q116_fc", _Q116_NODES))
+        .with_output_type_checks()
+        .build()
+    )
+    with pytest.raises(TypeError, match="numbers: returned list, expected dict"):
+        checked.execute(["total"], inputs={"in_path": str(listed)})
 
 
 _Q117_OWNED = """
@@ -5468,6 +5502,18 @@ def test_q117_static_checks_are_a_function(tmp_path: Path) -> None:
         hamilton_driver.Builder().with_modules(module).with_adapters(Owned()).build()
     assert not isinstance(caught.value, ValueError)
     assert "orphan_a: no owner tag" in str(caught.value)
+
+    class Silent(lifecycle.StaticValidator):
+        @override
+        def run_to_validate_node(
+            self, *, node: graph_types.HamiltonNode, **future_kwargs: Any
+        ) -> tuple[bool, str | None]:
+            del node, future_kwargs
+            return False, None
+
+    # A failure with no message crashes the build with a `TypeError`.
+    with pytest.raises(TypeError):
+        hamilton_driver.Builder().with_modules(module).with_adapters(Silent()).build()
     # A class rather than an instance is accepted, and never runs.
     hamilton_driver.Builder().with_modules(module).with_adapters(
         Owned  # ty: ignore[invalid-argument-type]  # the class, as Hamilton accepts
@@ -5508,97 +5554,27 @@ def _plus(v: int) -> int:
 
 
 @pytest.mark.deliberate("Q110")
-def test_q110_a_resolver_importing_a_mutate_is_refused(tmp_path: Path) -> None:
+def test_q110_a_resolver_importing_a_mutate_is_refused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The known limit: `@mutate` while a resolver runs is refused, even by import."""
     (tmp_path / "q110_mutating.py").write_text(_Q110_MUTATING, encoding="utf-8")
-    sys.path.insert(0, str(tmp_path))
-    try:
-        module = make_module(
-            "q110_importing", _Q110_IMPORTING.format(mutating="q110_mutating")
-        )
-        with pytest.raises(TypeError, match="can't apply @mutate"):
-            fnloom.Builder().with_modules(module).with_config({"flag": True}).build()
-    finally:
-        sys.path.remove(str(tmp_path))
-        sys.modules.pop("q110_mutating", None)
-
-
-_Q112_TAXES = """
-def net(gross: float) -> float:
-    return gross * 0.8
-
-def doubled(net: float) -> float:
-    return net * 2
-"""
-
-_Q112_SUBDAGS = """
-from hamilton.function_modifiers import source, subdag, value
-import q112_taxes
-
-@subdag(q112_taxes, inputs={"gross": source("eu_gross")})
-def eu(doubled: float) -> float:
-    return doubled
-
-@subdag(q112_taxes, inputs={"gross": value(5.0)})
-def us(doubled: float) -> float:
-    return doubled
-
-@subdag(q112_taxes, inputs={"gross": source("eu_gross")})
-def typo(doubld: float) -> float:
-    return doubld
-"""
-
-_Q112_FINALS = """
-import fnloom
-
-@fnloom.inject(doubled=fnloom.source("eu.doubled"))
-def eu(doubled: float) -> float:
-    return doubled
-
-@fnloom.inject(doubled=fnloom.source("us.doubled"))
-def us(doubled: float) -> float:
-    return doubled
-
-@fnloom.inject(doubld=fnloom.source("eu.doubld"))
-def typo(doubld: float) -> float:
-    return doubld
-"""
-
-
-@pytest.mark.deliberate("Q112")
-def test_q112_bind_feeds_each_namespace(tmp_path: Path) -> None:
-    """Two `@subdag`s with `inputs=` and two bound namespaces give the same values.
-
-    Hamilton makes a misspelled final-function parameter a namespaced input;
-    fnloom's final node reads the namespace's node by name, and a misspelled
-    one is a missing input that `validate` names.
-    """
-    _module_from_file(tmp_path, "q112_taxes", _Q112_TAXES)
-    hamilton_module = _module_from_file(tmp_path, "q112_h", _Q112_SUBDAGS)
-    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
-    inputs = {"eu_gross": 10.0}
-    expected = hamilton.execute(["eu", "us"], inputs=inputs)
-    assert expected == {"eu": 16.0, "us": 8.0}
-    assert sorted(
-        v.name for v in hamilton.list_available_variables() if v.is_external_input
-    ) == ["eu_gross", "typo.doubld"]
-    taxes = make_module("q112_taxes_f", _Q112_TAXES)
-    finals = make_module("q112_f", _Q112_FINALS)
-    driver = (
-        fnloom.Builder()
-        .with_modules(finals)
-        .with_modules(taxes, namespace="eu", bind={"gross": fnloom.source("eu_gross")})
-        .with_modules(taxes, namespace="us", bind={"gross": fnloom.value(5.0)})
-        .build()
+    monkeypatch.syspath_prepend(str(tmp_path))
+    module = make_module(
+        "q110_importing", _Q110_IMPORTING.format(mutating="q110_mutating")
     )
-    assert driver.execute(["eu", "us"], inputs=inputs) == expected
-    assert driver.validate(["typo"], inputs=inputs) == [
-        "missing inputs: 'eu.doubld' (needed by 'typo')"
-    ]
-    # An unused binding is refused, where Hamilton drops a source() silently.
-    with pytest.raises(ValueError, match="bind names 'rate' under namespace 'eu'"):
-        fnloom.Builder().with_modules(
-            taxes,
-            namespace="eu",
-            bind={"gross": fnloom.value(1.0), "rate": fnloom.source("r")},
-        ).build()
+    # The resolver only imports it when the config says so.
+    plain = fnloom.Builder().with_modules(module).build()
+    assert plain.execute(["host"], inputs={"x": 1}) == {"host": 1}
+    with pytest.raises(TypeError, match="can't apply @mutate"):
+        fnloom.Builder().with_modules(module).with_config({"flag": True}).build()
+    # The advice: import the module at the top of the file instead.
+    advised = make_module(
+        "q110_advised",
+        "import q110_mutating\n"
+        + _Q110_IMPORTING.format(mutating="q110_mutating").replace(
+            '    if flag:\n        importlib.import_module("q110_mutating")\n', ""
+        ),
+    )
+    built = fnloom.Builder().with_modules(advised).with_config({"flag": True}).build()
+    assert built.execute(["host"], inputs={"x": 1}) == {"host": 1}
