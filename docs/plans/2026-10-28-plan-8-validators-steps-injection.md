@@ -3,8 +3,8 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** proposed, 2026-10-28, on `claude/plan-8-validators-steps-injection`. Waiting for the maintainer's approval
-of the decisions.
+**Status:** approved 2026-10-28 with four amendments (marked *Amended*), in progress on
+`claude/plan-8-validators-steps-injection`.
 
 **Goal:** close the roadmap's step 7, the v1.x decorators. That means:
 
@@ -81,8 +81,8 @@ the build starts.
     - `fnloom.ValidationError(ValueError)` has a readable message, one line per failed `fail` check:
       `x: check range failed: 12 is not in [0, 10]`. Its `results` attribute holds the failed checks' `CheckResult`s.
       Hamilton's `DataValidationError` subclasses `Exception` only, and its message is a list's repr (H8.2).
-    - **A `warn` failure** logs one WARNING per check on the `fnloom` logger, and the run goes on (KEEP the level,
-      H8.2).
+    - **A `warn` failure** logs one WARNING per failed check per run on the `fnloom` logger, and the run goes on (KEEP
+      the level, H8.2). *Amended:* through the standard `logging` module only: no `print` and no `warnings.warn`.
     - **Order:** all of a node's checks run before any decision, then every failed `fail` check is raised in one
       error (KEEP, H8.2).
 3. **Built-in checks over any type (Q101).** `check_output(**checks, importance="fail")` takes:
@@ -97,6 +97,11 @@ the build starts.
     - `range`, `values_in` and the NaN checks apply to a scalar, and to each item of a value that iterates (an array,
       a Series, a list), with no pandas or numpy import. A value with `min()` and `max()` methods (numpy, pandas) is
       ranged through them.
+    - *Amended:* a `str`, `bytes`, `bytearray` or `Mapping` is one scalar, never iterated as items. A one-shot
+      iterator (`iter(v) is v`, a generator) is never consumed: a check on a node annotated `Iterator` or `Generator`
+      is a `TypeError` at build, and a one-shot value met at run is a `TypeError` naming the node and the check. The
+      value a node returns is never consumed or changed by a check. numpy and pandas values are checked through their
+      own vectorised `min`, `max`, `isin` and NaN tests, found by duck typing, never a Python loop.
     - An argument that doesn't apply to the node's return annotation is a `TypeError` at build, naming the node, the
       argument and the type. Hamilton crashes with a raw `TypeError` on `list[int]` or `int | None` (H8.1).
     - Bad argument values are refused when decorating, e.g. `max_fraction_nans=2` and `range=(3, 1)`.
@@ -128,6 +133,10 @@ the build starts.
     - **Cache hits:** a hit is not checked again. A value that failed a `fail` check is never stored. One that only
       warned is stored, and its warning is not logged again: Q87's rule for type checks, and Hamilton's (KEEP, H8.7).
       Its `NodeEnd.checks` is `()`.
+    - *Amended:* **checks are part of the cache key.** A node's static key holds its checks: each built-in's
+      arguments by fingerprint, each check function by its code version, each `Validator` by its class version and
+      fingerprint. Adding, removing or changing a check misses, so a value stored before a stricter check never comes
+      back unchecked. A check with no version makes the node uncacheable, saying why.
 6. **Steps: shape and names (Q104).**
     - `fnloom.step(fn, *args, **bindings)` binds `fn`'s parameters after its first one. A binding is
       `source("node")`, `value(v)`, or a bare literal, read as `value` (KEEP, H8.11).
@@ -211,6 +220,10 @@ the build starts.
     - **Order with hooks:** `before_node` and `after_node` fire around the whole chain (KEEP, H8.23). Validators run
       inside it, so a wrapper sees a `ValidationError`.
     - **Cache hits:** a hit skips the chain. A wrapper's return value is checked by output checks when they are on.
+    - *Amended:* **wrappers are execution-only, never part of the cache key.** What the chain returns is stored like
+      any value, a wrapper that calls `call()` zero times included, and a later run with other wrappers, or none,
+      gets that value on a hit. A wrapper that changes values is the user's to keep apart, by giving such a driver
+      its own store; the docs say so.
     - **Checked when attached:** a non-callable or an `async def` wrapper is a `TypeError` from
       `with_node_wrappers`. On the async driver, wrappers wrap sync nodes. An `async def` node with wrappers is a
       `TypeError` from `build_async`, naming it, until async wrappers are designed.
