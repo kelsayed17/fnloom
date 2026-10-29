@@ -1,4 +1,4 @@
-"""Differential-test setup: Hamilton's environment and the `deliberate` and `keeps` markers."""
+"""Differential-test setup: Hamilton's environment and the evidence markers."""
 
 import os
 import re
@@ -18,7 +18,8 @@ if TYPE_CHECKING:
 from harness import FAKE_GRAPHVIZ  # after the environment is set
 
 REGISTER = Path(__file__).parents[2] / "docs" / "quirk-register.md"
-_ROW_ID = re.compile(r"^\| (Q\d+) \|", re.MULTILINE)
+# Each row's ID and disposition, its first and third columns.
+_ROW = re.compile(r"^\| (Q\d+) \| .*? \| ([^|]*?) \|", re.MULTILINE)
 
 
 def pytest_configure(config: pytest.Config) -> None:
@@ -37,13 +38,18 @@ def pytest_configure(config: pytest.Config) -> None:
 
 def pytest_collection_modifyitems(items: Sequence[pytest.Item]) -> None:
     """Fails collection when a `deliberate` or `keeps` marker names no register row."""
-    known = set(_ROW_ID.findall(REGISTER.read_text(encoding="utf-8")))
+    dispositions = dict(_ROW.findall(REGISTER.read_text(encoding="utf-8")))
     for item in items:
         for name in ("deliberate", "keeps"):
             for marker in item.iter_markers(name):
                 quirk = marker.args[0] if marker.args else None
-                if quirk not in known:
-                    msg = f"{item.nodeid}: {name}({quirk!r}) is no row of {REGISTER.name}"
+                if quirk not in dispositions:
+                    msg = (
+                        f"{item.nodeid}: {name}({quirk!r}) is no row of {REGISTER.name}"
+                    )
+                    raise pytest.UsageError(msg)
+                if name == "keeps" and "KEEP" not in dispositions[quirk]:
+                    msg = f"{item.nodeid}: keeps({quirk!r}) marks a row not kept"
                     raise pytest.UsageError(msg)
 
 

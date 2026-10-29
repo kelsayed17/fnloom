@@ -174,7 +174,10 @@ COMPARISON_TABLES = ("Decorators", "What changes in your code", "Caching")
 REGISTER = DOCS / "quirk-register.md"
 REGISTER_ROW = re.compile(r"^\| (Q\d+) \|", re.MULTILINE)
 CITED = re.compile(r"\bQ\d+\b")
-EVIDENCE = re.compile(r"\.(?:deliberate|keeps)\(\"(Q\d+)\"\)")
+EVIDENCE = re.compile(
+    r"^@pytest\.mark\.(?:deliberate|keeps)\(\"(Q\d+)\"\)$", re.MULTILINE
+)
+SEPARATOR = re.compile(r"^\|\s*:?-{3,}")
 
 
 def _comparison_rows() -> list[tuple[str, str]]:
@@ -182,15 +185,16 @@ def _comparison_rows() -> list[tuple[str, str]]:
     rows: list[tuple[str, str]] = []
     heading = ""
     for line in (DOCS / "from-hamilton.md").read_text(encoding="utf-8").splitlines():
-        if line.startswith("## "):
-            heading = line.removeprefix("## ")
-        elif heading in COMPARISON_TABLES and line.startswith("| "):
+        if line.startswith("#"):
+            # Any heading ends a table's section, so a subsection's tables don't count.
+            heading = line.removeprefix("## ") if line.startswith("## ") else ""
+        elif heading in COMPARISON_TABLES and line.startswith("|"):
             rows.append((heading, line))
     # Drop each table's header row: the one followed by its `| --- |` separator.
     return [
         row
         for row, after in zip(rows, [*rows[1:], ("", "")], strict=True)
-        if not row[1].startswith("| ---") and not after[1].startswith("| ---")
+        if not SEPARATOR.match(row[1]) and not SEPARATOR.match(after[1])
     ]
 
 
