@@ -3,7 +3,7 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** built, merge pending; approved 2026-10-28, as drafted, with the recommended option for decision 1. Building on
+**Status:** built and merged (#28); approved 2026-10-28, as drafted, with the recommended option for decision 1. Building on
 `claude/plan-9-decisions`.
 
 **Goal:** close the roadmap's step 8 by deciding each Hamilton feature the roadmap leaves to Plan 9: `@subdag` (with

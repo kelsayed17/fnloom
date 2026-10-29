@@ -1,8 +1,7 @@
 # Roadmap: ahead of Hamilton everywhere
 
 **Status:** in progress, 2026-10-28. Plans 1–4, the Plan 4 follow-up and Plan 3 are merged and released in 0.2.0.
-Plans 5 to 7 are merged (#24 to #26), not yet released. Plan 8 is merged (#27), not yet released. Plan 9 is on its own branch, merge pending; a row below marked decided in
-Plan 9 describes that branch. Plan 10 and later are not built.
+Plans 5 to 9 are merged (#24 to #28), not yet released. Plan 10 and later are not built.
 
 **Goal:** for every capability Hamilton 1.90.0 offers, fnloom has an equivalent that is at least as good, or a
 written decision explaining why it doesn't. "At least as good" means: same intent; behaviour proven differentially
@@ -218,9 +217,9 @@ tests against Hamilton for every kept behaviour; benchmarks for anything on the 
 6. **Plan 7: drawing and the CLI.** Done: DOT and Mermaid text for the graph, upstream, downstream,
    path between and an execution, with no dependency (Q90–Q94); `export` of the graph or a run, with code versions
    (Q95, Q96); the `fnloom` command (Q97, Q98).
-7. **Plan 8: v1.x decorators.** Done, merge pending: output validators (Q99–Q103), step injection and `@mutate`
+7. **Plan 8: v1.x decorators.** Done: output validators (Q99–Q103), step injection and `@mutate`
    (Q104–Q108), `@inject` and `@resolve` (Q109, Q110), and node wrappers (Q111).
-8. **Plan 9: the long tail.** Done, merge pending: a decision per remaining Hamilton decorator, each a register row
+8. **Plan 9: the long tail.** Done: a decision per remaining Hamilton decorator, each a register row
    (Q112 to Q117), with `bind=` on a namespaced `with_modules` as the one build (Q112), and Q110's known limit pinned
    by a test.
 9. **Design, then Plan 10: dynamic execution**, together with the "Beyond Hamilton" designs.
