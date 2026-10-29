@@ -16,7 +16,7 @@ from types import MappingProxyType
 
 from fnloom._decorators import (
     _ATTRIBUTE,
-    MUTATES,
+    RESOLVING,
     Binding,
     _check_rows,
     decorations,
@@ -144,35 +144,44 @@ def resolved(
         return fn
     where = f"resolve on {fn.__qualname__}"
     copy = _copied(fn)
-    with _LOCK:
-        setattr(copy, _ATTRIBUTE, replace(decorations(fn), resolvers=()))
-        for resolver in resolvers:
-            for decorator in reversed(_decorators(where, resolver, config)):
-                if getattr(decorator, MUTATES, False):
-                    # Refused before it runs: it would write onto its targets,
-                    # which a refused build must leave as they were (Q110).
-                    msg = f"{where}: it can't apply @mutate"
-                    raise TypeError(msg)
-                before = decorations(copy)
-                try:
-                    applied = decorator(copy)
-                except Exception as error:
-                    error.add_note(f"in {where}")
-                    raise
-                if applied is not copy:
-                    msg = f"{where}: a decorator returned another object"
-                    raise TypeError(msg)
-                after = decorations(copy)
-                refused = [
-                    name
-                    for field, name in _FORBIDDEN
-                    if getattr(before, field) != getattr(after, field)
-                ]
-                if refused:
-                    msg = f"{where}: it can't apply {', '.join(refused)}"
-                    raise TypeError(msg)
+    token = RESOLVING.set(where)
+    try:
+        with _LOCK:
+            _decorate(copy, fn, where, resolvers, config)
+    finally:
+        RESOLVING.reset(token)
     setattr(copy, ORIGINAL, fn)
     return copy
+
+
+def _decorate(
+    copy: types.FunctionType,
+    fn: types.FunctionType,
+    where: str,
+    resolvers: Sequence[Callable[..., object]],
+    config: Mapping[str, object],
+) -> None:
+    setattr(copy, _ATTRIBUTE, replace(decorations(fn), resolvers=()))
+    for resolver in resolvers:
+        for decorator in reversed(_decorators(where, resolver, config)):
+            before = decorations(copy)
+            try:
+                applied = decorator(copy)
+            except Exception as error:
+                error.add_note(f"in {where}")
+                raise
+            if applied is not copy:
+                msg = f"{where}: a decorator returned another object"
+                raise TypeError(msg)
+            after = decorations(copy)
+            refused = [
+                name
+                for field, name in _FORBIDDEN
+                if getattr(before, field) != getattr(after, field)
+            ]
+            if refused:
+                msg = f"{where}: it can't apply {', '.join(refused)}"
+                raise TypeError(msg)
 
 
 def _decorators(

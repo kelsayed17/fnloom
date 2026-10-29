@@ -5,6 +5,7 @@ import inspect
 import types
 import typing
 from collections.abc import Callable, Iterable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Literal, overload
@@ -20,8 +21,9 @@ if TYPE_CHECKING:
 
 _ATTRIBUTE = "__fnloom__"
 
-# The attribute marking a `@mutate(...)` decorator, which changes other functions.
-MUTATES = "__fnloom_mutates__"
+# The `@resolve` running now, as words for an error, while its resolvers and
+# decorators run: `@mutate` refuses to write onto other functions then.
+RESOLVING: ContextVar[str | None] = ContextVar("fnloom_resolving", default=None)
 
 # How a node uses the result cache: see `cache`.
 type CacheBehavior = Literal["default", "recompute", "disable"]

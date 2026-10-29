@@ -312,3 +312,30 @@ def host(x: int) -> int:
     clean = fnloom.Builder().with_modules(module).with_config({"flag": False}).build()
     assert "target.raw" not in clean.node_names()
     assert clean.execute(["target"], inputs={"x": 1}) == {"target": 1}
+
+
+def test_a_wrapped_mutate_in_a_resolver_leaves_no_step() -> None:
+    """However a resolver comes to apply `@mutate`, it is refused unwritten (Q110)."""
+    source_text = """
+import fnloom
+
+def target(x: int) -> int:
+    return x
+
+def _host(v: int) -> int:
+    return v + 100
+
+def _sneaky(fn):
+    fnloom.mutate(target)(_host)
+    return fn
+
+@fnloom.resolve(lambda flag=False: _sneaky if flag else fnloom.tag(t="1"))
+def host(x: int) -> int:
+    return x
+"""
+    module = make_module("resolve_wrapped_mutate", source_text)
+    with pytest.raises(TypeError, match="can't apply @mutate"):
+        fnloom.Builder().with_modules(module).with_config({"flag": True}).build()
+    clean = fnloom.Builder().with_modules(module).with_config({"flag": False}).build()
+    assert "target.raw" not in clean.node_names()
+    assert clean.execute(["target"], inputs={"x": 1}) == {"target": 1}

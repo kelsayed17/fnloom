@@ -286,7 +286,8 @@ def _values_in(allowed: Sequence[object]) -> Callable[[object], tuple[bool, str]
     def member(item: object) -> bool:
         try:
             return item in allowed
-        except TypeError:
+        except TypeError, ValueError:
+            # An item whose `==` is no `bool`, as an array's: not a member.
             return False
 
     def check(value: object) -> tuple[bool, str]:
@@ -568,6 +569,15 @@ def check_output[F: Callable[..., object]](  # noqa: C901, PLR0912, PLR0913, PLR
             msg = f"values_in must be a collection of values, got {values_in!r}"
             raise TypeError(msg)
         allowed = _canonical(values_in)
+        for member in allowed:
+            try:
+                bool(member == member)  # noqa: PLR0124  # does its `==` give a bool?
+            except Exception:  # noqa: BLE001  # its own `==` or `bool` raised
+                msg = (
+                    f"values_in members must compare to a bool, as an array "
+                    f"does not: {member!r}"
+                )
+                raise TypeError(msg) from None
         add("values_in", allowed, _values_in(allowed), _reads_items("values_in"))
     if data_type is not None:
         add("data_type", data_type, _data_type(data_type), _anything)

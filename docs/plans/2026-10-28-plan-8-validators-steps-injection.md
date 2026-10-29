@@ -450,4 +450,9 @@ from-hamilton.md, quirk-register.md, benchmarks.md, index.md, README.md, CHANGEL
     - A `@pipe_output` node's checks run on the unwrapped pass-on node, so no wrapper sees them fail; Q111 and the
       guide say so.
     - `None` counts as missing for the NaN checks, in a list, an object array and a Series alike.
+- **Re-review.** Three more, each with a regression test:
+    - Mutator steps are matched by function and by each binding's identity or fingerprint, never `==`, so an array
+      binding builds.
+    - `@mutate` refuses while any `@resolve` runs, so a resolver's own wrapper can't register a step either.
+    - A `values_in` member whose `==` gives no `bool` is a `TypeError` when decorating; an array item fails the check.
 - **Register rows:** Q99 to Q111, and Q24 updated.

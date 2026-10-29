@@ -16,8 +16,9 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from fnloom._config import Condition, ConfigPolicy, build_conditions, matches
-from fnloom._decorators import _ATTRIBUTE, MUTATES, Source, Value, decorations
+from fnloom._decorators import _ATTRIBUTE, RESOLVING, Source, Value, decorations
 from fnloom._extract import extractor
+from fnloom._fingerprint import fingerprint
 from fnloom._scan import NodeDef, _payload
 from fnloom._types import opaque, resolved_hints, type_matches
 from fnloom._view import Param
@@ -568,6 +569,40 @@ def apply_to(fn: Callable[..., object], **bindings: object) -> Target:
     return replace(found, bindings=MappingProxyType(dict(bindings)))
 
 
+def _same(one: Step, other: Step) -> bool:
+    """Whether two steps are one: the same function, bound alike, never by `==`.
+
+    A `value()` matches by identity or by fingerprint, as the cache would key
+    it, so an array or anything whose `==` is no `bool` is never compared.
+    """
+    if (
+        one.fn is not other.fn
+        or one.label != other.label
+        or one.conditions != other.conditions
+        or one.fields != other.fields
+        or one.bindings.keys() != other.bindings.keys()
+    ):
+        return False
+    return all(
+        _same_binding(one.bindings[name], other.bindings[name]) for name in one.bindings
+    )
+
+
+def _same_binding(one: Source | Value, other: Source | Value) -> bool:
+    if one is other:
+        return True
+    if isinstance(one, Source) and isinstance(other, Source):
+        return one.name == other.name
+    if not (isinstance(one, Value) and isinstance(other, Value)):
+        return False
+    if one.value is other.value:
+        return True
+    try:
+        return fingerprint(one.value) == fingerprint(other.value)
+    except Exception:  # noqa: BLE001  # no fingerprint: not known to be the same
+        return False
+
+
 def _mutator_key(fn: Callable[..., object]) -> str:
     """Who a mutator is, across redefinitions: its module and qualified name."""
     return f"{getattr(fn, '__module__', '')}.{_named(fn)}"
@@ -593,6 +628,11 @@ def mutate[F: Callable[..., object]](
     found = [_target(t) for t in targets]
 
     def apply(mutator: F) -> F:
+        if (where := RESOLVING.get()) is not None:
+            # Refused before it writes onto a target, however a resolver came
+            # to apply it: a refused build leaves every function as it was.
+            msg = f"{where}: it can't apply @mutate"
+            raise TypeError(msg)
         key = _mutator_key(mutator)
         code = getattr(mutator, "__code__", None)
         cleared: set[int] = set()
@@ -617,7 +657,7 @@ def mutate[F: Callable[..., object]](
                     if k != key or getattr(s.fn, "__code__", None) is code
                 )
                 cleared.add(id(target.fn))
-            if any(step_ == made for _, step_ in mutations):
+            if any(_same(step_, made) for _, step_ in mutations):
                 # This very mutator, bound the same, already adds this step.
                 continue
             mutations = (*mutations, (key, made))
@@ -634,8 +674,6 @@ def mutate[F: Callable[..., object]](
         )
         return mutator
 
-    # Marked, so `@resolve` refuses it before it writes onto any target.
-    setattr(apply, MUTATES, True)  # an attribute of our own
     return apply
 
 

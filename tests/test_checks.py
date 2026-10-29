@@ -869,3 +869,22 @@ def test_none_is_missing_for_the_nan_checks_everywhere() -> None:
     ):
         with pytest.raises(ValidationError):
             driver.execute(["a"], inputs={"v": value})
+
+
+def test_values_in_never_compares_an_array_ambiguously() -> None:
+    """An array member is refused when decorating; an array item fails the check."""
+    numpy = _loaded("numpy")
+
+    def f() -> list[int]:
+        return []
+
+    with pytest.raises(TypeError, match="must compare to a bool"):
+        check_output(values_in=[numpy.array([1, 2])])(f)
+    module = make_module(
+        "array_items",
+        "from typing import Any\ndef a(v: Any) -> Any:\n    return v\n",
+    )
+    check_output(values_in=[1, 2])(module.a)
+    driver = fnloom.build(module)
+    with pytest.raises(fnloom.ValidationError, match="is not one of"):
+        driver.execute(["a"], inputs={"v": [1, numpy.array([1, 2])]})

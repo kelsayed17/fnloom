@@ -1,10 +1,20 @@
 """`@mutate` and `apply_to`: steps added to another function's `@pipe_output`."""
 
+import contextlib
+import importlib
+from typing import Any
+
 import pytest
 
 import fnloom
-from fnloom import apply_to, mutate
+from fnloom import apply_to, mutate, value
 from helpers import make_module
+
+# Imported once, here: the helpers forget modules a test imports, and numpy
+# can't be imported twice in one process.
+_NUMPY: object = None
+with contextlib.suppress(ImportError):
+    _NUMPY = importlib.import_module("numpy")
 
 MUTATED = """
 from fnloom import apply_to, check_output, mutate, pipe_output, source, step, value
@@ -298,3 +308,28 @@ def test_the_same_mutator_twice_adds_one_step() -> None:
         "f.raw",
         "f.with_p",
     ]
+
+
+def test_a_mutator_bound_to_an_array_dedupes_without_equality() -> None:
+    """Bindings match by identity or fingerprint, so an array's `==` never runs."""
+    if _NUMPY is None:
+        pytest.skip("numpy is not installed")
+    numpy: Any = _NUMPY
+    module = make_module("array_bound", "def f(x: int) -> int:\n    return x\n")
+
+    def _p(v: int, w: object) -> int:
+        return v + int(numpy.sum(w))
+
+    _p.__module__ = "array_bound"
+    same = numpy.array([1, 2])
+    mutate(module.f, w=value(same))(_p)
+    mutate(module.f, w=value(same))(_p)
+    mutate(module.f, w=value(numpy.array([1, 2])))(_p)
+    mutate(module.f, w=value(numpy.array([5, 5])))(_p)
+    driver = fnloom.build(module)
+    assert [n for n in driver.node_names() if n.startswith("f.")] == [
+        "f.raw",
+        "f.with_p",
+        "f.with_p_1",
+    ]
+    assert driver.execute(["f"], inputs={"x": 1}) == {"f": 14}
