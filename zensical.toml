@@ -30,6 +30,7 @@ nav = [
   { "Project" = [
     { "Design" = "design/2026-10-26-fnloom-design.md" },
     { "Caching design" = "design/2026-10-27-caching-design.md" },
+    { "Dynamic execution design" = "design/2026-10-28-dynamic-execution-design.md" },
     { "Roadmap: ahead of Hamilton" = "plans/2026-10-28-roadmap-ahead-of-hamilton.md" },
     { "Plan 4: caching" = "plans/2026-10-27-plan-4-result-caching.md" },
     { "Plan 2: decorators and type checks" = "plans/2026-10-27-plan-2-decorators-inspection-type-checks.md" },
