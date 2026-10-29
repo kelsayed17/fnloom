@@ -332,7 +332,21 @@ def _nan_count(value: object) -> tuple[int, int]:
     return sum(_is_nan(item) for item in items), len(items)
 
 
+def _canonical(values: Iterable[object]) -> tuple[object, ...]:
+    """`values` as a tuple; a set's in one order, by type then `repr`.
+
+    A set iterates in the order the hash seed gives, which the check's identity,
+    and so its cache key, and its message must not follow.
+    """
+    if isinstance(values, (set, frozenset)):
+        return tuple(sorted(values, key=lambda v: (type(v).__qualname__, repr(v))))
+    return tuple(values)
+
+
 def _is_nan(item: object) -> bool:
+    """Whether `item` is missing: NaN, or `None`, as pandas counts it."""
+    if item is None:
+        return True
     if isinstance(item, complex):
         return math.isnan(item.real) or math.isnan(item.imag)
     if isinstance(item, (str, bytes, bytearray)) or not hasattr(item, "__float__"):
@@ -538,7 +552,7 @@ def check_output[F: Callable[..., object]](  # noqa: C901, PLR0912, PLR0913, PLR
             raise TypeError(msg)
         low, high = range
         if any(_is_nan(bound) for bound in range):
-            msg = f"range bounds must not be NaN, got {range!r}"
+            msg = f"range bounds must not be NaN or None, got {range!r}"
             raise ValueError(msg)
         try:
             backwards = bool(low > high)  # ty: ignore[unsupported-operator]
@@ -553,7 +567,7 @@ def check_output[F: Callable[..., object]](  # noqa: C901, PLR0912, PLR0913, PLR
         if isinstance(values_in, (str, bytes)) or not isinstance(values_in, Iterable):
             msg = f"values_in must be a collection of values, got {values_in!r}"
             raise TypeError(msg)
-        allowed = tuple(values_in)
+        allowed = _canonical(values_in)
         add("values_in", allowed, _values_in(allowed), _reads_items("values_in"))
     if data_type is not None:
         add("data_type", data_type, _data_type(data_type), _anything)

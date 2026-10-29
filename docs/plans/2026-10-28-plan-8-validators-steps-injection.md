@@ -439,4 +439,15 @@ from-hamilton.md, quirk-register.md, benchmarks.md, index.md, README.md, CHANGEL
   wiring, tags, values and check results; and each Plan 8 decorator with `@extract_fields`. Every pair gives one graph
   in either order, except `@inject` with `@parameterize`, which is refused in both orders with one message. Two check
   decorators run in the order written, so only their order differs.
+- **Maintainer's review of the PR.** Six fixes and a minor one, each with a regression test:
+    - A set given to `values_in` is sorted, so the check's identity, its cache key and its message never follow the
+      hash seed.
+    - An export lists each node's checks, and its `version` and `graph_version` cover them as the cache key does;
+      `diff` compares `checks`.
+    - `@resolve` refuses a `@mutate` before it runs: it writes onto its targets, which a refused build must not.
+    - One mutator bound the same and applied twice, or given twice as a target, adds its step once.
+    - `<fn>.raw` is made even when the config keeps no step.
+    - A `@pipe_output` node's checks run on the unwrapped pass-on node, so no wrapper sees them fail; Q111 and the
+      guide say so.
+    - `None` counts as missing for the NaN checks, in a list, an object array and a Series alike.
 - **Register rows:** Q99 to Q111, and Q24 updated.

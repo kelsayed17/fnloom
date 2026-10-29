@@ -229,6 +229,8 @@ class NodeViews(Mapping[str, NodeView]):
         # The function each node was built from when it isn't its view's
         # `origin`: a `@resolve` copy, which holds the resolved decorators.
         self.built_from: Mapping[str, Callable[..., object]] = {}
+        # Each checked node's output checks, for an export to describe.
+        self.checks: Mapping[str, tuple[object, ...]] = {}
 
     def type_of(self, name: str) -> object:
         """The type of node or input `name`, without making an input's view."""
@@ -363,4 +365,5 @@ def node_views(
         for node in nodes
         if functions[node.name].origin is not node.origin
     }
+    views.checks = {node.name: node.checks for node in nodes if node.checks}
     return views

@@ -16,7 +16,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from fnloom._config import Condition, ConfigPolicy, build_conditions, matches
-from fnloom._decorators import _ATTRIBUTE, Source, Value, decorations
+from fnloom._decorators import _ATTRIBUTE, MUTATES, Source, Value, decorations
 from fnloom._extract import extractor
 from fnloom._scan import NodeDef, _payload
 from fnloom._types import opaque, resolved_hints, type_matches
@@ -462,9 +462,11 @@ def _piped(
         for s in steps
         if s.fields is None or field_name is None or field_name in s.fields
     ]
-    kept = _kept(mine, config)
-    if not kept:
+    if not mine:
         return node, []
+    # `.raw` and the node's pass-on are made even when the config keeps no
+    # step, so a name never depends on the config (Q104).
+    kept = _kept(mine, config)
     raw = replace(node, name=f"{name}.raw", tags=_NO_TAGS, checks=())
     made = [raw]
     reads = raw.name
@@ -615,6 +617,9 @@ def mutate[F: Callable[..., object]](
                     if k != key or getattr(s.fn, "__code__", None) is code
                 )
                 cleared.add(id(target.fn))
+            if any(step_ == made for _, step_ in mutations):
+                # This very mutator, bound the same, already adds this step.
+                continue
             mutations = (*mutations, (key, made))
             setattr(target.fn, _ATTRIBUTE, replace(current, mutations=mutations))
         current = decorations(mutator)
@@ -629,6 +634,8 @@ def mutate[F: Callable[..., object]](
         )
         return mutator
 
+    # Marked, so `@resolve` refuses it before it writes onto any target.
+    setattr(apply, MUTATES, True)  # an attribute of our own
     return apply
 
 

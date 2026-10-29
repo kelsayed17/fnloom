@@ -16,6 +16,7 @@ from types import MappingProxyType
 
 from fnloom._decorators import (
     _ATTRIBUTE,
+    MUTATES,
     Binding,
     _check_rows,
     decorations,
@@ -147,6 +148,11 @@ def resolved(
         setattr(copy, _ATTRIBUTE, replace(decorations(fn), resolvers=()))
         for resolver in resolvers:
             for decorator in reversed(_decorators(where, resolver, config)):
+                if getattr(decorator, MUTATES, False):
+                    # Refused before it runs: it would write onto its targets,
+                    # which a refused build must leave as they were (Q110).
+                    msg = f"{where}: it can't apply @mutate"
+                    raise TypeError(msg)
                 before = decorations(copy)
                 try:
                     applied = decorator(copy)

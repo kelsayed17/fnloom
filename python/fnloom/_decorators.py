@@ -20,6 +20,9 @@ if TYPE_CHECKING:
 
 _ATTRIBUTE = "__fnloom__"
 
+# The attribute marking a `@mutate(...)` decorator, which changes other functions.
+MUTATES = "__fnloom_mutates__"
+
 # How a node uses the result cache: see `cache`.
 type CacheBehavior = Literal["default", "recompute", "disable"]
 

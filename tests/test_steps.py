@@ -124,7 +124,7 @@ def a(x: int) -> int:
 
 
 def test_steps_dropped_by_the_config_leave_the_node_alone() -> None:
-    """No `.raw` when no step is kept."""
+    """`.raw` is still made, so names don't depend on the config (Q104)."""
     driver = _driver(mode="small")
     assert "piped.with_mul" not in driver.node_names()
     assert driver.execute(["piped"], inputs={"x": 1, "other": 5}) == {"piped": 7}
@@ -495,3 +495,22 @@ def p(x: int) -> int:
 """
     with pytest.raises(ValueError, match=r"\.named"):
         _driver(source, "named_twice")
+
+
+def test_raw_is_made_when_the_config_keeps_no_step() -> None:
+    """Names never depend on the config: `.raw` stays (Q104)."""
+    source = """
+from fnloom import pipe_output, step
+
+def _inc(v: int) -> int:
+    return v + 1
+
+@pipe_output(step(_inc).when(mode="a"))
+def a(x: int) -> int:
+    return x
+"""
+    kept = _driver(source, "raw_kept", mode="a")
+    dropped = _driver(source, "raw_dropped", mode="b")
+    assert "a.raw" in kept.node_names()
+    assert "a.raw" in dropped.node_names()
+    assert dropped.execute(["a"], inputs={"x": 1}) == {"a": 1}

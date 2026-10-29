@@ -640,3 +640,36 @@ def test_a_value_that_raises_or_is_too_deep_is_unversioned() -> None:
     document = fnloom.build(module).export()
     assert _nodes(document)["held"]["params"][1]["value_version"] is None
     assert document["graph_version"] is None
+
+
+def test_checks_are_in_the_export_and_its_versions() -> None:
+    """Listed on the node, in its version and the graph version; diff sees them."""
+    plain = "def a(x: int) -> int:\n    return x\n"
+    variants = {
+        "none": plain,
+        "range10": "from fnloom import check_output\n\n@check_output(range=(0, 10))\n"
+        + plain,
+        "range5": "from fnloom import check_output\n\n@check_output(range=(0, 5))\n"
+        + plain,
+        "warn": "from fnloom import check_output\n\n"
+        "@check_output(range=(0, 5), importance='warn')\n" + plain,
+    }
+    documents = {
+        key: fnloom.build(make_module(f"exported_checks_{key}", source)).export()
+        for key, source in variants.items()
+    }
+    versions = {key: doc["graph_version"] for key, doc in documents.items()}
+    assert len(set(versions.values())) == len(versions)
+    node_versions = {key: _nodes(doc)["a"]["version"] for key, doc in documents.items()}
+    assert len(set(node_versions.values())) == len(node_versions)
+    assert _nodes(documents["range5"])["a"]["checks"] == [
+        {
+            "name": "range",
+            "kind": "builtin",
+            "importance": "fail",
+            "field": None,
+            "given": "(0, 5)",
+        }
+    ]
+    found = _export.diff(documents["range10"], documents["range5"])
+    assert found["changed"] == {"a": ["checks", "version"]}

@@ -727,7 +727,9 @@ the nodes that run a function of yours: each function's node, each [step](writin
 node. An extracted field, and a `@pipe_output` node that only passes its last step's value on, run no function of
 yours, so they aren't wrapped. `inputs` holds what the node reads, by parameter name: a `value()` binding and an
 unused default aren't in it, as in a [hook](hooks.md)'s events. Hooks' node events fire outside the whole chain, so
-`after_node` sees what the chain returned; a failed check on a wrapped node is an error the wrappers see.
+`after_node` sees what the chain returned; a failed check on a wrapped node is an error the wrappers see. A
+`@pipe_output` node's checks run on the node passing its last step's value on, which isn't wrapped, so no wrapper sees
+them fail; `after_node` does.
 
 A [cache](caching.md) hit runs no wrapper, and wrappers are not part of a node's cache key: what a chain returns is
 stored as the node's value, and a later run with other wrappers, or none, gets that value. Give a driver whose wrappers

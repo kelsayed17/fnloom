@@ -836,3 +836,36 @@ def test_allow_none_true_keeps_only_the_builtin() -> None:
     driver = fnloom.build(module)  # ty: ignore[invalid-argument-type]
     assert driver.execute(["a"], inputs={"v": None}) == {"a": None}
     assert ran == []
+
+
+def test_a_set_of_allowed_values_keys_the_same_in_every_process() -> None:
+    """Sorted, so the check's identity, its key and its message hold across seeds."""
+    a = check_output(values_in={"s", "q", "p", "r"})
+    b = check_output(values_in=frozenset({"r", "p", "s", "q"}))
+    first = _any_module("set_a")
+    second = _any_module("set_b")
+    a(first.a)  # ty: ignore[unresolved-attribute]
+    b(second.a)  # ty: ignore[unresolved-attribute]
+    identities = [
+        fnloom._decorators.decorations(m.a).checks[0].identity  # noqa: SLF001  # ty: ignore[unresolved-attribute]
+        for m in (first, second)
+    ]
+    assert (
+        identities[0] == identities[1] == ("builtin", "values_in", ("p", "q", "r", "s"))
+    )
+
+
+def test_none_is_missing_for_the_nan_checks_everywhere() -> None:
+    """An object array and a Series count None the same way."""
+    numpy = _loaded("numpy")
+    pandas = _loaded("pandas")
+    module = _any_module("none_missing")
+    check_output(allow_nans=False)(module.a)  # ty: ignore[unresolved-attribute]
+    driver = fnloom.build(module)  # ty: ignore[invalid-argument-type]
+    for value in (
+        numpy.array([1.0, None], dtype=object),
+        pandas.Series(["a", None]),
+        [1.0, None],
+    ):
+        with pytest.raises(ValidationError):
+            driver.execute(["a"], inputs={"v": value})

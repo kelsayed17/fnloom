@@ -38,6 +38,7 @@ from fnloom._types import written
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Mapping, Sequence
 
+    from fnloom._checks import Check
     from fnloom._hooks import Dispatch
     from fnloom._scan import NodeDef
 
@@ -227,7 +228,7 @@ def _node_key(
             _warn_build(reason, stacklevel=6)
         params.append((key_name, None, version))
     extraction, unkeyed = _extraction_parts(node)
-    checked, unchecked = _check_parts(node)
+    checked, unchecked = check_parts(node.checks)
     reason = reason or unkeyed or unchecked
     static = None
     if policy.behavior == "disable":
@@ -259,7 +260,7 @@ def _node_key(
     return NodeKey(static, reason, policy.behavior, tuple(params), stored)
 
 
-def _check_parts(node: NodeDef) -> tuple[list[bytes], str | None]:
+def check_parts(checks: Sequence[Check]) -> tuple[list[bytes], str | None]:
     """A node's output checks as key parts, or why one has no version (Plan 8).
 
     Each check is keyed by its name, importance and field, and by what it runs:
@@ -269,7 +270,7 @@ def _check_parts(node: NodeDef) -> tuple[list[bytes], str | None]:
     a value stored before a stricter check is never returned unchecked.
     """
     parts: list[bytes] = []
-    for check in node.checks:
+    for check in checks:
         kind, *rest = check.identity
         try:
             if kind == "builtin":

@@ -162,7 +162,8 @@ text = json.dumps(document, sort_keys=True)
 ```
 
 Each node gives its kind (`"function"` or `"input"`), its whole type, each parameter and what it reads, its tags, doc,
-function, config conditions, source and marks. An input says whether it is required and which nodes read it:
+function, config conditions, source, marks and output checks. An input says whether it is required and which nodes read
+it:
 
 ```python
 tax = document["nodes"][4]
@@ -175,7 +176,8 @@ price["kind"], price["required"], price["consumers"], price["version"]
 
 A function node's `version` is its code version, the one the [result cache](caching.md) keys on. It covers the
 function's code, defaults, closures and the globals it reads, helpers and constants included. A function with no code
-version, such as one reading a mutable global, has `version` `None` and an `unversioned` entry saying why.
+version, such as one reading a mutable global, has `version` `None` and an `unversioned` entry saying why. A node with
+output checks has them in its `version` too, as the result cache keys them, so `fnloom diff` sees a check change.
 `graph_version` hashes every node's name, kind, type, wiring, conditions and version, so it changes when any of them
 does, and it is `None` when some node is unversioned.
 

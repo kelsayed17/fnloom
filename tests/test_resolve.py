@@ -289,3 +289,26 @@ def a(x: int) -> int:
     with pytest.raises(TypeError) as caught:
         fnloom.build(make_module("resolve_raising", source_text))
     assert "in resolve on a" in caught.value.__notes__
+
+
+def test_a_refused_resolve_changes_no_other_function() -> None:
+    """A resolver applying `@mutate` is refused before it writes to a target (Q110)."""
+    source_text = """
+import fnloom
+
+def target(x: int) -> int:
+    return x
+
+def _host(v: int) -> int:
+    return v + 100
+
+@fnloom.resolve(lambda flag=False: fnloom.mutate(target) if flag else fnloom.tag(t="1"))
+def host(x: int) -> int:
+    return x
+"""
+    module = make_module("resolve_mutate", source_text)
+    with pytest.raises(TypeError, match="can't apply @mutate"):
+        fnloom.Builder().with_modules(module).with_config({"flag": True}).build()
+    clean = fnloom.Builder().with_modules(module).with_config({"flag": False}).build()
+    assert "target.raw" not in clean.node_names()
+    assert clean.execute(["target"], inputs={"x": 1}) == {"target": 1}

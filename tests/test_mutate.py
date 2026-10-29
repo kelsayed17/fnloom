@@ -279,3 +279,22 @@ def test_apply_to_refuses_a_name() -> None:
     """As `mutate` does."""
     with pytest.raises(TypeError, match="not its name"):
         apply_to("a")  # ty: ignore[invalid-argument-type]
+
+
+def test_the_same_mutator_twice_adds_one_step() -> None:
+    """One function object, bound the same, applied twice or named twice (Q107)."""
+    module = make_module("same_object", "def f(x: int) -> int:\n    return x\n")
+
+    def _p(v: int) -> int:
+        return v + 2
+
+    _p.__module__ = "same_object"
+    mutate(module.f)(_p)
+    mutate(module.f)(_p)
+    mutate(module.f, module.f)(_p)
+    driver = fnloom.build(module)
+    assert driver.execute(["f"], inputs={"x": 1}) == {"f": 3}
+    assert [n for n in driver.node_names() if n.startswith("f.")] == [
+        "f.raw",
+        "f.with_p",
+    ]
