@@ -20,6 +20,7 @@ run as without the cache, and nothing is stored for that node.
 
 import functools
 import threading
+import typing
 import warnings
 from collections import abc
 from dataclasses import dataclass
@@ -27,11 +28,12 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
 
 from fnloom import _core, _extract
-from fnloom._codeversion import UncacheableError, code_version
+from fnloom._codeversion import UncacheableError, class_version, code_version
 from fnloom._decorators import CacheBehavior, CachePolicy, Source, decorations
 from fnloom._fingerprint import fingerprint, forget_class_versions
 from fnloom._scan import core_inputs
 from fnloom._stores import MISSING, CacheStore, CacheWarning, Format, MemoryCache
+from fnloom._types import written
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Mapping, Sequence
@@ -225,7 +227,8 @@ def _node_key(
             _warn_build(reason, stacklevel=6)
         params.append((key_name, None, version))
     extraction, unkeyed = _extraction_parts(node)
-    reason = reason or unkeyed
+    checked, unchecked = _check_parts(node)
+    reason = reason or unkeyed or unchecked
     static = None
     if policy.behavior == "disable":
         reason = "policy disable"
@@ -249,10 +252,58 @@ def _node_key(
                 policy.behavior.encode(),
                 *framed,
                 *extraction,
+                *checked,
             ]
         )
     stored = not extraction
     return NodeKey(static, reason, policy.behavior, tuple(params), stored)
+
+
+def _check_parts(node: NodeDef) -> tuple[list[bytes], str | None]:
+    """A node's output checks as key parts, or why one has no version (Plan 8).
+
+    Each check is keyed by its name, importance and field, and by what it runs:
+    a built-in's argument by fingerprint (an annotation by its text), a check
+    function by its code version, a `Validator` by its class version and its
+    attributes' fingerprint. So adding, removing or changing a check misses, and
+    a value stored before a stricter check is never returned unchecked.
+    """
+    parts: list[bytes] = []
+    for check in node.checks:
+        kind, *rest = check.identity
+        try:
+            if kind == "builtin":
+                version = _argument_version(rest[1])
+            elif kind == "function" and callable(function := rest[0]):
+                version = code_version(function)
+            else:
+                validator = rest[0]
+                version = class_version(type(validator)) + fingerprint(
+                    dict(sorted(vars(validator).items()))
+                )
+        except (UncacheableError, _core.UnfingerprintableError, TypeError) as error:
+            reason = error.reason if isinstance(error, UncacheableError) else error
+            return [], f"check {check.name}: {reason}"
+        parts += [
+            b"check",
+            check.name.encode(),
+            check.importance.encode(),
+            (check.field or "").encode(),
+            version,
+        ]
+    return parts, None
+
+
+def _argument_version(argument: object) -> bytes:
+    """A built-in check's argument by fingerprint; an annotation by its text."""
+    try:
+        return fingerprint(argument)
+    except _core.UnfingerprintableError:
+        if isinstance(argument, type) or typing.get_origin(argument) is not None:
+            return _core.hash_parts([b"annotation", written(argument).encode()])
+        if argument is typing.Any:
+            return _core.hash_parts([b"annotation", b"Any"])
+        raise
 
 
 def _formats(store: CacheStore, nodes: Sequence[NodeDef]) -> dict[str, Format]:

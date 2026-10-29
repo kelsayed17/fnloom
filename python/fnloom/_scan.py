@@ -46,6 +46,8 @@ if TYPE_CHECKING:
     from collections.abc import Set as AbstractSet
     from types import ModuleType
 
+    from fnloom._checks import Check
+
 _UNSUPPORTED_KINDS = {
     inspect.Parameter.POSITIONAL_ONLY: "positional-only parameter",
     inspect.Parameter.VAR_POSITIONAL: "*args parameter",
@@ -82,6 +84,7 @@ class NodeDef:
     doc: str | None = None
     namespace: str | None = None
     documented: bool = False
+    checks: tuple[Check, ...] = ()
 
 
 def core_inputs(params: tuple[Param, ...]) -> list[tuple[str, bool]]:

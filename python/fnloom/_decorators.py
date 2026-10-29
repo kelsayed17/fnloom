@@ -13,6 +13,7 @@ from fnloom._stores import Format
 from fnloom._types import written
 
 if TYPE_CHECKING:
+    from fnloom._checks import Check
     from fnloom._config import ConfigPolicy
     from fnloom._extract import Extraction
 
@@ -102,8 +103,8 @@ class DefaultsPolicy:
 class Decorations:
     """What the decorators recorded on one function.
 
-    Its rows, tags, cache policy, config conditions, extraction, defaults, and whether
-    `@exclude` marked it.
+    Its rows, tags, cache policy, config conditions, extraction, defaults, whether
+    `@exclude` marked it, and its output checks, in the order they run.
     """
 
     rows: Mapping[str, Mapping[str, Binding]] | None
@@ -114,6 +115,7 @@ class Decorations:
     defaults: DefaultsPolicy | None = None
     excluded: bool = False
     docs: Mapping[str, str | None] = MappingProxyType[str, str | None]({})
+    checks: tuple[Check, ...] = ()
 
 
 def source(name: str) -> Source:

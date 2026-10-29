@@ -385,6 +385,105 @@ on fixed tuples, parameterized generics and `NewType`s, and reports a failing no
 
 A [custom value check](running.md#custom-value-checks) applies to results too.
 
+## Checking values
+
+`@fnloom.check_output` checks a node's value after its function returns, with built-in checks given as keywords. A
+value that fails is the node's own failure, a `fnloom.ValidationError`, which is a `ValueError` (Q99, Q100):
+
+```python
+# file: readings.py
+from fnloom import check_output
+
+
+@check_output(range=(0, 100))
+def humidity(raw: float) -> float:
+    """Relative humidity, in percent."""
+    return raw * 100
+
+
+@check_output(values_in=["ok", "stale"], importance="warn")
+def status(age: int) -> str:
+    """Whether the reading is fresh."""
+    return "ok" if age < 60 else "expired"
+```
+
+```python
+import readings
+from fnloom import ValidationError
+
+sensors = fnloom.build(readings)
+sensors.execute(["humidity"], inputs={"raw": 0.4})
+# -> {'humidity': 40.0}
+sensors.execute(["humidity"], inputs={"raw": 1.2})
+# raises ValidationError: humidity: check range failed: 120.0 is not in [0, 100]
+```
+
+The node keeps its name and its place in the graph: no node is added, unlike Hamilton's `a_raw` and validator nodes.
+`importance="warn"` logs one WARNING on the `fnloom` logger for each failed check in a run, and the run goes on:
+
+```python
+sensors.execute(["status"], inputs={"age": 90})
+# -> {'status': 'expired'}
+```
+
+| Keyword | Passes when |
+| --- | --- |
+| `range=(lo, hi)` | the value, or every item, is between `lo` and `hi`, inclusive |
+| `values_in=[...]` | the value, or every item, is one of these |
+| `data_type=T` | `fnloom.value_matches(T, value)`, so `list[int]` and `int \| None` work |
+| `allow_none=False` | the value isn't `None` |
+| `contains=`, `does_not_contain=` | a `str` value contains, or doesn't contain, each `str` given |
+| `allow_nans=False`, `max_fraction_nans=f` | no item, or at most that fraction of items, is NaN |
+
+`range`, `values_in` and the NaN checks read a scalar, or each item of a value that iterates: a list, a numpy array or
+a pandas Series or DataFrame, the last ones through their own vectorised methods, with no import from fnloom. A `str`,
+`bytes` or mapping is one value. A one-shot iterator is never read, since that would consume it: a node annotated
+`Iterator` is refused at build, and one met at run is a `TypeError`. A check that can't read the return annotation,
+such as `range` on a `str`, is a `TypeError` at build, naming the node (Q101).
+
+`@fnloom.check_output_custom` takes checks of your own. A function takes the value, and an `inputs` parameter if it
+wants the node's arguments, and returns `True` or `None` for a good value, or `False` or a message for a bad one. A
+`fnloom.Validator` subclass does the same in `validate(value, inputs)`, and may refuse a return annotation at build
+with `applies_to` (Q102):
+
+```python
+# file: deliveries.py
+from fnloom import check_output_custom
+
+
+def _no_more_than_ordered(value: int, inputs) -> str | None:
+    if value > inputs["ordered"]:
+        return f"shipped {value}, more than the {inputs['ordered']} ordered"
+    return None
+
+
+@check_output_custom(_no_more_than_ordered)
+def shipped(ordered: int, packed: int) -> int:
+    """What leaves the warehouse."""
+    return packed
+```
+
+```python
+import deliveries
+
+fnloom.build(deliveries).execute(["shipped"], inputs={"ordered": 3, "packed": 5})
+# raises ValidationError: shipped: check _no_more_than_ordered failed: shipped 5, more than the 3 ordered
+```
+
+Checks stack in any number and in any order, and run in the order written, top first. A check is on the function's
+own value; `field="p"` puts it on an `@extract_fields` or `@extract_columns` field instead, whatever the decorator
+order. Every `@parameterize` row and `@config.when` variant is checked. An overridden node doesn't run, so it isn't
+checked, and a [cache](caching.md) hit isn't checked again. The checks are part of the node's cache key, so adding a
+stricter check makes the next run compute the value afresh (Q103). A [hook](hooks.md)'s `after_node` gets every
+check's result as `NodeEnd.checks`.
+
+Hamilton's pandas statistics checks are a few lines as a custom check:
+
+```python
+def _mean_in_range(series) -> bool:
+    return 0 <= series.mean() <= 10
+```
+
 ## Modules together
 
 `fnloom.build` takes several modules, and so does `Builder.with_modules`. Nodes are matched by name across all of

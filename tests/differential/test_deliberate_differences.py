@@ -62,7 +62,7 @@ from fnloom._types import type_matches, value_matches
 from helpers import make_module
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine
+    from collections.abc import Callable, Coroutine, Mapping
     from types import ModuleType
 
 
@@ -4813,3 +4813,181 @@ def test_q98_diff_compares_inputs_as_inputs(
     assert main(["diff", *paths]) == 1
     found = json.loads(capsys.readouterr().out)
     assert found["changed"] == {"a": ["version"]}
+
+
+_Q99_CHECKED = """
+from {package} import check_output
+
+@check_output(range=(0, 10){importance})
+def a(x: int) -> int:
+    return x
+"""
+
+
+def _q99(package: str, name: str, importance: str = "") -> types.ModuleType:
+    return make_module(
+        name, _Q99_CHECKED.format(package=package, importance=importance)
+    )
+
+
+@pytest.mark.deliberate("Q99")
+def test_q99_checks_add_no_node() -> None:
+    """Hamilton makes `a_raw` and a validator node; fnloom's node keeps its place."""
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(_q99("hamilton.function_modifiers", "q99_h"))
+        .build()
+    )
+    names = {v.name for v in hamilton.list_available_variables()}
+    assert {"a", "a_raw", "a_range_validator"} <= names
+    result = hamilton.execute(["a_range_validator"], inputs={"x": 1})
+    assert result["a_range_validator"].passes
+    built = fnloom.build(_q99("fnloom", "q99_f"))
+    assert built.node_names() == ["a", "x"]
+
+
+@pytest.mark.deliberate("Q100")
+def test_q100_fail_is_the_default_and_a_value_error() -> None:
+    """Hamilton warns by default; its failure is no ValueError, and prints a list."""
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(_q99("hamilton.function_modifiers", "q100_h"))
+        .build()
+    )
+    assert hamilton.execute(["a"], inputs={"x": 12}) == {"a": 12}
+    failing = (
+        hamilton_driver.Builder()
+        .with_modules(
+            _q99("hamilton.function_modifiers", "q100_hf", ', importance="fail"')
+        )
+        .build()
+    )
+    with pytest.raises(Exception) as caught:  # noqa: PT011  # Hamilton's own class
+        failing.execute(["a"], inputs={"x": 12})
+    assert type(caught.value).__name__ == "DataValidationError"
+    assert not isinstance(caught.value, ValueError)
+    assert str(caught.value).startswith("[")
+    built = fnloom.build(_q99("fnloom", "q100_f"))
+    with pytest.raises(fnloom.ValidationError) as error:
+        built.execute(["a"], inputs={"x": 12})
+    assert isinstance(error.value, ValueError)
+    assert str(error.value) == "a: check range failed: 12 is not in [0, 10]"
+
+
+_Q101_GENERIC = """
+from {package} import check_output
+
+@check_output(range=(0, 10))
+def a(x: list[int]) -> list[int]:
+    return x
+"""
+
+
+@pytest.mark.deliberate("Q101")
+def test_q101_generic_annotations_are_checked() -> None:
+    """Hamilton's build crashes on `list[int]`; fnloom checks every item."""
+    module = make_module(
+        "q101_h", _Q101_GENERIC.format(package="hamilton.function_modifiers")
+    )
+    with pytest.raises(TypeError, match="issubclass"):
+        hamilton_driver.Builder().with_modules(module).build()
+    module_f = make_module("q101_f", _Q101_GENERIC.format(package="fnloom"))
+    built = fnloom.build(module_f)
+    assert built.execute(["a"], inputs={"x": [1, 2]}) == {"a": [1, 2]}
+    with pytest.raises(fnloom.ValidationError, match="1 items are not in"):
+        built.execute(["a"], inputs={"x": [1, 20]})
+
+
+@pytest.mark.deliberate("Q102")
+def test_q102_custom_checks() -> None:
+    """Hamilton never calls `applies_to`, and a `bool` result breaks it."""
+    from hamilton.data_quality.base import (  # noqa: PLC0415  # Hamilton's API only here
+        DataValidator,
+        ValidationResult,
+    )
+    from hamilton.function_modifiers import (  # noqa: PLC0415  # Hamilton's API only here
+        check_output_custom as hamilton_custom,
+    )
+
+    asked: list[object] = []
+
+    class Never(DataValidator):
+        @override
+        def applies_to(self, datatype: type) -> bool:
+            asked.append(datatype)
+            return False
+
+        @override
+        def description(self) -> str:
+            return "never applies"
+
+        @classmethod
+        @override
+        def name(cls) -> str:
+            return "never"
+
+        @override
+        def validate(self, dataset: object) -> ValidationResult:
+            del dataset
+            return ValidationResult(passes=True, message="")
+
+    class Boolean(Never):
+        @override
+        def validate(self, dataset: object) -> bool:  # ty: ignore[invalid-method-override]
+            del dataset
+            return True
+
+    module = make_module("q102_h", "def a(x: int) -> int:\n    return x\n")
+    hamilton_custom(Never("fail"))(module.a)
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    assert hamilton.execute(["a"], inputs={"x": 1}) == {"a": 1}
+    assert asked == []
+    bool_module = make_module("q102_hb", "def a(x: int) -> int:\n    return x\n")
+    hamilton_custom(Boolean("fail"))(bool_module.a)
+    with pytest.raises(AttributeError, match="passes"):
+        hamilton_driver.Builder().with_modules(bool_module).build().execute(
+            ["a"], inputs={"x": 1}
+        )
+
+    class OnlyStr(fnloom.Validator):
+        @override
+        def applies_to(self, declared: object) -> bool:
+            return declared is str
+
+        @override
+        def validate(self, value: object, inputs: Mapping[str, object]) -> bool:
+            del value, inputs
+            return True
+
+    refused = make_module("q102_f", "def a(x: int) -> int:\n    return x\n")
+    fnloom.check_output_custom(OnlyStr())(refused.a)
+    with pytest.raises(TypeError, match="does not apply to int"):
+        fnloom.build(refused)
+    plain = make_module("q102_fb", "def a(x: int) -> int:\n    return x\n")
+    fnloom.check_output_custom(lambda _: True)(plain.a)
+    assert fnloom.build(plain).execute(["a"], inputs={"x": 1}) == {"a": 1}
+
+
+_Q103_STACKED = """
+from {package} import check_output
+
+@check_output(range=(0, 10))
+@check_output(values_in=[1, 2, 3])
+def a(x: int) -> int:
+    return x
+"""
+
+
+@pytest.mark.deliberate("Q103")
+def test_q103_checks_stack() -> None:
+    """Hamilton refuses a second `@check_output`; fnloom runs both, top first."""
+    module = make_module(
+        "q103_h", _Q103_STACKED.format(package="hamilton.function_modifiers")
+    )
+    with pytest.raises(ValueError, match="a_raw more than once"):
+        hamilton_driver.Builder().with_modules(module).build()
+    module_f = make_module("q103_f", _Q103_STACKED.format(package="fnloom"))
+    built = fnloom.build(module_f)
+    assert built.execute(["a"], inputs={"x": 2}) == {"a": 2}
+    with pytest.raises(fnloom.ValidationError, match="check values_in failed"):
+        built.execute(["a"], inputs={"x": 5})

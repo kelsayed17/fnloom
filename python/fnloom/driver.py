@@ -26,7 +26,7 @@ from typing import (
     override,
 )
 
-from fnloom import _async, _core, _hooks, _types
+from fnloom import _async, _checks, _core, _hooks, _types
 from fnloom._caching import Cache, CacheOutcome, CacheRun
 from fnloom._decorators import Source
 from fnloom._defaults import default_problems
@@ -2794,7 +2794,9 @@ class Builder[R = dict[str, object]]:
             functions=self._functions,
             namespaces=self._namespaces,
         )
-        nodes = resolve(scanned.nodes, self._rules, self._value_checks)
+        nodes = _checks.attached(
+            resolve(scanned.nodes, self._rules, self._value_checks)
+        )
         unmatched = scanned.unmatched
         if unmatched:
             # A field of a forward-referenced `TypedDict` is first known resolved.
@@ -2809,6 +2811,8 @@ class Builder[R = dict[str, object]]:
             nodes = _output_checked(
                 nodes, self._rules, self._value_checks, awaits=awaits
             )
+        # Outside the type check: a check reads a value of the declared type.
+        nodes = _checks.wrapped(nodes, awaits=awaits)
         graph = _graph_of(nodes)
         if mismatches := _edge_mismatches(views.functions):
             raise ValueError("\n".join(mismatches))

@@ -5,6 +5,7 @@ it node events from the core through `_Forward`, a private core observer; the
 front end fires the run events itself, around the value checks and the core run.
 """
 
+import contextvars
 import inspect
 import logging
 import reprlib
@@ -14,11 +15,12 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, override
 
-from fnloom import _core
+from fnloom import _checks, _core
 
 # Imported for real, not under TYPE_CHECKING: the events' signatures annotate with
 # them, and `inspect.signature` resolves those annotations at run time.
 from fnloom._caching import CacheOutcome
+from fnloom._checks import CheckResult
 from fnloom._scan import by_parameter
 from fnloom._view import NodeView
 
@@ -65,6 +67,9 @@ class NodeEnd:
 
     `NodeStart`'s fields, then whether it succeeded: `result` is what it returned,
     `None` unless `ok`, and `error` the very exception it raised, `None` if `ok`.
+    `checks` are its output checks' results, in the order they ran, passed or
+    not: `()` for a node with none, a cache hit, or a node that raised before
+    its checks ran (Q99).
     """
 
     run_id: str
@@ -74,6 +79,7 @@ class NodeEnd:
     ok: bool
     result: object
     error: BaseException | None
+    checks: tuple[CheckResult, ...] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -295,8 +301,10 @@ class Dispatch:
         "_hooks",
         "_kwargs",
         "_node_error",
+        "_results",
         "_start",
         "_started",
+        "_token",
         "_views",
         "outcomes",
     )
@@ -323,6 +331,11 @@ class Dispatch:
         # The last node started and its inputs, so its end needn't key them again.
         self._kwargs: Mapping[str, object] | None = None
         self._started: Mapping[str, object] | None = None
+        # Each checked node's check results, collected while the run is on.
+        self._results: dict[str, tuple[CheckResult, ...]] | None = None
+        self._token: (
+            contextvars.Token[dict[str, tuple[CheckResult, ...]] | None] | None
+        ) = None
 
     def observers(self) -> tuple[_core.ObserverBase, ...]:
         """What the core run is given: one observer when node events are wanted."""
@@ -364,7 +377,13 @@ class Dispatch:
         overrides: Mapping[str, object] | None,
         nodes: tuple[str, ...],
     ) -> None:
-        """Fires `before_run`, for the request `outputs`, `inputs` and `overrides`."""
+        """Fires `before_run`, for the request `outputs`, `inputs` and `overrides`.
+
+        When `after_node` is wanted, the run's checks report their results here.
+        """
+        if self._hooks.after_node and self._token is None:
+            self._results = {}
+            self._token = _checks.RESULTS.set(self._results)
         start = RunStart(
             run_id=uuid.uuid4().hex,
             outputs=outputs,
@@ -442,6 +461,7 @@ class Dispatch:
         if not methods:
             return
         ok = error is None
+        results = self._results
         event = NodeEnd(
             run_id=self._run_id(),
             node=self._views.view(name),
@@ -450,6 +470,7 @@ class Dispatch:
             ok=ok,
             result=value if ok else None,
             error=error,
+            checks=() if results is None else results.pop(name, ()),
         )
         found: list[BaseException] = []
         for method in methods:
@@ -458,6 +479,17 @@ class Dispatch:
             except BaseException as failure:  # noqa: BLE001  # raised once every hook ran
                 found.append(failure)
         self._raised(found)
+
+    def _release(self) -> None:
+        """Stops collecting check results, in the context the run started in."""
+        token, self._token = self._token, None
+        if token is None:
+            return
+        try:
+            _checks.RESULTS.reset(token)
+        except ValueError:
+            # Ended in another context than it started in: just stop collecting.
+            _checks.RESULTS.set(None)
 
     def end(
         self,
@@ -473,6 +505,7 @@ class Dispatch:
         raised instead. `results` are the raw outputs, or `None` when none were
         computed; a failed run passes them only when its result builder raised.
         """
+        self._release()
         lead: list[BaseException] = []
         if self._node_error is not None:
             lead.append(self._node_error)

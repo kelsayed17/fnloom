@@ -3,6 +3,13 @@
 from importlib.metadata import version as _version
 
 from fnloom._caching import CacheOutcome
+from fnloom._checks import (
+    CheckResult,
+    ValidationError,
+    Validator,
+    check_output,
+    check_output_custom,
+)
 from fnloom._config import Condition, config
 from fnloom._core import UnfingerprintableError
 from fnloom._decorators import (
@@ -56,6 +63,7 @@ __all__ = [
     "CachePolicy",
     "CacheStore",
     "CacheWarning",
+    "CheckResult",
     "Condition",
     "DiskCache",
     "Drawing",
@@ -77,10 +85,14 @@ __all__ = [
     "RunStart",
     "Source",
     "UnfingerprintableError",
+    "ValidationError",
+    "Validator",
     "Value",
     "ValueCheck",
     "build",
     "cache",
+    "check_output",
+    "check_output_custom",
     "config",
     "defaults",
     "exclude",

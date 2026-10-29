@@ -186,6 +186,67 @@ def _boxed(nodes: Sequence[tuple[str, str, object]]) -> set[str]:
     return found
 
 
+_CHECKED = """
+from {package} import check_output
+
+@check_output({checks}, importance="fail")
+def a(x: {kind}) -> {kind}:
+    return x
+"""
+
+
+@pytest.mark.parametrize(
+    ("checks", "kind", "values"),
+    [
+        ("range=(0, 10)", "int", [0, 10, -1, 11, 5]),
+        ("range=(0.5, 1.5)", "float", [0.5, 1.5, 0.4, 2.0]),
+        ("values_in=[1, 2]", "int", [1, 2, 3]),
+        ("values_in=['p', 'q']", "str", ["p", "r"]),
+        ("data_type=int", "int", [1]),
+        ("allow_none=False", "int", [1, None]),
+        ("contains='lo'", "str", ["hello", "world"]),
+    ],
+)
+def test_builtin_checks_pass_and_fail_the_same_values(
+    checks: str, kind: str, values: list[object]
+) -> None:
+    """Which values a shared built-in check passes, as Hamilton's (KEEP, Q101)."""
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(
+            make_module(
+                "checked_h",
+                _CHECKED.format(
+                    package="hamilton.function_modifiers", checks=checks, kind=kind
+                ),
+            )
+        )
+        .build()
+    )
+    built = (
+        fnloom.Builder()
+        .with_modules(
+            make_module(
+                "checked_f", _CHECKED.format(package="fnloom", checks=checks, kind=kind)
+            )
+        )
+        .without_input_type_checks()
+        .build()
+    )
+    for value in values:
+        try:
+            hamilton.execute(["a"], inputs={"x": value})
+            hamilton_passes = True
+        except Exception:  # noqa: BLE001  # Hamilton's error is no ValueError
+            hamilton_passes = False
+        try:
+            built.execute(["a"], inputs={"x": value})
+            fnloom_passes = True
+        except fnloom.ValidationError:
+            fnloom_passes = False
+        assert fnloom_passes == hamilton_passes, value
+
+
 @pytest.mark.parametrize(
     ("fixture", "outputs", "inputs", "overrides"),
     [
