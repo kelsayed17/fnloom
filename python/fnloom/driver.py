@@ -1484,9 +1484,8 @@ class Driver[R = dict[str, object]]:
     def draw_upstream_of(self, *names: str) -> Drawing:
         """A drawing of the named nodes and every node and input they depend on.
 
-        Names are checked as `what_is_the_path_between` checks them: every unknown
-        one in one `ValueError`, sorted, and a non-`str` a `TypeError`, as is
-        giving none.
+        Every unknown name is raised in one `ValueError`, sorted; a non-`str`, or
+        no name at all, is a `TypeError`.
         """
         self._check_drawn(names)
         return drawing(self._nodes, {*names, *self._graph.upstream_of(list(names))})
@@ -1540,8 +1539,10 @@ class Driver[R = dict[str, object]]:
         With `validate`, every problem `validate` finds is raised in one
         `ValueError`, its lines joined, so a drawing never shows a run that
         can't happen. `validate=False` draws from the names alone, as if every
-        required input were supplied; an unknown name is still a `ValueError`,
-        and a malformed request a `TypeError`.
+        input the run would miss were supplied; an unknown name and an override
+        `Builder.with_strict_overrides` refuses are still a `ValueError`, and a
+        malformed request a `TypeError`. A driver with a cache draws every node
+        the plan has, since which are hits is known only when it runs.
         """
         shape = self._shape(final_vars, inputs, overrides)
         if validate:
@@ -1552,11 +1553,15 @@ class Driver[R = dict[str, object]]:
         else:
             if shape.lines:
                 raise ValueError("\n".join(sorted(shape.lines)))
-            required = {n for n, view in self.inputs().items() if view.required}
-            supplied = shape.supplied | required
+            supplied = shape.supplied | self._missing_inputs(shape)
         plan = self._graph.prepare(
             shape.planned, sorted(supplied - shape.overridden), sorted(shape.overridden)
         )
+        if not validate and self._strict_overrides:
+            # A refusal by names alone, raised as `execute` raises it (Q75).
+            refused = self._unsupplied_overrides(plan, shape.key[1], shape.overridden)
+            if refused:
+                raise ValueError(_strict(refused))
         drawn = [
             node for node, action in plan.steps() if action != "skip_optional_input"
         ]
@@ -1564,6 +1569,22 @@ class Driver[R = dict[str, object]]:
         for name in shape.planned:
             marks.setdefault(name, []).append("output")
         return drawing(self._nodes, drawn, marks)
+
+    def _missing_inputs(self, shape: _Shape) -> set[str]:
+        """The inputs a run of `shape` needs that it does not supply.
+
+        Those `execute` would name as missing: requested, or read by a required
+        edge of a node the plan computes.
+        """
+        functions = self._nodes.functions
+        every = shape.supplied | {n for n in self._nodes if n not in functions}
+        plan = self._graph.prepare(
+            shape.planned,
+            sorted(every - shape.overridden),
+            sorted(shape.overridden),
+        )
+        entries = self._missing_entries(plan, shape.planned, shape.supplied)
+        return {name for name, _ in entries}
 
     def _check_drawn(self, names: Sequence[object]) -> None:
         """`TypeError` for no names or a non-`str`; `ValueError` for unknown ones."""

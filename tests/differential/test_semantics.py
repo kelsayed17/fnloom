@@ -4,6 +4,7 @@ import asyncio
 import copy
 import inspect
 import pickle
+import re
 from typing import TYPE_CHECKING, Any, cast, override
 
 import pytest
@@ -148,24 +149,70 @@ def test_lineage_queries_name_the_same_nodes(
     assert lineage_fnloom([module], direction, names) == hamilton
 
 
-def _hamilton_drawn(module: ModuleType, scope: str, names: Sequence[str]) -> set[str]:
-    """The nodes Hamilton's drawing of `scope` shows, from its graph queries.
+# An input's row in one of Hamilton's input boxes: `<tr><td>name</td>...`.
+_INPUT_ROW = re.compile(r"<tr><td>([^<]+)</td>")
 
-    Its drawing methods need the graphviz package, which the test environment
-    doesn't have, so this takes the node sets as `display_upstream_of`,
-    `display_downstream_of` and `visualize_path_between` choose them (H7.1).
+
+def _hamilton_drawn(module: ModuleType, scope: str, names: Sequence[str]) -> set[str]:
+    """The nodes and inputs Hamilton's drawing of `scope` shows.
+
+    Run with the `fake_graphviz` fixture. Hamilton draws inputs as rows of a box
+    per consumer, so they are read from the boxes; config nodes are left out.
     """
     built = hamilton_driver.Builder().with_modules(module).build()
-    graph = built.graph
     if scope == "upstream":
-        nodes, _ = graph.get_upstream_nodes(list(names))
-        return {n.name for n in nodes}
-    if scope == "downstream":
-        found = set(graph.get_downstream_nodes(list(names)))
-        return {n.name for n in found} | {d.name for n in found for d in n.dependencies}
-    upstream, downstream = names
-    path = built._get_nodes_between(upstream, downstream)  # noqa: SLF001  # Hamilton's own path query
-    return {n.name for n in path} | {d.name for n in path for d in n.dependencies}
+        drawn = built.display_upstream_of(*names, show_legend=False)
+    elif scope == "downstream":
+        drawn = built.display_downstream_of(*names, show_legend=False)
+    else:
+        drawn = built.visualize_path_between(
+            names[0],
+            names[1],
+            strict_path_visualization=scope == "strict",
+            show_legend=False,
+        )
+    found: set[str] = set()
+    for name, label, _ in drawn.nodes:
+        if name.startswith("_") and name.endswith("_inputs"):
+            found.update(_INPUT_ROW.findall(label))
+        else:
+            found.add(name)
+    return found
+
+
+@pytest.mark.parametrize(
+    ("fixture", "scope", "names"),
+    [
+        ("diamond", "upstream", ["join"]),
+        ("diamond", "upstream", ["left", "right"]),
+        ("diamond", "downstream", ["root"]),
+        ("diamond", "downstream", ["left"]),
+        ("diamond", "path", ["a", "join"]),
+        ("diamond", "path", ["root", "left"]),
+        ("diamond", "strict", ["root", "join"]),
+        ("chain", "upstream", ["c"]),
+        ("chain", "path", ["a", "c"]),
+        ("chain", "strict", ["b", "c"]),
+        ("optional", "upstream", ["scaled"]),
+        ("optional", "downstream", ["a"]),
+        ("optional", "path", ["factor", "scaled"]),
+    ],
+)
+@pytest.mark.usefixtures("fake_graphviz")
+def test_drawings_show_the_same_nodes(
+    fixture: str, scope: str, names: list[str]
+) -> None:
+    """Upstream, downstream with parents, and paths draw the same nodes (Q90)."""
+    module = load_fixture(fixture)
+    built = fnloom.build(module)
+    if scope == "upstream":
+        drawing = built.draw_upstream_of(*names)
+    elif scope == "downstream":
+        drawing = built.draw_downstream_of(*names)
+    else:
+        drawing = built.draw_path_between(names[0], names[1], context=scope != "strict")
+    drawn = {node.name for node in drawing.nodes}
+    assert drawn == _hamilton_drawn(module, scope, names)
 
 
 @pytest.mark.parametrize(
@@ -194,37 +241,6 @@ def test_execution_drawings_show_the_same_nodes(
         outputs, inputs=inputs, overrides=overrides
     )
     assert {n.name for n in drawing.nodes} == {n.name for n in nodes | user}
-
-
-@pytest.mark.parametrize(
-    ("fixture", "scope", "names"),
-    [
-        ("diamond", "upstream", ["join"]),
-        ("diamond", "upstream", ["left", "right"]),
-        ("diamond", "downstream", ["root"]),
-        ("diamond", "downstream", ["left"]),
-        ("diamond", "path", ["a", "join"]),
-        ("diamond", "path", ["root", "left"]),
-        ("chain", "upstream", ["c"]),
-        ("chain", "path", ["a", "c"]),
-        ("optional", "upstream", ["scaled"]),
-        ("optional", "downstream", ["a"]),
-    ],
-)
-def test_drawings_show_the_same_nodes(
-    fixture: str, scope: str, names: list[str]
-) -> None:
-    """Upstream, downstream with parents, and path with parents draw alike (Q90)."""
-    module = load_fixture(fixture)
-    built = fnloom.build(module)
-    if scope == "upstream":
-        drawing = built.draw_upstream_of(*names)
-    elif scope == "downstream":
-        drawing = built.draw_downstream_of(*names)
-    else:
-        drawing = built.draw_path_between(names[0], names[1])
-    drawn = {node.name for node in drawing.nodes}
-    assert drawn == _hamilton_drawn(module, scope, names)
 
 
 @pytest.mark.parametrize(

@@ -57,7 +57,7 @@ tax = drawing.nodes[5]
 ```
 
 `to_dot()` writes the text, and `str(drawing)` is the same. `orient` sets the direction edges point (`"LR"`, `"TB"`,
-`"RL"` or `"BT"`), and `legend=False` leaves out the box naming each kind of node drawn:
+`"RL"` or `"BT"`), and `legend=False` leaves out the box naming each kind and mark drawn:
 
 ```python
 dot = drawing.to_dot(orient="TB", legend=False)
@@ -118,3 +118,28 @@ driver.draw_execution(["total"])
 ```
 
 The async driver draws the same drawings.
+
+## Mermaid and images
+
+`to_mermaid()` writes the drawing as a Mermaid flowchart, which GitHub and many Markdown tools show as a diagram:
+
+```python
+driver.draw_upstream_of("subtotal").to_mermaid().splitlines()[:3]
+# -> ['flowchart LR', '  n0["price<br>float"]', '  n1["quantity<br>int"]']
+```
+
+`render(path)` writes a file in the format its suffix names. A `.dot` or `.mmd` path gets the text, with nothing to
+install; any other format, such as `.svg`, `.png` or `.pdf`, is made by Graphviz's `dot` program, which must be on
+`PATH`. fnloom depends on no Python package for it. Without Graphviz, `render` raises a `FileNotFoundError` saying how
+to install it. In Jupyter, a drawing shows as an image when Graphviz is installed, and as its DOT text otherwise.
+
+```python
+import tempfile
+from pathlib import Path
+
+with tempfile.TemporaryDirectory() as folder:
+    written = driver.draw().render(Path(folder) / "prices.dot")
+    text = written.read_text()
+text == driver.draw().to_dot()
+# -> True
+```

@@ -23,6 +23,7 @@ from hamilton.function_modifiers import hamilton_exclude
 from hamilton.function_modifiers.base import InvalidDecoratorException
 from hamilton.lifecycle import NoEdgeAndInputTypeChecking
 from harness import (
+    FAKE_GRAPHVIZ,
     FIXTURES,
     Nodes,
     Outcome,
@@ -4380,30 +4381,6 @@ def test_q88_failures_are_logged_only_on_request(
     assert "dflt" not in record.getMessage()
 
 
-# A stand-in for the `graphviz` package, which the test environment doesn't have:
-# enough of `Digraph` for Hamilton's drawing code to run and record what it drew.
-FAKE_GRAPHVIZ = """
-class Digraph:
-    def __init__(self, name=None, **kwargs):
-        self.name = name
-        self.kwargs = kwargs
-        self.nodes = []
-        self.edges = []
-        self.subgraphs = []
-
-    def node(self, name, label=None, **attrs):
-        self.nodes.append((name, label, attrs))
-
-    def edge(self, tail, head, **attrs):
-        self.edges.append((tail, head, attrs))
-
-    def subgraph(self, graph=None, name=None):
-        self.subgraphs.append(graph)
-
-    def attr(self, **attrs):
-        pass
-"""
-
 _HAMILTON_DRAWN_ORDER = """
 import json
 import sys
@@ -4418,14 +4395,6 @@ built = driver.Builder().with_modules(diamond).build()
 drawn = built.display_all_functions(show_legend=False)
 print(json.dumps([name for name, _, _ in drawn.nodes]))
 """
-
-
-@pytest.fixture
-def fake_graphviz(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Lets Hamilton's drawing methods run, recording nodes and edges."""
-    module = types.ModuleType("graphviz")
-    exec(FAKE_GRAPHVIZ, module.__dict__)  # noqa: S102  # our own stand-in
-    monkeypatch.setitem(sys.modules, "graphviz", module)
 
 
 @pytest.mark.deliberate("Q90")
@@ -4489,11 +4458,22 @@ def test_q90_drawings(tmp_path: Path) -> None:
 
 
 _Q91_GRAPH = """
+from typing import Literal
+
+from {package} import config
+
 def nested(x: int) -> dict[str, list[int]]:
-    return {"k": [x]}
+    return {{"k": [x]}}
 
 def maybe(nested: dict[str, list[int]]) -> int | None:
     return None
+
+def kind(x: int) -> Literal["a", "b"]:
+    return "a"
+
+@config.when(mode="fast")
+def chosen__fast(x: int) -> int:
+    return x
 """
 
 
@@ -4501,17 +4481,31 @@ def maybe(nested: dict[str, list[int]]) -> int | None:
 @pytest.mark.usefixtures("fake_graphviz")
 def test_q91_labels() -> None:
     """Hamilton labels a type by its origin's name; fnloom writes it whole."""
-    module = make_module("q91_labels", _Q91_GRAPH)
-    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    hamilton_module = make_module(
+        "q91_h", _Q91_GRAPH.format(package="hamilton.function_modifiers")
+    )
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(hamilton_module)
+        .with_config({"mode": "fast"})
+        .build()
+    )
     labels = {
         name: label
         for name, label, _ in hamilton.display_all_functions(show_legend=False).nodes
     }
     assert "<i>dict</i>" in labels["nested"]
     assert "<i>Union</i>" in labels["maybe"]
-    drawn = {n.name: n.type for n in fnloom.build(module).draw().nodes}
-    assert drawn["nested"] == "dict[str, list[int]]"
-    assert drawn["maybe"] == "int | None"
+    assert "<i>Literal</i>" in labels["kind"]
+    # A variant shows its key, not the value it matched.
+    assert labels["chosen"].startswith("<<b>chosen: mode</b>")
+    module = make_module("q91_f", _Q91_GRAPH.format(package="fnloom"))
+    built = fnloom.Builder().with_modules(module).with_config({"mode": "fast"}).build()
+    drawn = {n.name: n for n in built.draw().nodes}
+    assert drawn["nested"].type == "dict[str, list[int]]"
+    assert drawn["maybe"].type == "int | None"
+    assert drawn["kind"].type == "Literal['a', 'b']"
+    assert drawn["chosen"].condition == "mode == 'fast'"
 
 
 _Q93_HAMILTON = """
@@ -4551,6 +4545,9 @@ def test_q93_inputs_and_config() -> None:
     boxes = [name for name, _, _ in every.nodes if name.endswith("_inputs")]
     assert sorted(boxes) == ["_a_inputs", "_b_inputs"]
     assert "x" not in [name for name, _, _ in every.nodes]
+    # `deduplicate_inputs` shares one box between consumers of the same inputs.
+    shared = hamilton.display_all_functions(show_legend=False, deduplicate_inputs=True)
+    assert len([n for n, _, _ in shared.nodes if n.endswith("_inputs")]) == 1
 
     built = (
         fnloom.Builder()
@@ -4588,3 +4585,22 @@ def test_q92_execution_drawings() -> None:
     with pytest.raises(ValueError, match="missing inputs") as caught:
         built.draw_execution(["c"])
     assert str(caught.value) == "\n".join(built.validate(["c"]))
+
+
+@pytest.mark.deliberate("Q94")
+def test_q94_drawing_needs_nothing(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """Hamilton without graphviz returns `None` and logs; fnloom's text needs none."""
+    assert importlib.util.find_spec("graphviz") is None
+    module = load_fixture("diamond")
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    target = tmp_path / "graph.svg"
+    with caplog.at_level(logging.DEBUG):
+        assert hamilton.display_all_functions(str(target)) is None
+    assert not target.exists()
+    (error,) = [r for r in caplog.records if r.levelno == logging.ERROR]
+    assert "sf-hamilton[visualization]" in error.getMessage()
+    assert error.exc_info is not None
+    dot = fnloom.build(module).draw().to_dot()
+    assert dot.startswith("digraph {")

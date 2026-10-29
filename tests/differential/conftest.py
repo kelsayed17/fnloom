@@ -2,6 +2,8 @@
 
 import os
 import re
+import sys
+import types
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -12,6 +14,8 @@ os.environ["HAMILTON_AUTOLOAD_EXTENSIONS"] = "0"
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+
+from harness import FAKE_GRAPHVIZ  # after the environment is set
 
 REGISTER = Path(__file__).parents[2] / "docs" / "quirk-register.md"
 _ROW_ID = re.compile(r"^\| (Q\d+) \|", re.MULTILINE)
@@ -37,3 +41,14 @@ def pytest_collection_modifyitems(items: Sequence[pytest.Item]) -> None:
                     f"{item.nodeid}: deliberate({quirk!r}) is no row of {REGISTER.name}"
                 )
                 raise pytest.UsageError(msg)
+
+
+@pytest.fixture
+def fake_graphviz(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lets Hamilton's drawing methods run without the graphviz package.
+
+    `FAKE_GRAPHVIZ` stands in for it, recording the nodes and edges drawn.
+    """
+    module = types.ModuleType("graphviz")
+    exec(FAKE_GRAPHVIZ, module.__dict__)  # noqa: S102  # our own stand-in
+    monkeypatch.setitem(sys.modules, "graphviz", module)

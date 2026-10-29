@@ -16,6 +16,30 @@ if TYPE_CHECKING:
     from types import ModuleType
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+# A stand-in for the `graphviz` package, which the test environment doesn't have:
+# enough of `Digraph` for Hamilton's drawing code to run and record what it drew.
+FAKE_GRAPHVIZ = """
+class Digraph:
+    def __init__(self, name=None, **kwargs):
+        self.name = name
+        self.kwargs = kwargs
+        self.nodes = []
+        self.edges = []
+        self.subgraphs = []
+
+    def node(self, name, label=None, **attrs):
+        self.nodes.append((name, label, attrs))
+
+    def edge(self, tail, head, **attrs):
+        self.edges.append((tail, head, attrs))
+
+    def subgraph(self, graph=None, name=None):
+        self.subgraphs.append(graph)
+
+    def attr(self, **attrs):
+        pass
+"""
 _load_counter = itertools.count()
 
 
