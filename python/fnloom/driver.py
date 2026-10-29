@@ -20,6 +20,7 @@ from fnloom import _async, _core, _hooks, _types
 from fnloom._caching import Cache, CacheOutcome, CacheRun
 from fnloom._decorators import Source
 from fnloom._defaults import default_problems
+from fnloom._drawing import Drawing, Mark, drawing, with_context
 from fnloom._extract import is_generated
 from fnloom._functions import (
     FunctionReference,
@@ -1427,6 +1428,70 @@ class Driver[R = dict[str, object]]:
         """Returns the named nodes and every node depending on them, sorted."""
         return sorted({*names, *self._graph.downstream_of(list(names))})
 
+    def draw(self) -> Drawing:
+        """A drawing of every node and input (Q90).
+
+        Each input is one node, with an edge to each node that reads it; config is
+        never drawn, since it is never a node (Q93). See `Drawing` for the text.
+        """
+        return drawing(self._nodes, self._nodes)
+
+    def draw_upstream_of(self, *names: str) -> Drawing:
+        """A drawing of the named nodes and every node and input they depend on.
+
+        Names are checked as `what_is_the_path_between` checks them: every unknown
+        one in one `ValueError`, sorted, and a non-`str` a `TypeError`, as is
+        giving none.
+        """
+        self._check_drawn(names)
+        return drawing(self._nodes, {*names, *self._graph.upstream_of(list(names))})
+
+    def draw_downstream_of(self, *names: str) -> Drawing:
+        """A drawing of the named nodes and every node depending on them (Q90).
+
+        Each drawn node's other dependencies are drawn too, marked `context`, so
+        every drawn node shows all it reads. Names are checked as
+        `draw_upstream_of` checks them.
+        """
+        self._check_drawn(names)
+        downstream = sorted({*names, *self._graph.downstream_of(list(names))})
+        context = with_context(self._nodes, downstream)
+        return drawing(self._nodes, [*downstream, *context], context)
+
+    def draw_path_between(
+        self, upstream: str, downstream: str, *, context: bool = True
+    ) -> Drawing:
+        """A drawing of every node on a path from `upstream` to `downstream` (Q90).
+
+        The path's nodes, as `what_is_the_path_between` gives them, are marked
+        `path`. With `context`, each one's other dependencies are drawn too,
+        marked `context`. `ValueError` when there is no path, and for unknown
+        endpoints as `what_is_the_path_between` raises it.
+        """
+        path = self.what_is_the_path_between(upstream, downstream)
+        if not path:
+            msg = f"no path from {upstream!r} to {downstream!r}"
+            raise ValueError(msg)
+        marks: dict[str, list[Mark]] = {name: ["path"] for name in path}
+        if context:
+            marks |= with_context(self._nodes, path)
+        return drawing(self._nodes, marks, marks)
+
+    def _check_drawn(self, names: Sequence[object]) -> None:
+        """`TypeError` for no names or a non-`str`; `ValueError` for unknown ones."""
+        if not names:
+            msg = "give at least one node to draw from"
+            raise TypeError(msg)
+        if wrong := [type(n).__name__ for n in names if not isinstance(n, str)]:
+            msg = f"node names must be str, got {', '.join(wrong)}"
+            raise TypeError(msg)
+        unknown = sorted(
+            {n for n in names if isinstance(n, str) and n not in self._nodes}
+        )
+        if unknown:
+            msg = f"unknown nodes: {', '.join(map(repr, unknown))}"
+            raise ValueError(msg)
+
 
 class AsyncPreparedPlan[R = dict[str, object]]:
     """A plan an `AsyncDriver` compiled: `PreparedPlan`, with `run` a coroutine.
@@ -1714,6 +1779,24 @@ class AsyncDriver[R = dict[str, object]]:
     def what_is_downstream_of(self, *names: str) -> list[str]:
         """Returns the named nodes and every node depending on them, sorted."""
         return self._driver.what_is_downstream_of(*names)
+
+    def draw(self) -> Drawing:
+        """A drawing of every node and input; see `Driver.draw`."""
+        return self._driver.draw()
+
+    def draw_upstream_of(self, *names: str) -> Drawing:
+        """The named nodes and their dependencies; see `Driver.draw_upstream_of`."""
+        return self._driver.draw_upstream_of(*names)
+
+    def draw_downstream_of(self, *names: str) -> Drawing:
+        """The named nodes and their dependents; see `Driver.draw_downstream_of`."""
+        return self._driver.draw_downstream_of(*names)
+
+    def draw_path_between(
+        self, upstream: str, downstream: str, *, context: bool = True
+    ) -> Drawing:
+        """The nodes on a path; see `Driver.draw_path_between`."""
+        return self._driver.draw_path_between(upstream, downstream, context=context)
 
     def prepare(
         self,

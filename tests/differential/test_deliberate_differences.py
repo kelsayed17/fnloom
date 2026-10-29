@@ -4378,3 +4378,189 @@ def test_q88_failures_are_logged_only_on_request(
     assert record.getMessage() == f"node 'boom' failed; inputs: a=2, big={cut}"
     assert record.exc_info is not None
     assert "dflt" not in record.getMessage()
+
+
+# A stand-in for the `graphviz` package, which the test environment doesn't have:
+# enough of `Digraph` for Hamilton's drawing code to run and record what it drew.
+FAKE_GRAPHVIZ = """
+class Digraph:
+    def __init__(self, name=None, **kwargs):
+        self.name = name
+        self.kwargs = kwargs
+        self.nodes = []
+        self.edges = []
+        self.subgraphs = []
+
+    def node(self, name, label=None, **attrs):
+        self.nodes.append((name, label, attrs))
+
+    def edge(self, tail, head, **attrs):
+        self.edges.append((tail, head, attrs))
+
+    def subgraph(self, graph=None, name=None):
+        self.subgraphs.append(graph)
+
+    def attr(self, **attrs):
+        pass
+"""
+
+_HAMILTON_DRAWN_ORDER = """
+import json
+import sys
+
+from hamilton import driver
+
+sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, sys.argv[2])
+import diamond
+
+built = driver.Builder().with_modules(diamond).build()
+drawn = built.display_all_functions(show_legend=False)
+print(json.dumps([name for name, _, _ in drawn.nodes]))
+"""
+
+
+@pytest.fixture
+def fake_graphviz(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lets Hamilton's drawing methods run, recording nodes and edges."""
+    module = types.ModuleType("graphviz")
+    exec(FAKE_GRAPHVIZ, module.__dict__)  # noqa: S102  # our own stand-in
+    monkeypatch.setitem(sys.modules, "graphviz", module)
+
+
+@pytest.mark.deliberate("Q90")
+@pytest.mark.usefixtures("fake_graphviz")
+def test_q90_drawings(tmp_path: Path) -> None:
+    """Hamilton's drawn order follows the hash seed; fnloom's never does."""
+    (tmp_path / "graphviz.py").write_text(FAKE_GRAPHVIZ)
+    orders = {
+        seed: subprocess.run(  # noqa: S603  # our own interpreter and script
+            [sys.executable, "-c", _HAMILTON_DRAWN_ORDER, str(FIXTURES), tmp_path],
+            env={
+                **os.environ,
+                "PYTHONHASHSEED": seed,
+                "HAMILTON_AUTOLOAD_EXTENSIONS": "0",
+            },
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for seed in ("0", "1", "2", "3", "4", "5")
+    }
+    assert len(set(orders.values())) > 1
+    module = load_fixture("diamond")
+    built = fnloom.build(module)
+    assert [n.name for n in built.draw().nodes] == [
+        "a",
+        "root",
+        "left",
+        "right",
+        "join",
+    ]
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    # Hamilton names the first unknown endpoint; fnloom names both.
+    with pytest.raises(ValueError, match="Upstream node nope not found") as caught:
+        hamilton.visualize_path_between("nope", "nada")
+    assert "nada" not in str(caught.value)
+    with pytest.raises(ValueError, match="'nada', 'nope'"):
+        built.draw_path_between("nope", "nada")
+    # Hamilton draws nothing for no names; fnloom refuses.
+    assert hamilton.display_upstream_of().nodes == []
+    with pytest.raises(TypeError, match="at least one node"):
+        built.draw_upstream_of()
+    # Hamilton draws a downstream node's other parents like any node; fnloom
+    # marks them context.
+    downstream = hamilton.display_downstream_of("left", show_legend=False)
+    styles = {name: attrs for name, _, attrs in downstream.nodes}
+    assert set(styles) == {"root", "left", "right", "join"}
+    assert styles["root"] == styles["left"]
+    marked = {n.name: n.marks for n in built.draw_downstream_of("left").nodes}
+    assert marked == {
+        "root": {"context"},
+        "left": frozenset(),
+        "right": {"context"},
+        "join": frozenset(),
+    }
+    # Hamilton writes a bad orient as given; fnloom refuses it.
+    attributes = hamilton.display_all_functions(orient="XX").kwargs["graph_attr"]
+    assert attributes["rankdir"] == "XX"
+    with pytest.raises(ValueError, match="orient must be one of"):
+        built.draw().to_dot(orient="XX")  # ty: ignore[invalid-argument-type]
+
+
+_Q91_GRAPH = """
+def nested(x: int) -> dict[str, list[int]]:
+    return {"k": [x]}
+
+def maybe(nested: dict[str, list[int]]) -> int | None:
+    return None
+"""
+
+
+@pytest.mark.deliberate("Q91")
+@pytest.mark.usefixtures("fake_graphviz")
+def test_q91_labels() -> None:
+    """Hamilton labels a type by its origin's name; fnloom writes it whole."""
+    module = make_module("q91_labels", _Q91_GRAPH)
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    labels = {
+        name: label
+        for name, label, _ in hamilton.display_all_functions(show_legend=False).nodes
+    }
+    assert "<i>dict</i>" in labels["nested"]
+    assert "<i>Union</i>" in labels["maybe"]
+    drawn = {n.name: n.type for n in fnloom.build(module).draw().nodes}
+    assert drawn["nested"] == "dict[str, list[int]]"
+    assert drawn["maybe"] == "int | None"
+
+
+_Q93_HAMILTON = """
+from hamilton.function_modifiers import config
+
+def a(x: int) -> int:
+    return x
+
+def b(x: int) -> int:
+    return x
+
+@config.when(mode="fast")
+def c__fast(a: int) -> int:
+    return a
+"""
+
+_Q93_FNLOOM = _Q93_HAMILTON.replace(
+    "from hamilton.function_modifiers import config", "from fnloom import config"
+)
+
+
+@pytest.mark.deliberate("Q93")
+@pytest.mark.usefixtures("fake_graphviz")
+def test_q93_inputs_and_config() -> None:
+    """Hamilton boxes an input per consumer and draws config; fnloom doesn't."""
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(make_module("q93_h", _Q93_HAMILTON))
+        .with_config({"mode": "fast", "unused": 1})
+        .build()
+    )
+    drawn = hamilton.display_upstream_of("b", show_legend=False)
+    names = [name for name, _, _ in drawn.nodes]
+    # Every config key, though `b` reads none; `x` once per consumer, as a box.
+    assert {"mode", "unused"} <= set(names)
+    every = hamilton.display_all_functions(show_legend=False)
+    boxes = [name for name, _, _ in every.nodes if name.endswith("_inputs")]
+    assert sorted(boxes) == ["_a_inputs", "_b_inputs"]
+    assert "x" not in [name for name, _, _ in every.nodes]
+
+    built = (
+        fnloom.Builder()
+        .with_modules(make_module("q93_f", _Q93_FNLOOM))
+        .with_config({"mode": "fast", "unused": 1})
+        .build()
+    )
+    assert [n.name for n in built.draw_upstream_of("b").nodes] == ["x", "b"]
+    nodes = built.draw().nodes
+    assert [n.name for n in nodes if n.kind == "input"] == ["x"]
+    assert ("x", "a") in built.draw().edges
+    assert ("x", "b") in built.draw().edges
+    assert next(n for n in nodes if n.name == "c").condition == "mode == 'fast'"

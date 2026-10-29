@@ -3,7 +3,7 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** proposed, 2026-10-28, on `claude/plan-7-viz-cli`. Waiting for the maintainer's approval of the decisions.
+**Status:** approved 2026-10-28, in progress on `claude/plan-7-viz-cli`.
 
 **Goal:** close the roadmap's step 6. That means:
 

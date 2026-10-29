@@ -358,6 +358,8 @@ def test_public_api_is_exported() -> None:
         "CacheWarning",
         "Condition",
         "DiskCache",
+        "Drawing",
+        "DrawnNode",
         "Driver",
         "Format",
         "Group",
