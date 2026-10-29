@@ -581,8 +581,9 @@ def mutate[F: Callable[..., object]](
     apply. The steps go after the target's own `@pipe_output` steps, in the
     order the mutators are defined. The mutator itself is no node. A target in
     another module works when both are built; one no built module defines is a
-    `ValueError` at build. Mutating twice with one mutator, as re-running a cell
-    does, adds its step once.
+    `ValueError` at build. A redefinition of a mutator, as re-running a cell
+    makes, replaces its step; mutators sharing one function's code, made in a
+    loop or a factory, each add theirs.
     """
     if not targets:
         msg = "mutate needs at least one target function"

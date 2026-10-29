@@ -163,7 +163,7 @@ uv run maturin develop --release
   output checks and custom value checks
 - ✅ [Drawing](https://kelsayed17.github.io/fnloom/drawing/) as DOT or Mermaid text, export as JSON, and the `fnloom`
   command
-- ✅ [Output checks](https://kelsayed17.github.io/fnloom/writing-nodes/#checking-values),
+- ✅ [`@check_output` validators](https://kelsayed17.github.io/fnloom/writing-nodes/#checking-values),
   [steps](https://kelsayed17.github.io/fnloom/writing-nodes/#steps), `@inject`, `@resolve` and
   [node wrappers](https://kelsayed17.github.io/fnloom/running/#node-wrappers)
 - 🔜 Dynamic execution

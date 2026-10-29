@@ -68,7 +68,8 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `@mutate(target)` and `apply_to(target, ...)` | The same, imported from `fnloom`; a target in another module works when both are built (Q107) |
 | `@inject(param=source("x"))` | The same, imported from `fnloom` ([Bindings and decorators from config](writing-nodes.md#bindings-and-decorators-from-config), Q109) |
 | `@resolve(when=ResolveAt.CONFIG_AVAILABLE, decorate_with=...)` with `hamilton.enable_power_user_mode` | `@fnloom.resolve(decorate_with)`, with no power-user mode (Q110) |
-| `@pipe`, `@flow`, `collapse=True`, `@check_output(schema=...)` | Not there: `pipe` is a deprecated alias of `pipe_input`, `flow` and `collapse` don't exist in 1.90.0, and a pandera schema is a custom check |
+| `@pipe`, `@flow`, `collapse=True`, `@check_output(schema=...)` | Not there: `pipe` is a deprecated alias of `pipe_input`, `flow` doesn't exist in 1.90.0, `collapse=True` raises `NotImplementedError` there, and a pandera schema is a custom check |
+| `@pipe_input(..., namespace=...)`, `.named(name, namespace=...)`, `@pipe_output(..., on_output=...)` | Not there: a step's node is always `<node>.<label>`, and `.on_output(...)` on each step picks the fields |
 
 </div>
 
@@ -208,8 +209,8 @@ value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](
 fnloom is pre-alpha. The core, the native path, `@parameterize` and its sugar, `@tag`, `@config`, `@extract_fields`,
 `@extract_columns`, `@exclude`, graph inspection, `validate`, graphs from plain functions, namespaces, type checks,
 result caching, the async driver, hooks, result builders, output checks, custom value checks, drawing, export, the
-CLI, output validators, step injection, `@inject`, `@resolve` and node wrappers are done. These Hamilton features come
-next, roughly in this order:
+CLI, `@check_output` validators, step injection, `@inject`, `@resolve` and node wrappers are done. These Hamilton
+features come next, roughly in this order:
 
 1. **Dynamic execution**, materializers and `@subdag`.
 2. **`GracefulErrorAdapter`** and `StaticValidator`. Node wrappers can change how a node is called, but a run still

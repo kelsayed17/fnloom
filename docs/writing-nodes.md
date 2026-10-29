@@ -471,11 +471,11 @@ fnloom.build(deliveries).execute(["shipped"], inputs={"ordered": 3, "packed": 5}
 ```
 
 Checks stack in any number and in any order, and run in the order written, top first. A check is on the function's
-own value; `field="p"` puts it on an `@extract_fields` or `@extract_columns` field instead, whatever the decorator
-order. Every `@parameterize` row and `@config.when` variant is checked. An overridden node doesn't run, so it isn't
-checked, and a [cache](caching.md) hit isn't checked again. The checks are part of the node's cache key, so adding a
-stricter check makes the next run compute the value afresh (Q103). A [hook](hooks.md)'s `after_node` gets every
-check's result as `NodeEnd.checks`.
+value after its [`@pipe_output`](#steps) and `@mutate` steps; `field="p"` puts it on an `@extract_fields` or
+`@extract_columns` field instead, whatever the decorator order. Every `@parameterize` row and `@config.when` variant
+is checked. An overridden node doesn't run, so it isn't checked, and a [cache](caching.md) hit isn't checked again.
+The checks are part of the node's cache key, so adding a stricter check makes the next run compute the value afresh
+(Q103). A [hook](hooks.md)'s `after_node` gets every check's result as `NodeEnd.checks`.
 
 Hamilton's pandas statistics checks are a few lines as a custom check:
 
@@ -581,8 +581,9 @@ fnloom.build(rounding).execute(["price", "tax"], inputs={"cost": 9.99})
 # -> {'price': 11.99, 'tax': 2.4}
 ```
 
-A target may be in another module, as long as both are built. A target no built module defines fails the build, and
-mutating twice with one mutator, as re-running a notebook cell does, adds its step once.
+A target may be in another module, as long as both are built. A target no built module defines fails the build, and so
+does a node mutated from a module the build doesn't include. A redefinition of a mutator, as re-running a notebook cell
+makes, replaces its step.
 
 ## Bindings and decorators from config
 

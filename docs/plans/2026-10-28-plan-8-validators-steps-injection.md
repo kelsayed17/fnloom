@@ -434,6 +434,9 @@ from-hamilton.md, quirk-register.md, benchmarks.md, index.md, README.md, CHANGEL
   `scripts/check.sh` makes. `benches.run` was not re-run: a graph with no Plan 8 decorator and no wrapper builds the
   very node definitions it built before, since `attached`, `lowered`, `wrapped` and the chain return their input
   unchanged when there's nothing to do.
-- **Stacking** is tested over 36 pairs (`tests/test_stacking.py`). Every pair gives one graph in either order, except
-  `@inject` with `@parameterize`, which is refused in both orders.
+- **Stacking** is tested over 33 pairs (`tests/test_stacking.py`): each Plan 8 decorator with each other one and with
+  `@tag`, `@parameterize` and `@config.when`, with and without a `@mutate` step on the function, comparing nodes,
+  wiring, tags, values and check results; and each Plan 8 decorator with `@extract_fields`. Every pair gives one graph
+  in either order, except `@inject` with `@parameterize`, which is refused in both orders with one message. Two check
+  decorators run in the order written, so only their order differs.
 - **Register rows:** Q99 to Q111, and Q24 updated.

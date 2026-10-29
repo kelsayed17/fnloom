@@ -25,7 +25,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `@fnloom.resolve(decorate_with)`, which applies the decorators `decorate_with` returns for the config, needing no
   power-user mode (Q109, Q110).
 - `Builder.with_node_wrappers(*wrappers)`: an ordered chain of `wrapper(node, call, inputs)` around every computed
-  node, any number per driver; hooks fire outside it, checks run inside it, and a cache hit skips it (Q111).
+  node that runs a function of yours, any number per driver; hooks fire outside it, a wrapped node's checks run inside
+  it, and a cache hit skips it (Q111).
 - Hooks. Subclass `fnloom.Hook`, override any of `before_run`, `before_node`, `after_node` and `after_run`, and give
   instances to `Builder.with_hooks(*hooks)`, which is cumulative. Each method gets one frozen event, `fnloom.RunStart`,
   `NodeStart`, `NodeEnd` or `RunEnd`, with a `run_id` shared by a run's events, the node's `NodeView`, its inputs by
