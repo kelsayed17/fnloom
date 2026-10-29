@@ -204,6 +204,191 @@ value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](
 
 </div>
 
+## Hamilton features fnloom leaves out
+
+fnloom doesn't build these Hamilton features, because plain Python, or something fnloom already has, gets the same
+result with less to learn. Each section shows the fnloom way. Each decision is a register row.
+
+### `@does`
+
+Call the function. The node is named, typed and cached as written, and the two signatures are type-checked like any
+call (Q113):
+
+```python
+# file: summing.py
+def _sum_all(a: int, b: int) -> int:
+    return a + b
+
+
+def total(x: int, y: int) -> int:
+    """x plus y."""
+    return _sum_all(a=x, b=y)
+```
+
+```python
+import fnloom
+import summing
+
+fnloom.build(summing).execute(["total"], inputs={"x": 1, "y": 2})
+# -> {'total': 3}
+```
+
+`fnloom.node(fn, name=..., bind=...)` makes the node from the function itself, with no wrapper:
+
+```python
+driver = (
+    fnloom.Builder()
+    .with_functions(
+        fnloom.node(summing._sum_all, name="summed", bind={"a": fnloom.source("x")})
+    )
+    .build()
+)
+driver.execute(["summed"], inputs={"x": 1, "b": 2})
+# -> {'summed': 3}
+```
+
+### `@schema.output`
+
+Hamilton's `@schema.output` records a tag that nothing checks. To check a frame's columns, use
+`@check_output_custom`, which fails the node with a `ValidationError` by default. To record them without checking, use
+`@tag` (Q114):
+
+```python
+# file: framed.py
+import fnloom
+
+
+def _has_columns(value: dict) -> str | None:
+    missing = sorted({"a", "b"} - set(value))
+    return f"missing columns {missing}" if missing else None
+
+
+@fnloom.check_output_custom(_has_columns)
+@fnloom.tag(schema="a:int,b:float")
+def frame(rows: int) -> dict:
+    return {"a": list(range(rows))}
+```
+
+```python
+import framed
+from fnloom import ValidationError
+
+driver = fnloom.build(framed)
+driver.nodes["frame"].tags["schema"]
+# -> 'a:int,b:float'
+driver.execute(["frame"], inputs={"rows": 2})
+# raises ValidationError: frame: check _has_columns failed: missing columns ['b']
+```
+
+### `@dataloader` and `@datasaver`
+
+A loader is a function that returns the data. If you also want its metadata as a node, return both and split them
+with `@extract_fields`. `@tag` marks the node for `Driver.nodes` and drawings (Q115):
+
+```python
+# file: loading.py
+import fnloom
+
+
+@fnloom.extract_fields({"data": list, "metadata": dict})
+@fnloom.tag(kind="loader")
+def raw(path: str = "p.json") -> dict:
+    return {"data": [1, 2], "metadata": {"source": path, "rows": 2}}
+
+
+def total_loaded(data: list) -> int:
+    return sum(data)
+```
+
+```python
+import loading
+
+fnloom.build(loading).execute(["total_loaded", "metadata"])
+# -> {'total_loaded': 3, 'metadata': {'source': 'p.json', 'rows': 2}}
+```
+
+A saver is a node that writes and returns what it wrote, or a hook (below).
+
+### `@load_from`, `@save_to` and materializers
+
+Load in a node. Its value is type-checked on the edge to each reader, which Hamilton's loaded values are not. Save
+from an `after_run` hook, which gets the run's raw outputs. A saver node requested with the outputs works too, just
+as a Hamilton saver node writes only when requested (Q116):
+
+```python
+# file: stored.py
+import json
+from pathlib import Path
+
+
+def numbers(in_path: str) -> dict:
+    return json.loads(Path(in_path).read_text(encoding="utf-8"))
+
+
+def total_stored(numbers: dict) -> int:
+    return sum(numbers.values())
+```
+
+```python
+import json
+import tempfile
+from pathlib import Path
+
+import stored
+
+
+class SaveJson(fnloom.Hook):
+    """Writes the named outputs of each successful run to one JSON file."""
+
+    def __init__(self, path: Path, names: list[str]) -> None:
+        self.path = path
+        self.names = names
+
+    def after_run(self, event: fnloom.RunEnd) -> None:
+        if event.ok and event.results is not None:
+            saved = {name: event.results[name] for name in self.names}
+            self.path.write_text(json.dumps(saved), encoding="utf-8")
+
+
+folder = Path(tempfile.mkdtemp())
+(folder / "in.json").write_text('{"a": 1, "b": 2}', encoding="utf-8")
+driver = (
+    fnloom.Builder()
+    .with_modules(stored)
+    .with_hooks(SaveJson(folder / "out.json", ["total_stored"]))
+    .build()
+)
+driver.execute(["total_stored"], inputs={"in_path": str(folder / "in.json")})
+# -> {'total_stored': 3}
+(folder / "out.json").read_text(encoding="utf-8")
+# -> '{"total_stored": 3}'
+```
+
+To choose the source at run time, use a `@config.when` variant per source, or a value given as an input.
+
+### `StaticValidator`
+
+To check the graph at build, write a function over `Driver.nodes` and call it right after `build()`. It sees the
+names, types, tags, dependencies, functions and config that a `StaticValidator` sees, and can report every problem in
+one error (Q117):
+
+```python
+def checked(driver: fnloom.Driver) -> fnloom.Driver:
+    """The driver, if every computed node has an owner tag."""
+    problems = [
+        f"{name}: no owner tag"
+        for name, node in driver.nodes.items()
+        if not node.is_input and "owner" not in node.tags
+    ]
+    if problems:
+        raise ValueError("; ".join(sorted(problems)))
+    return driver
+
+
+checked(fnloom.build(summing))
+# raises ValueError: total: no owner tag
+```
+
 ## Not there yet
 
 fnloom is pre-alpha. The core, the native path, `@parameterize` and its sugar, `@tag`, `@config`, `@extract_fields`,

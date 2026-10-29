@@ -5252,3 +5252,272 @@ def test_q111_wrappers_chain() -> None:
     built = fnloom.Builder().with_modules(module).with_node_wrappers(first, second)
     assert built.build().execute(["b"], inputs={"a": 1}) == {"b": 2}
     assert order == ["first", "second"]
+
+
+_Q113_DOES = """
+from hamilton.function_modifiers import does
+
+def _sum_all(a: int, b: int) -> int:
+    return a + b
+
+def _as_text(**kwargs: int) -> str:
+    return "s"
+
+@does(_sum_all, a="x", b="y")
+def total(x: int, y: int) -> int:
+    pass
+
+@does(_as_text)
+def typed_int(a: int) -> int:
+    pass
+"""
+
+_Q113_CALLED = """
+def _sum_all(a: int, b: int) -> int:
+    return a + b
+
+def total(x: int, y: int) -> int:
+    return _sum_all(a=x, b=y)
+"""
+
+
+@pytest.mark.deliberate("Q113")
+def test_q113_does_is_a_call(tmp_path: Path) -> None:
+    """Hamilton's `@does` returns a `str` from an `int` node; a call types it."""
+    module = _module_from_file(tmp_path, "q113_h", _Q113_DOES)
+    driver = hamilton_driver.Builder().with_modules(module).build()
+    assert driver.execute(["total", "typed_int"], inputs={"x": 1, "y": 2, "a": 0}) == {
+        "total": 3,
+        "typed_int": "s",
+    }
+    types_ = {v.name: v.type for v in driver.list_available_variables()}
+    assert types_["typed_int"] is int
+    called = fnloom.build(make_module("q113_f", _Q113_CALLED))
+    assert called.execute(["total"], inputs={"x": 1, "y": 2}) == {"total": 3}
+
+
+_Q114_SCHEMA = """
+from hamilton.function_modifiers import schema
+
+@schema.output(("a", "int"), ("b", "float"))
+def frame(rows: int) -> dict:
+    return {"a": list(range(rows))}
+"""
+
+_Q114_CHECKED = """
+import fnloom
+
+def _has_columns(value: dict) -> str | None:
+    missing = sorted({"a", "b"} - set(value))
+    return f"missing columns {missing}" if missing else None
+
+@fnloom.check_output_custom(_has_columns)
+@fnloom.tag(schema="a:int,b:float")
+def frame(rows: int) -> dict:
+    return {"a": list(range(rows))}
+"""
+
+
+@pytest.mark.deliberate("Q114")
+def test_q114_schema_is_a_check(tmp_path: Path) -> None:
+    """Hamilton refuses the type at build; fnloom checks the columns at run."""
+    module = _module_from_file(tmp_path, "q114_h", _Q114_SCHEMA)
+    with pytest.raises(InvalidDecoratorException, match="not a registered type"):
+        hamilton_driver.Builder().with_modules(module).build()
+    driver = fnloom.build(make_module("q114_f", _Q114_CHECKED))
+    assert driver.nodes["frame"].tags["schema"] == "a:int,b:float"
+    with pytest.raises(fnloom.ValidationError, match=r"missing columns \['b'\]"):
+        driver.execute(["frame"], inputs={"rows": 2})
+
+
+_Q115_LOADER = """
+from hamilton.function_modifiers import dataloader
+
+@dataloader()
+def raw(path: str = "p.json") -> tuple[list, dict]:
+    return [1, 2], {"source": path, "rows": 2}
+
+def total(raw: list) -> int:
+    return sum(raw)
+"""
+
+_Q115_FIELDS = """
+import fnloom
+
+@fnloom.extract_fields({"data": list, "metadata": dict})
+@fnloom.tag(kind="loader")
+def raw(path: str = "p.json") -> dict:
+    return {"data": [1, 2], "metadata": {"source": path, "rows": 2}}
+
+def total(data: list) -> int:
+    return sum(data)
+"""
+
+
+@pytest.mark.deliberate("Q115")
+def test_q115_a_loader_is_a_function(tmp_path: Path) -> None:
+    """The same data and metadata, from `@extract_fields` rather than a tuple split."""
+    module = _module_from_file(tmp_path, "q115_h", _Q115_LOADER)
+    driver = hamilton_driver.Builder().with_modules(module).build()
+    data, metadata = driver.execute(["total", "raw.loader"])["raw.loader"]
+    assert driver.execute(["total"]) == {"total": 3}
+    fields = fnloom.build(make_module("q115_f", _Q115_FIELDS))
+    assert fields.execute(["total", "metadata"]) == {"total": 3, "metadata": metadata}
+    assert fields.execute(["data"]) == {"data": data}
+
+
+_Q116_IO = """
+from hamilton.function_modifiers import load_from, save_to, source
+
+@save_to.json(path=source("out_path"), output_name_="saved")
+def doubled(total: int) -> dict:
+    return {"total": total * 2}
+
+@load_from.json(path=source("in_path"))
+def total(data: dict) -> int:
+    return sum(data.values())
+"""
+
+_Q116_NODES = """
+import json
+from pathlib import Path
+
+def numbers(in_path: str) -> dict:
+    return json.loads(Path(in_path).read_text(encoding="utf-8"))
+
+def total(numbers: dict) -> int:
+    return sum(numbers.values())
+
+def doubled(total: int) -> dict:
+    return {"total": total * 2}
+"""
+
+
+@pytest.mark.deliberate("Q116")
+def test_q116_io_is_a_node_and_a_hook(tmp_path: Path) -> None:
+    """A loader node and an `after_run` hook write what `@load_from`/`@save_to` do."""
+    given = tmp_path / "in.json"
+    given.write_text('{"a": 1, "b": 2}', encoding="utf-8")
+    module = _module_from_file(tmp_path, "q116_h", _Q116_IO)
+    driver = hamilton_driver.Builder().with_modules(module).build()
+    inputs = {"in_path": str(given), "out_path": str(tmp_path / "h.json")}
+    driver.execute(["doubled"], inputs=inputs)
+    assert not (tmp_path / "h.json").exists()  # only a requested saver writes
+    driver.execute(["saved"], inputs=inputs)
+    written = json.loads((tmp_path / "h.json").read_text(encoding="utf-8"))
+
+    class SaveJson(fnloom.Hook):
+        @override
+        def after_run(self, event: fnloom.RunEnd) -> None:
+            if event.ok and event.results is not None:
+                (tmp_path / "f.json").write_text(
+                    json.dumps(event.results["doubled"]), encoding="utf-8"
+                )
+
+    built = (
+        fnloom.Builder()
+        .with_modules(make_module("q116_f", _Q116_NODES))
+        .with_hooks(SaveJson())
+        .build()
+    )
+    assert built.execute(["doubled"], inputs={"in_path": str(given)}) == {
+        "doubled": {"total": 6}
+    }
+    assert json.loads((tmp_path / "f.json").read_text(encoding="utf-8")) == written
+
+
+_Q117_OWNED = """
+from hamilton.function_modifiers import tag
+
+@tag(owner="a")
+def kept(x: int) -> int:
+    return x
+
+def orphan_b(x: int) -> int:
+    return x
+
+def orphan_a(x: int) -> int:
+    return x
+"""
+
+
+def _owner_problems(driver: fnloom.Driver) -> list[str]:
+    return sorted(
+        f"{name}: no owner tag"
+        for name, node in driver.nodes.items()
+        if not node.is_input and "owner" not in node.tags
+    )
+
+
+@pytest.mark.deliberate("Q117")
+def test_q117_static_checks_are_a_function(tmp_path: Path) -> None:
+    """Hamilton raises `ValidationException`; a function over `nodes` finds the same."""
+
+    class Owned(lifecycle.StaticValidator):
+        @override
+        def run_to_validate_node(
+            self, *, node: graph_types.HamiltonNode, **future_kwargs: Any
+        ) -> tuple[bool, str | None]:
+            del future_kwargs
+            if node.is_external_input or "owner" in node.tags:
+                return True, None
+            return False, "no owner tag"
+
+    module = _module_from_file(tmp_path, "q117_h", _Q117_OWNED)
+    with pytest.raises(Exception, match="2 errors encountered") as caught:
+        hamilton_driver.Builder().with_modules(module).with_adapters(Owned()).build()
+    assert not isinstance(caught.value, ValueError)
+    assert "orphan_a: no owner tag" in str(caught.value)
+    # A class rather than an instance is accepted, and never runs.
+    hamilton_driver.Builder().with_modules(module).with_adapters(
+        Owned  # ty: ignore[invalid-argument-type]  # the class, as Hamilton accepts
+    ).build()
+    fnloom_module = make_module(
+        "q117_f", _Q117_OWNED.replace("hamilton.function_modifiers", "fnloom")
+    )
+    assert _owner_problems(fnloom.build(fnloom_module)) == [
+        "orphan_a: no owner tag",
+        "orphan_b: no owner tag",
+    ]
+
+
+_Q110_IMPORTING = """
+import importlib
+import fnloom
+
+def _late(flag=False):
+    if flag:
+        importlib.import_module("{mutating}")
+    return fnloom.tag(t="1")
+
+@fnloom.resolve(_late)
+def host(x: int) -> int:
+    return x
+"""
+
+_Q110_MUTATING = """
+import fnloom
+
+def target(x: int) -> int:
+    return x
+
+@fnloom.mutate(target)
+def _plus(v: int) -> int:
+    return v + 1
+"""
+
+
+@pytest.mark.deliberate("Q110")
+def test_q110_a_resolver_importing_a_mutate_is_refused(tmp_path: Path) -> None:
+    """The known limit: `@mutate` while a resolver runs is refused, even by import."""
+    (tmp_path / "q110_mutating.py").write_text(_Q110_MUTATING, encoding="utf-8")
+    sys.path.insert(0, str(tmp_path))
+    try:
+        module = make_module(
+            "q110_importing", _Q110_IMPORTING.format(mutating="q110_mutating")
+        )
+        with pytest.raises(TypeError, match="can't apply @mutate"):
+            fnloom.Builder().with_modules(module).with_config({"flag": True}).build()
+    finally:
+        sys.path.remove(str(tmp_path))
+        sys.modules.pop("q110_mutating", None)
