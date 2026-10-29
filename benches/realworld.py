@@ -27,6 +27,7 @@ interpreter, for the memory baseline.
 
 import asyncio
 import hashlib
+import importlib
 import json
 import os
 import statistics
@@ -257,11 +258,12 @@ def _rss_mb() -> float:
 
 
 def _peak_mb() -> float:
-    import resource  # noqa: PLC0415  # not on every platform
-
+    # Imported by name: the module has no Windows build, which this script doesn't
+    # support (it reads the resident size from `ps`), but the type check runs there.
+    resource: Any = importlib.import_module("resource")
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
     # Bytes on macOS, kilobytes on Linux.
-    return peak / (1024 * 1024 if sys.platform == "darwin" else 1024)
+    return float(peak) / (1024 * 1024 if sys.platform == "darwin" else 1024)
 
 
 def _ms(start: int) -> float:
@@ -305,8 +307,6 @@ def sample(  # noqa: C901
     if runtime == "none":
         return Sample(0, 0, 0, 0, 0, _peak_mb(), _rss_mb(), "")
     start = time.perf_counter_ns()
-    import importlib  # noqa: PLC0415
-
     module = importlib.import_module(f"{workload}_{numpy}")
     module_ms = _ms(start)
 
