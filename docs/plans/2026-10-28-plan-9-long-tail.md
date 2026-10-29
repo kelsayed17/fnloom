@@ -231,6 +231,10 @@ docs/plans/2026-10-28-roadmap-ahead-of-hamilton.md, README.md, docs/index.md, CH
   of `_export.py`) is the fingerprint of a value with no set, and a hash of a canonical form otherwise. The cache key
   and `value_version` both use it, so a `frozenset` constant keys the same on every `PYTHONHASHSEED`. This also fixes
   the same value in any `value()` parameter, not only a bound one.
+- **Set-holding `value()` constants change key once.** Their cache keys and export versions differ from before, so old
+  entries miss once. Only sets in a set, list, tuple, mapping or dataclass are canonicalised; one in a plain object,
+  `deque` or `Counter` still follows the seed and only misses.
+- **A `bind=` key read only by an unselected `@config.when` variant is refused** for that config, as the row says.
 - **Pickling carries `bind=` as plain dicts**, since a `MappingProxyType` doesn't pickle.
 - **Checks.** `with_modules` refuses a missing namespace, a binding that is no `source` or `value`, a key that is no
   identifier, and a key bound otherwise by an earlier call. `build()` refuses a key the namespace defines or no node

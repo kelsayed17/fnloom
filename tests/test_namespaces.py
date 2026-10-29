@@ -979,6 +979,6 @@ def test_unread_or_defined_bind_keys_are_refused_at_build() -> None:
         module, namespace="eu", bind={"net": fnloom.value(1.0)}
     )
     with pytest.raises(
-        ValueError, match=re.escape("bind names 'net', which namespace 'eu' defines")
+        ValueError, match=re.escape("bind names 'net' under namespace 'eu', which defines it")
     ):
         defined.build()

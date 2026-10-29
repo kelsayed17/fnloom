@@ -13,7 +13,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `inputs=` does. Each key is a name the namespace reads that none of its modules defines, bound to `source("x")`, read
   outside the namespace, or `value(v)`. A key no node reads, or one the namespace defines, is a `ValueError` at build.
   Bindings are in `Driver.nodes`, the export, `graph_version` and the cache key (a `value()` holding a set is keyed the
-  same on every hash seed), and survive pickling, `copy` and `rebuild()` (Q112).
+  same on every hash seed), and survive pickling, `copy` and `rebuild()` (Q112). A `value()` holding a set now has a different cache key and export
+  version than before, so such cache entries miss once and `diff` against an older export shows them changed.
 - Decisions, each with a register row and a runnable recipe in Coming from Hamilton: `@does`, `@schema.output`,
   `@dataloader`, `@datasaver`, `@load_from`, `@save_to`, materializers and `StaticValidator` are not planned (Q113 to
   Q117); `@parameterized_subdag` and `config=` per `@subdag` copy are not planned either (Q112).

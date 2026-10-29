@@ -1044,7 +1044,7 @@ def scan(  # noqa: PLR0913  # keyword-only options, one per kind of source
         for namespace, within in names.items()
     }
     if defined := sorted(
-        f"bind names {key!r}, which namespace {namespace!r} defines"
+        f"bind names {key!r} under namespace {namespace!r}, which defines it"
         for namespace, within in names.items()
         for key in within.bound.keys() & within.names.keys()
     ):
