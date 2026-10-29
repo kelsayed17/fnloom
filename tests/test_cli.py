@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING
 import pytest
 
 from fnloom._cli import main
+from helpers import fake_dot
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -321,9 +322,7 @@ def test_an_image_by_the_suffix(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     """With `-o` and no `--format`, the suffix names the format, in any case."""
-    dot = tmp_path / "dot"
-    dot.write_text(f"#!{sys.executable}\nimport sys\nsys.stdout.write(sys.argv[1])\n")
-    dot.chmod(0o755)
+    fake_dot(tmp_path, "import sys\nsys.stdout.write(sys.argv[1])\n")
     monkeypatch.setenv("PATH", str(tmp_path))
     status, _, err = _run(capsys, "draw", str(flow), "-o", str(tmp_path / "g.svg"))
     assert (status, err) == (0, "")
@@ -397,6 +396,9 @@ def test_diff_of_a_malformed_export_is_status_2(
     assert err.startswith("fnloom: ValueError: new:")
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="Windows reports a closed pipe as EINVAL"
+)
 def test_a_closed_pipe_is_quiet(flow: Path) -> None:
     """`fnloom draw ... | head -1` reports no error."""
     head = subprocess.Popen(  # noqa: S603  # our own interpreter

@@ -12,7 +12,7 @@ import pytest
 
 import fnloom
 from fnloom import Drawing, DrawnNode
-from helpers import make_module
+from helpers import fake_dot, make_module
 
 if TYPE_CHECKING:
     import types
@@ -598,18 +598,11 @@ def test_render_runs_graphviz(tmp_path: Path) -> None:
         drawing.render(tmp_path / "graph.nope")
 
 
-def _fake_dot(folder: Path, script: str) -> None:
-    """A `dot` executable in `folder` running `script` in Python."""
-    path = folder / "dot"
-    path.write_text(f"#!{sys.executable}\n{textwrap.dedent(script)}")
-    path.chmod(0o755)
-
-
 def test_render_runs_dot_from_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The `dot` on PATH gets `-T<format>` and the DOT text; its stdout is written."""
-    _fake_dot(
+    fake_dot(
         tmp_path,
         """
         import sys
@@ -630,7 +623,7 @@ def test_a_failing_dot_is_a_runtime_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Its stderr in the message; nothing is written."""
-    _fake_dot(
+    fake_dot(
         tmp_path,
         """
         import sys
