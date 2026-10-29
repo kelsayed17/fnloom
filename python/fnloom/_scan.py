@@ -651,6 +651,16 @@ def _node_name(fn: Callable[..., object]) -> str:
         return full
 
 
+def _mutates(module: ModuleType) -> bool:
+    """Whether `module` defines a `@mutate` mutator: it adds steps, if no node."""
+    return any(
+        inspect.isfunction(value)
+        and value.__module__ == module.__name__
+        and decorations(value).mutates
+        for value in vars(module).values()
+    )
+
+
 def _skipped(module: ModuleType) -> str:
     """Why `module` has no node: each function it holds, and why it is not one."""
     listed = _listed(module)
@@ -809,7 +819,7 @@ def _functions(
     for module in unique:
         gathered = _found(module)
         scanned[id(module)] = gathered
-        if not gathered.functions:
+        if not gathered.functions and not _mutates(module):
             empty.append(_skipped(module))
         elif gathered.configured:
             configured.append(module)

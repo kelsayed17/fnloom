@@ -119,6 +119,8 @@ class Decorations:
     checks: tuple[Check, ...] = ()
     pipe_input: PipeInput | None = None
     pipe_output: tuple[Step, ...] = ()
+    mutations: tuple[tuple[str, Step], ...] = ()
+    mutates: tuple[Callable[..., object], ...] = ()
 
 
 def source(name: str) -> Source:

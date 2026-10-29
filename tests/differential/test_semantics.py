@@ -238,6 +238,43 @@ def test_steps_make_the_same_nodes_and_values(tmp_path: Path) -> None:
     )
 
 
+_MUTATED = """
+from {package} import mutate, pipe_output, step, value
+
+def _first(v: int) -> int:
+    return v + 1000
+
+@pipe_output(step(_first))
+def a(x: int) -> int:
+    return x
+
+@mutate(a, n=value(1))
+def _add(v: int, n: int) -> int:
+    return v + n
+
+@mutate(a)
+def _double(v: int) -> int:
+    return v * 2
+"""
+
+
+def test_mutate_makes_the_same_nodes_and_values(tmp_path: Path) -> None:
+    """Steps after the target's own, in definition order (KEEP, Q107)."""
+    hamilton_module = _file_module(
+        tmp_path, "mutated_h", _MUTATED.format(package="hamilton.function_modifiers")
+    )
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    built = fnloom.build(make_module("mutated_f", _MUTATED.format(package="fnloom")))
+    hamilton_names = {
+        v.name for v in hamilton.list_available_variables() if not v.is_external_input
+    }
+    fnloom_names = {n for n in built.node_names() if not built.nodes[n].is_input}
+    assert fnloom_names == hamilton_names
+    assert built.execute(["a"], inputs={"x": 1}) == hamilton.execute(
+        ["a"], inputs={"x": 1}
+    )
+
+
 def _file_module(folder: Path, name: str, source: str) -> ModuleType:
     """`source` as a module loaded from a file, so Hamilton can read its source."""
     path = folder / f"{name}.py"

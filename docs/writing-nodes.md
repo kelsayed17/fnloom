@@ -548,6 +548,42 @@ Misuse, such as `on_input` naming no parameter, is refused rather than ignored (
 `@pipe_output` function check the last step's value, whatever the decorator order. A public step function is a node
 of its own too, as any public function is; name it with a leading `_`, or mark it [`@exclude`](#keeping-a-function-out).
 
+### Steps from elsewhere: `@mutate`
+
+`@mutate` adds the decorated function as a step to other functions' `@pipe_output`, so a cross-cutting change lives
+in one place. Each target is a function, or `apply_to(fn, **bindings)` to bind the step differently for it; the steps
+follow the target's own, in the order the mutators are defined, and the mutator itself is no node (Q107):
+
+```python
+# file: rounding.py
+from fnloom import apply_to, mutate
+
+
+def price(cost: float) -> float:
+    """The price before rounding."""
+    return cost * 1.2
+
+
+def tax(price: float) -> float:
+    """The tax on the price."""
+    return price * 0.2
+
+
+@mutate(price, apply_to(tax, places=1))
+def _rounded(v: float, places: int = 2) -> float:
+    return round(v, places)
+```
+
+```python
+import rounding
+
+fnloom.build(rounding).execute(["price", "tax"], inputs={"cost": 9.99})
+# -> {'price': 11.99, 'tax': 2.4}
+```
+
+A target may be in another module, as long as both are built. A target no built module defines fails the build, and
+mutating twice with one mutator, as re-running a notebook cell does, adds its step once.
+
 ## Modules together
 
 `fnloom.build` takes several modules, and so does `Builder.with_modules`. Nodes are matched by name across all of

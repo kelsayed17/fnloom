@@ -5107,3 +5107,35 @@ def test_q108_rows_get_their_own_chain(tmp_path: Path) -> None:
         hamilton_driver.Builder().with_modules(module).build()
     built = fnloom.build(make_module("q108_f", _Q108_ROWS.format(package="fnloom")))
     assert built.execute(["low", "high"], inputs={"x": 1}) == {"low": 2, "high": 20}
+
+
+_Q107_TARGET = "def a(x: int) -> int:\n    return x\n"
+_Q107_MUTATOR = """
+from {package} import mutate
+import {target}
+
+@mutate({target}.a)
+def _plus(v: int) -> int:
+    return v + 1
+"""
+
+
+@pytest.mark.deliberate("Q107")
+def test_q107_cross_module_mutate(tmp_path: Path) -> None:
+    """Hamilton refuses a target in another module; fnloom mutates it."""
+    _module_from_file(tmp_path, "q107_target_h", _Q107_TARGET)
+    # Hamilton's own `NotSameModuleError`.
+    with pytest.raises(Exception, match="have to be in the same module"):
+        _module_from_file(
+            tmp_path,
+            "q107_mutator_h",
+            _Q107_MUTATOR.format(
+                package="hamilton.function_modifiers", target="q107_target_h"
+            ),
+        )
+    target = make_module("q107_target_f", _Q107_TARGET)
+    mutator = make_module(
+        "q107_mutator_f",
+        _Q107_MUTATOR.format(package="fnloom", target="q107_target_f"),
+    )
+    assert fnloom.build(target, mutator).execute(["a"], inputs={"x": 1}) == {"a": 2}

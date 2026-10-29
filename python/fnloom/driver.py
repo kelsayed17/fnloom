@@ -2810,6 +2810,8 @@ class Builder[R = dict[str, object]]:
         nodes = _checks.attached(
             resolve(scanned.nodes, self._rules, self._value_checks)
         )
+        if unbuilt := _steps.unbuilt_targets(self._modules, nodes):
+            raise ValueError("\n".join(unbuilt))
         nodes, stepped = _steps.lowered(nodes, self._config)
         _checks.refuse_unreadable(nodes)
         unmatched = scanned.unmatched

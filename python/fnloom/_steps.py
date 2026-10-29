@@ -22,6 +22,8 @@ from fnloom._types import opaque, resolved_hints, type_matches
 from fnloom._view import Param
 
 if TYPE_CHECKING:
+    from types import ModuleType
+
     from fnloom._config import ConditionKind
 
 _NO_TAGS = MappingProxyType[str, str]({})
@@ -325,27 +327,21 @@ def lowered(
         names = {} if node.namespace is None else within.get(node.namespace, {})
         if recorded.pipe_input is not None and extractor(node) is None:
             current, extra = _fed(node, recorded.pipe_input, config, names, problems)
-        if recorded.pipe_output:
+        steps_out = (*recorded.pipe_output, *(s for _, s in recorded.mutations))
+        if steps_out:
             fields = by_origin.get(id(node.origin))
             extracting = extractor(node)
             own_target = fields is None and extracting is None
             field_target = extracting is not None
             if own_target or field_target:
-                current, piped = _piped(
-                    current, recorded.pipe_output, config, extracting, names
-                )
+                current, piped = _piped(current, steps_out, config, extracting, names)
                 extra += piped
                 if field_target and piped:
                     # A field's final node stands for no function in a request.
                     made.add(current.name)
             if extracting is None and fields is not None:
                 unknown = sorted(
-                    {
-                        f
-                        for s in recorded.pipe_output
-                        for f in s.fields or ()
-                        if f not in fields
-                    }
+                    {f for s in steps_out for f in s.fields or () if f not in fields}
                 )
                 problems.extend(
                     f"{node.name}: on_output names {f!r}, which it doesn't extract"
@@ -458,3 +454,156 @@ def _refuse_twice(nodes: Sequence[NodeDef]) -> None:
         listed = ", ".join(repr(n) for n in sorted(twice))
         msg = f"two nodes are named {listed}"
         raise ValueError(msg)
+
+
+# ---- @mutate ------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Target:
+    """A function `@mutate` adds a step to, with bindings of its own: `apply_to(...)`.
+
+    `bindings`, when given, replace `@mutate`'s own for this target. The
+    modifiers act on the step made for it, as `Step`'s do.
+    """
+
+    fn: Callable[..., object]
+    bindings: Mapping[str, object] | None = None
+    label: str | None = None
+    conditions: tuple[Condition, ...] = ()
+    fields: tuple[str, ...] | None = None
+
+    def named(self, name: str) -> Target:
+        """The step's node named `<node>.<name>`; see `Step.named`."""
+        return replace(self, label=Step(_passed, {}).named(name).label)
+
+    def _gated(self, kind: ConditionKind, keys: Mapping[str, object]) -> Target:
+        added = build_conditions(kind, None, keys, None).conditions
+        return replace(self, conditions=(*self.conditions, *added))
+
+    def when(self, **keys: object) -> Target:
+        """The step run only when every key equals its value; see `Step.when`."""
+        return self._gated("when", keys)
+
+    def when_not(self, **keys: object) -> Target:
+        """The step run only when no key equals its value."""
+        return self._gated("when_not", keys)
+
+    def when_in(self, **keys: object) -> Target:
+        """The step run only when each key is one of its values."""
+        return self._gated("when_in", keys)
+
+    def when_not_in(self, **keys: object) -> Target:
+        """The step run only when no key is one of its values."""
+        return self._gated("when_not_in", keys)
+
+    def on_output(self, *fields: str) -> Target:
+        """The step on these extracted fields only; see `Step.on_output`."""
+        return replace(self, fields=Step(_passed, {}).on_output(*fields).fields)
+
+
+def _target(given: object) -> Target:
+    if isinstance(given, Target):
+        found = given
+    elif isinstance(given, str):
+        msg = f"mutate takes the target function itself, not its name {given!r}"
+        raise TypeError(msg)
+    elif callable(given):
+        found = Target(given)
+    else:
+        msg = f"mutate takes functions or apply_to(...)s, got {type(given).__name__}"
+        raise TypeError(msg)
+    if getattr(found.fn, "__name__", "") == "<lambda>":
+        msg = "a lambda is never a node, so it can't be mutated"
+        raise TypeError(msg)
+    return found
+
+
+def apply_to(fn: Callable[..., object], **bindings: object) -> Target:
+    """`fn` as a `@mutate` target, the step's bindings given here rather than there.
+
+    `bindings` replace `@mutate`'s own for this target, as in Hamilton.
+    """
+    found = _target(fn)
+    return replace(found, bindings=MappingProxyType(dict(bindings)))
+
+
+def _mutator_key(fn: Callable[..., object]) -> str:
+    """Who a mutator is, across redefinitions: its module and qualified name."""
+    return f"{getattr(fn, '__module__', '')}.{_named(fn)}"
+
+
+def mutate[F: Callable[..., object]](
+    *targets: Callable[..., object] | Target, **bindings: object
+) -> Callable[[F], F]:
+    """Adds the decorated function as a step to each target's `@pipe_output` (Q107).
+
+    Each target is a function, or `apply_to(fn, **bindings)`. The step is bound
+    with `bindings`, or with the target's own when it has some; its modifiers
+    apply. The steps go after the target's own `@pipe_output` steps, in the
+    order the mutators are defined. The mutator itself is no node. A target in
+    another module works when both are built; one no built module defines is a
+    `ValueError` at build. Mutating twice with one mutator, as re-running a cell
+    does, adds its step once.
+    """
+    if not targets:
+        msg = "mutate needs at least one target function"
+        raise TypeError(msg)
+    found = [_target(t) for t in targets]
+
+    def apply(mutator: F) -> F:
+        key = _mutator_key(mutator)
+        for target in found:
+            given = target.bindings if target.bindings is not None else bindings
+            made = step(mutator, **given)
+            made = replace(
+                made,
+                label=target.label,
+                conditions=target.conditions,
+                fields=target.fields,
+            )
+            current = decorations(target.fn)
+            kept = tuple((k, s) for k, s in current.mutations if k != key)
+            if len(kept) == len(current.mutations):
+                mutations = (*kept, (key, made))
+            else:
+                # Mutated again by the same mutator: its step, where it was.
+                mutations = tuple(
+                    (k, made if k == key else s) for k, s in current.mutations
+                )
+            setattr(target.fn, _ATTRIBUTE, replace(current, mutations=mutations))
+        current = decorations(mutator)
+        setattr(
+            mutator,
+            _ATTRIBUTE,
+            replace(
+                current,
+                excluded=True,
+                mutates=(*current.mutates, *(t.fn for t in found)),
+            ),
+        )
+        return mutator
+
+    return apply
+
+
+def unbuilt_targets(
+    modules: Sequence[ModuleType], nodes: Sequence[NodeDef]
+) -> list[str]:
+    """Each `@mutate` target of a built module's mutator that no node comes from."""
+    origins = {id(node.origin) for node in nodes}
+    found: set[str] = set()
+    for module in modules:
+        for value in vars(module).values():
+            if (
+                not callable(value)
+                or getattr(value, "__module__", None) != module.__name__
+            ):
+                continue
+            for target in decorations(value).mutates:
+                if id(target) not in origins:
+                    found.add(
+                        f"mutate on {_named(value)}: its target {_named(target)} "
+                        "is no node of the build"
+                    )
+    return sorted(found)

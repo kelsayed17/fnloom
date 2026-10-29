@@ -87,6 +87,8 @@ def test_the_regressed_callables_are_covered() -> None:
         "step",
         "pipe_input",
         "pipe_output",
+        "mutate",
+        "apply_to",
         "Validator",
         "Drawing.to_mermaid",
     }

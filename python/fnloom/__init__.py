@@ -33,7 +33,15 @@ from fnloom._extract import extract_columns, extract_fields
 from fnloom._fingerprint import fingerprint, register_fingerprint
 from fnloom._functions import NodeSpec, node
 from fnloom._hooks import Hook, LogFailures, NodeEnd, NodeStart, RunEnd, RunStart
-from fnloom._steps import Step, pipe_input, pipe_output, step
+from fnloom._steps import (
+    Step,
+    Target,
+    apply_to,
+    mutate,
+    pipe_input,
+    pipe_output,
+    step,
+)
 from fnloom._stores import (
     MISSING,
     CacheStore,
@@ -86,11 +94,13 @@ __all__ = [
     "RunStart",
     "Source",
     "Step",
+    "Target",
     "UnfingerprintableError",
     "ValidationError",
     "Validator",
     "Value",
     "ValueCheck",
+    "apply_to",
     "build",
     "cache",
     "check_output",
@@ -102,6 +112,7 @@ __all__ = [
     "extract_fields",
     "fingerprint",
     "group",
+    "mutate",
     "node",
     "parameterize",
     "parameterize_sources",
