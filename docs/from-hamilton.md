@@ -92,7 +92,7 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `ad_hoc_utils.create_temporary_module(fa, fb)` | Copies the functions into a module it registers in `sys.modules`; refuses `_` names; the original function in `final_vars` is refused | `Builder().with_functions(fa, fb)`: the functions themselves, no module made or registered, the original in `final_vars` means its node ([Graphs without modules](writing-nodes.md#graphs-without-modules), Q72) |
 | A lambda in `create_temporary_module` | Accepted, failing later | Needs a name: `fnloom.node(fn, name="x")`, which also binds parameters with `bind={...}` (Q72) |
 | `allow_module_overrides()` | The later module's function silently replaces the earlier one, for every reader | No override: a name defined twice fails the build. To use one module twice, give it a namespace ([Namespaces](writing-nodes.md#namespaces), Q74) |
-| `@subdag(module, ...)` to reuse a module | The module's nodes are named `<function>.<name>`, under a function you write | `Builder().with_modules(module, namespace="ns")` names them `ns.<name>`; inside, a parameter reads the namespace's node first, then the plain name, and inputs keep their plain names (Q74) |
+| `@subdag(module, ...)` to reuse a module | The module's nodes are named `<function>.<name>`, under a function you write | `Builder().with_modules(module, namespace="ns")` names them `ns.<name>`; inside, a parameter reads the namespace's node first, then the plain name, and inputs keep their plain names (Q74). `inputs=` becomes `bind=`, which feeds each copy its own inputs ([`@subdag` and `@parameterized_subdag`](#subdag-and-parameterized_subdag), Q112) |
 | `what_is_upstream_of` | `HamiltonNode` objects | Sorted names, including the ones you named (Q28) |
 | Reusing a request | Re-planned on every call | `prepare(...)` returns a plan to run again (Q3) |
 | `validate_execution(final_vars, overrides, inputs)` | Returns `None` or raises one kind of problem; refuses a function in `final_vars`; a missing input names every consumer in the graph | `validate(final_vars, *, inputs, overrides)` returns every problem, one sorted line each, and names only the consumers the request needs; unknown names get a `did you mean` suggestion (Q71) |
@@ -115,7 +115,7 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | A failing node logged at ERROR | Always, with a support banner | Off by default; `with_hooks(fnloom.LogFailures())` logs the node and its inputs, each cut to 50 characters ([Logging failures](hooks.md#logging-failures), Q88) |
 | `GraphConstructionHook`'s `run_after_graph_construction` | Called with the built graph | Read `driver.nodes` after `build()` |
 | `lifecycle.NoEdgeAndInputTypeChecking()` | Turns off the input and edge checks | `without_input_type_checks()`; edges are always checked, at build (Q10) |
-| A `StaticValidator`, refusing a node or the graph at build | `run_to_validate_node` and `run_to_validate_graph` | Not yet. Until then, check `driver.nodes` after `build()` and raise |
+| A `StaticValidator`, refusing a node or the graph at build | `run_to_validate_node` and `run_to_validate_graph` | Not planned: check `driver.nodes` after `build()` and raise ([`StaticValidator`](#staticvalidator), Q117) |
 | `NodeExecutionMethod` (`run_to_execute_node`) | Replaces how a node is called; one per driver | `with_node_wrappers(*wrappers)`: any number, an ordered chain, each `wrapper(node, call, inputs)` ([Node wrappers](running.md#node-wrappers), Q111) |
 | `lifecycle.default.GracefulErrorAdapter` | Keeps running past a failure, skipping what depends on it | Not yet: on the [roadmap](plans/2026-10-28-roadmap-ahead-of-hamilton.md). A failing node fails the run, and `after_node` sees its error and inputs |
 | `TaskExecutionHook` and the other task hooks | Hooks on dynamic execution's tasks | None: fnloom has no dynamic execution yet |
@@ -204,6 +204,249 @@ value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](
 
 </div>
 
+## Hamilton features fnloom leaves out
+
+fnloom doesn't build these Hamilton features, because plain Python, or something fnloom already has, gets the same
+result with less to learn. Each section shows the fnloom way. Each decision is a register row.
+
+### `@subdag` and `@parameterized_subdag`
+
+A namespace is a module used again (Q74), and `bind=` feeds each copy its own input, as `@subdag`'s `inputs=` does
+(Q112). The function body is an ordinary function reading the namespace's nodes by their full names:
+
+```python
+# file: taxes.py
+def net(gross: float) -> float:
+    return gross * 0.8
+
+
+def doubled(net: float) -> float:
+    return net * 2
+```
+
+```python
+# file: finals.py
+import fnloom
+
+
+@fnloom.inject(doubled=fnloom.source("eu.doubled"))
+def eu(doubled: float) -> float:
+    return doubled
+
+
+@fnloom.inject(doubled=fnloom.source("us.doubled"))
+def us(doubled: float) -> float:
+    return doubled
+```
+
+```python
+import fnloom
+import finals
+import taxes
+
+driver = (
+    fnloom.Builder()
+    .with_modules(finals)
+    .with_modules(taxes, namespace="eu", bind={"gross": fnloom.source("eu_gross")})
+    .with_modules(taxes, namespace="us", bind={"gross": fnloom.value(5.0)})
+    .build()
+)
+driver.execute(["eu", "us"], inputs={"eu_gross": 10.0})
+# -> {'eu': 16.0, 'us': 8.0}
+```
+
+Two things differ from Hamilton, on purpose. A misspelled parameter in a final function is a missing-input error, where
+Hamilton makes it a namespaced input. A `bind=` key no node reads is a `ValueError`, where Hamilton drops an unused
+`source()`.
+
+`config=` per copy isn't built: give each copy a config key (`eu_mode`, `us_mode`) read by `@config.when`.
+`@parameterized_subdag` isn't either: loop over `with_modules(taxes, namespace=name, bind=...)`, one call per copy.
+
+### `@does`
+
+Call the function. The node is named, typed and cached as written. A static checker checks the call against the
+replacing function's signature, and `with_output_type_checks()` checks the result at run (Q113):
+
+```python
+# file: summing.py
+def _sum_all(a: int, b: int) -> int:
+    return a + b
+
+
+def total(x: int, y: int) -> int:
+    """x plus y."""
+    return _sum_all(a=x, b=y)
+```
+
+```python
+import fnloom
+import summing
+
+fnloom.build(summing).execute(["total"], inputs={"x": 1, "y": 2})
+# -> {'total': 3}
+```
+
+`fnloom.node(fn, name=..., bind=...)` makes the node from the function itself, with no wrapper:
+
+```python
+driver = (
+    fnloom.Builder()
+    .with_functions(
+        fnloom.node(summing._sum_all, name="summed", bind={"a": fnloom.source("x")})
+    )
+    .build()
+)
+driver.execute(["summed"], inputs={"x": 1, "b": 2})
+# -> {'summed': 3}
+```
+
+### `@schema.output`
+
+Hamilton's `@schema.output` records a tag that nothing checks. To check a frame's columns, use
+`@check_output_custom`, which fails the node with a `ValidationError` by default. To record them without checking, use
+`@tag` (Q114):
+
+```python
+# file: framed.py
+import fnloom
+
+
+def _has_columns(value: dict) -> str | None:
+    missing = sorted({"a", "b"} - set(value))
+    return f"missing columns {missing}" if missing else None
+
+
+@fnloom.check_output_custom(_has_columns)
+@fnloom.tag(schema="a:int,b:float")
+def frame(rows: int) -> dict:
+    return {"a": list(range(rows))}
+```
+
+```python
+import fnloom
+import framed
+from fnloom import ValidationError
+
+driver = fnloom.build(framed)
+driver.nodes["frame"].tags["schema"]
+# -> 'a:int,b:float'
+driver.execute(["frame"], inputs={"rows": 2})
+# raises ValidationError: frame: check _has_columns failed: missing columns ['b']
+```
+
+### `@dataloader` and `@datasaver`
+
+A loader is a function that returns the data. If you also want its metadata as a node, return both and split them
+with `@extract_fields`. `@tag` marks the nodes in `Driver.nodes` and the export (Q115):
+
+```python
+# file: loading.py
+import fnloom
+
+
+@fnloom.extract_fields({"data": list, "metadata": dict})
+@fnloom.tag(kind="loader")
+def raw(path: str = "p.json") -> dict:
+    return {"data": [1, 2], "metadata": {"source": path, "rows": 2}}
+
+
+def total_loaded(data: list) -> int:
+    return sum(data)
+```
+
+```python
+import fnloom
+import loading
+
+fnloom.build(loading).execute(["total_loaded", "metadata"])
+# -> {'total_loaded': 3, 'metadata': {'source': 'p.json', 'rows': 2}}
+```
+
+A saver is a node that writes and returns what it wrote, or a hook (below).
+
+### `@load_from`, `@save_to` and materializers
+
+Load in a node. Its annotation is checked against each reader's at build, and its value at run with
+`with_output_type_checks()` (Q87), neither of which Hamilton's loaded values get. Save
+from an `after_run` hook, which gets the run's raw outputs (Q116):
+
+```python
+# file: stored.py
+import json
+from pathlib import Path
+
+
+def numbers(in_path: str) -> dict:
+    return json.loads(Path(in_path).read_text(encoding="utf-8"))
+
+
+def total_stored(numbers: dict) -> int:
+    return sum(numbers.values())
+```
+
+```python
+import json
+import shutil
+import tempfile
+from pathlib import Path
+
+import fnloom
+import stored
+
+
+class SaveJson(fnloom.Hook):
+    """Writes the named outputs of each successful run to one JSON file."""
+
+    def __init__(self, path: Path, names: list[str]) -> None:
+        self.path = path
+        self.names = names
+
+    def after_run(self, event: fnloom.RunEnd) -> None:
+        if event.ok and event.results is not None:
+            saved = {name: event.results[name] for name in self.names}
+            self.path.write_text(json.dumps(saved), encoding="utf-8")
+
+
+folder = Path(tempfile.mkdtemp())
+(folder / "in.json").write_text('{"a": 1, "b": 2}', encoding="utf-8")
+driver = (
+    fnloom.Builder()
+    .with_modules(stored)
+    .with_hooks(SaveJson(folder / "out.json", ["total_stored"]))
+    .build()
+)
+driver.execute(["total_stored"], inputs={"in_path": str(folder / "in.json")})
+# -> {'total_stored': 3}
+(folder / "out.json").read_text(encoding="utf-8")
+# -> '{"total_stored": 3}'
+shutil.rmtree(folder)
+```
+
+To choose the source per build, use a `@config.when` variant per source; to choose it per run, give the path as an input.
+
+### `StaticValidator`
+
+To check the graph at build, write a function over `Driver.nodes` and call it right after `build()`. It sees the
+names, types, tags, dependencies, functions and config that a `StaticValidator` sees, and can report every problem in
+one error (Q117):
+
+```python
+def checked(driver: fnloom.Driver) -> fnloom.Driver:
+    """The driver, if every computed node has an owner tag."""
+    problems = [
+        f"{name}: no owner tag"
+        for name, node in driver.nodes.items()
+        if not node.is_input and "owner" not in node.tags
+    ]
+    if problems:
+        raise ValueError("; ".join(sorted(problems)))
+    return driver
+
+
+checked(fnloom.build(summing))
+# raises ValueError: total: no owner tag
+```
+
 ## Not there yet
 
 fnloom is pre-alpha. The core, the native path, `@parameterize` and its sugar, `@tag`, `@config`, `@extract_fields`,
@@ -212,8 +455,8 @@ result caching, the async driver, hooks, result builders, output checks, custom 
 CLI, `@check_output` validators, step injection, `@inject`, `@resolve` and node wrappers are done. These Hamilton
 features come next, roughly in this order:
 
-1. **Dynamic execution**, materializers and `@subdag`.
-2. **`GracefulErrorAdapter`** and `StaticValidator`. Node wrappers can change how a node is called, but a run still
-   stops at the first failure.
+1. **Dynamic execution**, which has its own design.
+2. **`GracefulErrorAdapter`**. Node wrappers can change how a node is called, but a run still stops at the first
+   failure.
 
 If your pipeline depends on one of these, it's worth waiting for it before you switch.

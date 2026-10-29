@@ -166,6 +166,9 @@ uv run maturin develop --release
 - ✅ [`@check_output` validators](https://kelsayed17.github.io/fnloom/writing-nodes/#checking-values),
   [steps](https://kelsayed17.github.io/fnloom/writing-nodes/#steps), `@inject`, `@resolve` and
   [node wrappers](https://kelsayed17.github.io/fnloom/running/#node-wrappers)
+- ✅ [Namespaces with `bind=`](https://kelsayed17.github.io/fnloom/writing-nodes/#namespaces), and a [written
+  recipe](https://kelsayed17.github.io/fnloom/from-hamilton/#hamilton-features-fnloom-leaves-out) for each Hamilton
+  feature left out
 - 🔜 Dynamic execution
 
 The [design](https://kelsayed17.github.io/fnloom/design/2026-10-26-fnloom-design/) has the full plan. The name is

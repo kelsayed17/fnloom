@@ -203,10 +203,27 @@ def _signature_parameters(
 
 
 class Within(NamedTuple):
-    """A namespace, and its nodes' full names by their names in it (Q74)."""
+    """A namespace, and its nodes' full names by their names in it (Q74).
+
+    `bound` holds what `with_modules(..., bind=...)` binds names the namespace
+    reads but doesn't define to (Q112), and `used` gathers each bound name a
+    node reads, so a binding no node reads is refused.
+    """
 
     namespace: str
     names: Mapping[str, str]
+    bound: Mapping[str, Source | Value] = MappingProxyType[str, Source | Value]({})
+    used: set[str] | None = None
+
+    def read(self, name: str) -> Source | Value | None:
+        """What `name` reads here: the namespace's node, a binding, or `None`."""
+        if (full := self.names.get(name)) is not None:
+            return Source(full)
+        if (bound := self.bound.get(name)) is not None:
+            if self.used is not None:
+                self.used.add(name)
+            return bound
+        return None
 
 
 def _bind(
@@ -262,13 +279,14 @@ def _readable_groups(
 
 
 def _within(binding: Source | Value, within: Within | None) -> Source | Value:
-    """`binding`, reading the namespace's node when `within` defines its source."""
-    if (
-        within is not None
-        and isinstance(binding, Source)
-        and binding.name in within.names
-    ):
-        return Source(within.names[binding.name])
+    """`binding`, reading the namespace's node when `within` defines its source.
+
+    Or what the namespace binds that name to (Q112).
+    """
+    if within is not None and isinstance(binding, Source):
+        read = within.read(binding.name)
+        if read is not None:
+            return read
     return binding
 
 
@@ -290,6 +308,27 @@ def _bind_within(
             renames[read] = name
         params.append(Param(name, Source(read), not has_default, annotation))
     return tuple(params), renames
+
+
+def _bound_rows(
+    rows: Mapping[str, Mapping[str, Binding]] | None,
+    name: str,
+    parameters: Sequence[_Parameter],
+    within: Within | None,
+) -> Mapping[str, Mapping[str, Binding]] | None:
+    """`rows`; for a plain function reading a name its namespace binds, one row.
+
+    A binding may be a constant, or a source another parameter reads too, which
+    only the row path's payload passes, so the function becomes one row binding
+    nothing, named as its plain node would be (Q112).
+    """
+    if rows is not None or within is None or not within.bound:
+        return rows
+    bound, names = within.bound, within.names
+    if any(p in bound and p not in names for p, _, _ in parameters):
+        nothing: dict[str, Binding] = {}
+        return {name: nothing}
+    return rows
 
 
 class _Shape(NamedTuple):
@@ -478,6 +517,7 @@ def _node_defs(  # noqa: PLR0913  # keyword-only options, one per kind of source
         name = _config.node_name(fn, recorded.config.name)
         conditions = recorded.config.conditions
     rows, injected_docs = _injected(fn, name, rows, bind)
+    rows = _bound_rows(rows, name, parameters, within)
     if rows is None:
         # A plain function is one node, of its own name, binding nothing, so each
         # parameter reads its own name, or its namespace's node of that name, and
@@ -859,6 +899,7 @@ def _functions(
 
 # No config: what a build without `with_config` selects with. Read, never written.
 _NO_CONFIG: Mapping[str, object] = MappingProxyType({})
+_NO_BINDS = MappingProxyType[str, "Mapping[str, Source | Value]"]({})
 
 
 class Scanned(NamedTuple):
@@ -930,13 +971,15 @@ def _given(
 type _Entry = tuple[str | None, Found | NodeSpec]
 
 
-def scan(
+def scan(  # noqa: PLR0913  # keyword-only options, one per kind of source
     modules: Sequence[ModuleType],
     config: Mapping[str, object] = _NO_CONFIG,
     *,
     awaits: bool = False,
     functions: Sequence[FunctionSource] = (),
     namespaces: Sequence[str | None] = (),
+    bound: Mapping[str, Mapping[str, Source | Value]] = _NO_BINDS,
+    used: dict[str, set[str]] | None = None,
 ) -> Scanned:
     """`collect`, with the reason each node that no variant gave is absent.
 
@@ -953,6 +996,11 @@ def scan(
     found before any node is made. A function found under several namespaces
     makes nodes in each, and the identity dedup of functions holds within one
     namespace only.
+
+    `bound` holds each namespace's `bind=` (Q112): a name its nodes read that it
+    doesn't define reads the binding instead. `ValueError` for a bound name the
+    namespace defines. `used`, when given, gathers each namespace's bound names
+    some node reads.
     """
     gathered = _functions(modules, namespaces)
     groups = gathered.functions
@@ -988,6 +1036,19 @@ def scan(
         for namespace, group in groups.items()
         if namespace is not None
     }
+    names = {
+        namespace: within._replace(
+            bound=bound.get(namespace, within.bound),
+            used=None if used is None else used.setdefault(namespace, set()),
+        )
+        for namespace, within in names.items()
+    }
+    if defined := sorted(
+        f"bind names {key!r} under namespace {namespace!r}, which defines it"
+        for namespace, within in names.items()
+        for key in within.bound.keys() & within.names.keys()
+    ):
+        raise ValueError("; ".join(defined))
     seen = _made(entries, given, names, awaits=awaits)
     # A node a plain function or another variant defines is not missing.
     missing = {n: why for n, why in unmatched.items() if n not in seen}

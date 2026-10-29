@@ -15,10 +15,10 @@ from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
 from fnloom._caching import check_parts
-from fnloom._codeversion import UncacheableError, class_version, code_version
+from fnloom._canonical import DEPTH, UnwritableError, stable_fingerprint
+from fnloom._codeversion import UncacheableError, code_version
 from fnloom._decorators import Source, Value, decorations
 from fnloom._drawing import condition_text
-from fnloom._fingerprint import fingerprint
 from fnloom._types import Unresolved
 
 if TYPE_CHECKING:
@@ -75,15 +75,6 @@ def export(  # noqa: PLR0913  # one argument per part of the document
 _ADDRESS = re.compile(r" at 0x[0-9a-fA-F]+")
 
 
-# How deep `stable_repr` and `value_version` look into a value: past it, a value is
-# written as unrepresentable and has no version, rather than exhausting the stack.
-_DEPTH = 100
-
-
-class _UnwritableError(Exception):
-    """A value too deep, or holding itself, for a canonical form."""
-
-
 def stable_repr(value: object) -> str:
     """`repr(value)`, the same in every process: sets sorted, addresses dropped.
 
@@ -102,8 +93,8 @@ def stable_repr(value: object) -> str:
 
 
 def _written(value: object, seen: frozenset[int], depth: int) -> str:  # noqa: PLR0911  # one return per kind
-    if depth > _DEPTH:
-        raise _UnwritableError
+    if depth > DEPTH:
+        raise UnwritableError
     if id(value) in seen:
         return "..."
     inner = seen | {id(value)}
@@ -152,76 +143,16 @@ def _written_set(value: set[object] | frozenset[object], members: list[str]) -> 
     return f"{name}({{{listed}}})" if value else f"{name}()"
 
 
-def _parts(value: object) -> list[object]:
-    """The parts `value` is written and versioned from, or `[]` for a whole value.
-
-    A dataclass instance's parts are all its fields, `repr=False` ones included:
-    they hold state as much as the others do.
-    """
-    if isinstance(value, (set, frozenset, list, tuple)):
-        return list(value)
-    if isinstance(value, Mapping):
-        return [part for pair in value.items() for part in pair]
-    if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return [getattr(value, f.name) for f in dataclasses.fields(value)]
-    return []
-
-
-def _holds_a_set(value: object) -> bool:
-    """Whether `value` is or holds a set, anywhere `_parts` reaches."""
-    waiting, seen = [value], set[int]()
-    while waiting:
-        current = waiting.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        if isinstance(current, (set, frozenset)):
-            return True
-        waiting.extend(_parts(current))
-    return False
-
-
 def value_version(value: object) -> str | None:
     """A `value()` binding's version: what `graph_version` and `diff` compare.
 
-    Its fingerprint in hex. A set's fingerprint follows the hash seed, so a
-    value holding one is versioned from a canonical form instead: each part
-    with no set in it by its own fingerprint, each set as its members' forms
-    sorted, and each container by its type and parts, a dataclass by its class
-    version and every field. Nothing is read from text, so a change a `repr`
-    elides is still seen. `None` when any part has no fingerprint, the value
-    holds itself or is nested past 100 levels, or its own code raises: such a
-    value's node is unversioned, never unchanged.
+    Its `stable_fingerprint` in hex, as the cache keys it. `None` when it has
+    none: such a value's node is unversioned, never unchanged.
     """
     try:
-        if not _holds_a_set(value):
-            return fingerprint(value).hex()
-        canonical = _canonical(value, frozenset(), 0)
+        return stable_fingerprint(value).hex()
     except Exception:  # noqa: BLE001  # no fingerprint, too deep, or the value raised
         return None
-    text = json.dumps([FORMAT, "canonical", canonical])
-    return hashlib.sha256(text.encode()).hexdigest()
-
-
-def _canonical(value: object, seen: frozenset[int], depth: int) -> object:
-    """`value` as JSON-ready parts, the same in every process; raises if it can't be."""
-    if depth > _DEPTH or id(value) in seen:
-        raise _UnwritableError
-    if not _holds_a_set(value):
-        return ["fingerprint", fingerprint(value).hex()]
-    inner = seen | {id(value)}
-    parts = [_canonical(part, inner, depth + 1) for part in _parts(value)]
-    kind = _type_version(type(value))
-    if isinstance(value, (set, frozenset)):
-        return ["set", kind, sorted(json.dumps(part) for part in parts)]
-    return ["parts", kind, parts]
-
-
-def _type_version(cls: type) -> str:
-    """A builtin type by name; any other by its class version, as the cache has it."""
-    if cls.__module__ == "builtins":
-        return cls.__qualname__
-    return class_version(cls).hex()
 
 
 def type_text(annotation: object) -> str:

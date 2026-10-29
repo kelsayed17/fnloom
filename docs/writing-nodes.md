@@ -762,6 +762,35 @@ driver.execute(["both"], inputs={"gross": 12.0})
 # -> {'both': (10.0, 10.0)}
 ```
 
+`bind=` feeds a namespace inputs of its own (Q112). Each key is a name the namespace's nodes read that none of its
+modules defines. Bound to `source("x")`, it reads `x` outside the namespace: an input, a node given without a
+namespace, or another namespace's node by its full name. Bound to `value(v)`, it's a constant:
+
+```python
+import fnloom
+import regional
+
+driver = (
+    fnloom.Builder()
+    .with_modules(regional, namespace="eu", bind={"gross": fnloom.source("eu_gross")})
+    .with_modules(regional, namespace="us", bind={"gross": fnloom.value(24.0)})
+    .build()
+)
+list(driver.inputs())
+# -> ['eu_gross']
+driver.nodes["eu.net"].dependencies
+# -> ('eu.tax_rate', 'eu_gross')
+driver.execute(["eu.net", "us.net"], inputs={"eu_gross": 12.0})
+# -> {'eu.net': 10.0, 'us.net': 20.0}
+```
+
+A binding holds for the whole namespace, across `with_modules` calls, and reaches every reader there: a plain
+parameter, a `@parameterize` row's or `@inject`'s `source(...)`, and a step's. It's shown as each reader's dependency,
+is in the export, `graph_version` and the cache key as a `value()` parameter is, and is carried by pickling, `copy`
+and `rebuild()`. `with_modules` refuses `bind=` without `namespace=`, a binding that is neither `source` nor `value`,
+and a key the namespace already binds to something else. `build()` refuses a key no selected node of the namespace
+reads, and a key the namespace defines.
+
 A few details:
 
 - A parameter can't read another namespace's node: a parameter `net` in namespace `us` reads `us.net` or the plain

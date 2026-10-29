@@ -28,6 +28,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
 
 from fnloom import _core, _extract
+from fnloom._canonical import stable_fingerprint
 from fnloom._codeversion import UncacheableError, class_version, code_version
 from fnloom._decorators import CacheBehavior, CachePolicy, Source, decorations
 from fnloom._fingerprint import fingerprint, forget_class_versions
@@ -216,7 +217,8 @@ def _node_key(
             params.append((key_name, param.binding.name, None))
             continue
         try:
-            version = fingerprint(param.binding.value)
+            # The same on every hash seed, so a set constant hits in another process.
+            version = stable_fingerprint(param.binding.value)
         except _core.UnfingerprintableError as error:
             version = None
             reason = reason or f"value() of parameter {param.name!r}: {error}"

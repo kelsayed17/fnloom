@@ -153,5 +153,6 @@ tested against Hamilton side by side.
     `validate`, graphs from plain functions, namespaces, type checks, [result caching](caching.md), the async driver,
     [hooks](hooks.md), result builders, output checks, custom value checks, [drawing, export and the
     CLI](drawing.md), [`@check_output` validators](writing-nodes.md#checking-values), [steps](writing-nodes.md#steps),
-    `@inject`, `@resolve` and [node wrappers](running.md#node-wrappers) are done. Dynamic execution comes later;
+    `@inject`, `@resolve`, [node wrappers](running.md#node-wrappers) and [`bind=` for namespaces](writing-nodes.md#namespaces)
+    are done. Dynamic execution comes later;
     [the design](design/2026-10-26-fnloom-design.md) has the full plan.

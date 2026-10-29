@@ -19,7 +19,7 @@ from fnloom._config import Condition, ConfigPolicy, build_conditions, matches
 from fnloom._decorators import _ATTRIBUTE, RESOLVING, Source, Value, decorations
 from fnloom._extract import extractor
 from fnloom._fingerprint import fingerprint
-from fnloom._scan import NodeDef, _payload
+from fnloom._scan import NodeDef, Within, _payload
 from fnloom._types import opaque, resolved_hints, type_matches
 from fnloom._view import Param
 
@@ -282,7 +282,7 @@ def _kept(
 
 
 def _step_node(
-    s: Step, name: str, reads: str, owner: NodeDef, names: Mapping[str, str]
+    s: Step, name: str, reads: str, owner: NodeDef, within: Within | None
 ) -> NodeDef:
     """`s` as a node `name`, its first parameter reading `reads`."""
     hints = resolved_hints(s.fn)
@@ -295,8 +295,10 @@ def _step_node(
         if param not in s.bindings:
             continue
         binding = s.bindings[param]
-        if isinstance(binding, Source):
-            binding = Source(names.get(binding.name, binding.name))
+        if isinstance(binding, Source) and within is not None:
+            # The namespace's node of that name, or what its `bind=` says.
+            read = within.read(binding.name)
+            binding = binding if read is None else read
         params.append(Param(param, binding, True, opaque(hints[param])))  # noqa: FBT003  # `required`
     frozen = tuple(params)
     payload, renames = _payload(s.fn, frozen)
@@ -333,13 +335,18 @@ def relays(nodes: Sequence[NodeDef]) -> frozenset[str]:
 
 
 def lowered(
-    nodes: Sequence[NodeDef], config: Mapping[str, object]
+    nodes: Sequence[NodeDef],
+    config: Mapping[str, object],
+    bound: Mapping[str, Mapping[str, Source | Value]] | None = None,
+    used: dict[str, set[str]] | None = None,
 ) -> tuple[list[NodeDef], frozenset[str]]:
     """`nodes` with each `@pipe_input` and `@pipe_output` lowered to step nodes.
 
     Also the names of the nodes made, which no function stands for in a request.
     `ValueError` for an `.on_output` field the function doesn't extract, a fed
-    parameter bound to a `value()`, and two nodes of one name.
+    parameter bound to a `value()`, and two nodes of one name. `bound` and
+    `used` are each namespace's `bind=` and the bound names read, as `scan`
+    takes them (Q112).
     """
     out: list[NodeDef] = []
     made: set[str] = set()
@@ -348,12 +355,12 @@ def lowered(
     for node in nodes:
         if (extracting := extractor(node)) is not None:
             by_origin.setdefault(id(node.origin), set()).add(extracting.field)
-    within = _within(nodes)
+    within = _within(nodes, bound or {}, used)
     for node in nodes:
         recorded = decorations(node.origin)
         current = node
         extra: list[NodeDef] = []
-        names = {} if node.namespace is None else within.get(node.namespace, {})
+        names = None if node.namespace is None else within.get(node.namespace)
         if recorded.pipe_input is not None and extractor(node) is None:
             current, extra = _fed(node, recorded.pipe_input, config, names, problems)
         steps_out = (*recorded.pipe_output, *(s for _, s in recorded.mutations))
@@ -385,25 +392,37 @@ def lowered(
     return out, frozenset(made)
 
 
-def _within(nodes: Sequence[NodeDef]) -> dict[str, dict[str, str]]:
+def _within(
+    nodes: Sequence[NodeDef],
+    bound: Mapping[str, Mapping[str, Source | Value]],
+    used: dict[str, set[str]] | None,
+) -> dict[str, Within]:
     """Each namespace's nodes' full names, by their names in it (Q74).
 
     A step's `source("x")` within a namespace reads the namespace's `x` when it
-    has one, as a parameter there does.
+    has one, as a parameter there does, and otherwise its `bind=` of `x` (Q112).
     """
     found: dict[str, dict[str, str]] = {}
     for node in nodes:
         if node.namespace is not None:
             bare = node.name.removeprefix(f"{node.namespace}.")
             found.setdefault(node.namespace, {})[bare] = node.name
-    return found
+    return {
+        namespace: Within(
+            namespace,
+            names,
+            bound.get(namespace, MappingProxyType({})),
+            None if used is None else used.setdefault(namespace, set()),
+        )
+        for namespace, names in found.items()
+    }
 
 
 def _fed(
     node: NodeDef,
     policy: PipeInput,
     config: Mapping[str, object],
-    names: Mapping[str, str],
+    names: Within | None,
     problems: list[str],
 ) -> tuple[NodeDef, list[NodeDef]]:
     """`node` reading its last `@pipe_input` step, and the step nodes."""
@@ -453,7 +472,7 @@ def _piped(
     steps: tuple[Step, ...],
     config: Mapping[str, object],
     field: object,
-    names: Mapping[str, str],
+    names: Within | None,
 ) -> tuple[NodeDef, list[NodeDef]]:
     """`node`'s final node reading its last `@pipe_output` step, and the others."""
     name = node.name
@@ -584,11 +603,12 @@ def _same(one: Step, other: Step) -> bool:
     ):
         return False
     return all(
-        _same_binding(one.bindings[name], other.bindings[name]) for name in one.bindings
+        same_binding(one.bindings[name], other.bindings[name]) for name in one.bindings
     )
 
 
-def _same_binding(one: Source | Value, other: Source | Value) -> bool:
+def same_binding(one: Source | Value, other: Source | Value) -> bool:
+    """Whether two bindings are one: a source by name, a value by fingerprint."""
     if one is other:
         return True
     if isinstance(one, Source) and isinstance(other, Source):
