@@ -423,5 +423,12 @@ Q98).
   where it isn't installed.
 - **DOT ids escape backslashes**, so a node named with a backslash shows it doubled in Graphviz's own output. Names
   with backslashes are rare, and the drawing itself is right.
+- **Follow-ups found below this plan** (the PR's review; not fixed here, since they change the result cache's keys too):
+    - `fingerprint` hashes a `dict` in insertion order, so `{k: 1 for k in {"a", "b"}}` changes version with the hash
+      seed, and two equal dicts built in different orders get different versions. Export inherits this for
+      `value()` bindings and code versions.
+    - `class_version` gives two classes defined by `exec`, with different method bodies, the same version, since
+      Python has no source for them. A `value()` holding an instance of one, or a function reading one, can change
+      unseen.
 - **Register rows:** Q90 (drawing methods and `Drawing`), Q91 (labels), Q92 (execution drawings), Q93 (inputs and
   config), Q94 (no dependency, `render`), Q95 (export), Q96 (versions), Q97 (the CLI) and Q98 (CLI output and `diff`).
