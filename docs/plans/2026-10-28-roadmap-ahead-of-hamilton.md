@@ -229,6 +229,10 @@ tests against Hamilton for every kept behaviour; benchmarks for anything on the 
     `Scheduler`, `with_threads(...)` for free-threaded 3.14t, `run_many`, the async driver on the scheduler, and
     `absent_on` for partial results. The rest of "Beyond Hamilton" (streaming, incremental execution, sweeps) is left
     room for in its §8.
+11. **Plan 12: every comparison row better.** [Plan 12](2026-10-29-plan-12-api-parity-plus.md), awaiting approval:
+    a test for every row of [Coming from Hamilton](../from-hamilton.md)'s comparison tables, then the four rows where
+    fnloom is behind and the seven where it is only different, each made strictly better (Q139 on). Independent of
+    Plans 10 and 11.
 
 ## Done means
 
