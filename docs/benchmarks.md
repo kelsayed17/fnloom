@@ -429,6 +429,85 @@ median of each, ms, the development build of `scripts/check.sh`, so slower than 
 
 `benchmarks/test_checks_wrappers.py` measures the checked and the wrapped runs under CodSpeed.
 
+## Cold start, first call and memory
+
+The tables above time a warm process. A short-lived process (a CLI, a job, a serverless handler) pays for the import,
+the build and the first call before any warm run, and holds the libraries in memory the whole time. `benches/realworld.py`
+measures those on a workload shaped like an application's, in a fresh interpreter per sample, as the median of seven,
+the runtimes round-robin. A sample imports the library, imports the module, builds a driver, makes one `execute`, then
+times 15 more and reads the process's peak and final resident set size (RSS). The answers of the two runtimes are
+checked against each other.
+
+The workloads are written to files in each runtime's spelling:
+
+- `mixed`: 44 nodes of numpy arrays (20,000 floats): a chain of transforms, ten `@parameterize` scales, an
+  `@extract_fields` of five statistics, ten `@parameterize` energies and a report that reads 20 of them.
+- `mixed_async`: the same, with the chain and the report `async def`. The `@parameterize` rows stay plain functions,
+  because Hamilton's async driver passes a parameterized `async def` node's dependents a coroutine instead of its value.
+- `rows_np`: one function of 200 `@parameterize` rows, each a numpy dot product, all 200 requested.
+
+Numpy is `lazy` (each node imports it when it first runs, as an application with optional heavy dependencies does) or
+`loaded` (imported, and its `random` and `fft` submodules used, before the timed part). Hamilton is run with its
+extensions autoloaded, as it ships; no extension library is installed here, so that run costs about the same as with
+`HAMILTON_AUTOLOAD_EXTENSIONS=0` (`hamilton-noext` in the raw rows).
+
+**Import and first build, `loaded`.** Milliseconds, median of seven processes:
+
+| workload | import, Hamilton | import, fnloom | module + build, Hamilton | module + build, fnloom |
+| --- | ---: | ---: | ---: | ---: |
+| mixed | 206.4 | 33.7 | 1.3 | 1.4 |
+| mixed_async | 204.7 | 32.0 | 1.3 | 1.4 |
+| rows_np | 212.3 | 33.1 | 6.3 | 3.9 |
+
+Import is `import fnloom` against `import hamilton` plus `hamilton.driver` and `hamilton.async_driver`. fnloom
+imports 6.1 to 6.4 times faster here. A downstream consumer's migration measured about 1.42 s for Hamilton's import
+and 21 ms for fnloom's, and a cold import-plus-build summed over 30 graphs at 3.9× faster; the import gap grows with
+the extensions installed (Hamilton imports every one it finds), and the build gap with the graph. On 44 nodes the
+builds tie, at about a millisecond each. Only 200 `@parameterize` rows separate them, 1.6× in fnloom's favour.
+
+**Memory.** RSS in megabytes after building and running, median of seven. A bare interpreter is 27.4 with the lazy
+numpy workload and 40.4 with numpy imported:
+
+| workload | numpy | Hamilton, peak / final | fnloom, peak / final |
+| --- | --- | --- | --- |
+| mixed | loaded | 91.5 / 90.3 | 50.5 / 49.8 |
+| mixed_async | loaded | 114.3 / 113.2 | 52.1 / 51.4 |
+| rows_np | loaded | 91.1 / 90.0 | 50.0 / 49.3 |
+
+fnloom's process is 1.8 to 2.2 times smaller: it adds about 10 MB to the numpy baseline and Hamilton about 50 MB (the
+async driver, about 73). The difference is Hamilton's import, not the graph: the numbers barely move between the
+sync workloads and `rows_np`.
+
+**First call against steady state.** Milliseconds, first / steady (the median of 15 warm `execute` calls):
+
+| workload | numpy | Hamilton | fnloom |
+| --- | --- | --- | --- |
+| mixed | loaded | 2.38 / 1.96 | 2.29 / 1.80 |
+| mixed_async | loaded | 3.73 / 3.18 | 5.16 / 2.45 |
+| rows_np | loaded | 1.49 / 1.32 | 1.25 / 0.68 |
+| mixed | lazy | 4.61 / 1.97 | 45.55 / 1.84 |
+| mixed_async | lazy | 6.37 / 3.18 | 48.53 / 2.45 |
+| rows_np | lazy | 1.51 / 1.36 | 38.61 / 0.69 |
+
+Two things are in these rows.
+
+1. **The `lazy` first call is slower in fnloom, and that is numpy, not fnloom.** `import hamilton` itself imports numpy
+   (and `numpy.random`), so a node's `import numpy` is already free by the first call. fnloom imports neither, so the
+   first node to run pays for them: the cost moves from the import to the first call. Profiling the first
+   `execute` of `rows_np` with numpy loaded, all of it is `numpy.random`'s extension modules (11 ms), none of it fnloom
+   (`driver.execute`, `prepare` and `_compile` are each under 0.5 ms). Added to the timeline, fnloom reaches
+   the first result in 82 ms (35.7 + 0.3 + 1.0 + 45.5, `mixed`) and Hamilton in 258 ms (252.4 + 0.4 + 0.9 + 4.6). A
+   process that already imported the heavy libraries when it started, or one that wants a flat first call, imports them
+   at startup, and then the first and steady calls are within a millisecond of each other.
+2. **One real first-call loss: `mixed_async`, 5.16 ms against 3.73 ms (1.4× slower), with `sync_nodes="thread"`.** The
+   graph's sync nodes make the first call start the loop's default executor and a worker thread: with
+   `sync_nodes="inline"` the same first call takes 2.9 ms, against 5.1 ms for `thread`, and warm calls 1.9 against
+   2.5 ms. About 1.6 ms is thread start-up, once per event loop, and about 1 ms the plan compile. Neither is hashing or
+   type-check setup: the profile of a first call shows no code-version hash of a helper, a constant or a library, and a
+   first call of the sync workloads is within 0.5 ms of a warm one, the plan compile. Nothing here is a bug to fix, so no change was made; `inline` removes the
+   thread start for graphs of cheap sync nodes, as it removes the per-node round trip described under
+   [Async](#async).
+
 ## Why fan-in is fast
 
 A node with `n` parameters is called with `n` keyword arguments. CPython binds a keyword to a parameter by identity
@@ -463,6 +542,17 @@ one per shape, runtime (`fnloom`, `fnloom-hooked`, `fnloom-async` or `hamilton`)
 `disk`). `fnloom-hooked` is `fnloom` with the counting hook. `warm_loads` is how many entries a warm `fnloom` run
 loads, counted on a separate, untimed driver. The graphs are written to files and imported, since Hamilton's cache
 versions a function by its source, and every answer is checked against the shape's closed form.
+
+The cold-start, first-call and memory runs have their own script, also a fresh process per sample:
+
+```bash
+uv run python -m benches.realworld > realworld.jsonl
+```
+
+It prints 20 JSON lines (`workload`, `numpy`, `runtime`, `processes`, `import_ms`, `module_ms`, `build_ms`, `first_ms`,
+`steady_ms`, `peak_mb`, `rss_mb`), one per workload, numpy mode (`lazy` or `loaded`) and runtime (`fnloom`, `hamilton`
+or `hamilton-noext`), plus two `none` rows for a bare interpreter. See
+[Cold start, first call and memory](#cold-start-first-call-and-memory).
 
 The async runs have their own script too, also a fresh process per sample:
 
@@ -519,7 +609,7 @@ environment: the `rust:1.99.1` image on aarch64 Linux. A change that costs instr
 The Python run path is measured by [CodSpeed](https://codspeed.io) as well. `benchmarks/` holds pytest benchmarks of
 a prepared plan's steady `run` on each generated shape, `Driver.execute` on a repeated request, cached runs against a
 `MemoryCache` (warm and cold), the async driver in both `sync_nodes` modes, `@extract_fields`, `@extract_columns` and
-`@config`, hooked runs of a 1,000-node chain on both drivers (with and without output checks, and cached, warm and
+`@config`, the mixed numpy workload of the cold-start section (a steady run, two builds and the async driver in both modes), hooked runs of a 1,000-node chain on both drivers (with and without output checks, and cached, warm and
 cold), and `Builder.build` on a 1,000-node graph. The extension is built in release mode first, so the numbers
 are those of the optimised build.
 

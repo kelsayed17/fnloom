@@ -10,4 +10,5 @@ uv run python -m benches.run > bench.jsonl 2> bench.stderr
 uv run python -m benches.cache > cache.jsonl   # cached runs, one fresh process per sample
 uv run python -m benches.async_ > async.jsonl  # async runs, one fresh process per sample
 uv run python -m benches.builds > builds.jsonl  # builds from modules, from functions and with namespaces
+uv run python -m benches.realworld > realworld.jsonl  # import, first call and memory, one fresh process per sample
 ```
