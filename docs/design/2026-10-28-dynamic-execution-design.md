@@ -585,7 +585,7 @@ New rows in `docs/benchmarks.md` and CodSpeed, each against Hamilton's executors
 Each task is one PR-sized, independently reviewable change. Its register rows, and their differential or
 `deliberate` tests, land in the same task, written before its code. Milestones can ship as separate releases.
 
-**A. Absence** (needs nothing from B or C)
+#### A. Absence (needs nothing from B or C)
 
 1. Core: the `Absent` outcome, `Dependency::Admits`, skip propagation in `Plan::run`, may-be-absent at build; Rust
    only.
@@ -595,7 +595,7 @@ Each task is one PR-sized, independently reviewable change. Its register rows, a
 4. Caching declared absences: the stored marker in both formats, its fingerprint, the "not supplied" version.
 5. Absence on the async driver.
 
-**B. Blocks, sequential**
+#### B. Blocks, sequential
 
 6. Core: `Expand` and `Collect` kinds, block discovery and the build errors, in Rust only (Q124, Q136).
 7. Core: sub-plans in `prepare`, `OutputInBlock`, and `Plan::run` over blocks in reference order, nesting included.
@@ -611,7 +611,7 @@ Each task is one PR-sized, independently reviewable change. Its register rows, a
 14. Namespaces and `bind=` with blocks, and every decorator on block nodes (the stacking test extended).
 15. Absence in blocks: `Collect` over absent branches, an absent expand node.
 
-**C. The scheduler and the parallel executor**
+#### C. The scheduler and the parallel executor
 
 16. Core: `Scheduler`, with order keys and pulls, matching `Plan::run` task for task; tested in Rust.
 17. Binding: the sync driver runs on the `Scheduler`; `with_threads(max_workers)`, the driver's `Limits`, the pool,
@@ -624,12 +624,12 @@ Each task is one PR-sized, independently reviewable change. Its register rows, a
 23. Blocks on the async driver, async generators as expand nodes (Q132).
 24. Free-threading stress tests, and the [Threads](../running.md#threads) section rewritten.
 
-**D. Partial results**
+#### D. Partial results
 
 25. `absent_on` and `with_absent_on`, `RunEnd.absent_errors`, error absences uncached and poisoning their downstream,
     `Collect` over partial results (Q133).
 
-**E. Close-out**
+#### E. Close-out
 
 26. Benchmarks (§12.2); `docs/running.md` sections on fan-out, threads and absence; `from-hamilton.md` rows; the
     roadmap and the design change log.
