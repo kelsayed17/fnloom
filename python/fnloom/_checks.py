@@ -201,12 +201,17 @@ def _least_and_most(value: object) -> tuple[object, object]:
     """`value`'s least and greatest items, NaN counted: pandas skips it otherwise."""
 
     def reduced(method: str) -> object:
-        found = getattr(value, method)
-        try:
-            first = found(skipna=False)
-        except TypeError:
-            first = found()
-        return _reduced(first, method)
+        # At every level: a frame's `min` is a Series, whose own `min` skips NaN.
+        found = value
+        for _ in range(3):
+            if _scalar(found):
+                break
+            call = getattr(found, method)
+            try:
+                found = call(skipna=False)
+            except TypeError:
+                found = call()
+        return found
 
     return reduced("min"), reduced("max")
 
@@ -755,7 +760,7 @@ def verdict(
         c.identity == ("builtin", "allow_none", True) for c in checks
     ):
         # `allow_none=True`: None passes every check.
-        checks = [c for c in checks if c.name == "allow_none"]
+        checks = [c for c in checks if c.identity[:2] == ("builtin", "allow_none")]
     given = inputs() if any(c.wants_inputs for c in checks) else _NO_DIAGNOSTICS
     results = tuple(_ran(check, value, given) for check in checks)
     if (sink := RESULTS.get()) is not None and sink[0] is owner:

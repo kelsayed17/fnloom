@@ -278,7 +278,7 @@ def _star(v: int, *rest: int) -> int:
         (lambda: step(_later), "async def"),
         (lambda: step(_bare, n=1), "need annotations: v"),
         (lambda: step(_none), "no parameter to take the value"),
-        (lambda: step(_star), r"\*args and \*\*kwargs"),
+        (lambda: step(_star), r"\*args, \*\*kwargs"),
         (lambda: step(3), "takes a function"),  # ty: ignore[invalid-argument-type]
         (pipe_input, "at least one step"),
         (lambda: pipe_output(_two), "takes step"),  # ty: ignore[invalid-argument-type]
@@ -390,3 +390,108 @@ def test_value_bindings_are_constants() -> None:
 
     pipe_output(step(_join, sep=value("-"), times=3))(module.a)
     assert fnloom.build(module).execute(["a"], inputs={"x": 7}) == {"a": "7-7-7"}
+
+
+def test_an_async_function_with_pipe_output_on_the_async_driver() -> None:
+    """Its final node is awaited, checked or not."""
+    source = """
+from fnloom import check_output, pipe_output, step
+
+def _b(v: int) -> int:
+    return v + 10
+
+@pipe_output(step(_b))
+async def p(x: int) -> int:
+    return x
+
+@check_output(range=(0, 50))
+@pipe_output(step(_b))
+async def q(x: int) -> int:
+    return x
+"""
+    module = make_module("async_piped", source)
+    driver = fnloom.Builder().with_modules(module).build_async()
+    assert asyncio.run(driver.execute(["p", "q"], inputs={"x": 2})) == {
+        "p": 12,
+        "q": 12,
+    }
+    with pytest.raises(fnloom.ValidationError, match="q: check range"):
+        asyncio.run(driver.execute(["q"], inputs={"x": 60}))
+
+
+def test_a_group_parameter_is_never_fed() -> None:
+    """Refused at build, whether named or first."""
+    for index, on_input in enumerate(("'xs'", "None")):
+        source = f"""
+from fnloom import inject, pipe_input, source, step, group
+
+def _inc(v: int) -> int:
+    return v + 1
+
+@pipe_input(step(_inc), on_input={on_input})
+@inject(xs=group(source("a"), source("b")))
+def tot(xs: list[int]) -> int:
+    return sum(xs)
+"""
+        with pytest.raises(ValueError, match="can't feed 'xs', a group"):
+            _driver(source, f"grouped_{index}")
+
+
+def test_a_fed_parameter_with_a_default_reads_the_chain() -> None:
+    """The chain always gives it a value, so its default never applies."""
+    source = """
+from fnloom import pipe_input, step
+
+def _inc(v: int) -> int:
+    return v + 1
+
+@pipe_input(step(_inc))
+def p(x: int = 1) -> int:
+    return x
+"""
+    driver = _driver(source, "defaulted_fed")
+    assert driver.execute(["p"], inputs={"x": 5}) == {"p": 6}
+
+
+def test_a_positional_only_step_parameter_is_refused() -> None:
+    """When decorating, rather than crashing at run."""
+
+    def _inc(v: int, /) -> int:
+        return v + 1
+
+    with pytest.raises(TypeError, match="positional-only"):
+        step(_inc)
+
+
+def test_a_fed_parameter_bound_to_a_value_says_so() -> None:
+    """The message names the `value()` binding."""
+    source = """
+from fnloom import parameterize, pipe_input, step, value
+
+def _inc(v: int) -> int:
+    return v + 1
+
+@pipe_input(step(_inc))
+@parameterize(r={"x": value(1)})
+def p(x: int) -> int:
+    return x
+"""
+    with pytest.raises(ValueError, match="bound to a value"):
+        _driver(source, "value_fed")
+
+
+def test_one_step_in_pipe_input_and_pipe_output_says_to_name_one() -> None:
+    """The duplicate-name error points at `.named`."""
+    source = """
+from fnloom import pipe_input, pipe_output, step
+
+def _a(v: int) -> int:
+    return v
+
+@pipe_input(step(_a))
+@pipe_output(step(_a))
+def p(x: int) -> int:
+    return x
+"""
+    with pytest.raises(ValueError, match=r"\.named"):
+        _driver(source, "named_twice")

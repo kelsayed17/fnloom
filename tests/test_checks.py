@@ -808,3 +808,15 @@ def test_changing_a_check_s_importance_misses() -> None:
     built("fail").execute(["a"], inputs={"x": 1})
     assert built("fail").explain_cache(["a"], inputs={"x": 1})["a"].status == "hit"
     assert built("warn").explain_cache(["a"], inputs={"x": 1})["a"].status == "miss"
+
+
+def test_a_frame_with_nan_fails_range() -> None:
+    """NaN in a column is outside the range, at every level of the frame."""
+    numpy = _loaded("numpy")
+    pandas = _loaded("pandas")
+    module = _any_module("frame_nan")
+    check_output(range=(0, 10))(module.a)  # ty: ignore[unresolved-attribute]
+    driver = fnloom.build(module)  # ty: ignore[invalid-argument-type]
+    frame = pandas.DataFrame({"a": [1.0, numpy.nan], "b": [2.0, 3.0]})
+    with pytest.raises(ValidationError):
+        driver.execute(["a"], inputs={"v": frame})

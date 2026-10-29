@@ -121,6 +121,8 @@ class Decorations:
     pipe_output: tuple[Step, ...] = ()
     mutations: tuple[tuple[str, Step], ...] = ()
     mutates: tuple[Callable[..., object], ...] = ()
+    injected: Mapping[str, Binding] | None = None
+    resolvers: tuple[Callable[..., object], ...] = ()
 
 
 def source(name: str) -> Source:
@@ -470,6 +472,9 @@ def parameterize[F: Callable[..., object]](
         if current.rows is not None:
             msg = "function is already parameterized; apply parameterize once"
             raise ValueError(msg)
+        if current.injected is not None:
+            msg = "inject and parameterize can't share a function: use one"
+            raise TypeError(msg)
         if current.extract is not None and len(frozen) > 1:
             decorator = f"extract_{current.extract.kind}"
             raise ValueError(too_many_rows(frozen, decorator))

@@ -5139,3 +5139,82 @@ def test_q107_cross_module_mutate(tmp_path: Path) -> None:
         _Q107_MUTATOR.format(package="fnloom", target="q107_target_f"),
     )
     assert fnloom.build(target, mutator).execute(["a"], inputs={"x": 1}) == {"a": 2}
+
+
+_Q109_INJECTED = """
+from {package} import inject, pipe_input, source, step
+
+def _inc(v: int) -> int:
+    return v + 1
+
+@pipe_input(step(_inc))
+@inject(v=source("a"))
+def piped(v: int) -> int:
+    return v
+"""
+
+
+@pytest.mark.deliberate("Q109")
+def test_q109_inject_with_pipe_input(tmp_path: Path) -> None:
+    """Hamilton refuses `@inject` with `@pipe_input`; fnloom chains the row."""
+    module = _module_from_file(
+        tmp_path, "q109_h", _Q109_INJECTED.format(package="hamilton.function_modifiers")
+    )
+    with pytest.raises(ValueError, match="Cannot call NodeExpander"):
+        hamilton_driver.Builder().with_modules(module).build()
+    built = fnloom.build(make_module("q109_f", _Q109_INJECTED.format(package="fnloom")))
+    assert built.execute(["piped"], inputs={"a": 1}) == {"piped": 2}
+
+
+_Q110_RESOLVED = """
+from {package} import parameterize, source, value{extra}
+
+@resolve({when}decorate_with=lambda pairs: parameterize(
+    **{{f"sum_{{a}}_{{b}}": {{"p": source(a), "q": source(b)}} for a, b in pairs}}
+))
+def summation(p: int, q: int) -> int:
+    return p + q
+"""
+
+
+@pytest.mark.deliberate("Q110")
+def test_q110_resolve_needs_no_power_user_mode(tmp_path: Path) -> None:
+    """Hamilton raises a raw KeyError without its power-user key; fnloom builds."""
+    module = _module_from_file(
+        tmp_path,
+        "q110_h",
+        _Q110_RESOLVED.format(
+            package="hamilton.function_modifiers",
+            extra=", resolve, ResolveAt",
+            when="when=ResolveAt.CONFIG_AVAILABLE, ",
+        ),
+    )
+    config = {"pairs": [("u", "v")]}
+    with pytest.raises(KeyError, match="enable_power_user_mode"):
+        hamilton_driver.Builder().with_modules(module).with_config(config).build()
+    powered = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_config({**config, "hamilton.enable_power_user_mode": True})
+        .build()
+    )
+    assert powered.execute(["sum_u_v"], inputs={"u": 1, "v": 2}) == {"sum_u_v": 3}
+    built = (
+        fnloom.Builder()
+        .with_modules(
+            make_module(
+                "q110_f",
+                _Q110_RESOLVED.format(package="fnloom", extra=", resolve", when=""),
+            )
+        )
+        .with_config(config)
+        .build()
+    )
+    assert built.execute(["sum_u_v"], inputs={"u": 1, "v": 2}) == {"sum_u_v": 3}
+    with pytest.raises(ValueError, match="the config has no 'pairs'"):
+        fnloom.Builder().with_modules(
+            make_module(
+                "q110_g",
+                _Q110_RESOLVED.format(package="fnloom", extra=", resolve", when=""),
+            )
+        ).build()

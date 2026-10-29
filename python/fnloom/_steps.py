@@ -111,9 +111,18 @@ def step(fn: Callable[..., object], *args: object, **bindings: object) -> Step:
     if not params:
         msg = f"step {name}: it has no parameter to take the value"
         raise TypeError(msg)
-    variadic = [p.name for p in params if p.kind in {p.VAR_POSITIONAL, p.VAR_KEYWORD}]
-    if variadic:
-        msg = f"step {name}: *args and **kwargs can't be bound: {', '.join(variadic)}"
+    variadic = [
+        p.name
+        for p in params
+        if p.kind in {p.VAR_POSITIONAL, p.VAR_KEYWORD}
+        or (p.kind == p.POSITIONAL_ONLY and p is not params[0])
+    ]
+    if params[0].kind == params[0].POSITIONAL_ONLY or variadic:
+        variadic = variadic or [params[0].name]
+        listed = ", ".join(variadic)
+        msg = (
+            f"step {name}: *args, **kwargs and positional-only can't be bound: {listed}"
+        )
         raise TypeError(msg)
     unannotated = [p.name for p in params if p.annotation is inspect.Parameter.empty]
     if signature.return_annotation is inspect.Signature.empty:
@@ -303,6 +312,11 @@ def _passed(value: object) -> object:
     return value
 
 
+async def _passed_async(value: object) -> object:
+    """`_passed` for an `async def` function's node, which the async driver awaits."""
+    return value
+
+
 def lowered(
     nodes: Sequence[NodeDef], config: Mapping[str, object]
 ) -> tuple[list[NodeDef], frozenset[str]]:
@@ -378,12 +392,20 @@ def _fed(
     problems: list[str],
 ) -> tuple[NodeDef, list[NodeDef]]:
     """`node` reading its last `@pipe_input` step, and the step nodes."""
-    plain = [p for p in node.params if p.slot is None]
-    target_name = policy.on_input or (plain[0].name if plain else None)
-    target = next((p for p in node.params if p.name == target_name), None)
+    first = node.params[0].name if node.params else None
+    target_name = policy.on_input or first
+    fed = [p for p in node.params if p.name == target_name]
+    if any(p.slot is not None for p in fed):
+        problems.append(
+            f"{node.name}: pipe_input can't feed {target_name!r}, a group(...) "
+            "parameter; give it a plain parameter"
+        )
+        return node, []
+    target = fed[0] if fed else None
     if target is None or not isinstance(target.binding, Source):
         problems.append(
-            f"{node.name}: pipe_input feeds {target_name!r}, which reads no node"
+            f"{node.name}: pipe_input feeds {target_name!r}, which is bound to "
+            "a value(), not read from a node"
         )
         return node, []
     kept = _kept(policy.steps, config)
@@ -402,8 +424,10 @@ def _fed(
             f"{inspect.formatannotation(target.annotation)}, but its first step "
             f"{made[0].name!r} takes {inspect.formatannotation(head.annotation)}"
         )
+    # Required: the chain always gives it a value, so its default never applies.
     params = tuple(
-        replace(p, binding=Source(reads)) if p is target else p for p in node.params
+        replace(p, binding=Source(reads), required=True) if p is target else p
+        for p in node.params
     )
     payload, renames = _payload(node.origin, params)
     return replace(node, params=params, payload=payload, renames=renames), made
@@ -438,7 +462,7 @@ def _piped(
     final = replace(
         node,
         params=(Param("value", Source(reads), True, last.returns),),  # noqa: FBT003  # `required`
-        payload=_passed,
+        payload=_passed_async if inspect.iscoroutinefunction(node.origin) else _passed,
         renames={reads: "value"},
         returns=last.returns,
     )
@@ -452,7 +476,7 @@ def _refuse_twice(nodes: Sequence[NodeDef]) -> None:
         (twice if node.name in seen else seen).add(node.name)
     if twice:
         listed = ", ".join(repr(n) for n in sorted(twice))
-        msg = f"two nodes are named {listed}"
+        msg = f"two nodes are named {listed}; give one step a name with .named(...)"
         raise ValueError(msg)
 
 
@@ -553,6 +577,8 @@ def mutate[F: Callable[..., object]](
 
     def apply(mutator: F) -> F:
         key = _mutator_key(mutator)
+        code = getattr(mutator, "__code__", None)
+        cleared: set[int] = set()
         for target in found:
             given = target.bindings if target.bindings is not None else bindings
             made = step(mutator, **given)
@@ -563,14 +589,18 @@ def mutate[F: Callable[..., object]](
                 fields=target.fields,
             )
             current = decorations(target.fn)
-            kept = tuple((k, s) for k, s in current.mutations if k != key)
-            if len(kept) == len(current.mutations):
-                mutations = (*kept, (key, made))
-            else:
-                # Mutated again by the same mutator: its step, where it was.
+            mutations = current.mutations
+            if id(target.fn) not in cleared:
+                # A redefinition of this mutator, as re-running a notebook cell
+                # makes, replaces its old steps: same name, other code. One
+                # whose code is the same, as a loop or a factory makes, adds.
                 mutations = tuple(
-                    (k, made if k == key else s) for k, s in current.mutations
+                    (k, s)
+                    for k, s in mutations
+                    if k != key or getattr(s.fn, "__code__", None) is code
                 )
+                cleared.add(id(target.fn))
+            mutations = (*mutations, (key, made))
             setattr(target.fn, _ATTRIBUTE, replace(current, mutations=mutations))
         current = decorations(mutator)
         setattr(
@@ -590,20 +620,38 @@ def mutate[F: Callable[..., object]](
 def unbuilt_targets(
     modules: Sequence[ModuleType], nodes: Sequence[NodeDef]
 ) -> list[str]:
-    """Each `@mutate` target of a built module's mutator that no node comes from."""
-    origins = {id(node.origin) for node in nodes}
+    """What is wrong with the build's `@mutate`s: one line each, sorted (Q107).
+
+    A built mutator's target must be a function of the build: a node's, or one
+    a built module defines, such as a `@config.when` variant the config didn't
+    select. A built node's mutator must be of a built module too, or its step
+    would be lost when the driver is pickled and built again elsewhere.
+    """
+    defined = {
+        id(value)
+        for module in modules
+        for value in vars(module).values()
+        if inspect.isfunction(value)
+    }
+    defined |= {id(node.origin) for node in nodes}
+    built = {module.__name__ for module in modules}
     found: set[str] = set()
     for module in modules:
         for value in vars(module).values():
-            if (
-                not callable(value)
-                or getattr(value, "__module__", None) != module.__name__
-            ):
+            if not inspect.isfunction(value) or value.__module__ != module.__name__:
                 continue
-            for target in decorations(value).mutates:
-                if id(target) not in origins:
-                    found.add(
-                        f"mutate on {_named(value)}: its target {_named(target)} "
-                        "is no node of the build"
-                    )
+            found.update(
+                f"mutate on {_named(value)}: its target {_named(target)} "
+                "is no function of the build"
+                for target in decorations(value).mutates
+                if id(target) not in defined
+            )
+    for node in nodes:
+        for _, mutation in decorations(node.origin).mutations:
+            home = getattr(mutation.fn, "__module__", None)
+            if home not in built:
+                found.add(
+                    f"{node.name}: mutated by {_named(mutation.fn)} of module "
+                    f"{home!r}, which isn't built; build it too"
+                )
     return sorted(found)

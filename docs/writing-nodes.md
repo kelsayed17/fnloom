@@ -584,6 +584,65 @@ fnloom.build(rounding).execute(["price", "tax"], inputs={"cost": 9.99})
 A target may be in another module, as long as both are built. A target no built module defines fails the build, and
 mutating twice with one mutator, as re-running a notebook cell does, adds its step once.
 
+## Bindings and decorators from config
+
+`@fnloom.inject` binds parameters with `source`, `value` or `group`, like one [`@parameterize`](#one-function-several-nodes)
+row, but keeps the function's name (Q109):
+
+```python
+# file: totals_injected.py
+from fnloom import group, inject, source, value
+
+
+@inject(parts=group(source("food"), source("drink"), value(2.5)))
+def bill(parts: list[float]) -> float:
+    """Everything ordered, plus the cover charge."""
+    return sum(parts)
+```
+
+```python
+import totals_injected
+
+fnloom.build(totals_injected).execute(["bill"], inputs={"food": 20.0, "drink": 6.0})
+# -> {'bill': 28.5}
+```
+
+`@fnloom.resolve(decorate_with)` decides a function's decorators from the [config](#config) at build.
+`decorate_with`'s parameters name config keys, a defaulted one optional, and it returns a decorator, or a list of them,
+applied as if written on the function (Q110):
+
+```python
+# file: regions.py
+from fnloom import parameterize, resolve, source
+
+
+@resolve(
+    lambda regions: parameterize(
+        **{f"sales_{r}": {"orders": source(f"orders_{r}")} for r in regions}
+    )
+)
+def sales(orders: int) -> int:
+    """Sales in one region."""
+    return orders * 10
+```
+
+```python
+import regions
+
+by_region = (
+    fnloom.Builder().with_modules(regions).with_config({"regions": ["eu", "us"]})
+)
+by_region.build().execute(
+    ["sales_eu", "sales_us"], inputs={"orders_eu": 1, "orders_us": 2}
+)
+# -> {'sales_eu': 10, 'sales_us': 20}
+```
+
+No power-user mode is needed. A missing required key fails the build, naming the function and the key. The
+decorators go on a copy of the function made for that build, so builds with other configs never see each other's, and
+the function still stands for its nodes in a request. A resolver may not apply `@config.when*`, `@exclude`, `@mutate`
+or `@resolve`: those decide which functions are nodes, which the config can't do from inside one.
+
 ## Modules together
 
 `fnloom.build` takes several modules, and so does `Builder.with_modules`. Nodes are matched by name across all of

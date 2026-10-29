@@ -110,7 +110,9 @@ def c(x: int) -> int:
 """
     mutator = make_module("unbuilt_source", source)
     assert target is not None
-    with pytest.raises(ValueError, match="mutate on _plus: its target a is no node"):
+    with pytest.raises(
+        ValueError, match="mutate on _plus: its target a is no function of the build"
+    ):
         fnloom.build(mutator)
 
 
@@ -130,22 +132,112 @@ def test_misuse_is_refused_when_decorating() -> None:
         mutate(3)  # ty: ignore[invalid-argument-type]
 
 
-def test_mutating_twice_adds_the_step_once() -> None:
-    """As re-running a notebook cell does (Q107)."""
+def test_redefining_a_mutator_replaces_its_step() -> None:
+    """As re-running a notebook cell does: new code under the same name (Q107)."""
     module = make_module("twice", "def a(x: int) -> int:\n    return x\n")
-    for _ in range(2):
-
-        def _plus(v: int) -> int:
-            return v + 1
-
-        _plus.__module__ = "twice"
-        mutate(module.a)(_plus)
+    cell = "@mutate(target.a)\ndef _plus(v: int) -> int:\n    return v + {n}\n"
+    space = {"mutate": mutate, "target": module, "__name__": "twice"}
+    for n in (1, 5):
+        exec(compile(cell.format(n=n), "cell", "exec"), space)  # noqa: S102  # a notebook cell
     driver = fnloom.build(module)
-    assert driver.execute(["a"], inputs={"x": 1}) == {"a": 2}
+    assert driver.execute(["a"], inputs={"x": 1}) == {"a": 6}
     assert [n for n in driver.node_names() if n.startswith("a.")] == [
         "a.raw",
         "a.with_plus",
     ]
+
+
+def test_mutators_made_in_a_loop_or_a_factory_each_add_a_step() -> None:
+    """Same code, other bindings: distinct mutations, as in Hamilton."""
+    module = make_module("looped", "def a(x: int) -> int:\n    return x\n")
+
+    def made(n: int) -> None:
+        def _plus(v: int) -> int:
+            return v + n
+
+        _plus.__module__ = "looped"
+        mutate(module.a)(_plus)
+
+    made(1)
+    made(10)
+    assert fnloom.build(module).execute(["a"], inputs={"x": 0}) == {"a": 11}
+
+
+def test_one_call_targeting_one_function_twice_adds_both() -> None:
+    """Two `apply_to`s of one target in one `@mutate`, as in Hamilton."""
+    source = """
+from fnloom import apply_to, mutate, value
+
+def a(x: int) -> int:
+    return x
+
+@mutate(apply_to(a, n=value(1)), apply_to(a, n=value(10)).named("ten"))
+def _add(v: int, n: int) -> int:
+    return v + n
+"""
+    assert _driver(source, "two_applies").execute(["a"], inputs={"x": 0}) == {"a": 11}
+
+
+def test_an_unselected_variant_is_a_target_of_the_build() -> None:
+    """A `@config.when` variant the config leaves out isn't an unknown target."""
+    source = """
+from fnloom import config, mutate
+
+@config.when(mode="x")
+def a__x(v: int) -> int:
+    return v
+
+@config.when(mode="y")
+def a__y(v: int) -> int:
+    return v * 2
+
+@mutate(a__x, a__y)
+def _plus(v: int) -> int:
+    return v + 100
+"""
+    module = make_module("variant_targets", source)
+    driver = fnloom.Builder().with_modules(module).with_config({"mode": "x"}).build()
+    assert driver.execute(["a"], inputs={"v": 0}) == {"a": 100}
+
+
+def test_a_mutation_from_an_unbuilt_module_fails_the_build() -> None:
+    """Else pickling would lose it; build the mutator's module too (Q107)."""
+    target = make_module("lonely_target", "def a(x: int) -> int:\n    return x\n")
+    make_module(
+        "lonely_mutator",
+        "from fnloom import mutate\nimport lonely_target\n\n"
+        "@mutate(lonely_target.a)\ndef _plus(v: int) -> int:\n    return v + 1\n",
+    )
+    with pytest.raises(
+        ValueError, match="of module 'lonely_mutator', which isn't built"
+    ):
+        fnloom.build(target)
+
+
+def test_rows_and_fields_each_get_the_step() -> None:
+    """Every `@parameterize` row; every field without `on_output`."""
+    source = """
+from fnloom import extract_fields, mutate, parameterize, value
+
+@parameterize(p1={"k": value(1)}, p2={"k": value(2)})
+def scaled(x: int, k: int) -> int:
+    return x * k
+
+@extract_fields({"f": int, "g": int})
+def d(x: int) -> dict:
+    return {"f": x, "g": x}
+
+@mutate(scaled, d)
+def _plus(v: int) -> int:
+    return v + 100
+"""
+    driver = _driver(source, "rows_fields_mutated")
+    assert driver.execute(["p1", "p2", "f", "g"], inputs={"x": 1}) == {
+        "p1": 101,
+        "p2": 102,
+        "f": 101,
+        "g": 101,
+    }
 
 
 def test_a_check_sees_the_mutated_value() -> None:

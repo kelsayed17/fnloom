@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, NamedTuple, override
 
 from fnloom._config import Condition
 from fnloom._decorators import Source, Value
+from fnloom._resolve import original
 from fnloom._types import type_matches
 
 if TYPE_CHECKING:
@@ -343,7 +344,7 @@ def node_views(
             node.name,
             node.returns,
             False,  # noqa: FBT003  # `is_input`, in field order
-            node.origin,
+            original(node.origin),
             node.module,
             node.params,
             _read_only(node.tags),

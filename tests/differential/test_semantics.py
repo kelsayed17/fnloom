@@ -275,6 +275,34 @@ def test_mutate_makes_the_same_nodes_and_values(tmp_path: Path) -> None:
     )
 
 
+_INJECTED = """
+from {package} import group, inject, source, value
+
+@inject(nums=group(source("a"), value(10), source("b")), k=value(2))
+def total(nums: list[int], k: int, extra: int = 0) -> int:
+    \"\"\"The total, times {{k}}.\"\"\"
+    return (sum(nums) + extra) * k
+"""
+
+
+def test_inject_gives_the_same_node(tmp_path: Path) -> None:
+    """Name, dependencies, value and templated doc (KEEP, Q109)."""
+    hamilton_module = _file_module(
+        tmp_path, "injected_h", _INJECTED.format(package="hamilton.function_modifiers")
+    )
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    built = fnloom.build(make_module("injected_f", _INJECTED.format(package="fnloom")))
+    by_name = {v.name: v for v in hamilton.list_available_variables()}
+    assert by_name["total"].documentation == built.nodes["total"].doc
+    assert sorted(
+        by_name["total"].required_dependencies | by_name["total"].optional_dependencies
+    ) == list(built.nodes["total"].dependencies)
+    inputs = {"a": 1, "b": 2}
+    assert built.execute(["total"], inputs=inputs) == hamilton.execute(
+        ["total"], inputs=inputs
+    )
+
+
 def _file_module(folder: Path, name: str, source: str) -> ModuleType:
     """`source` as a module loaded from a file, so Hamilton can read its source."""
     path = folder / f"{name}.py"

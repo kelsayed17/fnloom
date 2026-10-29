@@ -33,6 +33,7 @@ from fnloom._extract import extract_columns, extract_fields
 from fnloom._fingerprint import fingerprint, register_fingerprint
 from fnloom._functions import NodeSpec, node
 from fnloom._hooks import Hook, LogFailures, NodeEnd, NodeStart, RunEnd, RunStart
+from fnloom._resolve import inject, resolve
 from fnloom._steps import (
     Step,
     Target,
@@ -112,6 +113,7 @@ __all__ = [
     "extract_fields",
     "fingerprint",
     "group",
+    "inject",
     "mutate",
     "node",
     "parameterize",
@@ -120,6 +122,7 @@ __all__ = [
     "pipe_input",
     "pipe_output",
     "register_fingerprint",
+    "resolve",
     "source",
     "step",
     "tag",

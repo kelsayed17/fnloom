@@ -5,12 +5,13 @@ import functools
 import inspect
 import operator
 import sys
+import types
 import typing
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, NamedTuple
 
-from fnloom import _config, _extract
+from fnloom import _config, _extract, _resolve
 from fnloom._config import (
     Condition,
     Found,
@@ -24,6 +25,7 @@ from fnloom._decorators import (
     Group,
     Source,
     Value,
+    _templated,
     decorations,
     group_element,
     group_mismatch,
@@ -471,6 +473,7 @@ def _node_defs(  # noqa: PLR0913  # keyword-only options, one per kind of source
         # A variant is named by `name=`, or by its function's name cut at `__`.
         name = _config.node_name(fn, recorded.config.name)
         conditions = recorded.config.conditions
+    rows, injected_docs = _injected(fn, name, rows, bind)
     if rows is None:
         # A plain function is one node, of its own name, binding nothing, so each
         # parameter reads its own name, or its namespace's node of that name, and
@@ -507,7 +510,7 @@ def _node_defs(  # noqa: PLR0913  # keyword-only options, one per kind of source
         return _extract.lower(node, recorded.extract, resolved=False)
     nodes: list[NodeDef] = []
     namespace = None if within is None else within.namespace
-    docs = recorded.docs if bind is None else {}
+    docs = (injected_docs or recorded.docs) if bind is None else {}
     parameters = _readable_groups(fn, parameters, rows)
     for node_name, row in rows.items():
         params = _bind(parameters, row, within)
@@ -953,7 +956,9 @@ def scan(
     if given:
         groups.setdefault(None, []).extend(given)  # ty: ignore[invalid-argument-type]  # specs join the plain group
     entries: list[_Entry] = [
-        (namespace, entry) for namespace, group in groups.items() for entry in group
+        (namespace, _resolved_entry(entry, config))
+        for namespace, group in groups.items()
+        for entry in group
     ]
     selecting = gathered.selecting
     if any(
@@ -981,6 +986,35 @@ def scan(
         # A variant the scan left out is a reason too: say so beside the others.
         missing[name] = "; ".join([missing[name], *gathered.variants[name]])
     return Scanned(list(seen.values()), missing, gathered.left_out)
+
+
+def _resolved_entry(
+    entry: Found | NodeSpec, config: Mapping[str, object]
+) -> Found | NodeSpec:
+    """`entry`, its function a copy decorated by its `@resolve`s, if any (Q110)."""
+    if isinstance(entry, NodeSpec):
+        return entry
+    module, attribute, fn = entry
+    if not isinstance(fn, types.FunctionType) or not decorations(fn).resolvers:
+        return entry
+    return module, attribute, _resolve.resolved(fn, config)
+
+
+def _injected(
+    fn: Callable[..., object],
+    name: str,
+    rows: Mapping[str, Mapping[str, Binding]] | None,
+    bind: Mapping[str, Binding] | None,
+) -> tuple[Mapping[str, Mapping[str, Binding]] | None, Mapping[str, str | None]]:
+    """The rows of a function `@inject` binds: one, named as its node (Q109).
+
+    Also the row's templated docstring. Otherwise `rows` as they are, no docs.
+    """
+    injected = decorations(fn).injected
+    if injected is None or bind is not None:
+        return rows, dict[str, str | None]()
+    made = {name: injected}
+    return made, _templated(fn, made, set())
 
 
 def _selected(
