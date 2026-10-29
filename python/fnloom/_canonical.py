@@ -25,6 +25,9 @@ _FORMAT = "fnloom.canonical/1"
 class UnwritableError(Exception):
     """A value too deep, or holding itself, for a canonical form."""
 
+    def __init__(self) -> None:
+        super().__init__("a value holding itself, or nested past 100 levels")
+
 
 def stable_fingerprint(value: object) -> bytes:
     """`value`'s 32-byte fingerprint, the same on every hash seed.
