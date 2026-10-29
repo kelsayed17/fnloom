@@ -366,11 +366,14 @@ Q98).
 - **Export text is the same in every process.** A config value's or `value()` binding's text is `stable_repr`: sets
   sorted, and the address in a default `repr` dropped. A `value()` holding a set is hashed into `graph_version` by that
   sorted text, since a set of strings' fingerprint follows the hash seed; one holding an object known only by its
-  address makes `graph_version` `null`. A function reading a global `frozenset` of strings keeps the result cache's
+  address makes `graph_version` `null`. (The PR review replaced the sorted-text hash with a canonical form: see
+  below.) A function reading a global `frozenset` of strings keeps the result cache's
   limit (its code version follows the seed); the guide says so.
 - **Maintainer's review of the PR.** Five fixes, each with a regression test:
-    - **`diff` sees a value its text hides.** Each `value()` parameter exports a `value_version`: its fingerprint, or a
-      hash of its sorted text when it holds a set. `diff` compares it with the rest of `params`, so an array changed
+    - **`diff` sees a value its text hides.** Each `value()` parameter exports a `value_version`: its fingerprint, or,
+      when it holds a set, a hash of a canonical form built from its parts (each set-free part by its fingerprint, each
+      set's members sorted, each container by its type, a dataclass by its class version and every field, `repr=False`
+      ones included), never from its text. `diff` compares it with the rest of `params`, so an array changed
       past its `repr`'s elision shows as changed. A value with no version makes its node `unversioned`. `diff` also
       reports `graph_version_changed`, and warns when the graph versions differ though no entry does; either makes the
       CLI's status 1.
@@ -381,6 +384,9 @@ Q98).
       `--outputs`, or on `draw` without `--execution`, exit 2 rather than being dropped.
     - **Formats in any case.** `render` lowercases `format` as well as the suffix; the CLI prints `mmd` and `gv` to
       stdout like `mermaid` and `dot`.
+    - **A value whose own code raises, or nested past 100 levels,** is written `<unrepresentable T>` and has no
+      version, so its node is unversioned rather than crashing `export`.
+    - **`export`'s no-run check reads the merged request**, so outputs from `--context` count.
     - **`main` returns a status when a loaded module calls `sys.exit`**, and a refused file leaves `sys.path` alone. A
       `.py` file loaded by an earlier `main` call in the process is used again, not reloaded.
 - **Pinned versions.** A `@cache(version="v1")` function exports a version hashed from the pin and `"pinned": "v1"`,

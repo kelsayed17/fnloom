@@ -14,7 +14,7 @@ import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from fnloom._codeversion import UncacheableError, code_version
+from fnloom._codeversion import UncacheableError, class_version, code_version
 from fnloom._decorators import Source, Value, decorations
 from fnloom._drawing import condition_text
 from fnloom._fingerprint import fingerprint
@@ -65,7 +65,16 @@ def export(  # noqa: PLR0913  # one argument per part of the document
 _ADDRESS = re.compile(r" at 0x[0-9a-fA-F]+")
 
 
-def stable_repr(value: object, seen: frozenset[int] = frozenset()) -> str:  # noqa: PLR0911  # one return per kind
+# How deep `stable_repr` and `value_version` look into a value: past it, a value is
+# written as unrepresentable and has no version, rather than exhausting the stack.
+_DEPTH = 100
+
+
+class _UnwritableError(Exception):
+    """A value too deep, or holding itself, for a canonical form."""
+
+
+def stable_repr(value: object) -> str:
     """`repr(value)`, the same in every process: sets sorted, addresses dropped.
 
     A set's members come in the order the hash seed gives, and an object's
@@ -73,24 +82,31 @@ def stable_repr(value: object, seen: frozenset[int] = frozenset()) -> str:  # no
     Sets, mappings, lists, tuples, named tuples and dataclass instances are
     written part by part, so a set inside any of them is sorted too; anything
     else is its own `repr`, its addresses dropped. A container holding itself
-    shows `...` there, as `repr` does.
+    shows `...` there, as `repr` does. A value nested past 100 levels, or whose
+    own `__iter__`, `__repr__` or the like raises, is `<unrepresentable T>`.
     """
+    try:
+        return _written(value, frozenset(), 0)
+    except Exception:  # noqa: BLE001  # the value's own code raised, or too deep
+        return f"<unrepresentable {type(value).__qualname__}>"
+
+
+def _written(value: object, seen: frozenset[int], depth: int) -> str:  # noqa: PLR0911  # one return per kind
+    if depth > _DEPTH:
+        raise _UnwritableError
     if id(value) in seen:
         return "..."
     inner = seen | {id(value)}
     name = type(value).__name__
 
     def each(items: Iterable[object]) -> list[str]:
-        return [stable_repr(item, inner) for item in items]
+        return [_written(item, inner, depth + 1) for item in items]
 
     if isinstance(value, (set, frozenset)):
-        members = ", ".join(sorted(each(value)))
-        if type(value) is set:
-            return f"{{{members}}}" if value else "set()"
-        return f"{name}({{{members}}})" if value else f"{name}()"
+        return _written_set(value, sorted(each(value)))
     if isinstance(value, Mapping):
         pairs = ", ".join(
-            f"{stable_repr(k, inner)}: {stable_repr(v, inner)}"
+            f"{_written(k, inner, depth + 1)}: {_written(v, inner, depth + 1)}"
             for k, v in value.items()
         )
         return f"{{{pairs}}}" if type(value) is dict else f"{name}({{{pairs}}})"
@@ -103,7 +119,8 @@ def stable_repr(value: object, seen: frozenset[int] = frozenset()) -> str:  # no
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         shown = [f for f in dataclasses.fields(value) if f.repr]
         named = ", ".join(
-            f"{f.name}={stable_repr(getattr(value, f.name), inner)}" for f in shown
+            f"{f.name}={_written(getattr(value, f.name), inner, depth + 1)}"
+            for f in shown
         )
         return f"{name}({named})"
     if isinstance(value, list):
@@ -116,19 +133,32 @@ def stable_repr(value: object, seen: frozenset[int] = frozenset()) -> str:  # no
     return _ADDRESS.sub("", repr(value))
 
 
+def _written_set(value: set[object] | frozenset[object], members: list[str]) -> str:
+    """A set as `repr` writes it, its members already written and sorted."""
+    listed = ", ".join(members)
+    if type(value) is set:
+        return f"{{{listed}}}" if value else "set()"
+    name = type(value).__name__
+    return f"{name}({{{listed}}})" if value else f"{name}()"
+
+
 def _parts(value: object) -> list[object]:
-    """What `stable_repr` writes `value` from, or `[]` for a value it writes whole."""
+    """The parts `value` is written and versioned from, or `[]` for a whole value.
+
+    A dataclass instance's parts are all its fields, `repr=False` ones included:
+    they hold state as much as the others do.
+    """
     if isinstance(value, (set, frozenset, list, tuple)):
         return list(value)
     if isinstance(value, Mapping):
         return [part for pair in value.items() for part in pair]
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return [getattr(value, f.name) for f in dataclasses.fields(value) if f.repr]
+        return [getattr(value, f.name) for f in dataclasses.fields(value)]
     return []
 
 
 def _holds_a_set(value: object) -> bool:
-    """Whether `value` is or holds a set, anywhere `stable_repr` looks."""
+    """Whether `value` is or holds a set, anywhere `_parts` reaches."""
     waiting, seen = [value], set[int]()
     while waiting:
         current = waiting.pop()
@@ -144,19 +174,44 @@ def _holds_a_set(value: object) -> bool:
 def value_version(value: object) -> str | None:
     """A `value()` binding's version: what `graph_version` and `diff` compare.
 
-    Its fingerprint in hex; for a value holding a set, whose fingerprint follows
-    the hash seed, a hash of its `stable_repr` instead. `None` when it has no
-    fingerprint, or holds a set beside something known only by its address.
+    Its fingerprint in hex. A set's fingerprint follows the hash seed, so a
+    value holding one is versioned from a canonical form instead: each part
+    with no set in it by its own fingerprint, each set as its members' forms
+    sorted, and each container by its type and parts, a dataclass by its class
+    version and every field. Nothing is read from text, so a change a `repr`
+    elides is still seen. `None` when any part has no fingerprint, the value
+    holds itself or is nested past 100 levels, or its own code raises: such a
+    value's node is unversioned, never unchanged.
     """
-    if _holds_a_set(value):
-        if _ADDRESS.search(repr(value)):
-            return None
-        text = json.dumps([FORMAT, "text", stable_repr(value)])
-        return hashlib.sha256(text.encode()).hexdigest()
     try:
-        return fingerprint(value).hex()
-    except Exception:  # noqa: BLE001  # unfingerprintable: no version
+        if not _holds_a_set(value):
+            return fingerprint(value).hex()
+        canonical = _canonical(value, frozenset(), 0)
+    except Exception:  # noqa: BLE001  # no fingerprint, too deep, or the value raised
         return None
+    text = json.dumps([FORMAT, "canonical", canonical])
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+def _canonical(value: object, seen: frozenset[int], depth: int) -> object:
+    """`value` as JSON-ready parts, the same in every process; raises if it can't be."""
+    if depth > _DEPTH or id(value) in seen:
+        raise _UnwritableError
+    if not _holds_a_set(value):
+        return ["fingerprint", fingerprint(value).hex()]
+    inner = seen | {id(value)}
+    parts = [_canonical(part, inner, depth + 1) for part in _parts(value)]
+    kind = _type_version(type(value))
+    if isinstance(value, (set, frozenset)):
+        return ["set", kind, sorted(json.dumps(part) for part in parts)]
+    return ["parts", kind, parts]
+
+
+def _type_version(cls: type) -> str:
+    """A builtin type by name; any other by its class version, as the cache has it."""
+    if cls.__module__ == "builtins":
+        return cls.__qualname__
+    return class_version(cls).hex()
 
 
 def type_text(annotation: object) -> str:

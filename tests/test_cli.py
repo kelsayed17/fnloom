@@ -535,3 +535,20 @@ def test_a_refused_file_leaves_sys_path_alone(
     status, _, _ = _run(capsys, "draw", str(path))
     assert status == 2  # noqa: PLR2004  # a usage error
     assert sys.path == before
+
+
+def test_outputs_from_a_context_file_make_a_run(
+    flow: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--input` with the outputs in `--context` is a run, not a usage error."""
+    context = tmp_path / "ctx.toml"
+    context.write_text('outputs = ["a"]\n')
+    status, out, err = _run(
+        capsys, "export", str(flow), "--context", str(context), "--input", "x=1"
+    )
+    assert (status, err) == (0, "")
+    assert json.loads(out)["request"] == {
+        "outputs": ["a"],
+        "inputs": ["x"],
+        "overrides": [],
+    }

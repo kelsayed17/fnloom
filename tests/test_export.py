@@ -5,6 +5,7 @@ import os
 import subprocess
 import sys
 import textwrap
+import typing
 from typing import Any
 
 import pytest
@@ -553,3 +554,89 @@ def test_a_value_known_only_by_its_address_is_unversioned() -> None:
     assert found["unversioned"] == ["held"]
     assert found["changed"] == {}
     assert old["graph_version"] is None
+
+
+_CANONICAL = """
+import dataclasses
+
+import numpy as np
+
+from fnloom import parameterize, value
+
+@dataclasses.dataclass(frozen=True)
+class W:
+    tags: frozenset
+    arr: object = dataclasses.field(compare=False)
+
+@dataclasses.dataclass(frozen=True)
+class H:
+    tags: frozenset
+    secret: int = dataclasses.field(repr=False)
+
+@parameterize(
+    wide={{"held": value(W(frozenset({{"a"}}), {array}))}},
+    hidden={{"held": value(H(frozenset({{"a"}}), {secret}))}},
+)
+def hold(x: int, held: object) -> int:
+    return x
+"""
+
+
+def test_a_set_holding_value_is_versioned_from_its_parts_not_its_text() -> None:
+    """An elided array element or a `repr=False` field still changes the version."""
+    pytest.importorskip("numpy")
+    base = {"array": "np.arange(2000)", "secret": "1"}
+    old = _driver(_CANONICAL.format(**base), "exported_canonical").export()
+    changed_array = {
+        **base,
+        "array": "np.where(np.arange(2000) == 1000, 7, np.arange(2000))",
+    }
+    changed_secret = {**base, "secret": "2"}
+    for change, expected in ((changed_array, "wide"), (changed_secret, "hidden")):
+        new = _driver(_CANONICAL.format(**change), "exported_canonical").export()
+        before = _nodes(old)[expected]["params"][1]
+        after = _nodes(new)[expected]["params"][1]
+        assert before["value"] == after["value"], expected
+        assert before["value_version"] != after["value_version"], expected
+        found = _export.diff(old, new)
+        assert found["changed"] == {expected: ["params"]}
+        assert found["graph_version_changed"] is True
+
+
+class _Raising(dict[str, object]):
+    """A mapping whose iteration raises, as a broken user mapping might."""
+
+    @typing.override
+    def __iter__(self) -> typing.Iterator[str]:
+        raise RuntimeError(_NO_ITERATING)
+
+    @typing.override
+    def items(self) -> typing.Never:
+        raise RuntimeError(_NO_ITERATING)
+
+
+_NO_ITERATING = "no iterating"
+
+
+def test_a_value_that_raises_or_is_too_deep_is_unversioned() -> None:
+    """No crash: written as unrepresentable, with no version."""
+    raising = _Raising()
+    assert _export.stable_repr(raising) == "<unrepresentable _Raising>"
+    assert _export.value_version(raising) is None
+    deep: list[object] = [frozenset({"a"})]
+    for _ in range(3000):
+        deep = [deep]
+    assert _export.stable_repr(deep) == "<unrepresentable list>"
+    assert _export.value_version(deep) is None
+    module = make_module(
+        "exported_deep",
+        "from fnloom import parameterize, value\n"
+        "DEEP = []\n"
+        "@parameterize(held={'v': value(DEEP)})\n"
+        "def hold(x: int, v: object) -> int:\n"
+        "    return x\n",
+    )
+    module.DEEP.append(deep)
+    document = fnloom.build(module).export()
+    assert _nodes(document)["held"]["params"][1]["value_version"] is None
+    assert document["graph_version"] is None

@@ -293,9 +293,10 @@ def _draw(args: argparse.Namespace) -> int:
 
 
 def _export_command(args: argparse.Namespace) -> int:
-    if not args.outputs:
-        _refuse_run_flags(args, "they describe a run: give --outputs too")
     request = _Request(args)
+    if not request.outputs:
+        # The outputs may come from --context: only the merged request says.
+        _refuse_run_flags(args, "they describe a run: give --outputs too")
     if request.outputs:
         document = request.driver.export(
             request.outputs, **request.run(), validate=not args.no_validate
