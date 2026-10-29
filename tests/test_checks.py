@@ -1,8 +1,10 @@
 """Output checks: the built-ins, custom checks, failing and warning, and caching."""
 
 import asyncio
+import contextlib
+import importlib
 import logging
-from typing import TYPE_CHECKING, cast, override
+from typing import TYPE_CHECKING, Any, cast, override
 
 import pytest
 
@@ -12,6 +14,21 @@ from helpers import make_module
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+
+
+# Imported once, here: the helpers forget modules a test imports, and numpy
+# can't be imported twice in one process.
+_LIBRARIES: dict[str, object] = {}
+for _name in ("numpy", "pandas"):
+    with contextlib.suppress(ImportError):
+        _LIBRARIES[_name] = importlib.import_module(_name)
+
+
+def _loaded(name: str) -> Any:  # noqa: ANN401  # the library module
+    """`name`'s module, or a skip when it isn't installed."""
+    if name not in _LIBRARIES:
+        pytest.skip(f"{name} is not installed")
+    return _LIBRARIES[name]
 
 
 class Recorder(fnloom.Hook):
@@ -210,20 +227,20 @@ from fnloom import check_output
 def a(x: int) -> Iterator[int]:
     return iter([x])
 """
-    with pytest.raises(TypeError, match="a: check range would consume a one-shot"):
+    with pytest.raises(TypeError, match="a: its checks would consume a one-shot"):
         _driver(annotated, "one_shot_annotated")
     hidden = annotated.replace("-> Iterator[int]", "-> object").replace(
         "from collections.abc import Iterator\n", ""
     )
     driver = _driver(hidden, "one_shot_hidden")
-    with pytest.raises(TypeError, match="check range would consume a one-shot"):
+    with pytest.raises(TypeError, match="a: its value is a one-shot iterator"):
         driver.execute(["a"], inputs={"x": 1})
 
 
 def test_numpy_and_pandas_are_checked_vectorised() -> None:
     """Through their own min, max, isin and NaN tests, without changing the value."""
-    numpy = pytest.importorskip("numpy")
-    pandas = pytest.importorskip("pandas")
+    numpy = _loaded("numpy")
+    pandas = _loaded("pandas")
     module = make_module(
         "vector_checked",
         "from typing import Any\ndef a(v: Any) -> Any:\n    return v\n",
@@ -582,3 +599,212 @@ def test_node_end_checks_default_is_empty() -> None:
         "def a(x: int) -> int:\n    return x\n", "plain", with_hooks=recorder
     ).execute(["a"], inputs={"x": 1})
     assert recorder.ends["a"].checks == ()
+
+
+def _any_module(name: str) -> object:
+    return make_module(
+        name, "from typing import Any\ndef a(v: Any) -> Any:\n    return v\n"
+    )
+
+
+def test_vectorised_range_on_empty_values_and_nan() -> None:
+    """Empty passes in every container; NaN is outside the range in every one."""
+    numpy = _loaded("numpy")
+    pandas = _loaded("pandas")
+    module = _any_module("range_edges")
+    check_output(range=(0, 10))(module.a)  # ty: ignore[unresolved-attribute]
+    driver = fnloom.build(module)  # ty: ignore[invalid-argument-type]
+    for empty in (
+        [],
+        numpy.array([]),
+        pandas.Series([], dtype=float),
+        pandas.DataFrame(),
+    ):
+        driver.execute(["a"], inputs={"v": empty})
+    for with_nan in (
+        [1.0, float("nan")],
+        numpy.array([1.0, numpy.nan]),
+        pandas.Series([1.0, numpy.nan]),
+    ):
+        with pytest.raises(ValidationError):
+            driver.execute(["a"], inputs={"v": with_nan})
+
+
+def test_values_that_cannot_be_compared_fail_the_check() -> None:
+    """A mixed frame, an object array and Decimal NaN: a failed check, not a crash."""
+    numpy = _loaded("numpy")
+    pandas = _loaded("pandas")
+    from decimal import Decimal  # noqa: PLC0415  # this test's own value
+
+    module = _any_module("uncomparable")
+    check_output(range=(0, 10))(module.a)  # ty: ignore[unresolved-attribute]
+    driver = fnloom.build(module)  # ty: ignore[invalid-argument-type]
+    for bad in (
+        pandas.DataFrame({"p": [1], "q": ["x"]}),
+        numpy.array([1, "a"], dtype=object),
+        Decimal("NaN"),
+    ):
+        with pytest.raises(ValidationError):
+            driver.execute(["a"], inputs={"v": bad})
+
+
+def test_values_in_with_mixed_allowed_values_on_numpy() -> None:
+    """Numpy doesn't turn the allowed values into strings."""
+    numpy = _loaded("numpy")
+    module = _any_module("mixed_allowed")
+    check_output(values_in=[1, "a"])(module.a)  # ty: ignore[unresolved-attribute]
+    driver = fnloom.build(module)  # ty: ignore[invalid-argument-type]
+    driver.execute(["a"], inputs={"v": numpy.array([1])})
+    driver.execute(["a"], inputs={"v": [1, "a"]})
+
+
+def test_a_nested_unhooked_run_does_not_leak_its_results() -> None:
+    """A checked driver run inside a hooked node reports nothing to the outer run."""
+    inner = fnloom.build(make_module("inner_checked", RANGED))
+
+    def a(x: int) -> int:
+        return cast("int", inner.execute(["a"], inputs={"x": x})["a"])
+
+    recorder = Recorder()
+    outer = fnloom.Builder().with_functions(a).with_hooks(recorder).build()
+    assert outer.execute(["a"], inputs={"x": 1}) == {"a": 1}
+    assert recorder.ends["a"].checks == ()
+
+
+def test_results_reach_the_event_from_executor_and_async_nodes() -> None:
+    """On the async driver, sync nodes run in the executor and async nodes alike."""
+    source = (
+        RANGED
+        + """
+@check_output(range=(0, 10))
+async def b(x: int) -> int:
+    return x
+"""
+    )
+    recorder = Recorder()
+    driver = (
+        fnloom.Builder()
+        .with_modules(make_module("async_results", source))
+        .with_hooks(recorder)
+        .build_async()
+    )
+    asyncio.run(driver.execute(["a", "b"], inputs={"x": 1}))
+    assert [c.name for c in recorder.ends["a"].checks] == ["range"]
+    assert [c.name for c in recorder.ends["b"].checks] == ["range"]
+
+
+def test_the_collector_is_reset_when_before_run_raises() -> None:
+    """A failed run leaves no collector behind."""
+
+    class Refuses(fnloom.Hook):
+        @override
+        def before_run(self, event: fnloom.RunStart) -> None:
+            del event
+            msg = "no"
+            raise RuntimeError(msg)
+
+        @override
+        def after_node(self, event: fnloom.NodeEnd) -> None:
+            del event
+
+    driver = _driver(RANGED, "reset", with_hooks=Refuses())
+    with pytest.raises(RuntimeError, match="no"):
+        driver.execute(["a"], inputs={"x": 1})
+    assert fnloom._checks.RESULTS.get() is None  # noqa: SLF001  # the collector itself
+
+
+def test_one_shot_annotations_refuse_every_check() -> None:
+    """A union arm too, and custom checks too (amended Q101)."""
+    for index, (annotation, decorator) in enumerate(
+        (
+            ("Iterator[int] | None", "check_output(allow_none=False)"),
+            ("Iterator[int]", "check_output_custom(_count)"),
+        )
+    ):
+        source = f"""
+from collections.abc import Iterator
+from fnloom import check_output, check_output_custom
+
+def _count(v) -> bool:
+    return sum(1 for _ in v) > 0
+
+@{decorator}
+def a(x: int) -> {annotation}:
+    return iter([x])
+"""
+        with pytest.raises(TypeError, match="a: its checks would consume a one-shot"):
+            _driver(source, f"one_shot_{index}")
+
+
+def test_a_one_shot_value_is_refused_at_run_naming_the_node() -> None:
+    """Before any check, custom ones included, could consume it."""
+    module = _any_module("one_shot_custom")
+    seen: list[object] = []
+    fnloom.check_output_custom(lambda v: seen.append(v) or True)(module.a)  # ty: ignore[unresolved-attribute]
+    driver = fnloom.build(module)  # ty: ignore[invalid-argument-type]
+    with pytest.raises(TypeError, match="a: its value is a one-shot iterator"):
+        driver.execute(["a"], inputs={"v": iter([1, 2])})
+    assert seen == []
+
+
+def test_a_check_that_raises_fails_the_node_noting_the_check() -> None:
+    """Its own error, with a note naming it, even at warn (Q102)."""
+
+    def _broken(value: int) -> bool:
+        raise ZeroDivisionError(value)
+
+    module = make_module("broken_check", "def a(x: int) -> int:\n    return x\n")
+    fnloom.check_output_custom(_broken, importance="warn")(module.a)
+    with pytest.raises(ZeroDivisionError) as caught:
+        fnloom.build(module).execute(["a"], inputs={"x": 1})
+    assert "in check _broken" in caught.value.__notes__
+
+
+def test_allow_none_true_lets_none_pass_every_check() -> None:
+    """With `allow_none=True`, None skips the node's other checks."""
+    module = _any_module("allow_none")
+    check_output(range=(0, 10), allow_none=True)(module.a)  # ty: ignore[unresolved-attribute]
+    driver = fnloom.build(module)  # ty: ignore[invalid-argument-type]
+    assert driver.execute(["a"], inputs={"v": None}) == {"a": None}
+    with pytest.raises(ValidationError):
+        driver.execute(["a"], inputs={"v": 11})
+
+
+def test_nan_range_bounds_are_refused() -> None:
+    """When decorating."""
+    with pytest.raises(ValueError, match="must not be NaN"):
+        check_output(range=(float("nan"), 1))
+
+
+def test_a_validator_skipping_init_defaults_to_fail() -> None:
+    """`importance` has a class default."""
+
+    class Lazy(Validator):
+        def __init__(self) -> None:
+            pass
+
+        @override
+        def validate(self, value: object, inputs: Mapping[str, object]) -> bool:
+            del inputs
+            return value == 1
+
+    module = make_module("lazy_validator", "def a(x: int) -> int:\n    return x\n")
+    fnloom.check_output_custom(Lazy())(module.a)
+    with pytest.raises(ValidationError):
+        fnloom.build(module).execute(["a"], inputs={"x": 2})
+
+
+def test_changing_a_check_s_importance_misses() -> None:
+    """Importance is part of the key too."""
+    store = fnloom.MemoryCache()
+
+    def built(importance: str) -> fnloom.Driver:
+        source = RANGED.replace(
+            "range=(0, 10)", f"range=(0, 10), importance={importance!r}"
+        )
+        module = make_module("importance_keyed", source)
+        return fnloom.Builder().with_modules(module).with_cache(store).build()
+
+    built("fail").execute(["a"], inputs={"x": 1})
+    assert built("fail").explain_cache(["a"], inputs={"x": 1})["a"].status == "hit"
+    assert built("warn").explain_cache(["a"], inputs={"x": 1})["a"].status == "miss"

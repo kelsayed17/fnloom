@@ -2,10 +2,12 @@
 
 import asyncio
 import copy
+import importlib.util
 import inspect
 import json
 import pickle
 import re
+import sys
 from typing import TYPE_CHECKING, Any, cast, override
 
 import pytest
@@ -39,6 +41,7 @@ from helpers import make_module
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Sequence
+    from pathlib import Path
     from types import ModuleType
 
 
@@ -184,6 +187,68 @@ def _boxed(nodes: Sequence[tuple[str, str, object]]) -> set[str]:
         else:
             found.add(name)
     return found
+
+
+_STEPPED = """
+from {package} import pipe_input, pipe_output, source, step, value
+
+def _add(v: int, n: int) -> int:
+    return v + n
+
+def _sum(v: int, other: int) -> int:
+    return v + other
+
+@pipe_input(step(_add, n=value(1)), step(_add, n=2), step(_sum, other=source("y")))
+def fed(x: int) -> int:
+    return x * 10
+
+@pipe_output(step(_add, n=1), step(_add, n=value(5)).named("last"))
+def piped(x: int) -> int:
+    return x
+"""
+
+
+def test_steps_make_the_same_nodes_and_values(tmp_path: Path) -> None:
+    """Names, wiring and values of a shared step graph (KEEP, Q104)."""
+    hamilton_module = _file_module(
+        tmp_path, "stepped_h", _STEPPED.format(package="hamilton.function_modifiers")
+    )
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    built = fnloom.build(make_module("stepped_f", _STEPPED.format(package="fnloom")))
+    hamilton_deps = {
+        v.name: sorted(v.required_dependencies | v.optional_dependencies)
+        for v in hamilton.list_available_variables()
+        if not v.is_external_input
+    }
+    fnloom_deps = {
+        name: sorted(built.nodes[name].dependencies)
+        for name in built.node_names()
+        if not built.nodes[name].is_input
+    }
+    assert fnloom_deps == hamilton_deps
+    outputs: list[str | Callable[..., object]] = [
+        "fed",
+        "piped",
+        "piped.raw",
+        "fed.with_add_1",
+    ]
+    inputs = {"x": 2, "y": 100}
+    assert built.execute(outputs, inputs=inputs) == hamilton.execute(
+        cast("Any", outputs), inputs=inputs
+    )
+
+
+def _file_module(folder: Path, name: str, source: str) -> ModuleType:
+    """`source` as a module loaded from a file, so Hamilton can read its source."""
+    path = folder / f"{name}.py"
+    path.write_text(source)
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 
 _CHECKED = """

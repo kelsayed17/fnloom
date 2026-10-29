@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from fnloom._checks import Check
     from fnloom._config import ConfigPolicy
     from fnloom._extract import Extraction
+    from fnloom._steps import PipeInput, Step
 
 _ATTRIBUTE = "__fnloom__"
 
@@ -104,7 +105,7 @@ class Decorations:
     """What the decorators recorded on one function.
 
     Its rows, tags, cache policy, config conditions, extraction, defaults, whether
-    `@exclude` marked it, and its output checks, in the order they run.
+    `@exclude` marked it, its output checks, in the order they run, and its steps.
     """
 
     rows: Mapping[str, Mapping[str, Binding]] | None
@@ -116,6 +117,8 @@ class Decorations:
     excluded: bool = False
     docs: Mapping[str, str | None] = MappingProxyType[str, str | None]({})
     checks: tuple[Check, ...] = ()
+    pipe_input: PipeInput | None = None
+    pipe_output: tuple[Step, ...] = ()
 
 
 def source(name: str) -> Source:

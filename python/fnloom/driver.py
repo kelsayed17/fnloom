@@ -26,7 +26,7 @@ from typing import (
     override,
 )
 
-from fnloom import _async, _checks, _core, _hooks, _types
+from fnloom import _async, _checks, _core, _hooks, _steps, _types
 from fnloom._caching import Cache, CacheOutcome, CacheRun
 from fnloom._decorators import Source
 from fnloom._defaults import default_problems
@@ -626,7 +626,10 @@ class _HookedPlan[R](PreparedPlan[R]):
         given_inputs, given_overrides, mismatches = self._opened(inputs, overrides)
         plan = self._plan
         cached = isinstance(plan, CacheRun)
-        dispatch = _hooks.Dispatch(self._hooks, self._views, {} if cached else None)
+        owner = None if self._driver is None else self._driver._checks_owner  # noqa: SLF001  # the plan's own driver
+        dispatch = _hooks.Dispatch(
+            self._hooks, self._views, {} if cached else None, checks_owner=owner
+        )
         error: BaseException | None = None
         try:
             if mismatches:
@@ -855,6 +858,8 @@ class Driver[R = dict[str, object]]:
         self._last: _LastRequest[R] | None = None
         # The builder that built this driver, which pickling rebuilds it from.
         self._builder: Builder[R] | None = None
+        # What its nodes' output checks report results under: see `_checks`.
+        self._checks_owner: object = None
 
     @override
     def __reduce__(
@@ -911,6 +916,7 @@ class Driver[R = dict[str, object]]:
         copied._builder = self._builder
         copied._unmatched = self._unmatched
         copied._left_out = self._left_out
+        copied._checks_owner = self._checks_owner
         return copied
 
     @property
@@ -1801,7 +1807,11 @@ class _HookedAsyncPlan[R](AsyncPreparedPlan[R]):
         schedule = self._schedule
         cached = isinstance(schedule, _async.CachedSchedule)
         hooks, views = prepared._hooks, prepared._views  # noqa: SLF001  # the plan this wraps
-        dispatch = _hooks.Dispatch(hooks, views, {} if cached else None)
+        driver = prepared._driver  # noqa: SLF001  # the plan this wraps
+        owner = None if driver is None else driver._checks_owner  # noqa: SLF001  # its driver
+        dispatch = _hooks.Dispatch(
+            hooks, views, {} if cached else None, checks_owner=owner
+        )
         error: BaseException | None = None
         try:
             if mismatches:
@@ -2745,10 +2755,10 @@ class Builder[R = dict[str, object]]:
         variants, or a node that a node reads and that no variant or
         `@config.default` gives, are a `ValueError` naming each (Q57, Q58).
         """
-        nodes, views, graph, unmatched, left_out = self._scanned(awaits=False)
+        nodes, views, graph, unmatched, left_out, owner = self._scanned(awaits=False)
         # Called here, so a `CacheWarning` points at the caller's `build`.
         cache = None if self._store is None else Cache.of(self._store, nodes)
-        return self._driver(graph, views, unmatched, left_out, cache)
+        return self._driver(graph, views, unmatched, left_out, cache, owner)
 
     def build_async(
         self, *, sync_nodes: Literal["thread", "inline"] = "thread"
@@ -2767,11 +2777,11 @@ class Builder[R = dict[str, object]]:
         or that a failure cancels, stores nothing. Store calls run on the loop.
         """
         checked = _async.checked_sync_nodes(sync_nodes)
-        nodes, views, graph, unmatched, left_out = self._scanned(awaits=True)
+        nodes, views, graph, unmatched, left_out, owner = self._scanned(awaits=True)
         # Called here, so a `CacheWarning` points at the caller's `build_async`.
         cache = None if self._store is None else Cache.of(self._store, nodes)
         built = AsyncDriver(
-            self._driver(graph, views, unmatched, left_out, cache),
+            self._driver(graph, views, unmatched, left_out, cache, owner),
             {node.name: node for node in nodes},
             sync_nodes=checked,
         )
@@ -2780,8 +2790,11 @@ class Builder[R = dict[str, object]]:
 
     def _scanned(
         self, *, awaits: bool
-    ) -> tuple[list[NodeDef], NodeViews, _core.Graph, dict[str, str], LeftOut]:
+    ) -> tuple[list[NodeDef], NodeViews, _core.Graph, dict[str, str], LeftOut, object]:
         """The checked nodes, their views and graph; see `build`.
+
+        Last, the token the nodes' output checks report their results under, so
+        only a run of this build's driver collects them.
 
         Also why each node no variant gave is absent, and each function `@exclude` or
         `__all__` left out. With `awaits`, an
@@ -2797,6 +2810,8 @@ class Builder[R = dict[str, object]]:
         nodes = _checks.attached(
             resolve(scanned.nodes, self._rules, self._value_checks)
         )
+        nodes, stepped = _steps.lowered(nodes, self._config)
+        _checks.refuse_unreadable(nodes)
         unmatched = scanned.unmatched
         if unmatched:
             # A field of a forward-referenced `TypedDict` is first known resolved.
@@ -2805,14 +2820,16 @@ class Builder[R = dict[str, object]]:
             if absent := _unmatched_edges(nodes, unmatched):
                 raise ValueError(absent)
         views = node_views(
-            nodes, frozenset(node.name for node in nodes if is_generated(node))
+            nodes,
+            stepped | frozenset(node.name for node in nodes if is_generated(node)),
         )
         if self._output_type_checks:
             nodes = _output_checked(
                 nodes, self._rules, self._value_checks, awaits=awaits
             )
         # Outside the type check: a check reads a value of the declared type.
-        nodes = _checks.wrapped(nodes, awaits=awaits)
+        owner = object()
+        nodes = _checks.wrapped(nodes, awaits=awaits, owner=owner)
         graph = _graph_of(nodes)
         if mismatches := _edge_mismatches(views.functions):
             raise ValueError("\n".join(mismatches))
@@ -2822,15 +2839,16 @@ class Builder[R = dict[str, object]]:
             refused := _undeclared(views, self._declared_inputs)
         ):
             raise ValueError("\n".join(refused))
-        return nodes, views, graph, unmatched, scanned.left_out
+        return nodes, views, graph, unmatched, scanned.left_out, owner
 
-    def _driver(
+    def _driver(  # noqa: PLR0913, PLR0917  # the build's parts, passed on
         self,
         graph: _core.Graph,
         views: NodeViews,
         unmatched: dict[str, str],
         left_out: LeftOut,
         cache: Cache | None,
+        owner: object,
     ) -> Driver[R]:
         """This builder's driver over a scanned graph."""
         driver = Driver(
@@ -2849,6 +2867,7 @@ class Builder[R = dict[str, object]]:
         driver._modules = tuple(dict.fromkeys(self._modules))  # noqa: SLF001  # the builder's own driver
         driver._unmatched = unmatched  # noqa: SLF001  # the builder's own driver
         driver._left_out = left_out  # noqa: SLF001  # the builder's own driver
+        driver._checks_owner = owner  # noqa: SLF001  # the builder's own driver
         driver._builder = self  # noqa: SLF001  # the builder's own driver
         return driver
 

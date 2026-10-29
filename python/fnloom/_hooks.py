@@ -301,6 +301,7 @@ class Dispatch:
         "_hooks",
         "_kwargs",
         "_node_error",
+        "_owner",
         "_results",
         "_start",
         "_started",
@@ -314,8 +315,13 @@ class Dispatch:
         hooks: Hooks,
         views: Views,
         outcomes: dict[str, CacheOutcome] | None,
+        *,
+        checks_owner: object = None,
     ) -> None:
         """A run of `hooks`, reporting the nodes of `views`.
+
+        `checks_owner` is the token the driver's output checks report their
+        results under; a check of another driver, run inside a node, can't.
 
         `outcomes` are the nodes' cache outcomes, `None` on a driver with no cache.
         A cached run fills it, level by level, as `loaded` hears of each level.
@@ -323,6 +329,7 @@ class Dispatch:
         self._hooks = hooks
         self._views = views
         self.outcomes = outcomes
+        self._owner = checks_owner
         self._start: RunStart | None = None
         # The hook errors so far, in event order, then hook order.
         self._errors: list[BaseException] = []
@@ -333,9 +340,7 @@ class Dispatch:
         self._started: Mapping[str, object] | None = None
         # Each checked node's check results, collected while the run is on.
         self._results: dict[str, tuple[CheckResult, ...]] | None = None
-        self._token: (
-            contextvars.Token[dict[str, tuple[CheckResult, ...]] | None] | None
-        ) = None
+        self._token: contextvars.Token[_checks.Sink | None] | None = None
 
     def observers(self) -> tuple[_core.ObserverBase, ...]:
         """What the core run is given: one observer when node events are wanted."""
@@ -381,9 +386,13 @@ class Dispatch:
 
         When `after_node` is wanted, the run's checks report their results here.
         """
-        if self._hooks.after_node and self._token is None:
-            self._results = {}
-            self._token = _checks.RESULTS.set(self._results)
+        if self._token is None:
+            # Set even when nothing is collected, so a run enclosing this one
+            # never collects this run's checks.
+            wanted = bool(self._hooks.after_node) and self._owner is not None
+            self._results = {} if wanted else None
+            sink = None if self._results is None else (self._owner, self._results)
+            self._token = _checks.RESULTS.set(sink)
         start = RunStart(
             run_id=uuid.uuid4().hex,
             outputs=outputs,

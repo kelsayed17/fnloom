@@ -17,6 +17,7 @@ import inspect
 import logging
 import math
 import sys
+import types
 import typing
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field, replace
@@ -89,6 +90,7 @@ class Validator:
     """
 
     name: str = ""
+    importance: Importance = "fail"
 
     def __init__(self, importance: Importance = "fail") -> None:
         """A check failing the node (`"fail"`) or logging a warning (`"warn"`)."""
@@ -190,24 +192,53 @@ def _vectorised(value: object, method: str) -> bool:
     return not _whole(value) and callable(getattr(value, method, None))
 
 
+def _empty(value: object) -> bool:
+    size = getattr(value, "size", None)
+    return isinstance(size, int) and size == 0
+
+
+def _least_and_most(value: object) -> tuple[object, object]:
+    """`value`'s least and greatest items, NaN counted: pandas skips it otherwise."""
+
+    def reduced(method: str) -> object:
+        found = getattr(value, method)
+        try:
+            first = found(skipna=False)
+        except TypeError:
+            first = found()
+        return _reduced(first, method)
+
+    return reduced("min"), reduced("max")
+
+
+def _ranged(
+    value: object, inside: Callable[[object], bool], bounds: tuple[object, object]
+) -> tuple[bool, str]:
+    """`range` on a numpy or pandas value, through its own `min` and `max`."""
+    if _empty(value):
+        return True, ""
+    try:
+        least, most = _least_and_most(value)
+    except (TypeError, ValueError, ArithmeticError) as error:
+        return False, f"its values can't be ranged: {error}"
+    if inside(least) and inside(most):
+        return True, ""
+    low, high = bounds
+    return False, f"values from {least!r} to {most!r} are not all in [{low}, {high}]"
+
+
 def _range(bounds: tuple[object, object]) -> Callable[[object], tuple[bool, str]]:
     low, high = bounds
 
     def inside(item: object) -> bool:
         try:
             return bool(low <= item <= high)  # ty: ignore[unsupported-operator]
-        except TypeError:
+        except TypeError, ValueError, ArithmeticError:
             return False
 
     def check(value: object) -> tuple[bool, str]:
         if _vectorised(value, "min") and _vectorised(value, "max"):
-            least, most = _reduced(value, "min"), _reduced(value, "max")
-            if inside(least) and inside(most):
-                return True, ""
-            return (
-                False,
-                f"values from {least!r} to {most!r} are not all in [{low}, {high}]",
-            )
+            return _ranged(value, inside, bounds)
         if _whole(value):
             if inside(value):
                 return True, ""
@@ -215,12 +246,30 @@ def _range(bounds: tuple[object, object]) -> Callable[[object], tuple[bool, str]
         outside = [item for item in _items(value) if not inside(item)]
         if not outside:
             return True, ""
-        return (
-            False,
-            f"{len(outside)} items are not in [{low}, {high}], such as {outside[0]!r}",
+        return False, (
+            f"{len(outside)} items are not in [{low}, {high}], such as {outside[0]!r}"
         )
 
     return check
+
+
+def _all_in(value: object, allowed: Sequence[object]) -> tuple[bool, str] | None:
+    """Whether every item of a numpy or pandas value is allowed, or `None` for others.
+
+    The message is set only when the values can't be compared at all.
+    """
+    try:
+        if (numpy := _numpy(value)) is not None and not _scalar(value):
+            # As objects, so a mixed list isn't turned into strings.
+            listed = numpy.empty(len(allowed), dtype=object)
+            listed[:] = list(allowed)
+            return bool(numpy.isin(value, listed).all()), ""
+        if _vectorised(value, "isin"):
+            found = getattr(value, "isin")(list(allowed))  # noqa: B009  # pandas' own method
+            return bool(_reduced(found, "all")), ""
+    except (TypeError, ValueError) as error:
+        return False, f"its values can't be compared: {error}"
+    return None
 
 
 def _values_in(allowed: Sequence[object]) -> Callable[[object], tuple[bool, str]]:
@@ -231,10 +280,11 @@ def _values_in(allowed: Sequence[object]) -> Callable[[object], tuple[bool, str]
             return False
 
     def check(value: object) -> tuple[bool, str]:
-        if (numpy := _numpy(value)) is not None and not _scalar(value):
-            ok = bool(numpy.isin(value, list(allowed)).all())
-        elif _vectorised(value, "isin"):
-            ok = bool(_reduced(getattr(value, "isin")(list(allowed)), "all"))  # noqa: B009  # pandas' own method
+        vectorised = _all_in(value, allowed)
+        if vectorised is not None:
+            ok, why = vectorised
+            if why:
+                return False, why
         elif _whole(value):
             ok = member(value)
             if not ok:
@@ -355,7 +405,11 @@ def _origin(declared: object) -> object:
 
 
 def _one_shot(declared: object) -> bool:
-    origin = _origin(declared)
+    """Whether `declared`, or any arm of it if a union, is a one-shot iterator."""
+    stripped = _types.stripped(declared)
+    if typing.get_origin(stripped) in {typing.Union, types.UnionType}:
+        return any(_one_shot(arm) for arm in typing.get_args(stripped))
+    origin = typing.get_origin(stripped) or stripped
     return isinstance(origin, type) and issubclass(origin, _ONE_SHOT)
 
 
@@ -364,14 +418,9 @@ def _textual(declared: object) -> bool:
     return isinstance(origin, type) and issubclass(origin, _NOT_NUMBERS)
 
 
-def _reads_items(name: str) -> Callable[[object], str | None]:
-    def problem(declared: object) -> str | None:
-        if _one_shot(declared):
-            shown = inspect.formatannotation(declared)
-            return f"check {name} would consume a one-shot {shown}"
-        return None
-
-    return problem
+def _reads_items(_: str) -> Callable[[object], str | None]:
+    # A one-shot annotation is refused for every check, by `refuse_unreadable`.
+    return _anything
 
 
 def _numeric(name: str) -> Callable[[object], str | None]:
@@ -431,7 +480,7 @@ def _builtin(  # noqa: PLR0913  # a check's parts, each named
     )
 
 
-def check_output[F: Callable[..., object]](  # noqa: C901, PLR0912, PLR0913  # one keyword per built-in check
+def check_output[F: Callable[..., object]](  # noqa: C901, PLR0912, PLR0913, PLR0915  # one keyword per built-in check
     *,
     importance: Importance = "fail",
     field: str | None = None,
@@ -478,6 +527,9 @@ def check_output[F: Callable[..., object]](  # noqa: C901, PLR0912, PLR0913  # o
             msg = f"range must be a (low, high) pair, got {range!r}"
             raise TypeError(msg)
         low, high = range
+        if any(_is_nan(bound) for bound in range):
+            msg = f"range bounds must not be NaN, got {range!r}"
+            raise ValueError(msg)
         try:
             backwards = bool(low > high)  # ty: ignore[unsupported-operator]
         except TypeError:
@@ -657,9 +709,12 @@ def check_output_custom[F: Callable[..., object]](
 
 # ---- running the checks inside a node ------------------------------------------------
 
-# Where a hooked run collects each node's check results, for its `after_node`.
-RESULTS: contextvars.ContextVar[dict[str, tuple[CheckResult, ...]] | None] = (
-    contextvars.ContextVar("fnloom_check_results", default=None)
+# A hooked run's collector: its driver's token, and each node's check results.
+type Sink = tuple[object, dict[str, tuple[CheckResult, ...]]]
+
+# Where a hooked run collects its nodes' check results, for its `after_node`.
+RESULTS: contextvars.ContextVar[Sink | None] = contextvars.ContextVar(
+    "fnloom_check_results", default=None
 )
 
 
@@ -669,21 +724,42 @@ def problems(node: str, declared: object, checks: Sequence[Check]) -> list[str]:
     return [f"{node}: {why}" for why in found if why is not None]
 
 
+def _ran(check: Check, value: object, inputs: Mapping[str, object]) -> CheckResult:
+    """`check`'s result; an error it raises fails the node, noting the check."""
+    try:
+        return check.run(value, inputs)
+    except Exception as error:
+        error.add_note(f"in check {check.name}")
+        raise
+
+
 def verdict(
     node: str,
     checks: Sequence[Check],
     value: object,
     inputs: Callable[[], Mapping[str, object]],
+    owner: object = None,
 ) -> None:
     """Runs `checks` on `value`, logs each `warn` failure, raises the `fail` ones.
 
-    Every result is handed to a hooked run's `after_node`. `inputs` makes the
-    node's arguments, only when a check reads them.
+    Every result is handed to a hooked run's `after_node`, when that run is of
+    the driver `owner` stands for. `inputs` makes the node's arguments, only
+    when a check reads them.
     """
+    if isinstance(value, collections.abc.Iterator):
+        msg = (
+            f"{node}: its value is a one-shot iterator, which its checks would consume"
+        )
+        raise TypeError(msg)
+    if value is None and any(
+        c.identity == ("builtin", "allow_none", True) for c in checks
+    ):
+        # `allow_none=True`: None passes every check.
+        checks = [c for c in checks if c.name == "allow_none"]
     given = inputs() if any(c.wants_inputs for c in checks) else _NO_DIAGNOSTICS
-    results = tuple(check.run(value, given) for check in checks)
-    if (sink := RESULTS.get()) is not None:
-        sink[node] = results
+    results = tuple(_ran(check, value, given) for check in checks)
+    if (sink := RESULTS.get()) is not None and sink[0] is owner:
+        sink[1][node] = results
     failed: list[CheckResult] = []
     for result in results:
         if result.passes:
@@ -701,8 +777,8 @@ def attached(nodes: Sequence[NodeDef]) -> list[NodeDef]:
 
     A function's own node gets its checks with no `field`; each extracted field's
     node the checks naming it. `ValueError` for a `field` the function doesn't
-    extract, and `TypeError` for a check that can't read its node's return
-    annotation, each naming every culprit, sorted.
+    extract, naming every culprit, sorted; `refuse_unreadable` checks the
+    annotations once steps are lowered.
     """
     fields: dict[int, set[str]] = {}
     for node in nodes:
@@ -710,7 +786,6 @@ def attached(nodes: Sequence[NodeDef]) -> list[NodeDef]:
             fields.setdefault(id(node.origin), set()).add(extracting.field)
     out: list[NodeDef] = []
     unknown: list[str] = []
-    refused: list[str] = []
     for node in nodes:
         recorded = decorations(node.origin).checks
         if not recorded:
@@ -727,16 +802,36 @@ def attached(nodes: Sequence[NodeDef]) -> list[NodeDef]:
                 for c in recorded
                 if c.field is not None and c.field not in produced
             )
-        refused.extend(problems(node.name, node.returns, mine))
         out.append(replace(node, checks=mine) if mine else node)
     if unknown:
         raise ValueError("\n".join(sorted(set(unknown))))
-    if refused:
-        raise TypeError("\n".join(sorted(refused)))
     return out
 
 
-def wrapped(nodes: Sequence[NodeDef], *, awaits: bool) -> list[NodeDef]:
+def refuse_unreadable(nodes: Sequence[NodeDef]) -> None:
+    """`TypeError` naming each check that can't read its node's return annotation.
+
+    Run once steps are lowered, so a `@pipe_output` node's checks are read
+    against its last step's type, which is what they check.
+    """
+    refused = [
+        line
+        for node in nodes
+        for line in problems(node.name, node.returns, node.checks)
+    ]
+    refused += [
+        f"{node.name}: its checks would consume a one-shot "
+        f"{inspect.formatannotation(node.returns)}"
+        for node in nodes
+        if node.checks and _one_shot(node.returns)
+    ]
+    if refused:
+        raise TypeError("\n".join(sorted(refused)))
+
+
+def wrapped(
+    nodes: Sequence[NodeDef], *, awaits: bool, owner: object = None
+) -> list[NodeDef]:
     """`nodes`, each checked one's payload running its checks after it returns.
 
     A node with no checks is kept as it is. With `awaits`, for the async driver,
@@ -744,12 +839,14 @@ def wrapped(nodes: Sequence[NodeDef], *, awaits: bool) -> list[NodeDef]:
     it with its own guided error.
     """
     return [
-        replace(node, payload=_checking(node, awaits=awaits)) if node.checks else node
+        replace(node, payload=_checking(node, awaits=awaits, owner=owner))
+        if node.checks
+        else node
         for node in nodes
     ]
 
 
-def _checking(node: NodeDef, *, awaits: bool) -> Callable[..., object]:
+def _checking(node: NodeDef, *, awaits: bool, owner: object) -> Callable[..., object]:
     name, checks, payload = node.name, node.checks, node.payload
     keyed = by_parameter(node.params)
 
@@ -761,7 +858,7 @@ def _checking(node: NodeDef, *, awaits: bool) -> Callable[..., object]:
 
         async def call_async(**kwargs: object) -> object:
             value = await awaited(**kwargs)
-            verdict(name, checks, value, arguments(kwargs))
+            verdict(name, checks, value, arguments(kwargs), owner)
             return value
 
         return call_async
@@ -770,7 +867,7 @@ def _checking(node: NodeDef, *, awaits: bool) -> Callable[..., object]:
         value = payload(**kwargs)
         if awaits and inspect.isawaitable(value):
             return value
-        verdict(name, checks, value, arguments(kwargs))
+        verdict(name, checks, value, arguments(kwargs), owner)
         return value
 
     return call

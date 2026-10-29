@@ -484,6 +484,70 @@ def _mean_in_range(series) -> bool:
     return 0 <= series.mean() <= 10
 ```
 
+## Steps
+
+A step is a small function run on a value on its way into a node, or on its way out. `fnloom.step(fn, **bindings)`
+names one: `fn`'s first parameter takes the value, and its other parameters are bound with `source("node")`,
+`value(v)` or a plain literal. `@pipe_input` runs steps on a parameter before the function reads it, and
+`@pipe_output` runs them on what the function returns (Q104):
+
+```python
+# file: cleaning.py
+from fnloom import pipe_input, pipe_output, source, step
+
+
+def _clip(v: float, low: float, high: float = 100.0) -> float:
+    return min(max(v, low), high)
+
+
+def _scale(v: float, factor: float) -> float:
+    return v * factor
+
+
+@pipe_input(step(_clip, low=0.0))
+def reading(raw: float) -> float:
+    """A raw reading, clipped to [0, 100] first."""
+    return raw
+
+
+@pipe_output(step(_scale, factor=source("unit")), step(_clip, low=0.0).named("bounded"))
+def adjusted(reading: float, offset: float) -> float:
+    """The reading, offset, then scaled to the unit and bounded."""
+    return reading + offset
+```
+
+Each step is an ordinary node, named after the node it serves: `reading.with_clip` for the first, and
+`adjusted.raw`, `adjusted.with_scale` and `adjusted.bounded` for the second, where `adjusted.raw` is the function
+itself and `adjusted` the last step's value. A repeated step is numbered, `with_clip_1`. Steps can be requested, are
+cached and get [hook](hooks.md) events like any node:
+
+```python
+import cleaning
+
+steps = fnloom.build(cleaning)
+steps.execute(
+    ["adjusted", "adjusted.raw"], inputs={"raw": 120.0, "offset": -30.0, "unit": 2.0}
+)
+# -> {'adjusted': 100.0, 'adjusted.raw': 70.0}
+```
+
+`high` has a default and isn't bound, so it keeps its default: a step's parameters are never graph inputs, where
+Hamilton makes every such parameter an input shared by every step that has it (Q105). A required parameter left
+unbound is refused when decorating.
+
+- `.named("x")` names a step's node `<node>.x`.
+- `.when(mode="fast")`, `.when_not`, `.when_in` and `.when_not_in` run a step only under that [config](#config). A
+  step's number counts every step written, so names don't change with the config.
+- `on_input="b"` on `@pipe_input` feeds the parameter `b` rather than the first.
+- On a function with [extracted fields](#extracting-fields), `@pipe_output`'s steps apply to each field, and
+  `.on_output("p")` picks the fields a step applies to.
+- With `@parameterize`, each row gets its own chain, named under the row (Q108).
+
+The first step must take the parameter's own type, checked at build, and so must each step the one before it.
+Misuse, such as `on_input` naming no parameter, is refused rather than ignored (Q106). Output checks on a
+`@pipe_output` function check the last step's value, whatever the decorator order. A public step function is a node
+of its own too, as any public function is; name it with a leading `_`, or mark it [`@exclude`](#keeping-a-function-out).
+
 ## Modules together
 
 `fnloom.build` takes several modules, and so does `Builder.with_modules`. Nodes are matched by name across all of

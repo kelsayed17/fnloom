@@ -4991,3 +4991,119 @@ def test_q103_checks_stack() -> None:
     assert built.execute(["a"], inputs={"x": 2}) == {"a": 2}
     with pytest.raises(fnloom.ValidationError, match="check values_in failed"):
         built.execute(["a"], inputs={"x": 5})
+
+
+_Q104_STEPS = """
+from {package} import pipe_output, step, value
+
+def _add(v: int, n: int) -> int:
+    return v + n
+
+@pipe_output(step(_add, n=value(1)).when(mode="a"), step(_add, n=value(2)))
+def a(x: int) -> int:
+    return x
+"""
+
+
+@pytest.mark.deliberate("Q104")
+def test_q104_step_names_hold_across_config(tmp_path: Path) -> None:
+    """Hamilton renumbers repeats by the steps the config kept; fnloom never does."""
+    module = _module_from_file(
+        tmp_path, "q104_h", _Q104_STEPS.format(package="hamilton.function_modifiers")
+    )
+    names = {}
+    for mode in ("a", "b"):
+        built = (
+            hamilton_driver.Builder()
+            .with_modules(module)
+            .with_config({"mode": mode})
+            .build()
+        )
+        names[mode] = {v.name for v in built.list_available_variables()}
+        tags = {v.name: v.tags for v in built.list_available_variables()}
+    assert "a.with_add_1" in names["a"]
+    assert "a.with_add" in names["b"]
+    assert "a.with_add_1" not in names["b"]
+    assert tags["a"]["module"] == "hamilton.function_modifiers.macros"
+    fn_module = make_module("q104_f", _Q104_STEPS.format(package="fnloom"))
+    for mode in ("a", "b"):
+        built_f = (
+            fnloom.Builder().with_modules(fn_module).with_config({"mode": mode}).build()
+        )
+        assert "a.with_add_1" in built_f.node_names()
+        assert built_f.nodes["a"].module == "q104_f"
+
+
+_Q105_STEPS = """
+from {package} import pipe_output, step
+
+def _mul(v: int, k: int = 10) -> int:
+    return v * k
+
+@pipe_output(step(_mul))
+def a(x: int) -> int:
+    return x
+"""
+
+
+@pytest.mark.deliberate("Q105")
+def test_q105_defaulted_step_parameters_stay_their_own(tmp_path: Path) -> None:
+    """Hamilton makes `k` a graph input; fnloom keeps the default."""
+    module = _module_from_file(
+        tmp_path, "q105_h", _Q105_STEPS.format(package="hamilton.function_modifiers")
+    )
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    assert "k" in {v.name for v in hamilton.list_available_variables()}
+    assert hamilton.execute(["a"], inputs={"x": 1, "k": 3}) == {"a": 3}
+    built = fnloom.build(make_module("q105_f", _Q105_STEPS.format(package="fnloom")))
+    assert "k" not in built.node_names()
+    assert built.execute(["a"], inputs={"x": 1}) == {"a": 10}
+
+
+_Q106_ON_INPUT = """
+from {package} import pipe_input, step
+
+def _add(v: int, n: int) -> int:
+    return v + n
+
+@pipe_input(step(_add, n=1), on_input="zz")
+def f(x: int) -> int:
+    return x
+"""
+
+
+@pytest.mark.deliberate("Q106")
+def test_q106_misuse_is_refused(tmp_path: Path) -> None:
+    """Hamilton feeds the first parameter for an unknown `on_input`."""
+    module = _module_from_file(
+        tmp_path, "q106_h", _Q106_ON_INPUT.format(package="hamilton.function_modifiers")
+    )
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    assert hamilton.execute(["f"], inputs={"x": 1}) == {"f": 2}
+    with pytest.raises(TypeError, match="no parameter named 'zz'"):
+        make_module("q106_f", _Q106_ON_INPUT.format(package="fnloom"))
+
+
+_Q108_ROWS = """
+from {package} import parameterize, pipe_input, step, value
+
+def _add(v: int, n: int) -> int:
+    return v + n
+
+@pipe_input(step(_add, n=1))
+@parameterize(low={{"k": value(1)}}, high={{"k": value(10)}})
+def scaled(x: int, k: int) -> int:
+    return x * k
+"""
+
+
+@pytest.mark.deliberate("Q108")
+def test_q108_rows_get_their_own_chain(tmp_path: Path) -> None:
+    """Hamilton refuses `@pipe_input` with `@parameterize`; fnloom chains each row."""
+    module = _module_from_file(
+        tmp_path, "q108_h", _Q108_ROWS.format(package="hamilton.function_modifiers")
+    )
+    with pytest.raises(ValueError, match="Cannot call NodeExpander"):
+        hamilton_driver.Builder().with_modules(module).build()
+    built = fnloom.build(make_module("q108_f", _Q108_ROWS.format(package="fnloom")))
+    assert built.execute(["low", "high"], inputs={"x": 1}) == {"low": 2, "high": 20}
