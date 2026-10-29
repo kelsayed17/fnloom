@@ -3,8 +3,8 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** approved 2026-10-28 with four amendments (marked *Amended*), in progress on
-`claude/plan-8-validators-steps-injection`.
+**Status:** done, 2026-10-28, on `claude/plan-8-validators-steps-injection`, merge pending. Approved with four
+amendments (marked *Amended*). [As built](#as-built) records where the build went beyond the plan or narrowed it.
 
 **Goal:** close the roadmap's step 7, the v1.x decorators. That means:
 
@@ -386,4 +386,50 @@ from-hamilton.md, quirk-register.md, benchmarks.md, index.md, README.md, CHANGEL
 
 ## As built
 
-Filled in when the plan is done.
+- **Check results reach `NodeEnd.checks` through a per-build token.** A hooked run sets a context variable that its
+  driver's checks report to; a check of another driver, run inside a node, can't, so results never leak between
+  nested runs. A run with no `after_node` hook collects nothing.
+- **Checks, beyond the decisions:**
+    - A check that raises fails the node with its own error, noting `in check <name>`, whatever its importance.
+    - `allow_none=True` lets `None` pass every check of the node.
+    - NaN range bounds are refused when decorating.
+    - `range` counts NaN as outside the range at every level of a frame, passes an empty value, and fails rather than
+      crashes on values that can't be compared.
+    - numpy's `isin` gets the allowed values as objects, so a mixed list isn't turned into strings.
+    - A node annotated as a one-shot iterator, or a union with one, can carry no check at all, and a one-shot value
+      at run is refused before any check, custom ones included, can read it.
+- **`refuse_unreadable` runs after steps are lowered**, so a `@pipe_output` node's checks are read against its last
+  step's type.
+- **Steps:**
+    - A `group(...)` parameter can't be fed by `@pipe_input`.
+    - A fed parameter with a default reads the chain: the chain always gives it a value.
+    - A positional-only step parameter is refused when decorating.
+    - An `async def` function with `@pipe_output` gets an awaited final node.
+    - A field's final node under `@pipe_output` is stored by the function's cache policy, unlike a plain field,
+      whose value is never stored; its `.raw` node keeps the field's policy.
+    - Using one step function in both `@pipe_input` and `@pipe_output` of a function names two nodes alike: the
+      error says to use `.named`.
+- **`@mutate`:**
+    - Applying the same mutator again replaces its steps only when its code changed, as a re-run notebook cell's
+      does. Mutators made in a loop or a factory share code and each add a step, and so do several `apply_to`s of one
+      target in one call: Hamilton adds them all, and so does fnloom.
+    - A module of mutators alone builds (Q53's "no nodes" refusal skips it).
+    - A `@config.when` variant the config doesn't select is a valid target.
+    - A node mutated by a module that isn't built fails the build, naming the module, since pickling would lose the
+      step.
+- **`@resolve` works on a copy of the function**, made per build after config selection, so an unselected variant's
+  resolver never runs. The node's view names the function as written (`NodeView.origin`), and
+  `NodeViews.built_from` keeps the copy for export, which reads its decorations, such as a pinned version.
+- **Annotations are read as forward references** wherever Plan 8 reads a signature (wrappers, steps, checks,
+  resolvers), so a name imported only under `TYPE_CHECKING` is no error; a wrapper annotated that way failed in the
+  first build.
+- **Wrappers and output type checks.** With output type checks on, a wrapped node's value is checked inside the chain,
+  on the function's value, and again outside it, on what the chain returns. Every computed node is wrapped, step,
+  `.raw` and field nodes included, so a wrapper sees each.
+- **Benchmarks** are recorded in [Benchmarks](../benchmarks.md#checks-and-wrappers) from the development build that
+  `scripts/check.sh` makes. `benches.run` was not re-run: a graph with no Plan 8 decorator and no wrapper builds the
+  very node definitions it built before, since `attached`, `lowered`, `wrapped` and the chain return their input
+  unchanged when there's nothing to do.
+- **Stacking** is tested over 36 pairs (`tests/test_stacking.py`). Every pair gives one graph in either order, except
+  `@inject` with `@parameterize`, which is refused in both orders.
+- **Register rows:** Q99 to Q111, and Q24 updated.

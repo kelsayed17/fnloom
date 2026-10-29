@@ -1,8 +1,8 @@
 # Roadmap: ahead of Hamilton everywhere
 
 **Status:** in progress, 2026-10-28. Plans 1–4, the Plan 4 follow-up and Plan 3 are merged and released in 0.2.0.
-Plans 5 and 6 are merged (#24, #25), not yet released. Plan 7 is on its own branch, merge pending; a row below marked
-done or fixed in Plan 7 describes that branch. Plans 8 and later are not built.
+Plans 5 to 7 are merged (#24 to #26), not yet released. Plan 8 is on its own branch, merge pending; a row below marked
+done or fixed in Plan 8 describes that branch. Plans 9 and later are not built.
 
 **Goal:** for every capability Hamilton 1.90.0 offers, fnloom has an equivalent that is at least as good, or a
 written decision explaining why it doesn't. "At least as good" means: same intent; behaviour proven differentially
@@ -42,9 +42,9 @@ and the design's change log takes a row when the item is approved.
 | `@config.when`, `.when_not`, `.when_in`, `.when_not_in`; `Builder.with_config` | Done in Plan 3, with `@config.default` and `name=` on all four forms (Q56–Q60) |
 | `@extract_fields`, `@extract_columns` | Done in Plan 3 (Q61–Q64) |
 | `@parameterize` row as `(bindings, docstring)`; `group(...)`; `parameterize_sources`, `parameterize_values` | Done in Plan 5, checked when decorating (Q82) |
-| `@check_output`, `@check_output_custom` | Plan 8 ("output validators") |
-| `@pipe_input`, `@pipe_output`, `@mutate`, `@step` | Plan 8 ("step injection") |
-| `@inject`, `@resolve` | Plan 8 ("dependency injection by config") |
+| `@check_output`, `@check_output_custom` | Done in Plan 8: checks inside the node, adding no node; fail by default with a `ValueError`; over any type; custom checks that read the node's inputs; stacked in any order; part of the cache key (Q99–Q103) |
+| `@pipe_input`, `@pipe_output`, `@mutate`, `@step` | Done in Plan 8: steps as ordinary nodes with Hamilton's names, stable across config; defaulted step parameters never inputs; cross-module `@mutate`; `@pipe_input` with `@parameterize` rows (Q104–Q108) |
+| `@inject`, `@resolve` | Done in Plan 8: `@inject` keeps the name; `@resolve(decorate_with)` without power-user mode, on a copy per build (Q109, Q110) |
 | `@subdag`, `@does`, `@schema`, `@dataloader`, `@datasaver`, `@load_from`, `@save_to` | Plan 9 decides each. Default: not planned, with a register row naming the fnloom way to get the same result |
 | `@cache(format=...)`, per-format result stores | Done in the Plan 4 follow-up: `fnloom.Format`, `"pickle"` and `"json"` built in, more through `DiskCache(formats=...)`; resolved at build (Q55), and `json` stores only what loads back exactly (Q54) |
 
@@ -57,7 +57,7 @@ and the design's change log takes a row when the item is approved.
 | Dynamic execution (`Parallelizable`, `Collect`) | Its own design first (design §2: "the first deferral to design next"), then Plan 10. Free-threaded 3.14t is the target for running nodes in parallel |
 | Plugin ecosystem (dask, ray, spark, pandera, mlflow, UI, tracker) | Not built in (design §2 non-goal). Plan 6's hooks make each one writable outside fnloom (Q84) |
 | A failing node logs its inputs | Done in Plan 6: `after_node` gets `ok=False` with the node, its inputs and its error, and `fnloom.LogFailures` (*new*) is the ready-made hook that logs them (Q88) |
-| `NodeExecutionMethod` and `GracefulErrorAdapter` (node-execution wrappers) | Out of scope for Plan 6 (its decision 13). Q24's ordered chain of wrappers ships with step injection in Plan 8, and graceful partial failure with "Graphs that carry I/O and failure" under [Beyond Hamilton](#beyond-hamilton) |
+| `NodeExecutionMethod` and `GracefulErrorAdapter` (node-execution wrappers) | `NodeExecutionMethod` done in Plan 8: `Builder.with_node_wrappers(*wrappers)`, Q24's ordered chain, any number per driver (Q111). Graceful partial failure ships with "Graphs that carry I/O and failure" under [Beyond Hamilton](#beyond-hamilton) |
 | `StaticValidator` | Plan 9 decides it (Plan 6, decision 13). `Driver.nodes` already allows the same check after `build` |
 | Async hook methods | Out of scope for Plan 6 (its decision 13): hook methods are plain `def`, called on the loop's thread on the async driver, and an `async def` method is a `TypeError` from `with_hooks` (Q84, Q86) |
 | A function in `final_vars` | Done in Plan 5: matched by identity, never by name (Q30) |
@@ -145,7 +145,7 @@ behind); **n/a** (fnloom has no such feature yet; the plan builds it without the
 | A failed run logs a full traceback at ERROR, then a Slack banner, then raises; a malformed function is reported twice | fixed | Q15; one raise |
 | A failing node's inputs are logged by Hamilton, not by fnloom | fixed (Plan 6, opt-in) | `after_node` gets the failing node, its inputs and its error; `fnloom.LogFailures` logs them, each value's `repr` cut to 50 characters. fnloom still logs nothing by default (Q88) |
 | A node can't skip (no early return); "don't compute" must be encoded as data | same | Design question for Plan 10: a typed "absent" outcome a node can return, which its consumers either accept as optional or skip on |
-| Validation errors (`DataValidationError`) are not `ValueError`, and `importance="warn"` is the default | n/a | Plan 8: validator errors subclass `ValueError`; fail is the default |
+| Validation errors (`DataValidationError`) are not `ValueError`, and `importance="warn"` is the default | fixed (Plan 8) | `fnloom.ValidationError` subclasses `ValueError`, with a readable message; fail is the default (Q100) |
 | A Driver used from several threads works but is untested (#54); one cache "last run" is shared across threads | fixed (Plan 5) | A documented guarantee ([Threads](../running.md#threads)) with a stress test of 16 threads sharing one cached driver, on the default and free-threaded builds (`tests/test_threads.py`); no cache state is shared between runs |
 | A module edit after `reload` is not seen by an existing driver | fixed (Plan 5) | `Driver.rebuild()` and `AsyncDriver.rebuild()` build again with every setting and see the edit; an existing driver keeps its code, as Hamilton's does, and the cache versions code (Q83, Q48) |
 | Unsupplied input requested as an output returns `None` when nothing reads it | fixed (Plan 5) | Refused: `missing inputs: 'x' (requested as an output)` (Q78) |
@@ -157,11 +157,11 @@ behind); **n/a** (fnloom has no such feature yet; the plan builds it without the
 | A missing or misspelled config key turns a computed node into a required input, with no hint; there is no default variant (#1213) | fixed (Plan 3) | A missing key never matches, and a needed node with no variant fails the build, naming each variant's condition; `@config.default` (Q57) |
 | Config keys become input nodes and silently shadow nodes of the same name; config, inputs and overrides are three overlapping channels | fixed (Plan 3) | Config selects the graph's shape only and never becomes a node or a value (Q56) |
 | The `__suffix` naming rule is invisible, and a Python redefinition silently keeps the last one | fixed (Plan 3) | An explicit `name=` on all four `@config.when*` forms, a redefinition refused at build, and misuse refused when decorating (Q58, Q59) |
-| Decorator stacking order is ignored, and collisions name the wrong decorator (#1163) | fixed so far | Done for config and extract in Plan 3: stacked in any order, and two matching variants name both functions (Q58). Plan 8 does the same for its decorators |
+| Decorator stacking order is ignored, and collisions name the wrong decorator (#1163) | fixed so far | Done for config and extract in Plan 3: stacked in any order, and two matching variants name both functions (Q58). Done for Plan 8's decorators: every pair, and each with `@tag`, `@parameterize`, `@config.when` and `@extract_fields`, gives one graph in either order (`tests/test_stacking.py`) |
 | `@extract_columns` is a pandas registry (polars after a plugin, which autoload-off disables), with missing columns found only at run; `@extract_fields` checks no types and drops extra keys | fixed (Plan 3) | A generic split over any value with `__getitem__`, with no registry or plugin; fields type-checked on every run; extra names refused; `fill_with` never mutates. A missing column is still found at run, when the value first exists, and the error names the columns the producer returned (Q61–Q64) |
-| `@check_output` is pandas-only; `@check_output_custom` sees only the output and renames the node | n/a | Plan 8: validators over any type, seeing inputs and output, without renaming |
+| `@check_output` is pandas-only; `@check_output_custom` sees only the output and renames the node | fixed (Plan 8) | Checks over any type, custom checks seeing inputs and output, inside the node with no renaming (Q99–Q102) |
 | `@parameterize` + `value()` silently drops a caller's value for that parameter | already refused (Q4, Q5); documented (Q77) | An input or override naming a parameter only `value()` binds is refused as unknown (Q77) |
-| `@pipe_output` can't share work between steps; optional parameters leak in as inputs | n/a | Plan 8 |
+| `@pipe_output` can't share work between steps; optional parameters leak in as inputs | fixed (Plan 8) | A defaulted step parameter keeps its default and is never an input (Q105); steps share work by `source("node")`, as in Hamilton, and each step is a node the cache keeps |
 | Two adapters can't implement the same lifecycle method (cache + graceful errors, result builder + type-check opt-out); a raising hook skips the others; hook signatures are checked only at run | fixed (Plan 6) | Any number of hooks per event, in the order given; every hook sees an event before its errors are raised, several as one `ExceptionGroup` with a node's own error first; signatures checked by `with_hooks` (Q23, Q24, Q84). One result builder per builder, as Hamilton (Q24) |
 | `execute` returns different types depending on the adapter; the legacy constructor returns a pandas frame that broadcasts scalars | fixed | Q19: always a dict |
 | `AsyncDriver`: async build, pandas default, a deprecated asyncio call, no sibling cancellation, sync nodes block the loop, no graceful partial failure, no caching, and a builder with methods it refuses | fixed (Plan 3), except graceful partial failure: n/a, a later design | Sync build, dict results in request order, no deprecated call (Q11–Q13); sync nodes off the loop (Q65); cancellation on failure (Q66); the sync driver's checks (Q67); caching (Q68); async rows awaited (Q69). A failure still raises the first exception (Q66): graceful partial failure is designed with "Graphs that carry I/O and failure" under [Beyond Hamilton](#beyond-hamilton). Done in Plan 6: hooks fire on the async driver as the node starts and finishes, with real values, and a result builder is used (Q86, Q19) |
@@ -214,10 +214,11 @@ tests against Hamilton for every kept behaviour; benchmarks for anything on the 
    events on both drivers (Q84, Q86), `fnloom.LogFailures` as the failure hook (Q88), cache outcomes on the node
    events (Q85), an opt-in output check (Q87), additive value checks (Q21), result builders and `raw_execute` (Q19,
    Q24, Q89).
-6. **Plan 7: drawing and the CLI.** Done, merge pending: DOT and Mermaid text for the graph, upstream, downstream,
+6. **Plan 7: drawing and the CLI.** Done: DOT and Mermaid text for the graph, upstream, downstream,
    path between and an execution, with no dependency (Q90–Q94); `export` of the graph or a run, with code versions
    (Q95, Q96); the `fnloom` command (Q97, Q98).
-7. **Plan 8: v1.x decorators.** Output validators, step injection, and dependency injection by config.
+7. **Plan 8: v1.x decorators.** Done, merge pending: output validators (Q99–Q103), step injection and `@mutate`
+   (Q104–Q108), `@inject` and `@resolve` (Q109, Q110), and node wrappers (Q111).
 8. **Plan 9: the long tail.** A decision per remaining Hamilton decorator, each a register row.
 9. **Design, then Plan 10: dynamic execution**, together with the "Beyond Hamilton" designs.
 
