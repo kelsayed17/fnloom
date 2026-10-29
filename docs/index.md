@@ -152,5 +152,6 @@ tested against Hamilton side by side.
     `@parameterize`, `@tag`, `@config.when*`, `@extract_fields`, `@extract_columns`, `@exclude`, graph inspection,
     `validate`, graphs from plain functions, namespaces, type checks, [result caching](caching.md), the async driver,
     [hooks](hooks.md), result builders, output checks, custom value checks, [drawing, export and the
-    CLI](drawing.md) are done. Dynamic execution comes later;
+    CLI](drawing.md), [`@check_output` validators](writing-nodes.md#checking-values), [steps](writing-nodes.md#steps),
+    `@inject`, `@resolve` and [node wrappers](running.md#node-wrappers) are done. Dynamic execution comes later;
     [the design](design/2026-10-26-fnloom-design.md) has the full plan.

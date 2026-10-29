@@ -686,6 +686,57 @@ Python prints the note, `in node 'ratio'`, under the traceback. It's also in the
 arguments and its result or error. A driver with no hooks runs exactly as without them. The [Hooks](hooks.md) guide
 has the events, their order, and what happens when a hook raises.
 
+## Node wrappers
+
+`Builder.with_node_wrappers(*wrappers)` runs every computed node through a chain of wrappers: around each node's own
+call, its [output checks](writing-nodes.md#checking-values) included. A wrapper is called as `wrapper(node, call,
+inputs)`, where `node` is the node's `NodeView`, `call()` runs the rest of the chain and then the node, and `inputs` are
+the node's arguments by parameter name. What it returns is the node's value (Q111):
+
+```python
+import time
+
+timings: dict[str, float] = {}
+
+
+def timed(node, call, inputs):
+    started = time.perf_counter()
+    try:
+        return call()
+    finally:
+        timings[node.name] = time.perf_counter() - started
+
+
+def retried(node, call, inputs):
+    try:
+        return call()
+    except ConnectionError:
+        return call()
+
+
+wrapped = fnloom.Builder().with_modules(pricing).with_node_wrappers(timed, retried)
+wrapped.build().execute(["discounted"], inputs={"price": 20.0, "quantity": 3})
+# -> {'discounted': 60.0}
+sorted(timings)
+# -> ['discounted', 'total']
+```
+
+The first wrapper given is the outermost, and any number may be given, where Hamilton allows one `NodeExecutionMethod`
+per driver. A wrapper may call `call()` once, several times, or not at all and return a value of its own. Wrappers see
+the nodes that run a function of yours: each function's node, each [step](writing-nodes.md#steps) and each `.raw`
+node. An extracted field, and a `@pipe_output` node that only passes its last step's value on, run no function of
+yours, so they aren't wrapped. `inputs` holds what the node reads, by parameter name: a `value()` binding and an
+unused default aren't in it, as in a [hook](hooks.md)'s events. Hooks' node events fire outside the whole chain, so
+`after_node` sees what the chain returned; a failed check on a wrapped node is an error the wrappers see. A
+`@pipe_output` node's checks run on the node passing its last step's value on, which isn't wrapped, so no wrapper sees
+them fail; `after_node` does.
+
+A [cache](caching.md) hit runs no wrapper, and wrappers are not part of a node's cache key: what a chain returns is
+stored as the node's value, and a later run with other wrappers, or none, gets that value. Give a driver whose wrappers
+change values a store of its own. With output type checks on, what a wrapper returns is checked too. Wrappers run
+synchronously: an `async def` wrapper is refused, and on the async driver an `async def` node can't be wrapped yet, so
+`build_async` refuses it. Wrappers travel with the driver when it's pickled, copied or rebuilt, as hooks do.
+
 ## Async
 
 `Builder.build_async()` builds an `AsyncDriver`, for a graph with `async def` nodes. Building is synchronous, like

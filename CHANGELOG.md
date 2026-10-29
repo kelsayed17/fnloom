@@ -9,6 +9,24 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Added
 
+- Output checks. `@fnloom.check_output(range=, values_in=, data_type=, allow_none=, contains=, does_not_contain=,
+  allow_nans=, max_fraction_nans=, importance="fail", field=None)` and `@fnloom.check_output_custom(*checks)` check a
+  node's value inside the node, adding no node. A custom check is a function, which may read the node's `inputs`, or a
+  `fnloom.Validator`. A failed `fail` check raises `fnloom.ValidationError`, a `ValueError`, with one line per check;
+  `warn` logs a WARNING on the `fnloom` logger. Every result is on `NodeEnd.checks` as a `fnloom.CheckResult`.
+  Checks read any type, numpy and pandas through their own methods, never consume a one-shot iterator, stack in any
+  order, and are part of the cache key (Q99 to Q103).
+- Steps. `fnloom.step(fn, **bindings)` with `.named`, `.when*` and `.on_output`; `@pipe_input` and `@pipe_output` lower
+  each step to an ordinary node named `<node>.with_<step>`, and `@pipe_output` runs the function as `<node>.raw`.
+  `@mutate(*targets)` and `apply_to(fn, ...)` add a step to another function's `@pipe_output`, across modules too. A
+  defaulted step parameter is never a graph input, names never change with the config, and misuse Hamilton ignores is
+  refused (Q104 to Q108).
+- `@fnloom.inject(**bindings)`, one `@parameterize` row that keeps the function's name, and
+  `@fnloom.resolve(decorate_with)`, which applies the decorators `decorate_with` returns for the config, needing no
+  power-user mode (Q109, Q110).
+- `Builder.with_node_wrappers(*wrappers)`: an ordered chain of `wrapper(node, call, inputs)` around every computed
+  node that runs a function of yours, any number per driver; hooks fire outside it, a wrapped node's checks run inside
+  it, and a cache hit skips it (Q111).
 - Hooks. Subclass `fnloom.Hook`, override any of `before_run`, `before_node`, `after_node` and `after_run`, and give
   instances to `Builder.with_hooks(*hooks)`, which is cumulative. Each method gets one frozen event, `fnloom.RunStart`,
   `NodeStart`, `NodeEnd` or `RunEnd`, with a `run_id` shared by a run's events, the node's `NodeView`, its inputs by

@@ -60,6 +60,16 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `group(source("a"), value(3))` and `group(k=source("a"))`, misuse refused when decorating, a mis-annotated parameter sometimes listed twice, for example a positional group on an `int` parameter | `from fnloom import group`; each offender is listed once, and a `group` source is required even when the parameter has a default (Q82) |
 | `parameterize_sources(row=dict(p="x"))`, where a non-`str` source fails later with a raw `TypeError` | The same call; a non-`str` source is a `TypeError` when decorating (Q82) |
 | `parameterize_values("p", {("name", "doc"): v})`, where an empty mapping builds no node | The same call; an empty mapping, or a key that is no `(name, doc)`, is refused when decorating (Q82) |
+| `@check_output(range=..., importance="warn")` | `from fnloom import check_output`, checked inside the node: no `x_raw` or validator node. `importance` defaults to `"fail"`, and a failure is `fnloom.ValidationError`, a `ValueError`. Checks read any type, generics and unions included ([Checking values](writing-nodes.md#checking-values), Q99 to Q101) |
+| `@check_output_custom(MyValidator("fail"))` | `check_output_custom` takes plain functions or `fnloom.Validator`s, which may read the node's `inputs`; `applies_to` is called at build (Q102) |
+| Two `@check_output` on one function, or one above or below `@extract_fields` or `@pipe_output` | Stack in any number and order; a check sees the final value, and `field="p"` checks a field (Q103) |
+| `@pipe_input(step(f, n=1))`, `@pipe_output(...)`, `step(...).named(...)`, `.when(...)` | The same, imported from `fnloom`, with the same `<fn>.with_<step>` and `<fn>.raw` names ([Steps](writing-nodes.md#steps), Q104) |
+| A step parameter with a default becoming a graph input | It keeps its default and is never an input (Q105) |
+| `@mutate(target)` and `apply_to(target, ...)` | The same, imported from `fnloom`; a target in another module works when both are built (Q107) |
+| `@inject(param=source("x"))` | The same, imported from `fnloom` ([Bindings and decorators from config](writing-nodes.md#bindings-and-decorators-from-config), Q109) |
+| `@resolve(when=ResolveAt.CONFIG_AVAILABLE, decorate_with=...)` with `hamilton.enable_power_user_mode` | `@fnloom.resolve(decorate_with)`, with no power-user mode (Q110) |
+| `@pipe`, `@flow`, `collapse=True`, `@check_output(schema=...)` | Not there: `pipe` is a deprecated alias of `pipe_input`, `flow` doesn't exist in 1.90.0, `collapse=True` raises `NotImplementedError` there, and a pandera schema is a custom check |
+| `@pipe_input(..., namespace=...)`, `.named(name, namespace=...)`, `@pipe_output(..., on_output=...)` | Not there: a step's node is always `<node>.<label>`, and `.on_output(...)` on each step picks the fields |
 
 </div>
 
@@ -106,7 +116,8 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `GraphConstructionHook`'s `run_after_graph_construction` | Called with the built graph | Read `driver.nodes` after `build()` |
 | `lifecycle.NoEdgeAndInputTypeChecking()` | Turns off the input and edge checks | `without_input_type_checks()`; edges are always checked, at build (Q10) |
 | A `StaticValidator`, refusing a node or the graph at build | `run_to_validate_node` and `run_to_validate_graph` | Not yet. Until then, check `driver.nodes` after `build()` and raise |
-| `NodeExecutionMethod`, and `lifecycle.default.GracefulErrorAdapter` built on it | Replaces how a node is called; the graceful adapter keeps running past a failure, skipping what depends on it | Not yet: both are on the [roadmap](plans/2026-10-28-roadmap-ahead-of-hamilton.md). A failing node fails the run, and `after_node` sees its error and inputs |
+| `NodeExecutionMethod` (`run_to_execute_node`) | Replaces how a node is called; one per driver | `with_node_wrappers(*wrappers)`: any number, an ordered chain, each `wrapper(node, call, inputs)` ([Node wrappers](running.md#node-wrappers), Q111) |
+| `lifecycle.default.GracefulErrorAdapter` | Keeps running past a failure, skipping what depends on it | Not yet: on the [roadmap](plans/2026-10-28-roadmap-ahead-of-hamilton.md). A failing node fails the run, and `after_node` sees its error and inputs |
 | `TaskExecutionHook` and the other task hooks | Hooks on dynamic execution's tasks | None: fnloom has no dynamic execution yet |
 | `display_all_functions()`, `display_upstream_of(*names)`, `display_downstream_of(*names)` | A `graphviz.Digraph`, or `None` and a logged traceback without the graphviz package; node order follows `PYTHONHASHSEED` | `draw()`, `draw_upstream_of(*names)`, `draw_downstream_of(*names)`: a `fnloom.Drawing`, whose `to_dot()` and `to_mermaid()` need nothing installed and give the same text every run ([Drawing](drawing.md), Q90, Q94) |
 | `visualize_path_between(a, b, strict_path_visualization=True)` | The path, and its nodes' parents unless strict | `draw_path_between(a, b, context=False)`; with `context=True`, the parents are drawn and marked `context` (Q90) |
@@ -197,11 +208,12 @@ value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](
 
 fnloom is pre-alpha. The core, the native path, `@parameterize` and its sugar, `@tag`, `@config`, `@extract_fields`,
 `@extract_columns`, `@exclude`, graph inspection, `validate`, graphs from plain functions, namespaces, type checks,
-result caching, the async driver, hooks, result builders, output checks, custom value checks, drawing, export and the
-CLI are done. These Hamilton features come next, roughly in this order:
+result caching, the async driver, hooks, result builders, output checks, custom value checks, drawing, export, the
+CLI, `@check_output` validators, step injection, `@inject`, `@resolve` and node wrappers are done. These Hamilton
+features come next, roughly in this order:
 
-1. **Dynamic execution**, materializers, `@subdag`, `@check_output` and `@pipe`.
-2. **Node-execution wrappers** (`NodeExecutionMethod`, `GracefulErrorAdapter`) and `StaticValidator`. Hooks see every
-   node, but can't change how one is called or let a run continue past a failure.
+1. **Dynamic execution**, materializers and `@subdag`.
+2. **`GracefulErrorAdapter`** and `StaticValidator`. Node wrappers can change how a node is called, but a run still
+   stops at the first failure.
 
 If your pipeline depends on one of these, it's worth waiting for it before you switch.

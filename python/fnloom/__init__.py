@@ -3,6 +3,13 @@
 from importlib.metadata import version as _version
 
 from fnloom._caching import CacheOutcome
+from fnloom._checks import (
+    CheckResult,
+    ValidationError,
+    Validator,
+    check_output,
+    check_output_custom,
+)
 from fnloom._config import Condition, config
 from fnloom._core import UnfingerprintableError
 from fnloom._decorators import (
@@ -26,6 +33,16 @@ from fnloom._extract import extract_columns, extract_fields
 from fnloom._fingerprint import fingerprint, register_fingerprint
 from fnloom._functions import NodeSpec, node
 from fnloom._hooks import Hook, LogFailures, NodeEnd, NodeStart, RunEnd, RunStart
+from fnloom._resolve import inject, resolve
+from fnloom._steps import (
+    Step,
+    Target,
+    apply_to,
+    mutate,
+    pipe_input,
+    pipe_output,
+    step,
+)
 from fnloom._stores import (
     MISSING,
     CacheStore,
@@ -56,6 +73,7 @@ __all__ = [
     "CachePolicy",
     "CacheStore",
     "CacheWarning",
+    "CheckResult",
     "Condition",
     "DiskCache",
     "Drawing",
@@ -76,11 +94,18 @@ __all__ = [
     "RunEnd",
     "RunStart",
     "Source",
+    "Step",
+    "Target",
     "UnfingerprintableError",
+    "ValidationError",
+    "Validator",
     "Value",
     "ValueCheck",
+    "apply_to",
     "build",
     "cache",
+    "check_output",
+    "check_output_custom",
     "config",
     "defaults",
     "exclude",
@@ -88,12 +113,18 @@ __all__ = [
     "extract_fields",
     "fingerprint",
     "group",
+    "inject",
+    "mutate",
     "node",
     "parameterize",
     "parameterize_sources",
     "parameterize_values",
+    "pipe_input",
+    "pipe_output",
     "register_fingerprint",
+    "resolve",
     "source",
+    "step",
     "tag",
     "type_matches",
     "value",

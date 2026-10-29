@@ -2,10 +2,12 @@
 
 import asyncio
 import copy
+import importlib.util
 import inspect
 import json
 import pickle
 import re
+import sys
 from typing import TYPE_CHECKING, Any, cast, override
 
 import pytest
@@ -39,6 +41,7 @@ from helpers import make_module
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Sequence
+    from pathlib import Path
     from types import ModuleType
 
 
@@ -184,6 +187,194 @@ def _boxed(nodes: Sequence[tuple[str, str, object]]) -> set[str]:
         else:
             found.add(name)
     return found
+
+
+_STEPPED = """
+from {package} import pipe_input, pipe_output, source, step, value
+
+def _add(v: int, n: int) -> int:
+    return v + n
+
+def _sum(v: int, other: int) -> int:
+    return v + other
+
+@pipe_input(step(_add, n=value(1)), step(_add, n=2), step(_sum, other=source("y")))
+def fed(x: int) -> int:
+    return x * 10
+
+@pipe_output(step(_add, n=1), step(_add, n=value(5)).named("last"))
+def piped(x: int) -> int:
+    return x
+"""
+
+
+def test_steps_make_the_same_nodes_and_values(tmp_path: Path) -> None:
+    """Names, wiring and values of a shared step graph (KEEP, Q104)."""
+    hamilton_module = _file_module(
+        tmp_path, "stepped_h", _STEPPED.format(package="hamilton.function_modifiers")
+    )
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    built = fnloom.build(make_module("stepped_f", _STEPPED.format(package="fnloom")))
+    hamilton_deps = {
+        v.name: sorted(v.required_dependencies | v.optional_dependencies)
+        for v in hamilton.list_available_variables()
+        if not v.is_external_input
+    }
+    fnloom_deps = {
+        name: sorted(built.nodes[name].dependencies)
+        for name in built.node_names()
+        if not built.nodes[name].is_input
+    }
+    assert fnloom_deps == hamilton_deps
+    outputs: list[str | Callable[..., object]] = [
+        "fed",
+        "piped",
+        "piped.raw",
+        "fed.with_add_1",
+    ]
+    inputs = {"x": 2, "y": 100}
+    assert built.execute(outputs, inputs=inputs) == hamilton.execute(
+        cast("Any", outputs), inputs=inputs
+    )
+
+
+_MUTATED = """
+from {package} import mutate, pipe_output, step, value
+
+def _first(v: int) -> int:
+    return v + 1000
+
+@pipe_output(step(_first))
+def a(x: int) -> int:
+    return x
+
+@mutate(a, n=value(1))
+def _add(v: int, n: int) -> int:
+    return v + n
+
+@mutate(a)
+def _double(v: int) -> int:
+    return v * 2
+"""
+
+
+def test_mutate_makes_the_same_nodes_and_values(tmp_path: Path) -> None:
+    """Steps after the target's own, in definition order (KEEP, Q107)."""
+    hamilton_module = _file_module(
+        tmp_path, "mutated_h", _MUTATED.format(package="hamilton.function_modifiers")
+    )
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    built = fnloom.build(make_module("mutated_f", _MUTATED.format(package="fnloom")))
+    hamilton_names = {
+        v.name for v in hamilton.list_available_variables() if not v.is_external_input
+    }
+    fnloom_names = {n for n in built.node_names() if not built.nodes[n].is_input}
+    assert fnloom_names == hamilton_names
+    assert built.execute(["a"], inputs={"x": 1}) == hamilton.execute(
+        ["a"], inputs={"x": 1}
+    )
+
+
+_INJECTED = """
+from {package} import group, inject, source, value
+
+@inject(nums=group(source("a"), value(10), source("b")), k=value(2))
+def total(nums: list[int], k: int, extra: int = 0) -> int:
+    \"\"\"The total, times {{k}}.\"\"\"
+    return (sum(nums) + extra) * k
+"""
+
+
+def test_inject_gives_the_same_node(tmp_path: Path) -> None:
+    """Name, dependencies, value and templated doc (KEEP, Q109)."""
+    hamilton_module = _file_module(
+        tmp_path, "injected_h", _INJECTED.format(package="hamilton.function_modifiers")
+    )
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    built = fnloom.build(make_module("injected_f", _INJECTED.format(package="fnloom")))
+    by_name = {v.name: v for v in hamilton.list_available_variables()}
+    assert by_name["total"].documentation == built.nodes["total"].doc
+    assert sorted(
+        by_name["total"].required_dependencies | by_name["total"].optional_dependencies
+    ) == list(built.nodes["total"].dependencies)
+    inputs = {"a": 1, "b": 2}
+    assert built.execute(["total"], inputs=inputs) == hamilton.execute(
+        ["total"], inputs=inputs
+    )
+
+
+def _file_module(folder: Path, name: str, source: str) -> ModuleType:
+    """`source` as a module loaded from a file, so Hamilton can read its source."""
+    path = folder / f"{name}.py"
+    path.write_text(source)
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+_CHECKED = """
+from {package} import check_output
+
+@check_output({checks}, importance="fail")
+def a(x: {kind}) -> {kind}:
+    return x
+"""
+
+
+@pytest.mark.parametrize(
+    ("checks", "kind", "values"),
+    [
+        ("range=(0, 10)", "int", [0, 10, -1, 11, 5]),
+        ("range=(0.5, 1.5)", "float", [0.5, 1.5, 0.4, 2.0]),
+        ("values_in=[1, 2]", "int", [1, 2, 3]),
+        ("values_in=['p', 'q']", "str", ["p", "r"]),
+        ("data_type=int", "int", [1]),
+        ("allow_none=False", "int", [1, None]),
+        ("contains='lo'", "str", ["hello", "world"]),
+    ],
+)
+def test_builtin_checks_pass_and_fail_the_same_values(
+    checks: str, kind: str, values: list[object]
+) -> None:
+    """Which values a shared built-in check passes, as Hamilton's (KEEP, Q101)."""
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(
+            make_module(
+                "checked_h",
+                _CHECKED.format(
+                    package="hamilton.function_modifiers", checks=checks, kind=kind
+                ),
+            )
+        )
+        .build()
+    )
+    built = (
+        fnloom.Builder()
+        .with_modules(
+            make_module(
+                "checked_f", _CHECKED.format(package="fnloom", checks=checks, kind=kind)
+            )
+        )
+        .without_input_type_checks()
+        .build()
+    )
+    for value in values:
+        try:
+            hamilton.execute(["a"], inputs={"x": value})
+            hamilton_passes = True
+        except Exception:  # noqa: BLE001  # Hamilton's error is no ValueError
+            hamilton_passes = False
+        try:
+            built.execute(["a"], inputs={"x": value})
+            fnloom_passes = True
+        except fnloom.ValidationError:
+            fnloom_passes = False
+        assert fnloom_passes == hamilton_passes, value
 
 
 @pytest.mark.parametrize(

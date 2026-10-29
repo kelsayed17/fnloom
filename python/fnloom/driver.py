@@ -26,7 +26,7 @@ from typing import (
     override,
 )
 
-from fnloom import _async, _core, _hooks, _types
+from fnloom import _async, _checks, _core, _hooks, _steps, _types, _wrappers
 from fnloom._caching import Cache, CacheOutcome, CacheRun
 from fnloom._decorators import Source
 from fnloom._defaults import default_problems
@@ -58,6 +58,7 @@ from fnloom._view import (
     output_names,
     topological,
 )
+from fnloom._wrappers import NodeWrapper
 
 type _PlanKey = tuple[tuple[str, ...], frozenset[str], frozenset[str]]
 # A request's final_vars (a list or tuple, copied), its input and override names,
@@ -626,7 +627,10 @@ class _HookedPlan[R](PreparedPlan[R]):
         given_inputs, given_overrides, mismatches = self._opened(inputs, overrides)
         plan = self._plan
         cached = isinstance(plan, CacheRun)
-        dispatch = _hooks.Dispatch(self._hooks, self._views, {} if cached else None)
+        owner = None if self._driver is None else self._driver._checks_owner  # noqa: SLF001  # the plan's own driver
+        dispatch = _hooks.Dispatch(
+            self._hooks, self._views, {} if cached else None, checks_owner=owner
+        )
         error: BaseException | None = None
         try:
             if mismatches:
@@ -855,6 +859,8 @@ class Driver[R = dict[str, object]]:
         self._last: _LastRequest[R] | None = None
         # The builder that built this driver, which pickling rebuilds it from.
         self._builder: Builder[R] | None = None
+        # What its nodes' output checks report results under: see `_checks`.
+        self._checks_owner: object = None
 
     @override
     def __reduce__(
@@ -911,6 +917,7 @@ class Driver[R = dict[str, object]]:
         copied._builder = self._builder
         copied._unmatched = self._unmatched
         copied._left_out = self._left_out
+        copied._checks_owner = self._checks_owner
         return copied
 
     @property
@@ -1801,7 +1808,11 @@ class _HookedAsyncPlan[R](AsyncPreparedPlan[R]):
         schedule = self._schedule
         cached = isinstance(schedule, _async.CachedSchedule)
         hooks, views = prepared._hooks, prepared._views  # noqa: SLF001  # the plan this wraps
-        dispatch = _hooks.Dispatch(hooks, views, {} if cached else None)
+        driver = prepared._driver  # noqa: SLF001  # the plan this wraps
+        owner = None if driver is None else driver._checks_owner  # noqa: SLF001  # its driver
+        dispatch = _hooks.Dispatch(
+            hooks, views, {} if cached else None, checks_owner=owner
+        )
         error: BaseException | None = None
         try:
             if mismatches:
@@ -2340,6 +2351,7 @@ class _Changes(TypedDict, total=False):
     hooks: tuple[Hook, ...]
     output_type_checks: bool
     value_checks: tuple[_types.ValueCheck, ...]
+    node_wrappers: tuple[NodeWrapper, ...]
 
 
 class _Settings(TypedDict):
@@ -2358,6 +2370,7 @@ class _Settings(TypedDict):
     hooks: tuple[Hook, ...]
     output_type_checks: bool
     value_checks: tuple[_types.ValueCheck, ...]
+    node_wrappers: tuple[NodeWrapper, ...]
 
 
 class Builder[R = dict[str, object]]:
@@ -2389,6 +2402,7 @@ class Builder[R = dict[str, object]]:
         result_builder: _ResultBuilder[R] | None = None,
         output_type_checks: bool = False,
         value_checks: Sequence[ValueCheck] = (),
+        node_wrappers: Sequence[NodeWrapper] = (),
     ) -> None:
         """Starts with the given modules (none by default), checking input types.
 
@@ -2402,7 +2416,7 @@ class Builder[R = dict[str, object]]:
         `without_override_type_checks`, `with_strict_overrides`,
         `with_declared_inputs`, `with_deep_type_checks`,
         `with_numeric_widening`, `with_hooks`, `with_result_builder`,
-        `with_output_type_checks` and `with_value_check`.
+        `with_output_type_checks`, `with_value_check` and `with_node_wrappers`.
         `TypeError` when an item of `modules` is not a module, or of
         `declared_inputs` is not a `str`; see `with_functions` for the errors
         `functions` raises, `with_hooks` for those of `hooks`,
@@ -2421,6 +2435,7 @@ class Builder[R = dict[str, object]]:
         self._result_builder = _checked_builder(result_builder)
         self._output_type_checks = output_type_checks
         self._value_checks = _checked_value_checks(value_checks)
+        self._wrappers = _wrappers.checked(node_wrappers)
         self._store = store
         # Never changed once made: `with_config` makes a new dict.
         self._config: dict[str, object] = (
@@ -2477,6 +2492,7 @@ class Builder[R = dict[str, object]]:
             "hooks": self._hooks,
             "output_type_checks": self._output_type_checks,
             "value_checks": self._value_checks,
+            "node_wrappers": self._wrappers,
         }
 
     def _with(
@@ -2679,6 +2695,27 @@ class Builder[R = dict[str, object]]:
         """
         return self._with(hooks=(*self._hooks, *hooks))
 
+    def with_node_wrappers(self, *wrappers: NodeWrapper) -> Builder[R]:
+        """Returns a new builder whose driver runs each node through `wrappers` (Q111).
+
+        Cumulative: the wrappers are added after this builder's. A wrapper is
+        called as `wrapper(node, call, inputs)`: `node` is the node's
+        `NodeView`, `call()` runs the next wrapper, then the node's own function
+        and its output checks, and `inputs` are the node's arguments by
+        parameter name, read-only. What it returns is the node's value: it may
+        call `call()` once, several times, or not at all. The first wrapper given
+        is the outermost; hooks' node events fire outside the whole chain.
+
+        A cache hit runs no wrapper, and wrappers are not part of the cache key:
+        what a chain returns is stored as the node's value, so give a driver
+        whose wrappers change values a store of its own. With output type
+        checks, a wrapper's value is checked too. `TypeError` for a wrapper that
+        isn't callable, is an `async def`, or can't take the three arguments; on
+        `build_async`, for an `async def` node, which wrappers can't wrap yet.
+        """
+        checked = _wrappers.checked(wrappers)
+        return self._with(node_wrappers=(*self._wrappers, *checked))
+
     def with_result_builder[T](self, build: _ResultBuilder[T]) -> Builder[T]:
         """Returns a new builder whose drivers' `execute` returns `build(outputs)`.
 
@@ -2745,10 +2782,10 @@ class Builder[R = dict[str, object]]:
         variants, or a node that a node reads and that no variant or
         `@config.default` gives, are a `ValueError` naming each (Q57, Q58).
         """
-        nodes, views, graph, unmatched, left_out = self._scanned(awaits=False)
+        nodes, views, graph, unmatched, left_out, owner = self._scanned(awaits=False)
         # Called here, so a `CacheWarning` points at the caller's `build`.
         cache = None if self._store is None else Cache.of(self._store, nodes)
-        return self._driver(graph, views, unmatched, left_out, cache)
+        return self._driver(graph, views, unmatched, left_out, cache, owner)
 
     def build_async(
         self, *, sync_nodes: Literal["thread", "inline"] = "thread"
@@ -2767,11 +2804,11 @@ class Builder[R = dict[str, object]]:
         or that a failure cancels, stores nothing. Store calls run on the loop.
         """
         checked = _async.checked_sync_nodes(sync_nodes)
-        nodes, views, graph, unmatched, left_out = self._scanned(awaits=True)
+        nodes, views, graph, unmatched, left_out, owner = self._scanned(awaits=True)
         # Called here, so a `CacheWarning` points at the caller's `build_async`.
         cache = None if self._store is None else Cache.of(self._store, nodes)
         built = AsyncDriver(
-            self._driver(graph, views, unmatched, left_out, cache),
+            self._driver(graph, views, unmatched, left_out, cache, owner),
             {node.name: node for node in nodes},
             sync_nodes=checked,
         )
@@ -2780,8 +2817,11 @@ class Builder[R = dict[str, object]]:
 
     def _scanned(
         self, *, awaits: bool
-    ) -> tuple[list[NodeDef], NodeViews, _core.Graph, dict[str, str], LeftOut]:
+    ) -> tuple[list[NodeDef], NodeViews, _core.Graph, dict[str, str], LeftOut, object]:
         """The checked nodes, their views and graph; see `build`.
+
+        Last, the token the nodes' output checks report their results under, so
+        only a run of this build's driver collects them.
 
         Also why each node no variant gave is absent, and each function `@exclude` or
         `__all__` left out. With `awaits`, an
@@ -2794,7 +2834,14 @@ class Builder[R = dict[str, object]]:
             functions=self._functions,
             namespaces=self._namespaces,
         )
-        nodes = resolve(scanned.nodes, self._rules, self._value_checks)
+        nodes = _checks.attached(
+            resolve(scanned.nodes, self._rules, self._value_checks)
+        )
+        if unbuilt := _steps.unbuilt_targets(self._modules, nodes):
+            raise ValueError("\n".join(unbuilt))
+        nodes, stepped = _steps.lowered(nodes, self._config)
+        relays = _steps.relays(nodes)
+        _checks.refuse_unreadable(nodes)
         unmatched = scanned.unmatched
         if unmatched:
             # A field of a forward-referenced `TypedDict` is first known resolved.
@@ -2803,12 +2850,18 @@ class Builder[R = dict[str, object]]:
             if absent := _unmatched_edges(nodes, unmatched):
                 raise ValueError(absent)
         views = node_views(
-            nodes, frozenset(node.name for node in nodes if is_generated(node))
+            nodes,
+            stepped | frozenset(node.name for node in nodes if is_generated(node)),
         )
         if self._output_type_checks:
             nodes = _output_checked(
                 nodes, self._rules, self._value_checks, awaits=awaits
             )
+        # Outside the type check: a check reads a value of the declared type.
+        owner = object()
+        nodes = _checks.wrapped(nodes, awaits=awaits, owner=owner)
+        if self._wrappers:
+            nodes = self._chained(nodes, views, relays, awaits=awaits)
         graph = _graph_of(nodes)
         if mismatches := _edge_mismatches(views.functions):
             raise ValueError("\n".join(mismatches))
@@ -2818,15 +2871,37 @@ class Builder[R = dict[str, object]]:
             refused := _undeclared(views, self._declared_inputs)
         ):
             raise ValueError("\n".join(refused))
-        return nodes, views, graph, unmatched, scanned.left_out
+        return nodes, views, graph, unmatched, scanned.left_out, owner
 
-    def _driver(
+    def _chained(
+        self,
+        nodes: list[NodeDef],
+        views: NodeViews,
+        relays: frozenset[str],
+        *,
+        awaits: bool,
+    ) -> list[NodeDef]:
+        """`nodes`, each run through the node wrappers, outside its checks (Q111).
+
+        So a wrapper sees a failed check as the node's error. With output type
+        checks, what the chain returns is checked too, since a wrapper may
+        return a value of its own. `build_async` refuses an `async def` node.
+        """
+        if awaits:
+            _wrappers.refuse_async(nodes)
+        chained = _wrappers.wrapped(nodes, views, self._wrappers, relays)
+        if not self._output_type_checks:
+            return chained
+        return _output_checked(chained, self._rules, self._value_checks, awaits=awaits)
+
+    def _driver(  # noqa: PLR0913, PLR0917  # the build's parts, passed on
         self,
         graph: _core.Graph,
         views: NodeViews,
         unmatched: dict[str, str],
         left_out: LeftOut,
         cache: Cache | None,
+        owner: object,
     ) -> Driver[R]:
         """This builder's driver over a scanned graph."""
         driver = Driver(
@@ -2845,6 +2920,7 @@ class Builder[R = dict[str, object]]:
         driver._modules = tuple(dict.fromkeys(self._modules))  # noqa: SLF001  # the builder's own driver
         driver._unmatched = unmatched  # noqa: SLF001  # the builder's own driver
         driver._left_out = left_out  # noqa: SLF001  # the builder's own driver
+        driver._checks_owner = owner  # noqa: SLF001  # the builder's own driver
         driver._builder = self  # noqa: SLF001  # the builder's own driver
         return driver
 

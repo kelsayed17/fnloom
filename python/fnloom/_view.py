@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, NamedTuple, override
 
 from fnloom._config import Condition
 from fnloom._decorators import Source, Value
+from fnloom._resolve import original
 from fnloom._types import type_matches
 
 if TYPE_CHECKING:
@@ -225,6 +226,11 @@ class NodeViews(Mapping[str, NodeView]):
         self._owners: Mapping[int, tuple[str, ...]] | None = None
         self._made: dict[str, NodeView] = {}
         self._names: list[str] | None = None
+        # The function each node was built from when it isn't its view's
+        # `origin`: a `@resolve` copy, which holds the resolved decorators.
+        self.built_from: Mapping[str, Callable[..., object]] = {}
+        # Each checked node's output checks, for an export to describe.
+        self.checks: Mapping[str, tuple[object, ...]] = {}
 
     def type_of(self, name: str) -> object:
         """The type of node or input `name`, without making an input's view."""
@@ -343,7 +349,7 @@ def node_views(
             node.name,
             node.returns,
             False,  # noqa: FBT003  # `is_input`, in field order
-            node.origin,
+            original(node.origin),
             node.module,
             node.params,
             _read_only(node.tags),
@@ -353,4 +359,11 @@ def node_views(
         )
         for node in nodes
     }
-    return NodeViews(functions, _input_types(nodes), generated)
+    views = NodeViews(functions, _input_types(nodes), generated)
+    views.built_from = {
+        node.name: node.origin
+        for node in nodes
+        if functions[node.name].origin is not node.origin
+    }
+    views.checks = {node.name: node.checks for node in nodes if node.checks}
+    return views

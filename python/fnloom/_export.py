@@ -14,6 +14,7 @@ import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
+from fnloom._caching import check_parts
 from fnloom._codeversion import UncacheableError, class_version, code_version
 from fnloom._decorators import Source, Value, decorations
 from fnloom._drawing import condition_text
@@ -23,13 +24,14 @@ from fnloom._types import Unresolved
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
 
+    from fnloom._checks import Check
     from fnloom._drawing import Drawing
     from fnloom._view import InputView, NodeView, Param
 
 FORMAT = "fnloom.export/1"
 
 # What `diff` compares, in the order it lists them.
-_COMPARED = ("kind", "type", "params", "config", "tags", "version", "marks")
+_COMPARED = ("kind", "type", "params", "config", "checks", "tags", "version", "marks")
 
 
 def export(  # noqa: PLR0913  # one argument per part of the document
@@ -48,7 +50,15 @@ def export(  # noqa: PLR0913  # one argument per part of the document
     """
     versions: dict[int, tuple[str | None, str | None]] = {}
     nodes = [
-        _node(drawn.name, sorted(drawn.marks), views[drawn.name], inputs, versions)
+        _node(
+            drawn.name,
+            sorted(drawn.marks),
+            views[drawn.name],
+            inputs,
+            versions,
+            built_from=getattr(views, "built_from", {}).get(drawn.name),
+            checks=getattr(views, "checks", {}).get(drawn.name, ()),
+        )
         for drawn in drawing.nodes
     ]
     return {
@@ -221,14 +231,23 @@ def type_text(annotation: object) -> str:
     return inspect.formatannotation(annotation)
 
 
-def _node(
+def _node(  # noqa: PLR0913  # the node's parts, and its build's
     name: str,
     marks: list[str],
     view: NodeView,
     inputs: Mapping[str, InputView],
     versions: dict[int, tuple[str | None, str | None]],
+    *,
+    built_from: Callable[..., object] | None = None,
+    checks: Sequence[Check] = (),
 ) -> dict[str, Any]:
-    """One node's entry; an input's has no source or version (Q95)."""
+    """One node's entry; an input's has no source or version (Q95).
+
+    `built_from` is the function the node was built from when it isn't the
+    view's `origin`, a `@resolve` copy: its decorations, such as a pinned
+    version, are the ones that apply. `checks` are the node's output checks:
+    listed, and part of its `version`, as the result cache keys them.
+    """
     entry: dict[str, Any] = {
         "name": name,
         "kind": "input" if view.is_input else "function",
@@ -244,6 +263,7 @@ def _node(
         "source": None,
         "version": None,
         "marks": marks,
+        "checks": [_check(c) for c in checks],
     }
     if view.is_input:
         found = inputs[name]
@@ -255,17 +275,48 @@ def _node(
         qualname = getattr(origin, "__qualname__", type(origin).__qualname__)
         entry["function"] = f"{origin.__module__}.{qualname}"
         entry["source"] = _source(origin)
-        key = id(origin)
+        built = origin if built_from is None else built_from
+        key = id(built)
         if key not in versions:
-            versions[key] = _version(origin)
+            versions[key] = _version(built)
         entry["version"], unversioned = versions[key]
+        if checks and entry["version"] is not None:
+            parts, unchecked = check_parts(checks)
+            if unchecked is not None:
+                entry["version"], unversioned = None, unchecked
+            else:
+                both = hashlib.sha256(bytes.fromhex(entry["version"]))
+                for part in parts:
+                    both.update(len(part).to_bytes(8, "big") + part)
+                entry["version"] = both.hexdigest()
         if unversioned is not None:
             entry["unversioned"] = unversioned
         if (
-            policy := decorations(origin).cache
+            policy := decorations(built).cache
         ) is not None and policy.version is not None:
             entry["pinned"] = policy.version
     return entry
+
+
+def _check(check: Check) -> dict[str, Any]:
+    """One output check as the export lists it: what it is, never what it read."""
+    kind, *rest = check.identity
+    if kind == "builtin":
+        given = stable_repr(rest[1])
+    elif kind == "function":
+        function = rest[0]
+        module = getattr(function, "__module__", "")
+        given = f"{module}.{getattr(function, '__qualname__', '')}"
+    else:
+        cls = type(rest[0])
+        given = f"{cls.__module__}.{cls.__qualname__}"
+    return {
+        "name": check.name,
+        "kind": kind,
+        "importance": check.importance,
+        "field": check.field,
+        "given": given,
+    }
 
 
 def _param(param: Param) -> dict[str, Any]:
@@ -334,7 +385,9 @@ def _graph_version(
                 return None
             bound.append([param.name, param.slot, None, value])
         named = [node[key] for key in ("name", "kind", "type")]
-        parts.append([*named, bound, node["config"], node["version"]])
+        parts.append(
+            [*named, bound, node["config"], node.get("checks", []), node["version"]]
+        )
     text = json.dumps([FORMAT, parts], sort_keys=True)
     return hashlib.sha256(text.encode()).hexdigest()
 
@@ -343,8 +396,8 @@ def diff(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
     """What changed between two documents, node by node.
 
     `added` and `removed` are names, sorted; `changed` maps each node in both to
-    the fields that differ, of `kind`, `type`, `params`, `config`, `tags`,
-    `version` and `marks` (a run's output or override). `unversioned` names
+    the fields that differ, of `kind`, `type`, `params`, `config`, `checks`,
+    `tags`, `version` and `marks` (a run's output or override). `unversioned` names
     each function node in both that differs in nothing else, its version aside,
     and that a side has no version for, or a `value()` without a
     `value_version`: a change there can't be seen.

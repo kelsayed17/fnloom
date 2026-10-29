@@ -5,6 +5,7 @@ import inspect
 import types
 import typing
 from collections.abc import Callable, Iterable, Mapping
+from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Literal, overload
@@ -13,10 +14,16 @@ from fnloom._stores import Format
 from fnloom._types import written
 
 if TYPE_CHECKING:
+    from fnloom._checks import Check
     from fnloom._config import ConfigPolicy
     from fnloom._extract import Extraction
+    from fnloom._steps import PipeInput, Step
 
 _ATTRIBUTE = "__fnloom__"
+
+# The `@resolve` running now, as words for an error, while its resolvers and
+# decorators run: `@mutate` refuses to write onto other functions then.
+RESOLVING: ContextVar[str | None] = ContextVar("fnloom_resolving", default=None)
 
 # How a node uses the result cache: see `cache`.
 type CacheBehavior = Literal["default", "recompute", "disable"]
@@ -102,8 +109,8 @@ class DefaultsPolicy:
 class Decorations:
     """What the decorators recorded on one function.
 
-    Its rows, tags, cache policy, config conditions, extraction, defaults, and whether
-    `@exclude` marked it.
+    Its rows, tags, cache policy, config conditions, extraction, defaults, whether
+    `@exclude` marked it, its output checks, in the order they run, and its steps.
     """
 
     rows: Mapping[str, Mapping[str, Binding]] | None
@@ -114,6 +121,13 @@ class Decorations:
     defaults: DefaultsPolicy | None = None
     excluded: bool = False
     docs: Mapping[str, str | None] = MappingProxyType[str, str | None]({})
+    checks: tuple[Check, ...] = ()
+    pipe_input: PipeInput | None = None
+    pipe_output: tuple[Step, ...] = ()
+    mutations: tuple[tuple[str, Step], ...] = ()
+    mutates: tuple[Callable[..., object], ...] = ()
+    injected: Mapping[str, Binding] | None = None
+    resolvers: tuple[Callable[..., object], ...] = ()
 
 
 def source(name: str) -> Source:
@@ -463,6 +477,9 @@ def parameterize[F: Callable[..., object]](
         if current.rows is not None:
             msg = "function is already parameterized; apply parameterize once"
             raise ValueError(msg)
+        if current.injected is not None:
+            msg = "inject and parameterize can't share a function: use one"
+            raise TypeError(msg)
         if current.extract is not None and len(frozen) > 1:
             decorator = f"extract_{current.extract.kind}"
             raise ValueError(too_many_rows(frozen, decorator))

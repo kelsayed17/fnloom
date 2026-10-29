@@ -385,6 +385,265 @@ on fixed tuples, parameterized generics and `NewType`s, and reports a failing no
 
 A [custom value check](running.md#custom-value-checks) applies to results too.
 
+## Checking values
+
+`@fnloom.check_output` checks a node's value after its function returns, with built-in checks given as keywords. A
+value that fails is the node's own failure, a `fnloom.ValidationError`, which is a `ValueError` (Q99, Q100):
+
+```python
+# file: readings.py
+from fnloom import check_output
+
+
+@check_output(range=(0, 100))
+def humidity(raw: float) -> float:
+    """Relative humidity, in percent."""
+    return raw * 100
+
+
+@check_output(values_in=["ok", "stale"], importance="warn")
+def status(age: int) -> str:
+    """Whether the reading is fresh."""
+    return "ok" if age < 60 else "expired"
+```
+
+```python
+import readings
+from fnloom import ValidationError
+
+sensors = fnloom.build(readings)
+sensors.execute(["humidity"], inputs={"raw": 0.4})
+# -> {'humidity': 40.0}
+sensors.execute(["humidity"], inputs={"raw": 1.2})
+# raises ValidationError: humidity: check range failed: 120.0 is not in [0, 100]
+```
+
+The node keeps its name and its place in the graph: no node is added, unlike Hamilton's `a_raw` and validator nodes.
+`importance="warn"` logs one WARNING on the `fnloom` logger for each failed check in a run, and the run goes on:
+
+```python
+sensors.execute(["status"], inputs={"age": 90})
+# -> {'status': 'expired'}
+```
+
+| Keyword | Passes when |
+| --- | --- |
+| `range=(lo, hi)` | the value, or every item, is between `lo` and `hi`, inclusive |
+| `values_in=[...]` | the value, or every item, is one of these |
+| `data_type=T` | `fnloom.value_matches(T, value)`, so `list[int]` and `int \| None` work |
+| `allow_none=False` | the value isn't `None` |
+| `contains=`, `does_not_contain=` | a `str` value contains, or doesn't contain, each `str` given |
+| `allow_nans=False`, `max_fraction_nans=f` | no item, or at most that fraction of items, is NaN |
+
+`range`, `values_in` and the NaN checks read a scalar, or each item of a value that iterates: a list, a numpy array or
+a pandas Series or DataFrame, the last ones through their own vectorised methods, with no import from fnloom. A `str`,
+`bytes` or mapping is one value. A one-shot iterator is never read, since that would consume it: a node annotated
+`Iterator` is refused at build, and one met at run is a `TypeError`. A check that can't read the return annotation,
+such as `range` on a `str`, is a `TypeError` at build, naming the node (Q101).
+
+`@fnloom.check_output_custom` takes checks of your own. A function takes the value, and an `inputs` parameter if it
+wants the node's arguments, and returns `True` or `None` for a good value, or `False` or a message for a bad one. A
+`fnloom.Validator` subclass does the same in `validate(value, inputs)`, and may refuse a return annotation at build
+with `applies_to` (Q102):
+
+```python
+# file: deliveries.py
+from fnloom import check_output_custom
+
+
+def _no_more_than_ordered(value: int, inputs) -> str | None:
+    if value > inputs["ordered"]:
+        return f"shipped {value}, more than the {inputs['ordered']} ordered"
+    return None
+
+
+@check_output_custom(_no_more_than_ordered)
+def shipped(ordered: int, packed: int) -> int:
+    """What leaves the warehouse."""
+    return packed
+```
+
+```python
+import deliveries
+
+fnloom.build(deliveries).execute(["shipped"], inputs={"ordered": 3, "packed": 5})
+# raises ValidationError: shipped: check _no_more_than_ordered failed: shipped 5, more than the 3 ordered
+```
+
+Checks stack in any number and in any order, and run in the order written, top first. A check is on the function's
+value after its [`@pipe_output`](#steps) and `@mutate` steps; `field="p"` puts it on an `@extract_fields` or
+`@extract_columns` field instead, whatever the decorator order. Every `@parameterize` row and `@config.when` variant
+is checked. An overridden node doesn't run, so it isn't checked, and a [cache](caching.md) hit isn't checked again.
+The checks are part of the node's cache key, so adding a stricter check makes the next run compute the value afresh
+(Q103). A [hook](hooks.md)'s `after_node` gets every check's result as `NodeEnd.checks`.
+
+Hamilton's pandas statistics checks are a few lines as a custom check:
+
+```python
+def _mean_in_range(series) -> bool:
+    return 0 <= series.mean() <= 10
+```
+
+## Steps
+
+A step is a small function run on a value on its way into a node, or on its way out. `fnloom.step(fn, **bindings)`
+names one: `fn`'s first parameter takes the value, and its other parameters are bound with `source("node")`,
+`value(v)` or a plain literal. `@pipe_input` runs steps on a parameter before the function reads it, and
+`@pipe_output` runs them on what the function returns (Q104):
+
+```python
+# file: cleaning.py
+from fnloom import pipe_input, pipe_output, source, step
+
+
+def _clip(v: float, low: float, high: float = 100.0) -> float:
+    return min(max(v, low), high)
+
+
+def _scale(v: float, factor: float) -> float:
+    return v * factor
+
+
+@pipe_input(step(_clip, low=0.0))
+def reading(raw: float) -> float:
+    """A raw reading, clipped to [0, 100] first."""
+    return raw
+
+
+@pipe_output(step(_scale, factor=source("unit")), step(_clip, low=0.0).named("bounded"))
+def adjusted(reading: float, offset: float) -> float:
+    """The reading, offset, then scaled to the unit and bounded."""
+    return reading + offset
+```
+
+Each step is an ordinary node, named after the node it serves: `reading.with_clip` for the first, and
+`adjusted.raw`, `adjusted.with_scale` and `adjusted.bounded` for the second, where `adjusted.raw` is the function
+itself and `adjusted` the last step's value. A repeated step is numbered, `with_clip_1`. Steps can be requested, are
+cached and get [hook](hooks.md) events like any node:
+
+```python
+import cleaning
+
+steps = fnloom.build(cleaning)
+steps.execute(
+    ["adjusted", "adjusted.raw"], inputs={"raw": 120.0, "offset": -30.0, "unit": 2.0}
+)
+# -> {'adjusted': 100.0, 'adjusted.raw': 70.0}
+```
+
+`high` has a default and isn't bound, so it keeps its default: a step's parameters are never graph inputs, where
+Hamilton makes every such parameter an input shared by every step that has it (Q105). A required parameter left
+unbound is refused when decorating.
+
+- `.named("x")` names a step's node `<node>.x`.
+- `.when(mode="fast")`, `.when_not`, `.when_in` and `.when_not_in` run a step only under that [config](#config). A
+  step's number counts every step written, so names don't change with the config.
+- `on_input="b"` on `@pipe_input` feeds the parameter `b` rather than the first.
+- On a function with [extracted fields](#extracting-fields), `@pipe_output`'s steps apply to each field, and
+  `.on_output("p")` picks the fields a step applies to.
+- With `@parameterize`, each row gets its own chain, named under the row (Q108).
+
+The first step must take the parameter's own type, checked at build, and so must each step the one before it.
+Misuse, such as `on_input` naming no parameter, is refused rather than ignored (Q106). Output checks on a
+`@pipe_output` function check the last step's value, whatever the decorator order. A public step function is a node
+of its own too, as any public function is; name it with a leading `_`, or mark it [`@exclude`](#keeping-a-function-out).
+
+### Steps from elsewhere: `@mutate`
+
+`@mutate` adds the decorated function as a step to other functions' `@pipe_output`, so a cross-cutting change lives
+in one place. Each target is a function, or `apply_to(fn, **bindings)` to bind the step differently for it; the steps
+follow the target's own, in the order the mutators are defined, and the mutator itself is no node (Q107):
+
+```python
+# file: rounding.py
+from fnloom import apply_to, mutate
+
+
+def price(cost: float) -> float:
+    """The price before rounding."""
+    return cost * 1.2
+
+
+def tax(price: float) -> float:
+    """The tax on the price."""
+    return price * 0.2
+
+
+@mutate(price, apply_to(tax, places=1))
+def _rounded(v: float, places: int = 2) -> float:
+    return round(v, places)
+```
+
+```python
+import rounding
+
+fnloom.build(rounding).execute(["price", "tax"], inputs={"cost": 9.99})
+# -> {'price': 11.99, 'tax': 2.4}
+```
+
+A target may be in another module, as long as both are built. A target no built module defines fails the build, and so
+does a node mutated from a module the build doesn't include. A redefinition of a mutator, as re-running a notebook cell
+makes, replaces its step.
+
+## Bindings and decorators from config
+
+`@fnloom.inject` binds parameters with `source`, `value` or `group`, like one [`@parameterize`](#one-function-several-nodes)
+row, but keeps the function's name (Q109):
+
+```python
+# file: totals_injected.py
+from fnloom import group, inject, source, value
+
+
+@inject(parts=group(source("food"), source("drink"), value(2.5)))
+def bill(parts: list[float]) -> float:
+    """Everything ordered, plus the cover charge."""
+    return sum(parts)
+```
+
+```python
+import totals_injected
+
+fnloom.build(totals_injected).execute(["bill"], inputs={"food": 20.0, "drink": 6.0})
+# -> {'bill': 28.5}
+```
+
+`@fnloom.resolve(decorate_with)` decides a function's decorators from the [config](#config) at build.
+`decorate_with`'s parameters name config keys, a defaulted one optional, and it returns a decorator, or a list of them,
+applied as if written on the function (Q110):
+
+```python
+# file: regions.py
+from fnloom import parameterize, resolve, source
+
+
+@resolve(
+    lambda regions: parameterize(
+        **{f"sales_{r}": {"orders": source(f"orders_{r}")} for r in regions}
+    )
+)
+def sales(orders: int) -> int:
+    """Sales in one region."""
+    return orders * 10
+```
+
+```python
+import regions
+
+by_region = (
+    fnloom.Builder().with_modules(regions).with_config({"regions": ["eu", "us"]})
+)
+by_region.build().execute(
+    ["sales_eu", "sales_us"], inputs={"orders_eu": 1, "orders_us": 2}
+)
+# -> {'sales_eu': 10, 'sales_us': 20}
+```
+
+No power-user mode is needed. A missing required key fails the build, naming the function and the key. The
+decorators go on a copy of the function made for that build, so builds with other configs never see each other's, and
+the function still stands for its nodes in a request. A resolver may not apply `@config.when*`, `@exclude`, `@mutate`
+or `@resolve`: those decide which functions are nodes, which the config can't do from inside one.
+
 ## Modules together
 
 `fnloom.build` takes several modules, and so does `Builder.with_modules`. Nodes are matched by name across all of

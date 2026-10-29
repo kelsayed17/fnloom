@@ -5,12 +5,13 @@ import functools
 import inspect
 import operator
 import sys
+import types
 import typing
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, NamedTuple
 
-from fnloom import _config, _extract
+from fnloom import _config, _extract, _resolve
 from fnloom._config import (
     Condition,
     Found,
@@ -24,6 +25,7 @@ from fnloom._decorators import (
     Group,
     Source,
     Value,
+    _templated,
     decorations,
     group_element,
     group_mismatch,
@@ -45,6 +47,9 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
     from collections.abc import Set as AbstractSet
     from types import ModuleType
+
+    from fnloom._checks import Check
+    from fnloom._extract import _Extractor
 
 _UNSUPPORTED_KINDS = {
     inspect.Parameter.POSITIONAL_ONLY: "positional-only parameter",
@@ -82,6 +87,10 @@ class NodeDef:
     doc: str | None = None
     namespace: str | None = None
     documented: bool = False
+    checks: tuple[Check, ...] = ()
+    # A field's extractor, kept when a check or a wrapper replaces its payload,
+    # so the node is still known as a field: see `_extract.extractor`.
+    extracting: _Extractor | None = None
 
 
 def core_inputs(params: tuple[Param, ...]) -> list[tuple[str, bool]]:
@@ -468,6 +477,7 @@ def _node_defs(  # noqa: PLR0913  # keyword-only options, one per kind of source
         # A variant is named by `name=`, or by its function's name cut at `__`.
         name = _config.node_name(fn, recorded.config.name)
         conditions = recorded.config.conditions
+    rows, injected_docs = _injected(fn, name, rows, bind)
     if rows is None:
         # A plain function is one node, of its own name, binding nothing, so each
         # parameter reads its own name, or its namespace's node of that name, and
@@ -504,7 +514,7 @@ def _node_defs(  # noqa: PLR0913  # keyword-only options, one per kind of source
         return _extract.lower(node, recorded.extract, resolved=False)
     nodes: list[NodeDef] = []
     namespace = None if within is None else within.namespace
-    docs = recorded.docs if bind is None else {}
+    docs = (injected_docs or recorded.docs) if bind is None else {}
     parameters = _readable_groups(fn, parameters, rows)
     for node_name, row in rows.items():
         params = _bind(parameters, row, within)
@@ -646,6 +656,16 @@ def _node_name(fn: Callable[..., object]) -> str:
         return _config.node_name(fn, recorded.config.name)
     except ValueError:
         return full
+
+
+def _mutates(module: ModuleType) -> bool:
+    """Whether `module` defines a `@mutate` mutator: it adds steps, if no node."""
+    return any(
+        inspect.isfunction(value)
+        and value.__module__ == module.__name__
+        and decorations(value).mutates
+        for value in vars(module).values()
+    )
 
 
 def _skipped(module: ModuleType) -> str:
@@ -806,7 +826,7 @@ def _functions(
     for module in unique:
         gathered = _found(module)
         scanned[id(module)] = gathered
-        if not gathered.functions:
+        if not gathered.functions and not _mutates(module):
             empty.append(_skipped(module))
         elif gathered.configured:
             configured.append(module)
@@ -948,19 +968,26 @@ def scan(
         for e in given
     ):
         selecting = {*selecting, None}
+    unmatched: dict[str, str] = {}
+    if selecting:
+        namespaced = any(namespace is not None for namespace in groups)
+        entries, selection = _selected(
+            entries, gathered.configured, config, namespaced=namespaced
+        )
+        unmatched = selection.unmatched
+    # Only the functions the config kept are resolved, so an unselected
+    # variant's `@resolve` never runs (Q110).
+    resolved = {id(entry): _resolved_entry(entry, config) for _, entry in entries}
+    entries = [(namespace, resolved[id(entry)]) for namespace, entry in entries]
+    given = [resolved.get(id(entry), entry) for entry in given]
     # Each namespace's names, from every function given under it, unselected
-    # variants too: reading a name no variant gave is the unmatched error.
+    # variants too: reading a name no variant gave is the unmatched error. A
+    # resolved function's names are its resolved decorators'.
     names = {
-        namespace: _names_in(namespace, group)
+        namespace: _names_in(namespace, [resolved.get(id(e), e) for e in group])
         for namespace, group in groups.items()
         if namespace is not None
     }
-    unmatched: dict[str, str] = {}
-    if selecting:
-        entries, selection = _selected(
-            entries, gathered.configured, config, namespaced=bool(names)
-        )
-        unmatched = selection.unmatched
     seen = _made(entries, given, names, awaits=awaits)
     # A node a plain function or another variant defines is not missing.
     missing = {n: why for n, why in unmatched.items() if n not in seen}
@@ -968,6 +995,35 @@ def scan(
         # A variant the scan left out is a reason too: say so beside the others.
         missing[name] = "; ".join([missing[name], *gathered.variants[name]])
     return Scanned(list(seen.values()), missing, gathered.left_out)
+
+
+def _resolved_entry(
+    entry: Found | NodeSpec, config: Mapping[str, object]
+) -> Found | NodeSpec:
+    """`entry`, its function a copy decorated by its `@resolve`s, if any (Q110)."""
+    if isinstance(entry, NodeSpec):
+        return entry
+    module, attribute, fn = entry
+    if not isinstance(fn, types.FunctionType) or not decorations(fn).resolvers:
+        return entry
+    return module, attribute, _resolve.resolved(fn, config)
+
+
+def _injected(
+    fn: Callable[..., object],
+    name: str,
+    rows: Mapping[str, Mapping[str, Binding]] | None,
+    bind: Mapping[str, Binding] | None,
+) -> tuple[Mapping[str, Mapping[str, Binding]] | None, Mapping[str, str | None]]:
+    """The rows of a function `@inject` binds: one, named as its node (Q109).
+
+    Also the row's templated docstring. Otherwise `rows` as they are, no docs.
+    """
+    injected = decorations(fn).injected
+    if injected is None or bind is not None:
+        return rows, dict[str, str | None]()
+    made = {name: injected}
+    return made, _templated(fn, made, set())
 
 
 def _selected(
