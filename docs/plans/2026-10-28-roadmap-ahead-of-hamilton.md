@@ -1,7 +1,7 @@
 # Roadmap: ahead of Hamilton everywhere
 
 **Status:** in progress, 2026-10-28. Plans 1–4, the Plan 4 follow-up and Plan 3 are merged and released in 0.2.0.
-Plans 5 to 9 are merged (#24 to #28), not yet released. Plan 10 is designed and awaiting approval; it is not built.
+Plans 5 to 9 are merged (#24 to #28), not yet released. Plans 10 and 11 are designed and approved, not built.
 
 **Goal:** for every capability Hamilton 1.90.0 offers, fnloom has an equivalent that is at least as good, or a
 written decision explaining why it doesn't. "At least as good" means: same intent; behaviour proven differentially
@@ -54,7 +54,7 @@ and the design's change log takes a row when the item is approved.
 |---|---|
 | Lifecycle adapters (pre/post node, pre/post graph) | Done in Plan 6: `fnloom.Hook` with `before_run`, `before_node`, `after_node` and `after_run`, each given one frozen event with real values, on both drivers, any number per driver, checked when attached (Q84, Q86); cache outcomes on node events (Q85) |
 | Result builders (`do_build_result`, dict / pandas / polars builders) | Done in Plan 6: `Builder.with_result_builder(build)`, any callable given the raw dict in request order, typed through `Builder[R]` (Q19, Q24). No pandas or polars builder: a callable, with recipes, including a strict `frame` recipe that refuses the outer join `pandas.DataFrame` does (Q89) |
-| Dynamic execution (`Parallelizable`, `Collect`) | Designed, awaiting approval: [the dynamic execution design](../design/2026-10-28-dynamic-execution-design.md). `Parallelizable[T]` and `Collect[T]` with no experimental flag, blocks compiled once into a reusable plan, nesting, content-addressed cache keys per branch, and `Builder.with_threads(...)` for a parallel executor on free-threaded 3.14t, correct on 3.14. Then Plan 10 |
+| Dynamic execution (`Parallelizable`, `Collect`) | Designed and approved 2026-10-29: [the dynamic execution design](../design/2026-10-28-dynamic-execution-design.md). `Parallelizable[T]` and `Collect[T]` with no experimental flag, blocks compiled once into a reusable plan, nesting, content-addressed cache keys per branch, and `Builder.with_threads(...)` for a parallel executor on free-threaded 3.14t, correct on 3.14. Plan 10 builds absence and sequential blocks; Plan 11 the executor |
 | Plugin ecosystem (dask, ray, spark, pandera, mlflow, UI, tracker) | Not built in (design §2 non-goal). Plan 6's hooks make each one writable outside fnloom (Q84) |
 | A failing node logs its inputs | Done in Plan 6: `after_node` gets `ok=False` with the node, its inputs and its error, and `fnloom.LogFailures` (*new*) is the ready-made hook that logs them (Q88) |
 | `NodeExecutionMethod` and `GracefulErrorAdapter` (node-execution wrappers) | `NodeExecutionMethod` done in Plan 8: `Builder.with_node_wrappers(*wrappers)`, Q24's ordered chain, any number per driver (Q111). Graceful partial failure is designed for Plan 10: `@fnloom.absent_on(*errors)` and `Builder.with_absent_on(...)` turn chosen errors into absence, and `Collect` keeps the branches that succeeded ([design](../design/2026-10-28-dynamic-execution-design.md) §7.5) |
@@ -222,10 +222,13 @@ tests against Hamilton for every kept behaviour; benchmarks for anything on the 
 8. **Plan 9: the long tail.** Done: a decision per remaining Hamilton decorator, each a register row
    (Q112 to Q117), with `bind=` on a namespaced `with_modules` as the one build (Q112), and Q110's known limit pinned
    by a test.
-9. **Design, then Plan 10: dynamic execution.** Designed 2026-10-28, awaiting approval:
-   [the dynamic execution design](../design/2026-10-28-dynamic-execution-design.md) covers fan-out and fan-in, the
-   parallel executor and typed absence, delivers "Graphs that carry I/O and failure" and in-graph panels, and leaves
-   room for streaming, incremental execution and sweeps (its §8).
+9. **Plan 10: typed absence and dynamic fan-out, sequential.** Designed and approved 2026-10-29
+   ([the dynamic execution design](../design/2026-10-28-dynamic-execution-design.md), milestones A and B): `ABSENT`
+   and its consumer rules, `Parallelizable` and `Collect` with nesting and per-branch caching. Then 0.3.0.
+10. **Plan 11: the parallel executor and partial results.** The same design, milestones C to E: the core
+    `Scheduler`, `with_threads(...)` for free-threaded 3.14t, `run_many`, the async driver on the scheduler, and
+    `absent_on` for partial results. The rest of "Beyond Hamilton" (streaming, incremental execution, sweeps) is left
+    room for in its §8.
 
 ## Done means
 

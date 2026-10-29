@@ -1,10 +1,10 @@
 # fnloom — dynamic execution, design
 
-**Status:** draft for the maintainer's review, 2026-10-28. Nothing here is built. It designs Plan 10 of the
-[roadmap](../plans/2026-10-28-roadmap-ahead-of-hamilton.md): dynamic fan-out and fan-in, a parallel executor, and a
-typed absent outcome, and it says which parts of the roadmap's "Beyond Hamilton" it delivers and which it only leaves
-room for. Facts about Hamilton were read in the `apache-hamilton 1.90.0` wheel and probed on Python 3.14 (§11).
-Decisions marked **(open)** need the maintainer; every other decision is a call this design makes, changeable (§13).
+**Status:** approved by the maintainer 2026-10-29, with the open questions of §13 decided. Nothing here is built.
+It designs Plans 10 and 11 of the [roadmap](../plans/2026-10-28-roadmap-ahead-of-hamilton.md): dynamic fan-out and
+fan-in, a parallel executor, and a typed absent outcome, and it says which parts of the roadmap's "Beyond Hamilton" it
+delivers and which it only leaves room for. Facts about Hamilton were read in the `apache-hamilton 1.90.0` wheel and
+probed on Python 3.14 (§11). Every decision is a call this design makes, changeable (§13).
 
 ## 1. Intent
 
@@ -287,7 +287,8 @@ The caching design's rules hold unchanged for nodes outside blocks. For a block:
 ### 6.2 Threads and the GIL
 
 `Builder.with_threads(max_workers=None, limits=None)` caps a driver at `max_workers` concurrent task calls (default
-`os.process_cpu_count()`), counted by the driver's `Limits` across every run and every thread that shares the driver.
+`os.process_cpu_count()`, maintainer 2026-10-29), counted by the driver's `Limits` across every run and every thread
+that shares the driver.
 A thread that calls `execute` works on its own run, and counts against `max_workers` while it runs a task, like a
 pool thread. The pool holds `max_workers - 1` threads, started lazily at the first run and shared by the driver's
 runs, so `max_workers=1` means no pool thread: the caller runs everything, in reference order, on its own thread.
@@ -467,7 +468,7 @@ What Plan 10 delivers, and what it only leaves room for:
 | Zero-copy arrays | Branch values are passed by reference; nothing is copied per branch or per worker | A native array value type in the binding |
 | Streaming and per-node state | Lazy expand with an in-flight bound; a block's sub-plan is a reusable per-item step | A `Stream[T]` expand whose collect is a fold, and stateful nodes carrying state from branch *i* to *i+1*: a plan stepped bar by bar |
 | Incremental execution | Content-addressed branch keys: an appended item computes one branch, and the rest hit | Incremental collect (fold over new branches only) |
-| Panel execution | In-graph: expand over entities | **(open)** `PreparedPlan.run_many(inputs_seq)`: one prepared plan over many input sets on the pool, results in order |
+| Panel execution | In-graph: expand over entities; and `PreparedPlan.run_many(inputs_seq)`, one prepared plan over many input sets on the pool, results in order (maintainer, 2026-10-29) | Panels that share work across entities |
 | Sweep execution | An expand node over parameter sets | A `sweep(...)` helper over a grid of `value()`s |
 | Graphs that carry I/O and failure | `absent_on`, `Collect` over partial results, cancellation, deadlines | Retries and backoff, as a node wrapper recipe |
 | Array contracts (Q9/Q17/Q18) | Untouched | Unchanged |
@@ -585,6 +586,10 @@ New rows in `docs/benchmarks.md` and CodSpeed, each against Hamilton's executors
 Each task is one PR-sized, independently reviewable change. Its register rows, and their differential or
 `deliberate` tests, land in the same task, written before its code. Milestones can ship as separate releases.
 
+**Split (maintainer, 2026-10-29):** Plan 10 is milestones A and B, ending in the 0.3.0 release; Plan 11 is
+milestones C, D and E. Each plan closes its own docs, roadmap rows and change log, so task 27's share for Plan 10
+is written into Plan 10's last task.
+
 #### A. Absence (needs nothing from B or C)
 
 1. Core: the `Absent` outcome, `Dependency::Admits`, skip propagation in `Plan::run`, may-be-absent at build; Rust
@@ -622,16 +627,18 @@ Each task is one PR-sized, independently reviewable change. Its register rows, a
 21. Failure, `timeout=`, `cancelled()`, `close()` on early stop, signals and `KeyboardInterrupt` (Q128; amends Q66).
 22. The async driver on the `Scheduler`, its sync nodes on the pool (amends Q65).
 23. Blocks on the async driver, async generators as expand nodes (Q132).
-24. Free-threading stress tests, and the [Threads](../running.md#threads) section rewritten.
+24. `PreparedPlan.run_many(inputs_seq, overrides=None)` on the pool: one result per input set, in order; a failure
+    raises as in §4.5, naming the input set's index.
+25. Free-threading stress tests, and the [Threads](../running.md#threads) section rewritten.
 
 #### D. Partial results
 
-25. `absent_on` and `with_absent_on`, `RunEnd.absent_errors`, error absences uncached and poisoning their downstream,
+26. `absent_on` and `with_absent_on`, `RunEnd.absent_errors`, error absences uncached and poisoning their downstream,
     `Collect` over partial results (Q133).
 
 #### E. Close-out
 
-26. Benchmarks (§12.2); `docs/running.md` sections on fan-out, threads and absence; `from-hamilton.md` rows; the
+27. Benchmarks (§12.2); `docs/running.md` sections on fan-out, threads and absence; `from-hamilton.md` rows; the
     roadmap and the design change log.
 
 ## 13. Calls made in this design (change any of them)
@@ -650,13 +657,12 @@ Each task is one PR-sized, independently reviewable change. Its register rows, a
 - **Error absences are never cached** (§7.5).
 - **`fnloom.export/2`** for the new node kinds (§4.7).
 
-**Open, for the maintainer:**
+**Decided by the maintainer (2026-10-29):**
 
-1. **Scope of Plan 10.** All five milestones (§12.3) as one plan, or absence and sequential blocks (A, B) as Plan 10
-   and the parallel executor and partial results (C, D) as Plan 11, releasing 0.3.0 between them?
-2. **`PreparedPlan.run_many(inputs_seq)`** (§8): build panel execution over input sets now (one more task in C), or
-   leave room only?
-3. **Default `max_workers`** for `with_threads()`: `os.process_cpu_count()`, or a required argument?
+1. **Scope:** absence and sequential blocks (milestones A and B) are Plan 10, then the 0.3.0 release; the
+   scheduler, parallel executor and partial results (C, D, E) are Plan 11.
+2. **`PreparedPlan.run_many(inputs_seq)`** is built, in Plan 11 (task 24).
+3. **`max_workers`** defaults to `os.process_cpu_count()`.
 
 ## 14. Change log
 
@@ -664,3 +670,4 @@ Each task is one PR-sized, independently reviewable change. Its register rows, a
   downstream keys; the positional key fallback only under a stored expand; driver-level limits and the caller's slot;
   pulls on any worker; a total order key; branch hits inside the scheduler; single-flight rules; per-call contexts;
   deadlines that abandon; every place absence meets; amended rows listed; export/2 only when needed; tasks split.
+- **2026-10-29:** approved by the maintainer; the three open questions decided (§13); `run_many` added as task 24.
