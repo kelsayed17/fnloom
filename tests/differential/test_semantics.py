@@ -526,6 +526,7 @@ ROWS = [
 ]
 
 
+@pytest.mark.keeps("Q151")
 @pytest.mark.parametrize("bump", [None, 7], ids=["without_optional", "with_optional"])
 def test_rows_compute_the_same_values(bump: int | None) -> None:
     """Every row node gives the same value, with and without the optional input.
@@ -543,6 +544,7 @@ def test_rows_compute_the_same_values(bump: int | None) -> None:
     assert run_fnloom([load_fixture("rows_f")], outputs, inputs) == hamilton
 
 
+@pytest.mark.keeps("Q151")
 def test_rows_list_the_same_nodes() -> None:
     """Rows are nodes, their function is not, and their sources are inputs, in both."""
     hamilton = nodes_hamilton([load_fixture("rows_h")])
@@ -550,6 +552,7 @@ def test_rows_list_the_same_nodes() -> None:
     assert nodes_fnloom([load_fixture("rows_f")]) == hamilton
 
 
+@pytest.mark.keeps("Q151")
 def test_value_object_is_passed_by_identity() -> None:
     """A bound list is the same object on every call, so its mutations persist."""
     seen: dict[str, list[object]] = {}
