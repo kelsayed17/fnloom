@@ -14,6 +14,15 @@ impl NodeId {
     }
 }
 
+/// A tag's value: one string, or several in the order the author wrote them.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TagValue {
+    /// A single string.
+    One(String),
+    /// Several strings, in written order.
+    Many(Vec<String>),
+}
+
 /// Whether a dependency must be satisfied for its consumer to run.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dependency {
@@ -40,7 +49,7 @@ pub struct NodeSpec<P> {
     /// Parameters, in declaration order.
     pub inputs: Vec<InputSpec>,
     /// Free-form key/value tags.
-    pub tags: BTreeMap<String, String>,
+    pub tags: BTreeMap<String, TagValue>,
     /// Opaque executable payload owned by the embedder.
     pub payload: P,
 }
@@ -75,7 +84,7 @@ pub struct Node<P> {
     /// Resolved inputs, in declaration order.
     pub inputs: Vec<Edge>,
     /// Free-form key/value tags.
-    pub tags: BTreeMap<String, String>,
+    pub tags: BTreeMap<String, TagValue>,
 }
 
 impl<P> Node<P> {

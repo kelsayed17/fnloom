@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, NamedTuple, override
 from fnloom._config import Condition
 from fnloom._decorators import Source, Value
 from fnloom._resolve import original
+from fnloom._tags import Query, TagValue, checked_query, tag_matches
 from fnloom._types import type_matches
 
 if TYPE_CHECKING:
@@ -63,7 +64,7 @@ class NodeView:
     origin: Callable[..., object] | None
     module: str | None
     params: tuple[Param, ...]
-    tags: Mapping[str, str]
+    tags: Mapping[str, TagValue]
     doc: str | None
     config: tuple[Condition, ...] = ()
     namespace: str | None = None
@@ -197,7 +198,7 @@ def _input_types(nodes: Sequence[NodeDef]) -> dict[str, object]:
     return types
 
 
-_NO_TAGS = MappingProxyType[str, str]({})
+_NO_TAGS = MappingProxyType[str, TagValue]({})
 
 
 class NodeViews(Mapping[str, NodeView]):
@@ -293,6 +294,21 @@ class NodeViews(Mapping[str, NodeView]):
         # One view per input, even when two threads read it at once.
         return self._made.setdefault(name, view)
 
+    def tagged(self, **query: Query) -> tuple[NodeView, ...]:
+        """The views whose tags match every `key=value` in `query`, in view order.
+
+        A value is a `str` (an equal tag value, or a tuple holding it), a list or
+        tuple of them (any one matches), or `ANY` (the tag is present). A tag no
+        node has matches nothing; no query matches every node. A malformed
+        value is a `TypeError` naming the tag.
+        """
+        wanted = {key: checked_query(key, value) for key, value in query.items()}
+        return tuple(
+            view
+            for view in self.values()
+            if all(tag_matches(view.tags, key, value) for key, value in wanted.items())
+        )
+
     @override
     def __contains__(self, name: object) -> bool:
         """Whether `name` is a node or input of the graph."""
@@ -316,7 +332,7 @@ class NodeViews(Mapping[str, NodeView]):
         return f"{type(self).__name__}({dict(self)!r})"
 
 
-def _read_only(tags: Mapping[str, str]) -> Mapping[str, str]:
+def _read_only(tags: Mapping[str, TagValue]) -> Mapping[str, TagValue]:
     """`tags` read-only: as they are when the decorators already made them so."""
     if isinstance(tags, MappingProxyType):
         return tags

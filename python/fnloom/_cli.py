@@ -133,6 +133,15 @@ def _parser() -> argparse.ArgumentParser:
         help="dot or mermaid, or an image format Graphviz makes: svg, png, pdf; "
         "by default dot to stdout, or what -o's suffix names",
     )
+    draw.add_argument(
+        "--tag",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="keep only the nodes with this tag; repeat to require several. "
+        "A VALUE matches an equal tag value or a list holding it; "
+        "there is no 'present' form",
+    )
     draw.add_argument("--orient", default="LR", choices=("LR", "TB", "RL", "BT"))
     draw.add_argument("--no-legend", action="store_true", help="leave out the legend")
     draw.add_argument(
@@ -149,6 +158,16 @@ def _parser() -> argparse.ArgumentParser:
     _graph_arguments(export)
     export.add_argument(
         "--no-validate", action="store_true", help="export without checking inputs"
+    )
+    export.add_argument(
+        "--tag",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="keep only the nodes with this tag; repeat to require several. "
+        "A VALUE matches an equal tag value or a list holding it; there is "
+        "no 'present' form. The document keeps its graph_version, and each "
+        "node's dependencies may name nodes left out",
     )
     export.add_argument("-o", "--output", type=Path, help="write here, not to stdout")
     export.set_defaults(command=_export_command)
@@ -257,6 +276,7 @@ def _check_draw_flags(args: argparse.Namespace) -> None:
 
 def _draw(args: argparse.Namespace) -> int:
     _check_draw_flags(args)
+    _tag_query(args.tag)
     request = _Request(args)
     driver = request.driver
     if args.upstream:
@@ -271,6 +291,7 @@ def _draw(args: argparse.Namespace) -> int:
         )
     else:
         drawing = driver.draw()
+    drawing = _tagged_drawing(drawing, driver, args.tag)
     if args.output is not None:
         # No --format: the file's suffix says, as `render` reads it.
         chosen = None if args.format is None else _TEXT_FORMATS.get(args.format)
@@ -293,6 +314,7 @@ def _draw(args: argparse.Namespace) -> int:
 
 
 def _export_command(args: argparse.Namespace) -> int:
+    _tag_query(args.tag)
     request = _Request(args)
     if not request.outputs:
         # The outputs may come from --context: only the merged request says.
@@ -303,8 +325,39 @@ def _export_command(args: argparse.Namespace) -> int:
         )
     else:
         document = request.driver.export()
+    if args.tag:
+        kept = {v.name for v in request.driver.nodes.tagged(**_tag_query(args.tag))}
+        document["nodes"] = [n for n in document["nodes"] if n["name"] in kept]
     _write(json.dumps(document, indent=2, sort_keys=True) + "\n", args.output)
     return 0
+
+
+def _tag_query(items: Sequence[str]) -> dict[str, str]:
+    """`--tag KEY=VALUE` items as a `tagged` query; the same key twice is refused."""
+    query: dict[str, str] = {}
+    for item in items:
+        key, equals, text = item.partition("=")
+        if not equals or not key:
+            msg = f"--tag takes KEY=VALUE, got {item!r}"
+            raise _UsageError(msg)
+        if key in query:
+            msg = f"--tag {key} given twice"
+            raise _UsageError(msg)
+        query[key] = text
+    return query
+
+
+def _tagged_drawing(
+    drawing: fnloom.Drawing, driver: fnloom.Driver, items: Sequence[str]
+) -> fnloom.Drawing:
+    """`drawing` with only the nodes carrying every `--tag`, and the edges between."""
+    if not items:
+        return drawing
+    kept = {v.name for v in driver.nodes.tagged(**_tag_query(items))}
+    return fnloom.Drawing(
+        tuple(n for n in drawing.nodes if n.name in kept),
+        tuple(e for e in drawing.edges if e[0] in kept and e[1] in kept),
+    )
 
 
 def _validate(args: argparse.Namespace) -> int:

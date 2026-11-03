@@ -453,7 +453,7 @@ def test_tags_match_hamilton_except_module() -> None:
 
 @pytest.mark.deliberate("Q36")
 def test_q36_list_valued_tag() -> None:
-    """Hamilton accepts a list of strings as a tag value; fnloom raises `TypeError`."""
+    """Both accept a list of strings; fnloom keeps a tuple and refuses odd values."""
     body = """
 @tag(kind=["a", "b"])
 def f(x: int) -> int:
@@ -466,8 +466,55 @@ def f(x: int) -> int:
     built = hamilton_driver.Builder().with_modules(hamilton_module).build()
     (node,) = (n for n in built.list_available_variables() if n.name == "f")
     assert node.tags["kind"] == ["a", "b"]
-    with pytest.raises(TypeError, match="'kind'"):
-        make_module("differential_list_tag_f", "from fnloom import tag\n" + body)
+    module = make_module("differential_list_tag_f", "from fnloom import tag\n" + body)
+    assert fnloom.build(module).nodes["f"].tags["kind"] == ("a", "b")
+    for odd in ('{"a"}', "()", '("a", "a")', '("a", 1)'):
+        with pytest.raises((TypeError, ValueError), match="'kind'"):
+            make_module(
+                "differential_odd_tag_f",
+                "from fnloom import tag\n"
+                f"@tag(kind={odd})\ndef f(x: int) -> int:\n    return x\n",
+            )
+
+
+@pytest.mark.deliberate("Q141")
+def test_q141_tag_filter_against_tagged() -> None:
+    """`tagged` picks the nodes Hamilton's `tag_filter` does."""
+    body = """
+@tag(owner=["ann", "bo"], stage="raw")
+def a(x: int) -> int:
+    return x
+
+@tag(owner="ann", stage=["raw", "clean"])
+def b(a: int) -> int:
+    return a
+
+@tag(owner="cy")
+def c(b: int) -> int:
+    return b
+"""
+    hamilton_module = make_module(
+        "differential_tagged_h",
+        "from hamilton.function_modifiers import tag\n" + body,
+    )
+    built = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    fnloom_nodes = fnloom.build(
+        make_module("differential_tagged_f", "from fnloom import tag\n" + body)
+    ).nodes
+    for key, value in (
+        ("owner", "ann"),
+        ("owner", "bo"),
+        ("stage", "clean"),
+        ("owner", None),
+    ):
+        found = sorted(
+            n.name for n in built.list_available_variables(tag_filter={key: value})
+        )
+        query = fnloom.ANY if value is None else value
+        assert found == sorted(v.name for v in fnloom_nodes.tagged(**{key: query})), (
+            key,
+            value,
+        )
 
 
 def _pairs(quirk: str) -> list[tuple[str, str]]:
