@@ -949,3 +949,28 @@ def b(x: int) -> int:
     # A memory store holds values, never bytes: any format is fine, and ignored.
     driver = _cached(unknown, MemoryCache())
     assert driver.execute(["a", "b"], inputs={"x": 1}) == {"a": 1, "b": 1}
+
+
+def test_a_pinned_version_caches_a_node_reading_a_mutable_global(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`@cache(version=...)` makes a reader of a mutable global cacheable (Q48)."""
+    module = make_module(
+        "cached_pinned_global",
+        """
+from fnloom import cache
+
+RATES = {"eu": 2}
+
+@cache(version="rates-1")
+def price(x: int) -> int:
+    print("price")
+    return x * RATES["eu"]
+""",
+    )
+    driver = _cached(module, MemoryCache())
+    assert driver.execute(["price"], inputs={"x": 3}) == {"price": 6}
+    assert _called(capsys) == ["price"]
+    assert driver.explain_cache(["price"], inputs={"x": 3})["price"].status == "hit"
+    assert driver.execute(["price"], inputs={"x": 3}) == {"price": 6}
+    assert _called(capsys) == []

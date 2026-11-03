@@ -9,6 +9,11 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Added
 
+- Every row of Coming from Hamilton's comparison tables cites a register row, and each cited row has a differential
+  test against Hamilton 1.90.0 (`deliberate`, or the new `keeps` marker for kept behaviour). Two docs tests enforce
+  both. New register rows record Hamilton's side of features fnloom doesn't have yet or keeps as they are (Q139,
+  Q140, Q142, Q143, Q145, Q147, Q148, Q151 to Q159). The `@pipe` row now says what Hamilton does: `pipe` is a
+  `pipe_input` that silently drops `collapse`, not a deprecated alias.
 - `Builder.with_modules(*modules, namespace=, bind={...})` feeds a namespace inputs of its own, as `@subdag`'s
   `inputs=` does. Each key is a name the namespace reads that none of its modules defines, bound to `source("x")`, read
   outside the namespace, or `value(v)`. A key no node reads, or one the namespace defines, is a `ValueError` at build.

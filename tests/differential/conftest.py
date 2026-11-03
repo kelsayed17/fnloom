@@ -1,4 +1,4 @@
-"""Differential-test setup: Hamilton's environment and the `deliberate` marker."""
+"""Differential-test setup: Hamilton's environment and the evidence markers."""
 
 import os
 import re
@@ -18,29 +18,39 @@ if TYPE_CHECKING:
 from harness import FAKE_GRAPHVIZ  # after the environment is set
 
 REGISTER = Path(__file__).parents[2] / "docs" / "quirk-register.md"
-_ROW_ID = re.compile(r"^\| (Q\d+) \|", re.MULTILINE)
+# Each row's ID and disposition, its first and third columns.
+_ROW = re.compile(r"^\| (Q\d+) \| .*? \| ([^|]*?) \|", re.MULTILINE)
 
 
 def pytest_configure(config: pytest.Config) -> None:
-    """Registers the `deliberate` marker."""
+    """Registers the `deliberate` and `keeps` markers."""
     config.addinivalue_line(
         "markers",
         "deliberate(id): fnloom deliberately differs from Hamilton; "
         "`id` must be a row of docs/quirk-register.md",
     )
+    config.addinivalue_line(
+        "markers",
+        "keeps(id): fnloom deliberately does what Hamilton does; "
+        "`id` must be a row of docs/quirk-register.md",
+    )
 
 
 def pytest_collection_modifyitems(items: Sequence[pytest.Item]) -> None:
-    """Fails collection when a `deliberate` marker names no row of the register."""
-    known = set(_ROW_ID.findall(REGISTER.read_text(encoding="utf-8")))
+    """Fails collection when a `deliberate` or `keeps` marker names no register row."""
+    dispositions = dict(_ROW.findall(REGISTER.read_text(encoding="utf-8")))
     for item in items:
-        for marker in item.iter_markers("deliberate"):
-            quirk = marker.args[0] if marker.args else None
-            if quirk not in known:
-                msg = (
-                    f"{item.nodeid}: deliberate({quirk!r}) is no row of {REGISTER.name}"
-                )
-                raise pytest.UsageError(msg)
+        for name in ("deliberate", "keeps"):
+            for marker in item.iter_markers(name):
+                quirk = marker.args[0] if marker.args else None
+                if quirk not in dispositions:
+                    msg = (
+                        f"{item.nodeid}: {name}({quirk!r}) is no row of {REGISTER.name}"
+                    )
+                    raise pytest.UsageError(msg)
+                if name == "keeps" and "KEEP" not in dispositions[quirk]:
+                    msg = f"{item.nodeid}: keeps({quirk!r}) marks a row not kept"
+                    raise pytest.UsageError(msg)
 
 
 @pytest.fixture
