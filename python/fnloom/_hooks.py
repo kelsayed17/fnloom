@@ -6,13 +6,16 @@ front end fires the run events itself, around the value checks and the core run.
 """
 
 import contextvars
+import functools
 import inspect
 import logging
 import reprlib
+import threading
+import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from types import MappingProxyType
+from types import MappingProxyType, ModuleType
 from typing import TYPE_CHECKING, Final, override
 
 from fnloom import _checks, _core
@@ -21,8 +24,9 @@ from fnloom import _checks, _core
 # them, and `inspect.signature` resolves those annotations at run time.
 from fnloom._caching import CacheOutcome
 from fnloom._checks import CheckResult
+from fnloom._requests import suggest
 from fnloom._scan import by_parameter
-from fnloom._view import NodeView
+from fnloom._view import NodeView, NodeViews
 
 if TYPE_CHECKING:
     from fnloom._caching import Begun
@@ -104,16 +108,34 @@ class RunEnd:
     results: Mapping[str, object] | None
 
 
+@dataclass(frozen=True, slots=True, kw_only=True)
+class BuildEnd:
+    """A driver was built; what `Hook.after_build` gets.
+
+    `nodes` are the built graph's views, inputs included; `config` is the
+    config it was built with, read-only; `modules` are the modules it was built
+    from, each once, in build order.
+    """
+
+    nodes: NodeViews
+    config: Mapping[str, object]
+    modules: tuple[ModuleType, ...]
+
+
 class Hook:
-    """Watches a driver's runs: subclass it and override any of its four methods.
+    """Watches a driver: subclass it and override any of its five methods.
 
     Each method is a no-op here, and only the methods a subclass overrides are
     called. Each gets one event, by position. Give hooks to `Builder.with_hooks`;
     every event calls them in the order given. A hook that raises stops the run
-    once every hook has seen the event (see the hooks guide).
+    (or the build, for `after_build`) once every hook has seen the event (see the
+    hooks guide).
     """
 
     __slots__ = ()
+
+    def after_build(self, event: BuildEnd) -> None:
+        """Called once a driver is built; raising refuses the build."""
 
     def before_run(self, event: RunStart) -> None:
         """Called once a run's request is known good, before its values are checked."""
@@ -128,7 +150,13 @@ class Hook:
         """Called once the run ended, whether or not it succeeded."""
 
 
-_METHODS: Final = ("before_run", "before_node", "after_node", "after_run")
+_METHODS: Final = (
+    "after_build",
+    "before_run",
+    "before_node",
+    "after_node",
+    "after_run",
+)
 
 
 def _overridden(hook: Hook, name: str) -> bool:
@@ -191,6 +219,24 @@ def checked(hooks: Sequence[object]) -> tuple[Hook, ...]:
     if twice:
         raise ValueError("\n".join(sorted(twice)))
     return tuple(hook for hook in hooks if isinstance(hook, Hook))
+
+
+def fire_build(hooks: Sequence[Hook], event: BuildEnd) -> None:
+    """Calls each hook's `after_build` with `event`, then raises what they raised.
+
+    Every hook sees the event. One error is raised as itself, several as one
+    group, in hook order (Q23).
+    """
+    errors: list[BaseException] = []
+    for hook in hooks:
+        if not _overridden(hook, "after_build"):
+            continue
+        try:
+            hook.after_build(event)
+        except BaseException as error:  # noqa: BLE001  # as every event: raised below, with the others
+            errors.append(error)
+    if errors:
+        raise _combined(errors, None, failed=False)
 
 
 class Hooks:
@@ -607,7 +653,7 @@ class _Bounded(reprlib.Repr):
     raises, even inside a container, shows as `<unrepresentable TypeName>`.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, cut: int = _CUT) -> None:
         super().__init__(
             maxlevel=4,
             maxtuple=20,
@@ -617,9 +663,9 @@ class _Bounded(reprlib.Repr):
             maxset=20,
             maxfrozenset=20,
             maxdeque=20,
-            maxstring=_CUT * 3,
-            maxlong=_CUT * 3,
-            maxother=_CUT * 3,
+            maxstring=cut * 3,
+            maxlong=cut * 3,
+            maxother=cut * 3,
         )
 
     @override
@@ -636,21 +682,24 @@ class _Bounded(reprlib.Repr):
         return text
 
 
-_REPR: Final = _Bounded()
+@functools.cache
+def _bounded(cut: int) -> _Bounded:
+    """The bounded `repr` for values cut to `cut` characters."""
+    return _Bounded(cut)
 
 
-def _cut(value: object) -> str:
-    """`value`'s `repr`, cut to 50 characters and marked with `...` when it was.
+def _cut(value: object, width: int = _CUT) -> str:
+    """`value`'s `repr`, cut to `width` (50) characters and marked with `...`.
 
     The `repr` is bounded first, so a huge input is not shown in full only to be
     cut. One that raises shows as `<unrepresentable TypeName>`, so logging a
     failure never replaces the node's error.
     """
     try:
-        text = _REPR.repr(value)
+        text = _bounded(width).repr(value)
     except Exception:  # noqa: BLE001  # any `__repr__` may raise; the node's error leads
         return _unrepresentable(value)
-    return text if len(text) <= _CUT else f"{text[:_CUT]}..."
+    return text if len(text) <= width else f"{text[:width]}..."
 
 
 class LogFailures(Hook):
@@ -694,3 +743,144 @@ class LogFailures(Hook):
             if error is None
             else (type(error), error, error.__traceback__),
         )
+
+
+_VERBOSE: Final = 2
+
+type NodeFilter = Sequence[str] | Callable[[NodeView], bool]
+
+
+type _State = tuple[int, Callable[[str], object], NodeFilter | None, int]
+
+
+class PrintNodes(Hook):
+    """Prints a line for each node a run calls; verbosity 2 adds inputs and result.
+
+    `verbosity=1` prints `node 'x' ran in 1.2 ms`, `node 'x' failed in 0.4 ms:
+    ValueError('no')`, or `node 'x' loaded from cache` for a cache hit.
+    `verbosity=2` adds `  inputs: a=1, b=2` (sorted by name) and `  result: ...`,
+    each value cut to `width` characters as `LogFailures` cuts them. `nodes`
+    limits what is printed to those names, or to the nodes a callable accepts
+    of their `NodeView`; a name that is no node is a `ValueError` when the
+    driver is built. `print_fn` takes one string. Times are kept per run and
+    node, so concurrent runs and the async driver stay correct.
+    """
+
+    __slots__ = ("_lock", "_nodes", "_print", "_started", "_verbosity", "_width")
+
+    def __init__(
+        self,
+        verbosity: int = 1,
+        *,
+        print_fn: Callable[[str], object] = print,
+        nodes: NodeFilter | None = None,
+        width: int = _CUT,
+    ) -> None:
+        """A hook printing with `print_fn`; `ValueError` for a bad setting."""
+        if isinstance(verbosity, bool) or verbosity not in (1, 2):
+            msg = f"verbosity must be 1 or 2, got {verbosity!r}"
+            raise ValueError(msg)
+        if isinstance(width, bool) or not isinstance(width, int) or width < 10:  # noqa: PLR2004  # the shortest width a cut `...` makes sense at
+            msg = f"width must be an int of at least 10, got {width!r}"
+            raise ValueError(msg)
+        if isinstance(nodes, str) or (
+            not callable(nodes)
+            and nodes is not None
+            and not all(isinstance(n, str) for n in nodes)
+        ):
+            msg = f"nodes must be a sequence of names or a callable, not {nodes!r}"
+            raise TypeError(msg)
+        self._verbosity = verbosity
+        self._print = print_fn
+        self._nodes: NodeFilter | None = (
+            nodes if callable(nodes) or nodes is None else tuple(nodes)
+        )
+        self._width = width
+        self._started: dict[tuple[str, str], float] = {}
+        self._lock = threading.Lock()
+
+    @override
+    def __getstate__(
+        self,
+    ) -> tuple[int, Callable[[str], object], NodeFilter | None, int]:
+        """The settings: a lock and a run's start times are not pickled."""
+        return (self._verbosity, self._print, self._nodes, self._width)
+
+    def __setstate__(self, state: _State) -> None:
+        """Restores the settings, with no run in flight."""
+        self._verbosity, self._print, self._nodes, self._width = state
+        self._started = {}
+        self._lock = threading.Lock()
+
+    @override
+    def after_build(self, event: BuildEnd) -> None:
+        names = self._nodes
+        if names is None or callable(names):
+            return
+        unknown = sorted(
+            n for n in names if n not in event.nodes or event.nodes[n].is_input
+        )
+        if unknown:
+            listed = ", ".join(f"'{n}'{suggest(n, event.nodes)}" for n in unknown)
+            msg = f"PrintNodes: not computed nodes of this graph: {listed}"
+            raise ValueError(msg)
+
+    def _shown(self, view: NodeView) -> bool:
+        wanted = self._nodes
+        if wanted is None:
+            return True
+        if callable(wanted):
+            return bool(wanted(view))
+        return view.name in wanted
+
+    @override
+    def after_run(self, event: RunEnd) -> None:
+        # A node whose `before_node` another hook refused, or that was cancelled,
+        # has no `after_node`: drop what this run left.
+        with self._lock:
+            for key in [k for k in self._started if k[0] == event.run_id]:
+                del self._started[key]
+
+    @override
+    def before_node(self, event: NodeStart) -> None:
+        if not self._shown(event.node):
+            return
+        with self._lock:
+            self._started[event.run_id, event.node.name] = time.perf_counter()
+
+    @override
+    def after_node(self, event: NodeEnd) -> None:
+        if not self._shown(event.node):
+            return
+        name = event.node.name
+        with self._lock:
+            began = self._started.pop((event.run_id, name), None)
+        elapsed = "?" if began is None else _milliseconds(time.perf_counter() - began)
+        cache = event.cache
+        if event.ok and cache is not None and cache.status == "hit":
+            self._print(f"node '{name}' loaded from cache")
+        elif event.ok:
+            self._print(f"node '{name}' ran in {elapsed}")
+        else:
+            self._print(
+                f"node '{name}' failed in {elapsed}: {_cut(event.error, self._width)}"
+            )
+        if self._verbosity < _VERBOSE:
+            return
+        inputs = event.inputs
+        shown = (
+            "none"
+            if inputs is None or len(inputs) == 0
+            else ", ".join(
+                f"{key}={_cut(value, self._width)}"
+                for key, value in sorted(inputs.items())
+            )
+        )
+        self._print(f"  inputs: {shown}")
+        if event.ok:
+            self._print(f"  result: {_cut(event.result, self._width)}")
+
+
+def _milliseconds(seconds: float) -> str:
+    """`seconds` as `1.2 ms`, to one decimal."""
+    return f"{seconds * 1000:.1f} ms"

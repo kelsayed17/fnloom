@@ -24,10 +24,11 @@ def total(subtotal: float, shipping: float) -> float:
 
 ## Writing a hook
 
-Subclass `fnloom.Hook` and override any of its four methods. Each gets one event:
+Subclass `fnloom.Hook` and override any of its five methods. Each gets one event:
 
 | Method | Called | Event |
 | --- | --- | --- |
+| `after_build` | once a driver is built; raising refuses the build ([Checking the graph at build](#checking-the-graph-at-build)) | `BuildEnd` |
 | `before_run` | once the request is known good, before its values are checked | `RunStart` |
 | `before_node` | before a node's function is called | `NodeStart` |
 | `after_node` | after it returned or raised | `NodeEnd` |
@@ -96,6 +97,10 @@ log
 Every event is a frozen dataclass, so a hook can't change it, and its mappings are read-only views. A hook gets its
 event by position, so a new field never breaks a hook.
 
+- **`BuildEnd`**: what `after_build` gets once a driver is built, by `build()`, `build_async()` or `rebuild()`.
+    - `nodes`: the built graph's views, inputs included.
+    - `config`: the config it was built with, read-only.
+    - `modules`: the modules it was built from, each once, in build order.
 - **`RunStart`**
     - `run_id`: a new `uuid4` hex for each run, shared by all of its events.
     - `outputs`: the requested outputs, each once, in request order.
@@ -227,6 +232,58 @@ class Late(fnloom.Hook):
 
 fnloom.Builder().with_hooks(Late())
 # raises TypeError: Late.after_run is an async def: a hook method must be a plain def
+```
+
+## Printing nodes
+
+`fnloom.PrintNodes` is a ready-made hook that prints a line for each node a run calls (Q142). At `verbosity=1` that
+is `node 'total' ran in 1.2 ms`, or `node 'total' failed in 0.4 ms: ValueError('no')`, or, for a node served by the
+[cache](#with-a-cache), `node 'total' loaded from cache`: a hit is reported as a hit, where Hamilton's `PrintLn`
+reports a run. `verbosity=2` adds an indented `inputs:` line (`price=30.0, quantity=2`, sorted by name) and a `result:`
+line, each value cut to `width` characters (50 by default) as [`LogFailures`](#logging-failures) cuts them.
+
+`nodes` limits what is printed: a sequence of names, or a function of the node's
+[`NodeView`](running.md#inspecting-a-graph), which can select by tag or namespace. A name that is no node of the
+graph is a `ValueError` when the driver is built, with a `did you mean`. `print_fn` takes one string; the default
+is `print`. A `verbosity` other than 1 or 2, or a `width` under 10, is a `ValueError`. Times are kept per run and
+node, so the async driver and concurrent runs print correctly.
+
+```python
+lines: list[str] = []
+printing = (
+    fnloom.Builder()
+    .with_modules(orders)
+    .with_hooks(fnloom.PrintNodes(2, print_fn=lines.append, nodes=["total"]))
+    .build()
+)
+printing.execute(["total"], inputs={"price": 30.0, "quantity": 2})
+# -> {'total': 60.0}
+[line for line in lines if line.startswith("  ")]
+# -> ['  inputs: shipping=0.0, subtotal=60.0', '  result: 60.0']
+```
+
+## Checking the graph at build
+
+`Hook.after_build(event)` gets a [`BuildEnd`](#the-events) once a driver is built, whether by `build()`,
+`build_async()` or `rebuild()`. It is Hamilton's `GraphConstructionHook`, and a `StaticValidator` too: a hook that
+raises refuses the build, and because the hook belongs to the builder, `rebuild()` and pickling carry it (Q145,
+Q117). Every hook sees the event, even after another raised, and several errors are raised together as one
+`ExceptionGroup`, in hook order. A hook belongs to the builder, so `rebuild()` and unpickling fire it again.
+
+```python
+class NeedsOwner(fnloom.Hook):
+    def after_build(self, event: fnloom.BuildEnd) -> None:
+        missing = sorted(
+            name
+            for name, view in event.nodes.items()
+            if not view.is_input and "owner" not in view.tags
+        )
+        if missing:
+            raise ValueError(f"no owner tag: {', '.join(missing)}")
+
+
+fnloom.Builder().with_modules(orders).with_hooks(NeedsOwner()).build()
+# raises ValueError: no owner tag: shipping, subtotal, total
 ```
 
 ## Logging failures

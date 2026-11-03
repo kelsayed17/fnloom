@@ -103,7 +103,7 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `htypes.check_input_type(t, v)` | Public, with Hamilton's rules | `fnloom.value_matches(t, v)` answers as the input check, and `fnloom.type_matches(produced, expected)` as the edge check ([What the checks understand](running.md#what-the-checks-understand)) (Q156) |
 | An override's value | Not type checked | Checked as an input is; `without_override_type_checks()` skips only the override checks (Q22) |
 | After `importlib.reload(module)` | A new `Builder` to see the edit | `driver.rebuild()` builds again with every setting; the old driver keeps its old code, as Hamilton's does (Q83) |
-| `with_adapters(...)` with `NodeExecutionHook` and `GraphExecutionHook` | `run_before_node_execution(**kwargs)` and its kin, each taking keyword arguments; the after-graph hook gets no request | `with_hooks(...)` with a `fnloom.Hook`: `before_run`, `before_node`, `after_node` and `after_run`, each taking one frozen event, and `RunEnd` repeats the request ([Hooks](hooks.md), Q84) |
+| `with_adapters(...)` with `NodeExecutionHook` and `GraphExecutionHook` | `run_before_node_execution(**kwargs)` and its kin, each taking keyword arguments; the after-graph hook gets no request | `with_hooks(...)` with a `fnloom.Hook`: `before_run`, `before_node`, `after_node` and `after_run` (plus `after_build`), each taking one frozen event, and `RunEnd` repeats the request ([Hooks](hooks.md), Q84) |
 | An object that is no adapter, or one given twice, in `with_adapters` | Ignored; called once | `TypeError`; `ValueError` (Q84) |
 | A hook method that can't take its arguments, or an `async def` hook on the sync driver | Fails at the first call; never awaited | `TypeError` naming the method, from `with_hooks` (Q84) |
 | `with_adapters(MyResult())`, a `ResultBuilder` whose `build_result(**outputs)` makes the result | It gets the outputs as keywords | `with_result_builder(build)`: any callable, given the outputs as one dict, in the same order. `execute`'s type follows it ([Result builders](running.md#result-builders), Q19) |
@@ -112,11 +112,11 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `with_adapters(lifecycle.FunctionInputOutputTypeChecker())` | Checks inputs and results by `isinstance` rules of its own: crashes on fixed tuples, parameterized generics and `NewType`s, and reports a failing node as returning `None` | `with_output_type_checks()` checks every result by the input checks' rules; a node that raises keeps its own error. Inputs and overrides are always checked ([Checking results](writing-nodes.md#checking-results), Q87) |
 | An `EdgeConnectionHook` whose `validate_input` (`do_validate_input`) decides an input's type | Replaces the default check, so it can refuse a correct value | `with_value_check(check)` adds to the default: `check(declared, value)` is asked only about a value the default refuses, and can only admit it. It applies to overrides, extracted fields, results and `validate` too ([Custom value checks](running.md#custom-value-checks), Q21) |
 | `raw_execute(final_vars, overrides, display_graph, inputs)` | Positional, with a `display_graph` flag | `raw_execute(final_vars, *, inputs, overrides)`, and `PreparedPlan.run_raw` (Q19) |
-| `with_adapters(lifecycle.PrintLn())` | Prints each node's name and time, and with `verbosity=2` its inputs and result | No built-in: a three-line hook, a `fnloom.Hook` subclass whose `after_node(self, event)` prints `event.node.name` and `event.result` or `event.error` ([Hooks](hooks.md)) (Q142) |
+| `with_adapters(lifecycle.PrintLn())` | Prints each node's name and time, and with `verbosity=2` its inputs and result | `fnloom.PrintNodes(verbosity, print_fn=, nodes=, width=)`: the same two levels, but a cache hit says `loaded from cache`, `nodes` is names or a function of the `NodeView` (tags, namespace, config), an unknown name fails the build, and values are cut to `width` ([Printing nodes](hooks.md#printing-nodes), Q142) |
 | A failing node logged at ERROR | Always, with a support banner | Off by default; `with_hooks(fnloom.LogFailures())` logs the node and its inputs, each cut to 50 characters ([Logging failures](hooks.md#logging-failures), Q88) |
-| `GraphConstructionHook`'s `run_after_graph_construction` | Called with the built graph | Read `driver.nodes` after `build()` (Q145) |
+| `GraphConstructionHook`'s `run_after_graph_construction` | Called with the built graph | `Hook.after_build(event)` gets a `BuildEnd` of frozen views, the config and the modules from `build()`, `build_async()` and `rebuild()`, and can refuse the build ([Checking the graph at build](hooks.md#checking-the-graph-at-build), Q145) |
 | `lifecycle.NoEdgeAndInputTypeChecking()` | Turns off the input and edge checks | `without_input_type_checks()`; edges are always checked, at build (Q10) |
-| A `StaticValidator`, refusing a node or the graph at build | `run_to_validate_node` and `run_to_validate_graph` | Not planned: check `driver.nodes` after `build()` and raise ([`StaticValidator`](#staticvalidator), Q117) |
+| A `StaticValidator`, refusing a node or the graph at build | `run_to_validate_node` and `run_to_validate_graph` | An `after_build` hook that raises refuses the build, with every problem in one error, carried through `rebuild()` ([`StaticValidator`](#staticvalidator), Q117) |
 | `NodeExecutionMethod` (`run_to_execute_node`) | Replaces how a node is called; one per driver | `with_node_wrappers(*wrappers)`: any number, an ordered chain, each `wrapper(node, call, inputs)` ([Node wrappers](running.md#node-wrappers), Q111) |
 | `lifecycle.default.GracefulErrorAdapter` | Keeps running past a failure, skipping what depends on it | Not yet: on the [roadmap](plans/2026-10-28-roadmap-ahead-of-hamilton.md). A failing node fails the run, and `after_node` sees its error and inputs (Q157) |
 | `TaskExecutionHook` and the other task hooks | Hooks on dynamic execution's tasks | None: fnloom has no dynamic execution yet (Q157) |
@@ -427,9 +427,9 @@ To choose the source per build, use a `@config.when` variant per source; to choo
 
 ### `StaticValidator`
 
-To check the graph at build, write a function over `Driver.nodes` and call it right after `build()`. It sees the
-names, types, tags, dependencies, functions and config that a `StaticValidator` sees, and can report every problem in
-one error (Q117):
+To check the graph at build, write an `after_build` hook (Q117, [Checking the graph at build](hooks.md#checking-the-graph-at-build)). It sees the
+names, types, tags, dependencies, functions and config that a `StaticValidator` sees, can report every problem in
+one error, and refuses the build by raising. A plain function over `Driver.nodes` called right after `build()` works too:
 
 ```python
 def checked(driver: fnloom.Driver) -> fnloom.Driver:

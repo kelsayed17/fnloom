@@ -393,8 +393,8 @@ def test_q19_hamilton_raw_execute_is_positional() -> None:
 
 
 @pytest.mark.deliberate("Q142")
-def test_q142_println_prints_and_fnloom_has_no_built_in() -> None:
-    """Hamilton's `PrintLn` prints each node, with inputs and results at verbosity 2."""
+def test_q142_println_and_print_nodes_report_the_same_nodes() -> None:
+    """`PrintLn` and `PrintNodes` report the same nodes; verbosity 2 adds values."""
     module = load_fixture("chain")
     for verbosity in (1, 2):
         printed: list[str] = []
@@ -407,8 +407,16 @@ def test_q142_println_prints_and_fnloom_has_no_built_in() -> None:
         assert [line.split()[3] for line in finished] == ["b", "c"]
         assert all("Status: Success" in line for line in finished)
         assert any("Result:" in line for line in printed) == (verbosity > 1)
+        ours: list[str] = []
+        hook = fnloom.PrintNodes(verbosity, print_fn=ours.append)
+        fnloom.Builder().with_modules(module).with_hooks(hook).build().execute(
+            ["c"], inputs={"a": 1}
+        )
+        reported = [line.split("'")[1] for line in ours if line.startswith("node ")]
+        assert reported == [line.split()[3] for line in finished]
+        assert any(line.startswith("  result:") for line in ours) == (verbosity > 1)
+        assert any(line.startswith("  inputs:") for line in ours) == (verbosity > 1)
     assert not hasattr(fnloom, "PrintLn")
-    assert not hasattr(fnloom, "PrintNodes")
 
 
 @pytest.mark.deliberate("Q88")
@@ -432,8 +440,8 @@ def b(a: int) -> int:
 
 
 @pytest.mark.deliberate("Q145")
-def test_q145_graph_construction_hook_gets_the_graph() -> None:
-    """Hamilton calls `run_after_graph_construction` with the graph and config."""
+def test_q145_graph_construction_hook_against_build_end() -> None:
+    """Hamilton's build hook and `after_build` see the same nodes and config."""
     seen: list[tuple[list[str], dict[str, object]]] = []
 
     class Seen(hamilton_api.GraphConstructionHook):
@@ -447,9 +455,20 @@ def test_q145_graph_construction_hook_gets_the_graph() -> None:
         Seen()
     ).build()
     assert seen == [(["a", "b", "c", "k"], {"k": 1})]
-    hook_methods = {n for n in vars(fnloom.Hook) if not n.startswith("_")}
-    assert hook_methods == {"before_run", "before_node", "after_node", "after_run"}
-    assert sorted(fnloom.build(module).nodes) == ["a", "b", "c"]
+    got: list[fnloom.BuildEnd] = []
+
+    class Mine(fnloom.Hook):
+        @override
+        def after_build(self, event: fnloom.BuildEnd) -> None:
+            got.append(event)
+
+    fnloom.Builder().with_modules(module).with_config({"k": 1}).with_hooks(
+        Mine()
+    ).build()
+    (event,) = got
+    # Hamilton lists the config key `k` as a node; fnloom's views are the graph's.
+    assert sorted(event.nodes) == ["a", "b", "c"]
+    assert dict(event.config) == {"k": 1}
 
 
 @pytest.mark.deliberate("Q157")

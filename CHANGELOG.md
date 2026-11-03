@@ -9,6 +9,12 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Added
 
+- `fnloom.PrintNodes(verbosity=1, *, print_fn=print, nodes=None, width=50)`, a hook that prints a line per node: its
+  time, `loaded from cache` for a hit, the error for a failure, and at `verbosity=2` the sorted inputs and the result,
+  cut to `width`. `nodes` is names (an unknown one fails the build) or a function of the `NodeView` (Q142).
+- `Hook.after_build(event: BuildEnd)`, with `fnloom.BuildEnd(nodes, config, modules)`: called once per hook from
+  `build()`, `build_async()` and `rebuild()`. Every hook sees the event, a raise refuses the build, and several are
+  one `ExceptionGroup`. This is Hamilton's `GraphConstructionHook` and `StaticValidator` (Q145, Q117).
 - `@tag` takes a `list` or `tuple` of strings as a value, kept as a tuple in written order. An empty sequence, a
   repeated item, a non-`str` item, or an unordered collection (`set`, `frozenset`, `dict`) is refused when decorating,
   naming the tag. `Driver.nodes.tagged(**query)` returns the views whose tags match: a `str` matches an equal value
