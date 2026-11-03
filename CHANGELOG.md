@@ -7,6 +7,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-11-03
+
 ### Added
 
 - Every row of Coming from Hamilton's comparison tables cites a register row, and each cited row has a differential
@@ -356,7 +358,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - The type stub `fnloom/_core.pyi` matches the extension: `Graph`, `KeyPlan` and `ObserverBase` construct through `__new__`,
   and `Plan.run`'s `observers` defaults to `()` in its runtime signature too.
 
-[Unreleased]: https://github.com/kelsayed17/fnloom/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/kelsayed17/fnloom/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/kelsayed17/fnloom/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kelsayed17/fnloom/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/kelsayed17/fnloom/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/kelsayed17/fnloom/releases/tag/v0.1.0

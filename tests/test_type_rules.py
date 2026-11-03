@@ -525,10 +525,10 @@ def test_public_matchers_are_the_internal_ones() -> None:
 
 
 def test_changelog_calls_out_the_none_change() -> None:
-    """The breaking `None` rule is under **Changed** in the unreleased section."""
+    """The breaking `None` rule is under **Changed** in 0.3.0, which made it."""
     text = CHANGELOG.read_text(encoding="utf-8")
-    unreleased = text.split("## [Unreleased]", 1)[1].split("\n## [", 1)[0]
-    changed = unreleased.split("### Changed", 1)[1].split("\n### ", 1)[0]
+    release = text.split("## [0.3.0]", 1)[1].split("\n## [", 1)[0]
+    changed = release.split("### Changed", 1)[1].split("\n### ", 1)[0]
     bullets = re.split(r"^- ", changed, flags=re.MULTILINE)
     assert any(
         b.startswith("**Breaking:**") and "`None`" in b and "Q79" in b for b in bullets

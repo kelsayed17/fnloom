@@ -365,7 +365,8 @@ Answered 2026-10-29: the recommended option for each.
    reads a tag as `str`. Accept the break, or add `NodeView.tag_values` as the new field and keep `tags` `str`-only
    (refusing to build a view of a tuple tag)? Recommended: accept the break.
 3. **Release:** ship these in 0.3.0 with Plan 10, or as 0.4.0 after it? Recommended: whichever lands first; no
-   dependency either way.
+   dependency either way. **Decided (maintainer, 2026-11-03):** PR 0 shipped in 0.3.0 without Plan 10; PRs A to G
+   ship as 0.4.0, with item 2's `tags` break in its own **Changed** entry.
 
 ## Appendix: row inventory
 
