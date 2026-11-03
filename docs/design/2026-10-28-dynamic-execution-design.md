@@ -590,6 +590,10 @@ Each task is one PR-sized, independently reviewable change. Its register rows, a
 milestones C, D and E. Each plan closes its own docs, roadmap rows and change log, so task 27's share for Plan 10
 is written into Plan 10's last task.
 
+**Superseded (maintainer, 2026-11-03):** 0.3.0 shipped without Plan 10, carrying Plans 5 to 9 and Plan 12's PR 0, and
+Plan 12's PRs A to G ship as 0.4.0. Plan 10's implementation plan follows Plan 12, and Plan 10 ends in the release after
+that instead of 0.3.0.
+
 #### A. Absence (needs nothing from B or C)
 
 1. Core: the `Absent` outcome, `Dependency::Admits`, skip propagation in `Plan::run`, may-be-absent at build; Rust

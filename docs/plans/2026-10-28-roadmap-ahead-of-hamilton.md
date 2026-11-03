@@ -1,7 +1,7 @@
 # Roadmap: ahead of Hamilton everywhere
 
-**Status:** in progress, 2026-10-28. Plans 1–4, the Plan 4 follow-up and Plan 3 are merged and released in 0.2.0.
-Plans 5 to 9 are merged (#24 to #28), not yet released. Plans 10 and 11 are designed and approved, not built.
+**Status:** in progress, 2026-11-03. Plans 1–4, the Plan 4 follow-up and Plan 3 are released in 0.2.0. Plans 5 to 9
+(#24 to #28) and Plan 12's PR 0 (#33) are released in 0.3.0. Plans 10 and 11 are designed and approved, not built.
 
 **Goal:** for every capability Hamilton 1.90.0 offers, fnloom has an equivalent that is at least as good, or a
 written decision explaining why it doesn't. "At least as good" means: same intent; behaviour proven differentially
@@ -224,7 +224,8 @@ tests against Hamilton for every kept behaviour; benchmarks for anything on the 
    by a test.
 9. **Plan 10: typed absence and dynamic fan-out, sequential.** Designed and approved 2026-10-29
    ([the dynamic execution design](../design/2026-10-28-dynamic-execution-design.md), milestones A and B): `ABSENT`
-   and its consumer rules, `Parallelizable` and `Collect` with nesting and per-branch caching. Then 0.3.0.
+   and its consumer rules, `Parallelizable` and `Collect` with nesting and per-branch caching. 0.3.0 shipped
+   without it (maintainer, 2026-11-03); Plan 10's implementation plan follows Plan 12.
 10. **Plan 11: the parallel executor and partial results.** The same design, milestones C to E: the core
     `Scheduler`, `with_threads(...)` for free-threaded 3.14t, `run_many`, the async driver on the scheduler, and
     `absent_on` for partial results. The rest of "Beyond Hamilton" (streaming, incremental execution, sweeps) is left
@@ -232,7 +233,7 @@ tests against Hamilton for every kept behaviour; benchmarks for anything on the 
 11. **Plan 12: every comparison row better.** [Plan 12](2026-10-29-plan-12-api-parity-plus.md), awaiting approval:
     a test for every row of [Coming from Hamilton](../from-hamilton.md)'s comparison tables, then the four rows where
     fnloom is behind and the seven where it is only different, each made strictly better (Q139 on). Independent of
-    Plans 10 and 11.
+    Plans 10 and 11. PR 0 shipped in 0.3.0; PRs A to G ship as 0.4.0 (maintainer, 2026-11-03).
 
 ## Done means
 
