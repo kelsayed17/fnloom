@@ -332,3 +332,41 @@ def test_a_missing_library_is_named(monkeypatch: pytest.MonkeyPatch) -> None:
         ImportError, match=r"^frame\('polars'\) needs polars, which can't be imported"
     ):
         fnloom.frame("polars")
+
+
+def test_strict_aligns_a_mapping_on_its_keys() -> None:
+    """A dict aligns on its keys, so strict compares them as an index."""
+    build = fnloom.frame()
+    with pytest.raises(ValueError, match=r"labels differ at row 0: 'a' against 0"):
+        build({"d": {"a": 1, "b": 2, "c": 3}, "s": pd.Series([1, 2, 3])})
+    with pytest.raises(ValueError, match=r"labels differ at row 0: 'a' against 'b'"):
+        build({"d": {"a": 1, "b": 2}, "e": {"b": 1, "c": 2}})
+    assert build({"d": {0: 1, 1: 2}, "s": pd.Series([3, 4])}).shape == (2, 2)
+
+
+def test_a_frame_without_columns_is_not_a_scalar() -> None:
+    """A frame with rows but no columns keeps its length, as Hamilton's does."""
+    with pytest.raises(ValueError, match=r"df has 2 rows, s has 3 rows"):
+        fnloom.frame()({"df": pd.DataFrame(index=[0, 1]), "s": pd.Series([1, 2, 3])})
+
+
+def test_a_frame_naming_a_column_twice_is_named() -> None:
+    """Duplicate columns within one frame say so, rather than naming it twice."""
+    with pytest.raises(
+        ValueError,
+        match=r"^frame\(\) can't make a column of output 'f': it has the column "
+        r"'f\.a' twice$",
+    ):
+        fnloom.frame()({"f": pd.DataFrame([[1, 2]], columns=["a", "a"])})
+
+
+def test_polars_scalars_keep_one_type_and_bad_values_are_named() -> None:
+    """A broadcast scalar is typed as a one-row frame types it; refusals name it."""
+    build = fnloom.frame("polars")
+    one = build({"x": 2})
+    many = build({"x": 2, "s": [1, 2]})
+    assert one.schema["x"] == many.schema["x"]
+    with pytest.raises(
+        TypeError, match=r"^frame\('polars'\) can't make the column 't'"
+    ):
+        build({"t": pytest.importorskip("numpy").array(3), "s": [1, 2]})

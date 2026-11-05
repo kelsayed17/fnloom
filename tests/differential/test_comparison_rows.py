@@ -10,7 +10,7 @@ import json
 import logging
 import sys
 import tempfile
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Any, override
 
 import pandas as pd
 import pytest
@@ -446,7 +446,7 @@ def rate() -> float:
     return 0.2
 """,
     )
-    request = ["revenue", "regions", "rate"]
+    request: list[Any] = ["revenue", "regions", "rate"]  # Hamilton's list is invariant
     hamilton = (
         hamilton_driver.Builder()
         .with_modules(module)
@@ -484,10 +484,11 @@ def test_q144_frame_differs_where_hamilton_is_silent() -> None:
         _hamilton_frame({"table": table, "table.p": pd.Series([9, 9])})
     replaced = _hamilton_frame({"table.p": pd.Series([9, 9]), "table": table})
     assert replaced["table.p"].tolist() == [1, 2]
-    for outputs in (
+    cases: list[dict[str, object]] = [
         {"table": table, "table.p": pd.Series([9, 9])},
         {"table.p": pd.Series([9, 9]), "table": table},
-    ):
+    ]
+    for outputs in cases:
         with pytest.raises(ValueError, match=r"makes the column 'table\.p' twice"):
             fnloom.frame()(outputs)
 

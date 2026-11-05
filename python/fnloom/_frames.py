@@ -6,7 +6,7 @@ imports it again in a process that unpickled the builder).
 """
 
 import importlib
-from collections.abc import Hashable  # noqa: TC003  # `inspect.signature` evaluates it
+from collections.abc import Hashable, Mapping
 from typing import Any, Final, Literal, override
 
 type Library = Literal["pandas", "polars"]
@@ -128,7 +128,7 @@ class FrameBuilder:
     ) -> dict[Hashable, object]:
         """Each column's name and value, in order; two of one name are refused."""
         columns: dict[Hashable, object] = {}
-        whence: dict[Hashable, str] = {}
+        whence: dict[Hashable, tuple[str, str]] = {}
         for name, value in outputs.items():
             if isinstance(value, frame_class):
                 parts: list[tuple[Hashable, object, str]] = [
@@ -143,19 +143,24 @@ class FrameBuilder:
                 parts = [(name, value, f"output {name!r}")]
             for label, column_value, source in parts:
                 if label in columns:
+                    owner, first = whence[label]
                     msg = (
-                        f"frame() makes the column {label!r} twice: "
-                        f"from {whence[label]} and from {source}"
+                        f"frame() can't make a column of output {name!r}: "
+                        f"it has the column {label!r} twice"
+                        if owner == name
+                        else f"frame() makes the column {label!r} twice: "
+                        f"from {first} and from {source}"
                     )
                     raise ValueError(msg)
                 columns[label] = column_value
-                whence[label] = source
+                whence[label] = (name, source)
         return columns
 
     def _pandas(self, pd: Any, outputs: dict[str, object]) -> Any:  # noqa: ANN401  # the pandas module and a frame
         is_list_like = pd.api.types.is_list_like
         columns = self._columns(outputs, pd.DataFrame)
-        if not any(is_list_like(value) for value in columns.values()):
+        # As Hamilton does: one row when no output has a length, a frame included.
+        if not any(is_list_like(value) for value in outputs.values()):
             return pd.DataFrame([columns])
         if self._join == "strict":
             _strict_pandas(pd, {n: v for n, v in outputs.items() if is_list_like(v)})
@@ -186,14 +191,31 @@ class FrameBuilder:
             raise ValueError(msg)
         (height,) = set(lengths.values())
         series = [
-            value.alias(str(label))
-            if isinstance(value, pl.Series)
-            else pl.Series(str(label), value)
-            if _polars_list_like(pl, value)
-            else pl.repeat(value, height, eager=True).alias(str(label))
+            _polars_column(pl, str(label), value, height)
             for label, value in columns.items()
         ]
         return pl.DataFrame(series)
+
+
+def _polars_column(pl: Any, label: str, value: object, height: int) -> Any:  # noqa: ANN401  # the polars module and a Series
+    """`value` as the polars column `label`: a scalar repeated `height` times.
+
+    A scalar takes the type a one-row frame gives it, whatever its column's height.
+    A value polars refuses is a `TypeError` naming the column.
+    """
+    try:
+        if isinstance(value, pl.Series):
+            return value.alias(label)
+        if _polars_list_like(pl, value):
+            return pl.Series(label, value)
+        dtype = pl.Series([value]).dtype
+        return pl.repeat(value, height, dtype=dtype, eager=True).alias(label)
+    except (TypeError, ValueError, pl.exceptions.PolarsError) as error:
+        msg = (
+            f"frame('polars') can't make the column {label!r} "
+            f"of a {type(value).__qualname__}: {error}"
+        )
+        raise TypeError(msg) from error
 
 
 def _rebuilt(
@@ -234,10 +256,11 @@ def _strict_pandas(pd: Any, outputs: dict[str, object]) -> None:  # noqa: ANN401
     lengths = {name: len(value) for name, value in outputs.items()}  # ty: ignore[invalid-argument-type]  # list-like
     if len(set(lengths.values())) > 1:
         _refuse(_listed(lengths))
-    indexed = [
-        (name, value.index)
+    # pandas aligns a mapping on its keys, as it does a series on its index.
+    indexed: list[tuple[str, Any]] = [
+        (name, value.index if hasattr(value, "index") else pd.Index(list(value)))
         for name, value in outputs.items()
-        if isinstance(value, (pd.Series, pd.DataFrame))
+        if isinstance(value, (pd.Series, pd.DataFrame, Mapping))
     ]
     if not indexed:
         return

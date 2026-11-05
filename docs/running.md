@@ -201,7 +201,8 @@ def revenue(prices: pd.Series, quantities: pd.Series) -> pd.Series:
 ```python
 import sales
 
-frames = fnloom.Builder().with_modules(sales).with_result_builder(fnloom.frame()).build()
+builder = fnloom.Builder().with_modules(sales)
+frames = builder.with_result_builder(fnloom.frame()).build()
 frames.execute(["revenue", "regions", "rate"]).to_dict("list")
 # -> {'revenue': [1.0, 4.0, 9.0], 'regions.north': [1, 2, 3], 'regions.south': [4, 5, 6], 'rate': [0.2, 0.2, 0.2]}
 ```
@@ -217,8 +218,9 @@ frames.execute(["revenue", "regions", "rate"]).to_dict("list")
   differ. Nothing is logged, where Hamilton only logs a warning.
 - **`join="outer"`** aligns the outputs on the union of their indexes: Hamilton's frame, without the log.
 - **Two columns of one name**, such as an output `regions.north` beside `regions`, are a `ValueError` naming both.
+  A dict output is aligned on its keys, so strict compares them as an index.
 - **`frame("polars")`** makes a polars frame by the same rules. polars has no index, so outputs of different lengths
-  are refused, and so is `join="outer"`.
+  are refused, and so is `join="outer"`. A pandas series given to it is taken by position, its index dropped.
 - **It travels with the driver**, as any result builder does, and compares and pickles by its settings.
 
 ```python
@@ -231,8 +233,8 @@ The frame class itself still works, and builds by the library's own rules (Q89):
 ```python
 import pandas
 
-plain = fnloom.Builder().with_modules(sales).with_result_builder(pandas.DataFrame).build()
-plain.execute(["quantities", "returns"])["returns"].isna().tolist()  # padded with NaN
+plain = builder.with_result_builder(pandas.DataFrame).build()
+plain.execute(["quantities", "returns"])["returns"].isna().tolist()  # NaN-padded
 # -> [False, False, True]
 ```
 
