@@ -386,6 +386,21 @@ def rate__eu() -> float:
     )
     driver = Builder().with_modules(excluded).with_config({"region": "eu"}).build()
     assert driver.execute(["rate"]) == {"rate": 0.2}
+    # A public lambda is named by the attribute that holds it, not `<lambda>`.
+    held = make_module(
+        "matches_public_lambda",
+        """
+from fnloom import config
+
+is_us = lambda region: region == "us"  # noqa: E731
+
+@config.matches(is_us)
+def rate__us() -> float:
+    return 0.1
+""",
+    )
+    with pytest.raises(ValueError, match=r"^'is_us' is a config\.matches predicate"):
+        Builder().with_modules(held).with_config({"region": "us"}).build()
 
 
 def test_a_predicate_runs_only_when_the_when_conditions_hold() -> None:

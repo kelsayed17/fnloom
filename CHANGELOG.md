@@ -63,6 +63,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 - A code version no longer depends on `PYTHONHASHSEED` when a function reads a `set` or `frozenset`, as a default
   or a global: its members are versioned sorted. Such a node's version, and its cache key, change once.
+- A `value()` binding, default or global holding a set inside a subclass of `set`, `frozenset`, `list`, `tuple` or
+  `dict` with attributes or slots of its own, or inside another mapping, is no longer versioned by its members alone,
+  so a change to that state can't hit a stale result: it is fingerprinted whole, or refused.
 
 ## [0.3.0] - 2026-11-03
 

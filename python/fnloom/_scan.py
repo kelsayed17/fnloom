@@ -1084,9 +1084,10 @@ def scan(  # noqa: PLR0913  # keyword-only options, one per kind of source
         for key in within.bound.keys() & within.names.keys()
     ):
         raise ValueError("; ".join(defined))
-    seen = _made(entries, given, names, awaits=awaits, replacing=replacing)
-    if predicates and (both := _predicate_nodes(seen.values(), predicates)):
+    # Before the nodes are made: a predicate need not be typed as a node is.
+    if predicates and (both := _predicate_nodes(entries, predicates)):
         raise ValueError("; ".join(both))
+    seen = _made(entries, given, names, awaits=awaits, replacing=replacing)
     # A node a plain function or another variant defines is not missing.
     missing = {n: why for n, why in unmatched.items() if n not in seen}
     for name in missing.keys() & gathered.variants.keys():
@@ -1110,18 +1111,20 @@ def _predicates(entries: Iterable[Found | NodeSpec]) -> dict[int, str]:
 
 
 def _predicate_nodes(
-    nodes: Iterable[NodeDef], predicates: Mapping[int, str]
+    entries: Iterable[_Entry], predicates: Mapping[int, str]
 ) -> list[str]:
-    """A line for each node made from a `config.matches` predicate, sorted.
+    """A line for each node source that is a `config.matches` predicate, sorted.
 
     A public function a module defines is a node, and a predicate is no node.
+    It is named by the attribute that holds it, so a lambda is named too.
     """
     return sorted(
         {
-            f"{getattr(node.origin, '__name__', node.name)!r} is a config.matches "
+            f"{qualified(namespace, entry[1])!r} is a config.matches "
             "predicate and a node; prefix it with `_` or `@exclude` it"
-            for node in nodes
-            if id(node.origin) in predicates
+            for namespace, entry in entries
+            if not isinstance(entry, NodeSpec)
+            and id(_resolve.original(entry[2])) in predicates
         }
     )
 

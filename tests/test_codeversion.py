@@ -406,6 +406,38 @@ def test_set_defaults_are_stable_across_hash_seeds() -> None:
     assert len(versions) == 1
 
 
+_SUBCLASS_DEFAULT = """
+class S({base}):
+    pass
+
+K = S({items})
+K.mode = {mode!r}
+
+def f(t=K):
+    return t.mode
+"""
+
+
+@pytest.mark.parametrize(
+    ("base", "items"), [("frozenset", "{1, 2}"), ("dict", "{'k': {1, 2}}")]
+)
+def test_a_container_subclass_default_sees_its_attributes(
+    base: str, items: str
+) -> None:
+    """A set-holding subclass with state of its own never hides that state.
+
+    Two attribute values give two versions, or the default is refused.
+    """
+    found: list[bytes | None] = []
+    for mode in ("x", "y"):
+        source = _SUBCLASS_DEFAULT.format(base=base, items=items, mode=mode)
+        try:
+            found.append(_version(source, module=f"cv_subclass_{base}"))
+        except UncacheableError:
+            found.append(None)
+    assert found[0] is None or found[0] != found[1]
+
+
 def _version_in_subprocess(seed: str, code: str = _SEEDED) -> str:
     """The hex code version a fresh interpreter prints for `code`, `_SEEDED`'s `f`."""
     result = subprocess.run(  # noqa: S603  # runs this interpreter on fixed code
