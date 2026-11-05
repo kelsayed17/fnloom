@@ -405,6 +405,14 @@ compile. B1 waits for A1 because both rewrite `run.rs`'s slot table.
     - `_scan.core_inputs(params) -> list[tuple[str, Literal["required","optional","admits","admits_optional"],
       None]]`: the third element is the collect mode, always `None` until Task 8. The binding maps the kinds to
       `Dependency`.
+    - **One source read by several parameters** (a `group(...)`, or `@parameterize` binding two parameters to one
+      `source`) gets one merged kind. `core_inputs` merges as follows:
+        - if every parameter on the source admits `Absent`, the kind is `admits`, or `admits_optional` when every one
+          of them has a default;
+        - otherwise it is `required` if any parameter lacks a default, and `optional` if all have one.
+
+        A source whose parameters disagree on admitting `Absent` can only be one of these when it can't be absent.
+        When it may be absent, `refuse_mixed` refuses it (Review Focus 4).
     - `_core.Graph(nodes, renames)`, where each node is `(name, inputs, tags, payload, declines: bool)`, and
       `Graph.may_be_absent() -> list[str]`, sorted.
     - `NodeView.may_be_absent: bool` and `Param.admits_absent: bool`.
@@ -425,6 +433,13 @@ compile. B1 waits for A1 because both rewrite `run.rs`'s slot table.
       raises `TypeError` matching `is ABSENT`;
     - `test_t_or_absent_feeds_t_on_an_edge`: `float | Absent` into `float`, into `float | Absent`, and into
       `x: float = 0.0` all build;
+    - `test_core_inputs_merges_kinds_per_source`, one case per row of the merge:
+        - two admitting parameters, one defaulted, give `admits`;
+        - two admitting parameters, both defaulted, give `admits_optional`;
+        - one defaulted parameter and one without a default give `required`;
+        - two defaulted parameters give `optional`;
+        - an admitting parameter with a plain defaulted one gives `optional`, built only because the source can't be
+          absent.
     - `test_mixed_absence_handling_of_one_source_is_refused` (Review Focus 4): a `@parameterize` row binding
       `source("listing")` to `a: list[str] | Absent` and to `b: list[str] = []`. It raises `ValueError` naming the
       node, `'listing'`, `'a'` and `'b'` when `listing` may be absent, and builds when it can't.
@@ -606,6 +621,13 @@ compile. B1 waits for A1 because both rewrite `run.rs`'s slot table.
       `path(m)` is empty, and as `CollectOfExpand` when `m` is an expand.
     - Contributions must be prefixes of one another, or the node fails as `UnrelatedBlocks`.
     - The node fails as `CollectsOwnBlock` when its final path extends the full `path(m)` of one of its collect edges.
+- **A block that reads its own collect through an outer node.** Suppose a block member reads an outer node `Y`, and
+  `Y` reads, possibly through other outer nodes, a collect `c` of the same block. Path discovery passes this graph,
+  but Task 7's contracted order would cycle: the expand waits for `Y`, `Y` waits for `c`, and `c` waits for the
+  expand. So after discovery, `Graph::build` checks every block, at every nesting level, for a cycle in its
+  contracted graph. It uses the iterative colour walk of `find_cycle`, run over the contracted edges. A cycle fails
+  as `CollectsOwnBlock`, whose `path` goes through the outer nodes: `'picked' -> 'details' -> 'y' -> 'summary' ->
+  'picked'`.
 - `may_be_absent` through collects: a collect edge propagates absence only when the collected block's expand may be
   absent, and only by its `dependency` (§7.4).
 - An edge from an expand into its own block passes no absence on. Its consumers read items, and an item is never
@@ -624,6 +646,8 @@ compile. B1 waits for A1 because both rewrite `run.rs`'s slot table.
     - `two_unrelated_blocks_are_refused`;
     - `a_node_may_collect_one_block_and_expand_another` (Q136): its path is `[]` and its own block is new;
     - `nested_blocks_record_their_path`;
+    - `a_block_reading_its_own_collect_through_an_outer_node_is_refused`;
+    - `a_nested_block_reading_its_own_collect_through_an_outer_node_is_refused`: the same shape inside an outer block;
     - `may_be_absent_crosses_a_collect_only_from_an_absent_expand`;
     - `an_expand_that_may_be_absent_does_not_make_its_block_nodes_absent`;
     - `discovery_has_no_recursion`: a 50,000-node chain inside one block, and 1,000 nested blocks.
@@ -789,9 +813,11 @@ Rows Q118 to Q124, Q127, Q132 (*Planned*), Q136, Q137 and Q138.
       `finish(exhausted: bool) -> list[object] | Items`, and records items only when the expand is an output or
       stored.
     - `_scan`: a generator function is a node when its return annotation is `Parallelizable[...]`. Every other
-      generator stays refused as today. The refusal in `_check_kind` (called from `_node_defs`) moves to after
-      `resolve`, because only a resolved return annotation says whether the function is an expand. A string
-      annotation is unresolved at scan time.
+      generator stays refused as today. Only the generator-function branch of `_check_kind` (called from
+      `_node_defs`) moves to after `resolve`, because only a resolved return annotation says whether the function is
+      an expand, and a string annotation is unresolved at scan time. The async-function and async-generator
+      refusals (Q32) stay where they are. The existing `tests/test_scan.py` and `deliberate("Q32")` tests must pass
+      unchanged; only the generator message's moment changes, never its text.
     - `Builder.build_async()` raises `TypeError: blocks run on the async driver from Plan 11; 'picked' expands` (call
       6, Q132).
 - Edge checks:
@@ -814,7 +840,7 @@ Rows Q118 to Q124, Q127, Q132 (*Planned*), Q136, Q137 and Q138.
       settings). Q137's fnloom cell reads: "No executor settings; grouping is found from the graph (§4.2).
       `with_threads(...)` is *Planned* for Plan 11".
 - [ ] **Step 3: Write the fnloom-only tests** in `tests/test_blocks.py`:
-    - `test_aliases_type_check_as_iterable_and_list`: this task creates `tests/typing/blocks.py`, a module that
+    - `test_aliases_type_check_as_iterable_and_list`: this task creates `tests/type_snippets/blocks.py`, a module that
       uses `Parallelizable[str]` as a generator return and calls `len()` and `[0]` on a `Collect[float]`. `check.sh`
       already runs `uv run ty check`, and `[tool.ty.src] include` in `pyproject.toml` already lists `tests`, so ty
       checks the snippet with no new step. The pytest test imports the module and runs it;
