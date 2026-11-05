@@ -126,6 +126,10 @@ def _keep(x: int) -> int:
 def fed(a: int) -> int:
     return a
 
+@pipe_input(step(_keep), namespace=None)
+def loose_fed(a: int) -> int:
+    return a
+
 def total(a: int) -> int:
     return a
 
@@ -140,10 +144,20 @@ def test_a_name_covers_the_nodes_its_steps_lower_to() -> None:
     module = make_module("edge_checks_stepped", STEPPED)
     with pytest.raises(ValueError, match=r"total\.raw\.a requires int") as raised:
         Builder().with_modules(module).without_edge_type_checks("fed").build()
-    assert "fed" not in str(raised.value)
+    assert "fed.with_keep" not in str(raised.value)
     with pytest.raises(ValueError, match=r"fed\.with_keep\.x requires int"):
         Builder().with_modules(module).without_edge_type_checks("total").build()
-    driver = (
+    # A step named without its node's prefix (`namespace=None`) is still its own.
+    with pytest.raises(ValueError, match=r"^with_keep\.x requires int"):
         Builder().with_modules(module).without_edge_type_checks("total", "fed").build()
+    driver = (
+        Builder()
+        .with_modules(module)
+        .without_edge_type_checks("total", "fed", "loose_fed")
+        .build()
     )
-    assert driver.execute(["total", "fed"]) == {"total": "7", "fed": "7"}
+    assert driver.execute(["total", "fed", "loose_fed"]) == {
+        "total": "7",
+        "fed": "7",
+        "loose_fed": "7",
+    }

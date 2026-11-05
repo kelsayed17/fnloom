@@ -62,10 +62,6 @@ def _module_file(tmp_path: Path, name: str, source: str) -> ModuleType:
     return module
 
 
-def _double(x: int) -> int:
-    return x * 2
-
-
 # ---- Decorators -------------------------------------------------------------------
 
 
@@ -324,45 +320,97 @@ def test_q155_pipe_flow_and_collapse() -> None:
     assert "collapse" not in inspect.signature(fnloom.pipe_input).parameters
 
 
-@pytest.mark.deliberate("Q140")
-def test_q140_step_namespaces_are_hamilton_only() -> None:
-    """Hamilton's step `namespace=` and `on_output=` work; fnloom refuses them."""
-    hamilton_module = make_module(
-        "rows_steps_h",
-        HAMILTON_HEADER
-        + """
-def _inc(x: int) -> int:
-    return x + 1
+_Q140_STEPS = """
+from {package} import extract_fields, pipe_input, pipe_output, step
+
+def _inc(v: int) -> int:
+    return v + 1
+
+def _dbl(v: int) -> int:
+    return v * 2
+
+def _neg(v: int) -> int:
+    return -v
+
+@pipe_input(step(_inc), step(_dbl).named("twice"))
+def by_default(a: int) -> int:
+    return a
 
 @pipe_input(step(_inc), namespace=None)
-def f(a: int) -> int:
+def bare(a: int) -> int:
     return a
 
-@pipe_input(step(_inc), namespace="ns")
-def g(a: int) -> int:
+@pipe_input(step(_inc), step(_dbl), namespace="sales")
+def shared(a: int) -> int:
     return a
 
-@pipe_input(step(_inc).named("bump", namespace="zz"))
-def h(a: int) -> int:
+@pipe_input(step(_inc).named("bump", namespace="taxes"), step(_dbl).named("then"))
+def renamed(a: int) -> int:
     return a
 
-@pipe_output(step(_inc), on_output="x")
-@extract_fields({"x": int, "y": int})
-def k(a: int) -> dict:
-    return {"x": a, "y": a}
-""",
+@pipe_output(step(_neg), namespace=None)
+def out_bare(a: int) -> int:
+    return a
+
+@pipe_output(step(_inc), namespace="regions")
+def out_shared(a: int) -> int:
+    return a
+
+@pipe_output(step(_inc), step(_dbl), on_output=("x", "y"))
+@extract_fields({{"x": int, "y": int, "z": int}})
+def fields(a: int) -> dict:
+    return {{"x": a, "y": a * 10, "z": a * 100}}
+
+@pipe_input(
+    step(_inc).named("with_inc", namespace="counted"),
+    step(_inc),
+    step(_dbl).named("x2"),
+    step(_inc),
+)
+def counting(a: int) -> int:
+    return a
+"""
+
+
+@pytest.mark.deliberate("Q140")
+def test_q140_step_namespaces_and_on_output_name_alike(tmp_path: Path) -> None:
+    """Step `namespace=`, `.named(n, namespace=)`, `on_output=`: same names, values."""
+    hamilton_module = _module_file(
+        tmp_path,
+        "rows_steps_h",
+        _Q140_STEPS.format(package="hamilton.function_modifiers"),
     )
     hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
-    names = {n.name for n in hamilton.list_available_variables()}
-    assert {"with_inc", "ns.with_inc", "zz.bump", "x.with_inc"} <= names
-    assert hamilton.execute(["x", "y"], inputs={"a": 1}) == {"x": 2, "y": 1}
-
-    with pytest.raises(TypeError, match="namespace"):
-        fnloom.pipe_input(fnloom.step(_double), namespace="ns")  # ty: ignore[unknown-argument]  # refused is the point
-    with pytest.raises(TypeError, match="namespace"):
-        fnloom.step(_double).named("bump", namespace="zz")  # ty: ignore[unknown-argument]  # refused is the point
-    with pytest.raises(TypeError, match="on_output"):
-        fnloom.pipe_output(fnloom.step(_double), on_output="x")  # ty: ignore[unknown-argument]  # refused is the point
+    expected = {
+        v.name for v in hamilton.list_available_variables() if not v.is_external_input
+    }
+    assert {
+        "by_default.with_inc",
+        "by_default.twice",
+        "with_inc",
+        "sales.with_inc",
+        "sales.with_dbl",
+        "taxes.bump",
+        "renamed.then",
+        "with_neg",
+        "out_bare.raw",
+        "regions.with_inc",
+        "x.with_inc",
+        "y.with_dbl",
+        # A named step counts too: the unnamed ones after it are `_1`, `_2`.
+        "counted.with_inc",
+        "counting.with_inc_1",
+        "counting.x2",
+        "counting.with_inc_2",
+    } <= expected
+    assert "z.with_inc" not in expected
+    fnloom_module = make_module("rows_steps_f", _Q140_STEPS.format(package="fnloom"))
+    driver = fnloom.build(fnloom_module)
+    assert set(driver.node_names()) - set(driver.inputs()) == expected
+    outputs = sorted(expected)
+    assert driver.execute(outputs, inputs={"a": 3}) == hamilton.execute(
+        outputs, inputs={"a": 3}
+    )
 
 
 # ---- What changes in your code ------------------------------------------------------

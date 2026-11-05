@@ -373,17 +373,17 @@ def _edge_mismatches(
     return sorted(found)
 
 
-def _lowered_names(names: Sequence[str], stepped: AbstractSet[str]) -> frozenset[str]:
+def _lowered_names(
+    names: Sequence[str], steps_of: Mapping[str, AbstractSet[str]]
+) -> frozenset[str]:
     """`names`, and each step node lowered from one of them (Q149).
 
-    A `@pipe_input`, `@pipe_output` or `@mutate` makes nodes named
-    `<node>.<step>`, such as `total.raw`: the edges into them are the node's own.
+    A `@pipe_input`, `@pipe_output` or `@mutate` makes step nodes, such as
+    `total.raw`, whatever their names: the edges into them are the node's own.
     """
-    if not names:
-        return frozenset[str]()
-    prefixes = tuple(f"{name}." for name in names)
-    lowered = {made for made in stepped if made.startswith(prefixes)}
-    return frozenset[str](names) | lowered
+    return frozenset[str](names).union(
+        *(steps_of.get(name, frozenset[str]()) for name in names)
+    )
 
 
 def _unknown_consumers(views: NodeViews, names: Sequence[str]) -> str | None:
@@ -3211,8 +3211,9 @@ class Builder[R = dict[str, object]]:
         )
         if unbuilt := _steps.unbuilt_targets(self._modules, nodes):
             raise ValueError("\n".join(unbuilt))
+        steps_of: dict[str, set[str]] = {}
         nodes, stepped = _steps.lowered(
-            nodes, self._config, self._bound, used, self._overlays
+            nodes, self._config, self._bound, used, self._overlays, steps_of
         )
         _refuse_unread(self._bound, used)
         relays = _steps.relays(nodes)
@@ -3243,7 +3244,7 @@ class Builder[R = dict[str, object]]:
             and (unknown := _unknown_consumers(views, self._loose_edges)) is not None
         ):
             raise ValueError(unknown)
-        loose = _lowered_names(self._loose_edges, stepped)
+        loose = _lowered_names(self._loose_edges, steps_of)
         if self._edge_checks and (
             mismatches := _edge_mismatches(views.functions, loose)
         ):
