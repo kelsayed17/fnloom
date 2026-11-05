@@ -777,24 +777,18 @@ class PrintNodes(Hook):
         width: int = _CUT,
     ) -> None:
         """A hook printing with `print_fn`; `ValueError` for a bad setting."""
-        if isinstance(verbosity, bool) or verbosity not in (1, 2):
+        if type(verbosity) is not int or verbosity not in (1, 2):
             msg = f"verbosity must be 1 or 2, got {verbosity!r}"
             raise ValueError(msg)
         if isinstance(width, bool) or not isinstance(width, int) or width < 10:  # noqa: PLR2004  # the shortest width a cut `...` makes sense at
             msg = f"width must be an int of at least 10, got {width!r}"
             raise ValueError(msg)
-        if isinstance(nodes, str) or (
-            not callable(nodes)
-            and nodes is not None
-            and not all(isinstance(n, str) for n in nodes)
-        ):
-            msg = f"nodes must be a sequence of names or a callable, not {nodes!r}"
+        if not callable(print_fn):
+            msg = f"print_fn must be callable, got {print_fn!r}"
             raise TypeError(msg)
         self._verbosity = verbosity
         self._print = print_fn
-        self._nodes: NodeFilter | None = (
-            nodes if callable(nodes) or nodes is None else tuple(nodes)
-        )
+        self._nodes: NodeFilter | None = _node_filter(nodes)
         self._width = width
         self._started: dict[tuple[str, str], float] = {}
         self._lock = threading.Lock()
@@ -821,7 +815,8 @@ class PrintNodes(Hook):
             n for n in names if n not in event.nodes or event.nodes[n].is_input
         )
         if unknown:
-            listed = ", ".join(f"'{n}'{suggest(n, event.nodes)}" for n in unknown)
+            computed = [n for n in event.nodes if not event.nodes[n].is_input]
+            listed = ", ".join(f"'{n}'{suggest(n, computed)}" for n in unknown)
             msg = f"PrintNodes: not computed nodes of this graph: {listed}"
             raise ValueError(msg)
 
@@ -833,6 +828,11 @@ class PrintNodes(Hook):
             return bool(wanted(view))
         return view.name in wanted
 
+    @staticmethod
+    def _key(event: NodeStart | NodeEnd) -> tuple[str, str]:
+        """The one place a start time is keyed: by run, then node."""
+        return (event.run_id, event.node.name)
+
     @override
     def after_run(self, event: RunEnd) -> None:
         # A node whose `before_node` another hook refused, or that was cancelled,
@@ -843,19 +843,20 @@ class PrintNodes(Hook):
 
     @override
     def before_node(self, event: NodeStart) -> None:
+        # The filter is asked here only: a node is printed when it has a start time.
         if not self._shown(event.node):
             return
         with self._lock:
-            self._started[event.run_id, event.node.name] = time.perf_counter()
+            self._started[self._key(event)] = time.perf_counter()
 
     @override
     def after_node(self, event: NodeEnd) -> None:
-        if not self._shown(event.node):
+        with self._lock:
+            began = self._started.pop(self._key(event), None)
+        if began is None:
             return
         name = event.node.name
-        with self._lock:
-            began = self._started.pop((event.run_id, name), None)
-        elapsed = "?" if began is None else _milliseconds(time.perf_counter() - began)
+        elapsed = _milliseconds(time.perf_counter() - began)
         cache = event.cache
         if event.ok and cache is not None and cache.status == "hit":
             self._print(f"node '{name}' loaded from cache")
@@ -879,6 +880,25 @@ class PrintNodes(Hook):
         self._print(f"  inputs: {shown}")
         if event.ok:
             self._print(f"  result: {_cut(event.result, self._width)}")
+
+
+def _node_filter(nodes: NodeFilter | None) -> NodeFilter | None:
+    """`nodes` as a callable, a tuple of names, or `None`; `TypeError` otherwise.
+
+    The names are read once into a tuple, so a generator is kept whole.
+    """
+    if nodes is None or callable(nodes):
+        return nodes
+    names: tuple[str, ...] | None = None
+    if not isinstance(nodes, str):
+        try:
+            names = tuple(nodes)
+        except TypeError:
+            names = None
+    if names is None or not all(isinstance(n, str) for n in names):
+        msg = f"nodes must be a sequence of names or a callable, not {nodes!r}"
+        raise TypeError(msg)
+    return names
 
 
 def _milliseconds(seconds: float) -> str:

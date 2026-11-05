@@ -414,8 +414,24 @@ def test_q142_println_and_print_nodes_report_the_same_nodes() -> None:
         )
         reported = [line.split("'")[1] for line in ours if line.startswith("node ")]
         assert reported == [line.split()[3] for line in finished]
-        assert any(line.startswith("  result:") for line in ours) == (verbosity > 1)
-        assert any(line.startswith("  inputs:") for line in ours) == (verbosity > 1)
+        # Which nodes carry inputs and a result: Hamilton's `Inputs:` and `Result:`
+        # against the indented lines after each of fnloom's node lines.
+        with_inputs = [
+            line.split()[2].rstrip(".") for line in executing if "Inputs:" in line
+        ]
+        with_result = [line.split()[3] for line in finished if "Result:" in line]
+        ours_inputs: list[str] = []
+        ours_result: list[str] = []
+        node = ""
+        for line in ours:
+            if line.startswith("node "):
+                node = line.split("'")[1]
+            elif line.startswith("  inputs:"):
+                ours_inputs.append(node)
+            elif line.startswith("  result:"):
+                ours_result.append(node)
+        assert ours_inputs == with_inputs
+        assert ours_result == with_result
     assert not hasattr(fnloom, "PrintLn")
 
 

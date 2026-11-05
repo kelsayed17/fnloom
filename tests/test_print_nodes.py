@@ -4,6 +4,7 @@ import asyncio
 import copy
 import pickle
 import re
+import threading
 from typing import TYPE_CHECKING, override
 
 import pytest
@@ -138,7 +139,7 @@ def test_nodes_by_view_predicate_sees_tags() -> None:
     assert [line.split("'")[1] for line in printed] == ["b"]
 
 
-def test_an_unknown_node_name_is_refused_naming_it_with_a_suggestion() -> None:
+def test_unknown_node_names_are_refused_naming_each() -> None:
     """A name that is no node of the built graph is a `ValueError`."""
     hook, _ = _lines(nodes=("c", "totl", "bb"))
     with pytest.raises(ValueError, match=r"'bb'.*'totl'|'totl'.*'bb'"):
@@ -260,7 +261,7 @@ def test_every_hook_sees_the_event_and_errors_are_raised_together() -> None:
     assert len(recorder.events) == 1
 
 
-def test_a_refusing_after_build_refuses_rebuild_and_build_async_too() -> None:
+def test_a_refusing_after_build_refuses_build_async_too() -> None:
     """The same check runs on every route that builds."""
     module = make_module("ab_routes", SOURCE)
     builder = fnloom.Builder().with_modules(module).with_hooks(Refuses("no"))
@@ -313,3 +314,153 @@ def test_inputs_and_non_str_names_are_refused() -> None:
         _driver("pn_input", hook)
     with pytest.raises(TypeError, match="nodes"):
         PrintNodes(nodes=("c", 1))  # ty: ignore[invalid-argument-type]  # the refusal is the point
+
+
+def test_a_one_shot_iterable_of_names_is_kept_whole() -> None:
+    """A generator of names filters as its names, not as an emptied iterator."""
+    hook, printed = _lines(nodes=(n for n in ["c"]))
+    _driver("pn_generator", hook).execute(["c"], inputs={"a": 1})
+    assert [line.split("'")[1] for line in printed] == ["c"]
+
+
+@pytest.mark.parametrize("nodes", [5, 1.5])
+def test_nodes_that_are_neither_names_nor_a_callable_are_refused(nodes: object) -> None:
+    """Something that is not iterable is a `TypeError` naming `nodes`."""
+    with pytest.raises(TypeError, match="nodes"):
+        PrintNodes(nodes=nodes)  # ty: ignore[invalid-argument-type]  # the refusal is the point
+
+
+def test_an_unknown_name_suggests_a_computed_node() -> None:
+    """The `did you mean` names a node `PrintNodes` would accept."""
+    hook, _ = _lines(nodes=("boomm",))
+    with pytest.raises(ValueError, match=r"'boomm' \(did you mean 'boom'\?\)"):
+        _driver("pn_suggest", hook)
+
+
+def test_an_unknown_name_never_suggests_an_input() -> None:
+    """An input is refused too, so it is never the suggestion."""
+    module = make_module(
+        "pn_no_input", "def total(price: int) -> int:\n    return price\n"
+    )
+    hook, _ = _lines(nodes=("pric",))
+    builder = fnloom.Builder().with_modules(module).with_hooks(hook)
+    with pytest.raises(ValueError, match="'pric'") as caught:
+        builder.build()
+    assert "did you mean" not in str(caught.value)
+
+
+class Toggle(Hook):
+    """Refuses a build once `refuse` is set."""
+
+    def __init__(self) -> None:
+        """Passes builds until told otherwise."""
+        self.refuse = False
+
+    @override
+    def after_build(self, event: BuildEnd) -> None:
+        """Raises when `refuse` is set."""
+        del event
+        if self.refuse:
+            msg = "now refused"
+            raise ValueError(msg)
+
+
+def test_a_raising_after_build_refuses_rebuild() -> None:
+    """A driver whose check passed is refused by `rebuild()` once the check fails."""
+    hook = Toggle()
+    driver = _driver("ab_rebuild_refused", hook)
+    hook.refuse = True
+    with pytest.raises(ValueError, match="now refused"):
+        driver.rebuild()
+
+
+@pytest.mark.parametrize("verbosity", [1.0, 2.0])
+def test_a_float_verbosity_is_refused(verbosity: float) -> None:
+    """`1.0 == 1`, but a verbosity is an int."""
+    with pytest.raises(ValueError, match="verbosity"):
+        PrintNodes(verbosity)  # ty: ignore[invalid-argument-type]  # the refusal is the point
+
+
+def test_a_print_fn_that_is_not_callable_is_refused() -> None:
+    """A bad `print_fn` fails when the hook is made, not at the first node."""
+    with pytest.raises(TypeError, match="print_fn"):
+        PrintNodes(print_fn=None)  # ty: ignore[invalid-argument-type]  # the refusal is the point
+
+
+def test_a_callable_filter_is_asked_once_per_node() -> None:
+    """The filter's answer at `before_node` decides the node's line."""
+    asked: list[str] = []
+    answers = iter([True, False])
+
+    def flaky(view: NodeView) -> bool:
+        asked.append(view.name)
+        return next(answers, False)
+
+    hook, printed = _lines(nodes=flaky)
+    _driver("pn_once", hook).execute(["c"], inputs={"a": 1})
+    assert asked == ["b", "c"]
+    assert len(printed) == 1
+    assert re.fullmatch(f"node 'b' ran in {TIME}", printed[0])
+
+
+SLOW = """
+import time
+
+def b(a: int) -> int:
+    time.sleep(0.2 if a == 1 else 0.0)
+    return a
+"""
+
+ASYNC_SLOW = """
+import asyncio
+
+async def b(a: int) -> int:
+    await asyncio.sleep(0.2 if a == 1 else 0.0)
+    return a
+"""
+
+SLOW_MS = 150
+
+
+def _times(printed: list[str]) -> list[float]:
+    """The milliseconds of each `ran in N ms` line, smallest first."""
+    return sorted(float(line.split()[-2]) for line in printed)
+
+
+def test_concurrent_runs_on_threads_keep_their_own_times() -> None:
+    """Three runs at once: only the slow run reports the slow time."""
+    hook, printed = _lines()
+    module = make_module("pn_threads", SLOW)
+    driver = fnloom.Builder().with_modules(module).with_hooks(hook).build()
+    start = threading.Barrier(3)
+
+    def run(a: int) -> None:
+        start.wait()
+        driver.execute(["b"], inputs={"a": a})
+
+    threads = [threading.Thread(target=run, args=(a,)) for a in (1, 2, 3)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    times = _times(printed)
+    assert len(times) == len(threads)
+    assert times[-1] >= SLOW_MS
+    assert times[-2] < SLOW_MS
+
+
+def test_concurrent_async_runs_keep_their_own_times() -> None:
+    """`asyncio.gather` of three runs: only the slow run reports the slow time."""
+    hook, printed = _lines()
+    module = make_module("pn_gather", ASYNC_SLOW)
+    driver = fnloom.Builder().with_modules(module).with_hooks(hook).build_async()
+    runs = (1, 2, 3)
+
+    async def main() -> None:
+        await asyncio.gather(*(driver.execute(["b"], inputs={"a": a}) for a in runs))
+
+    asyncio.run(main())
+    times = _times(printed)
+    assert len(times) == len(runs)
+    assert times[-1] >= SLOW_MS
+    assert times[-2] < SLOW_MS

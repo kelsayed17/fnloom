@@ -243,10 +243,11 @@ reports a run. `verbosity=2` adds an indented `inputs:` line (`price=30.0, quant
 line, each value cut to `width` characters (50 by default) as [`LogFailures`](#logging-failures) cuts them.
 
 `nodes` limits what is printed: a sequence of names, or a function of the node's
-[`NodeView`](running.md#inspecting-a-graph), which can select by tag or namespace. A name that is no node of the
-graph is a `ValueError` when the driver is built, with a `did you mean`. `print_fn` takes one string; the default
-is `print`. A `verbosity` other than 1 or 2, or a `width` under 10, is a `ValueError`. Times are kept per run and
-node, so the async driver and concurrent runs print correctly.
+[`NodeView`](running.md#inspecting-a-graph), which can select by tag or namespace and is asked once per node. A
+name that is no computed node of the graph (an input included) is a `ValueError` when the driver is built, with a
+`did you mean`. `print_fn` takes one string; the default is `print`, and one that is not callable is a `TypeError`.
+A `verbosity` other than the int 1 or 2, or a `width` under 10, is a `ValueError`. Times are kept per run and node,
+so the async driver and concurrent runs print correctly.
 
 ```python
 lines: list[str] = []
@@ -266,9 +267,9 @@ printing.execute(["total"], inputs={"price": 30.0, "quantity": 2})
 
 `Hook.after_build(event)` gets a [`BuildEnd`](#the-events) once a driver is built, whether by `build()`,
 `build_async()` or `rebuild()`. It is Hamilton's `GraphConstructionHook`, and a `StaticValidator` too: a hook that
-raises refuses the build, and because the hook belongs to the builder, `rebuild()` and pickling carry it (Q145,
-Q117). Every hook sees the event, even after another raised, and several errors are raised together as one
-`ExceptionGroup`, in hook order. A hook belongs to the builder, so `rebuild()` and unpickling fire it again.
+raises refuses the build (Q145, Q117). The hook belongs to the builder, so `rebuild()` and unpickling fire it again.
+Every hook sees the event, even after another raised, and several errors are raised together as one `ExceptionGroup`,
+in hook order.
 
 ```python
 class NeedsOwner(fnloom.Hook):
