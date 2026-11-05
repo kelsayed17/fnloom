@@ -3093,6 +3093,15 @@ class Builder[R = dict[str, object]]:
         driver._left_out = left_out  # noqa: SLF001  # the builder's own driver
         driver._checks_owner = owner  # noqa: SLF001  # the builder's own driver
         driver._builder = self  # noqa: SLF001  # the builder's own driver
+        # Last, so a hook sees the finished driver's views, and may refuse the build.
+        _hooks.fire_build(
+            self._hooks,
+            _hooks.BuildEnd(
+                nodes=views,
+                config=driver.config,
+                modules=driver._modules,  # noqa: SLF001  # the builder's own driver
+            ),
+        )
         return driver
 
 
