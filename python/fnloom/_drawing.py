@@ -252,6 +252,9 @@ def condition_text(conditions: Sequence[Condition]) -> str:
     """The `@config.when*` conditions as text: `mode == 'fast'`, joined by `, `."""
     parts: list[str] = []
     for c in conditions:
+        if c.kind == "matches":
+            parts.append(f"matches({c.key})")
+            continue
         operator = _OPERATORS[c.kind]
         if c.kind in {"when", "when_not"}:
             parts.append(f"{c.key} {operator} {c.values[0]!r}")

@@ -41,6 +41,23 @@ change the public API; such changes are listed under **Changed** and **Removed**
   not run when it hits; `"recompute"` runs the producer again for the field; `"disable"` makes the field's readers
   uncacheable. A field the function doesn't extract is a `ValueError` at build, and `fields=` on a function that
   extracts nothing a `TypeError` (Q147).
+- `@config.matches(predicate, *, name=None)`: a variant kept when `predicate`, called with the config keys its
+  parameters name, returns `True`. A defaulted parameter is an optional key, a missing required key never matches,
+  and a result that is no `bool` is a `TypeError` at build. It stacks with `config.when*` and falls back to
+  `@config.default`. The predicate's code version is in the selected variant's cache key and export `version`, and
+  the export shows the condition as `matches(<module.qualname>)`. A public module-level predicate, which would be a
+  node, fails the build (Q148).
+- `Builder.without_edge_type_checks(*consumers)` turns edge type checks off for every edge, or only for the edges into
+  the nodes named; an unknown name is a `ValueError` at build. Input checks stay on. The export's new `edge_checks`
+  field records it, and it is in `graph_version` (Q149).
+- `with_modules(..., namespace="eu", config={...})` gives a namespace a config of its own, overlaid on the builder's
+  for its `@config` variants, `@resolve`s, `config.matches` predicates and steps, as `@subdag(config=)` does.
+  `Driver.config` stays the builder's own; the export's new `namespace_config` field lists each overlay, which is in
+  `graph_version` (Q112 amended: `config=` per copy was not planned).
+- `with_modules(module, replace=("total",))` replaces the node `total` that earlier modules define, for every reader.
+  A name no earlier module, or not this one, defines under the config is a `ValueError` at build. `NodeView.replaced`
+  and the export entry's `replaced` name the module replaced. A `@mutate` on the replaced function fails the build,
+  and `@config` variants on both sides are each selected first (Q74 amended, Q150).
 
 ### Changed
 
@@ -61,6 +78,14 @@ change the public API; such changes are listed under **Changed** and **Removed**
   where it had `None`.
 - `@cache(...)` without `behavior` no longer sets one: `CachePolicy.behavior` is `None`, and the driver's
   `default_behavior` applies, as in Hamilton. With `with_cache`'s default, nothing changes.
+
+### Fixed
+
+- A code version no longer depends on `PYTHONHASHSEED` when a function reads a `set` or `frozenset`, as a default
+  or a global: its members are versioned sorted. Such a node's version, and its cache key, change once.
+- A `value()` binding, default or global holding a set inside a subclass of `set`, `frozenset`, `list`, `tuple` or
+  `dict` with attributes or slots of its own, or inside another mapping, is no longer versioned by its members alone,
+  so a change to that state can't hit a stale result: it is fingerprinted whole, or refused.
 
 ## [0.3.0] - 2026-11-03
 

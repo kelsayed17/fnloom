@@ -445,9 +445,10 @@ differ. It must hold everything that can change a node's result.
 are refused although they look plain:
 
 - A set of strings iterates in an order the hash seed decides, which changes with every process unless
-  `PYTHONHASHSEED` is set. Its fingerprint follows that order, so an input holding one, or a global `frozenset` of
-  strings a node reads, misses in each new process with `DiskCache`. Pass a sorted tuple instead, or fix
-  `PYTHONHASHSEED`, to share results across processes.
+  `PYTHONHASHSEED` is set. Its fingerprint follows that order, so an input holding one misses in each new process
+  with `DiskCache`. Pass a sorted tuple instead, or fix `PYTHONHASHSEED`, to share results across processes. A
+  `set` or `frozenset` a node's code reads, as a global or a default, is versioned by its members sorted, the same in
+  every process.
 - An object of a type fnloom does not know that exposes a buffer (a `bytes` subclass, a `ctypes` value) is hashed
   by its type's name, its buffer and the attributes set on the instance, so state held elsewhere (in memory a
   `ctypes` pointer reaches, say) is not seen.
