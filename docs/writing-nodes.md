@@ -536,11 +536,17 @@ Hamilton makes every such parameter an input shared by every step that has it (Q
 unbound is refused when decorating.
 
 - `.named("x")` names a step's node `<node>.x`.
+- `namespace=` on `@pipe_input` or `@pipe_output`, or `.named("x", namespace=...)` on one step, replaces the `<node>`
+  part: `None` drops it, so the step is `x` or `with_clip`, and a dotted path such as `"sales"` names it
+  `sales.with_clip`. The default, `...`, keeps `<node>`; a step's own namespace wins over the decorator's, and under a
+  [module namespace](#namespaces) the step stays within it. `.raw` and the node itself keep their names. A name two
+  nodes would have fails the build, naming what made each (Q140).
 - `.when(mode="fast")`, `.when_not`, `.when_in` and `.when_not_in` run a step only under that [config](#config). A
   step's number counts every step written, so names don't change with the config.
 - `on_input="b"` on `@pipe_input` feeds the parameter `b` rather than the first.
-- On a function with [extracted fields](#extracting-fields), `@pipe_output`'s steps apply to each field, and
-  `.on_output("p")` picks the fields a step applies to.
+- On a function with [extracted fields](#extracting-fields), `@pipe_output`'s steps apply to each field.
+  `on_output=("p", "q")` on `@pipe_output` picks the fields for every step, and `.on_output("p")` for one step, which
+  wins. A field the function doesn't extract is refused at build.
 - With `@parameterize`, each row gets its own chain, named under the row (Q108).
 
 The first step must take the parameter's own type, checked at build, and so must each step the one before it.

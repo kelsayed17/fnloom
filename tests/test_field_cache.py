@@ -406,13 +406,23 @@ def report(region: str) -> dict:
 """
 
 
-@pytest.mark.parametrize("on_output", ["", '.on_output("rate")'])
+@pytest.mark.parametrize(
+    "on_output",
+    [
+        "",
+        '.on_output("rate")',
+        ', namespace=None, on_output="rate"',
+        ', namespace="adj", on_output="rate"',
+        '.named("tidy", namespace="adj"), on_output="rate"',
+    ],
+)
 def test_a_piped_field_takes_its_policy(
     on_output: str, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """`fields=` beside `@pipe_output` builds, and the field is stored and served."""
     module = make_module(
-        f"field_cache_piped_{bool(on_output)}", PIPED.format(on_output=on_output)
+        "field_cache_piped_" + "".join(c for c in on_output if c.isalnum()),
+        PIPED.format(on_output=on_output),
     )
     driver = Builder().with_modules(module).with_cache(MemoryCache()).build()
     assert driver.execute(["rate"], inputs=REQUEST) == {"rate": 0.2}
