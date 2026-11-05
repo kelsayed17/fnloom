@@ -501,20 +501,23 @@ def c(b: int) -> int:
     fnloom_nodes = fnloom.build(
         make_module("differential_tagged_f", "from fnloom import tag\n" + body)
     ).nodes
-    for key, value in (
-        ("owner", "ann"),
-        ("owner", "bo"),
-        ("stage", "clean"),
-        ("owner", None),
-    ):
+    filters: list[dict[str, str | list[str] | None]] = [
+        {"owner": "ann"},
+        {"owner": "bo"},
+        {"stage": "clean"},
+        {"owner": None},
+        {"owner": ["bo", "cy"]},
+        {"owner": ["zz"]},
+        {"owner": "ann", "stage": "clean"},
+        {"owner": None, "stage": ["clean"]},
+        {},
+    ]
+    for tag_filter in filters:
         found = sorted(
-            n.name for n in built.list_available_variables(tag_filter={key: value})
+            n.name for n in built.list_available_variables(tag_filter=tag_filter)
         )
-        query = fnloom.ANY if value is None else value
-        assert found == sorted(v.name for v in fnloom_nodes.tagged(**{key: query})), (
-            key,
-            value,
-        )
+        query = {k: fnloom.ANY if v is None else v for k, v in tag_filter.items()}
+        assert found == sorted(v.name for v in fnloom_nodes.tagged(**query)), tag_filter
 
 
 def _pairs(quirk: str) -> list[tuple[str, str]]:

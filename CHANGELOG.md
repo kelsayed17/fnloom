@@ -17,14 +17,15 @@ change the public API; such changes are listed under **Changed** and **Removed**
   one `ExceptionGroup`. This is Hamilton's `GraphConstructionHook` and `StaticValidator` (Q145, Q117).
 - `@tag` takes a `list` or `tuple` of strings as a value, kept as a tuple in written order. An empty sequence, a
   repeated item, a non-`str` item, or an unordered collection (`set`, `frozenset`, `dict`) is refused when decorating,
-  naming the tag. `Driver.nodes.tagged(**query)` returns the views whose tags match: a `str` matches an equal value
-  or a tuple holding it, a sequence matches any item, `fnloom.ANY` matches a node with the tag. `fnloom draw` and
-  `fnloom export` take a repeatable `--tag key=value`. The export writes a tuple as a JSON list, and `diff` compares
-  it in order (Q36, Q141).
+  naming the tag. `Driver.nodes.tagged(**query)` returns the views whose tags match: a `str` matches an equal value or
+  a tuple holding it, a sequence matches any item, `fnloom.ANY` matches a node with the tag. `fnloom draw` and `fnloom
+  export` take a repeatable `--tag key=value`, one per key (a key given twice is a usage error). A `str` subclass
+  value or item is kept as a plain `str`, and `fnloom.ANY` survives `copy`, `deepcopy` and `pickle`. The export writes
+  a tuple as a JSON list, and `diff` compares it in order (Q36, Q141).
 
 ### Changed
 
-- `NodeView.tags` is now `Mapping[str, str | tuple[str, ...]]`: code that reads a tag as a `str` needs a
+- `NodeView.tags` is now `Mapping[str, str | tuple[str, ...]]`: code that reads a tag as a `str` needs an
   `isinstance(value, str)` check (or `tags.get("k")` handled as either) to type-check. `Driver.nodes` is typed
   `NodeViews`, which has `tagged`. A node's `display_name` tag given as a tuple is drawn joined by `, `.
 

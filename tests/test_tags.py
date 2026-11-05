@@ -118,8 +118,10 @@ def test_export_writes_a_list_and_diff_sees_a_changed_order() -> None:
 
 
 def test_tuple_tags_are_hash_seed_stable() -> None:
-    """The export of a tuple tag is the same text on every hash seed."""
-    import json  # noqa: PLC0415  # used by this test alone
+    """The export and the drawing of tuple tags are the same text on every hash seed.
+
+    And a `diff` of one seed's export against another's sees no change at all.
+    """
     import os  # noqa: PLC0415  # used by this test alone
     import subprocess  # noqa: PLC0415  # used by this test alone
     import sys  # noqa: PLC0415  # used by this test alone
@@ -131,22 +133,83 @@ def test_tuple_tags_are_hash_seed_stable() -> None:
         module = types.ModuleType("seeded")
         sys.modules["seeded"] = module
         exec(sys.argv[1], module.__dict__)
-        doc = fnloom.build(module).export()
-        print(json.dumps({n["name"]: n["tags"] for n in doc["nodes"]}))
+        driver = fnloom.build(module)
+        drawing = driver.draw()
+        print(json.dumps({
+            "export": json.dumps(driver.export(), sort_keys=True),
+            "dot": drawing.to_dot(),
+            "mermaid": drawing.to_mermaid(),
+            "str": str(drawing),
+        }))
         """
     )
-    outputs = {
-        subprocess.run(  # noqa: S603  # this interpreter, fixed arguments
-            [sys.executable, "-c", script, SOURCE],
-            check=True,
-            capture_output=True,
-            text=True,
-            env={**os.environ, "PYTHONHASHSEED": seed},
-        ).stdout
+    runs = {
+        seed: json.loads(
+            subprocess.run(  # noqa: S603  # this interpreter, fixed arguments
+                [sys.executable, "-c", script, SOURCE],
+                check=True,
+                capture_output=True,
+                text=True,
+                env={**os.environ, "PYTHONHASHSEED": seed},
+            ).stdout
+        )
         for seed in ("0", "1", "2")
     }
-    assert len(outputs) == 1
-    assert json.loads(outputs.pop())["a"] == {"owner": ["ann", "bo"], "stage": "raw"}
+    for part in ("export", "dot", "mermaid", "str"):
+        assert len({run[part] for run in runs.values()}) == 1, part
+    first = json.loads(runs["0"]["export"])
+    nodes = {n["name"]: n for n in first["nodes"]}
+    assert nodes["a"]["tags"] == {"owner": ["ann", "bo"], "stage": "raw"}
+    changes = _export.diff(first, json.loads(runs["1"]["export"]))
+    assert changes["added"] == []
+    assert changes["removed"] == []
+    assert changes["changed"] == {}
+    assert changes["graph_version_changed"] is False
+
+
+def test_any_is_one_object_after_copy_deepcopy_and_pickle() -> None:
+    """`ANY` copied, deep-copied or pickled is `ANY`, and still matches."""
+    import copy  # noqa: PLC0415  # used by this test alone
+    import pickle  # noqa: PLC0415  # used by this test alone
+
+    nodes = fnloom.build(make_module("tags_any_copy", SOURCE)).nodes
+    for again in (
+        copy.copy(fnloom.ANY),
+        copy.deepcopy(fnloom.ANY),
+        pickle.loads(pickle.dumps(fnloom.ANY)),  # noqa: S301  # our own bytes
+        copy.deepcopy({"owner": fnloom.ANY})["owner"],
+    ):
+        assert again is fnloom.ANY
+        assert _names(nodes.tagged(owner=again)) == ["a", "b", "c"]
+
+
+def test_a_str_subclass_value_is_stored_as_plain_str() -> None:
+    """A `str` subclass, alone or as an item, reads back as a plain `str`."""
+    module = make_module(
+        "tags_str_subclass",
+        HEADER
+        + "class Name(str):\n    __slots__ = ()\n\n"
+        + '@tag(owner=Name("ann"), stage=[Name("raw"), "clean"])\n'
+        + "def f(x: int) -> int:\n    return x\n",
+    )
+    view = fnloom.build(module).nodes["f"]
+    assert type(view.tags["owner"]) is str
+    stage = view.tags["stage"]
+    assert isinstance(stage, tuple)
+    assert [type(item) for item in stage] == [str, str]
+    assert view.tags == {"owner": "ann", "stage": ("raw", "clean")}
+
+
+def test_the_cli_refuses_a_tag_key_given_twice(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--tag k=a --tag k=b` is a usage error, for `export` and `draw` alike."""
+    source = tmp_path / "tagged_twice.py"
+    source.write_text(SOURCE)
+    for command in ("export", "draw"):
+        argv = [command, str(source), "--tag", "owner=ann", "--tag", "owner=bo"]
+        assert cli.main(argv) == USAGE
+        assert "--tag owner given twice" in capsys.readouterr().err
 
 
 def test_the_cli_keeps_only_the_tagged_nodes(tmp_path: Path) -> None:
