@@ -1,27 +1,42 @@
 """Drawings of a built graph: which nodes, how each is marked, and their text.
 
 A `Drawing` is plain data: its nodes in topological order and its edges, each node
-with the text its label shows. It writes DOT and Mermaid itself, so drawing needs
-nothing installed; only an image needs Graphviz's `dot` (Q90, Q94).
+with the text its label shows. It writes DOT, Mermaid and SVG itself, so drawing
+needs nothing installed; only another image format needs Graphviz's `dot` (Q90,
+Q94, Q146). `Drawing.styled` adds `Style`s that every writer draws (Q139).
 """
 
+import annotationlib
+import dataclasses
 import inspect
+import json
 
 # `os` is imported for real: `render`'s signature annotates with `os.PathLike`,
 # and `inspect.signature` resolves that at run time.
 import os  # noqa: TC003  # resolved at run time, see above
 import shutil
 import subprocess
+import sys
+import typing
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, Protocol, override
 
+from fnloom._style import (
+    Style,
+    StyleTypeError,
+    StyleValueError,
+    check_scope,
+    hex_colour,
+    merged,
+    number,
+)
 from fnloom._types import Unresolved
-from fnloom._view import topological
+from fnloom._view import NodeView, topological
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
 
     from fnloom._config import Condition
     from fnloom._view import NodeViews
@@ -29,8 +44,10 @@ if TYPE_CHECKING:
 type Mark = Literal["output", "override", "path", "context"]
 type Orient = Literal["LR", "TB", "RL", "BT"]
 type Kind = Literal["function", "input"]
+type Engine = Literal["dot", "builtin"]
 
 _ORIENTS = ("LR", "TB", "RL", "BT")
+_ENGINES = ("dot", "builtin")
 
 # The formats `render` writes as `to_dot()`'s text: Graphviz's own suffixes.
 _DOT_SUFFIXES = frozenset({"dot", "gv"})
@@ -49,6 +66,8 @@ _TYPE_WIDTH = 80
 _NODE_DEFAULTS = (
     '  node [shape=box style="rounded,filled" fillcolor="#b4d8e4" fontname=Helvetica]'
 )
+# The `style` tokens a node has when its kind and marks set none.
+_DEFAULT_TOKENS = ("rounded", "filled")
 
 # The tag whose value replaces a node's name in its label, as Hamilton's does.
 _DISPLAY_NAME = "display_name"
@@ -64,6 +83,14 @@ class DrawnNode:
     `@config.when*` conditions it was chosen by, or `None`. `marks` say what the
     drawing shows it as: a requested `output`, an `override`, on the `path`, or
     `context` (drawn only because a drawn node reads it).
+
+    `tags` are the `(name, value)` pairs of the tags the drawing was asked to
+    show (`show_tags`), in the order asked, a tuple value joined by `, `;
+    `schema` the `(field, type)` pairs of a `TypedDict`, dataclass or
+    `NamedTuple` return type (`show_schema`). `style` is the node's own `Style`,
+    from `Drawing.styled`. `view` is the node's `NodeView`, for a style
+    function; it is left out of equality, `repr` and pickling, and is `None`
+    for a node made by hand or unpickled.
     """
 
     name: str
@@ -72,6 +99,31 @@ class DrawnNode:
     title: str
     condition: str | None = None
     marks: frozenset[Mark] = field(default_factory=frozenset)
+    tags: tuple[tuple[str, str], ...] = ()
+    schema: tuple[tuple[str, str], ...] = ()
+    style: Style | None = None
+    view: NodeView | None = field(default=None, compare=False, repr=False)
+
+    @override
+    def __reduce__(self) -> tuple[object, ...]:
+        """Pickled without `view`, which holds the node's function."""
+        return (
+            DrawnNode,
+            (
+                self.name,
+                self.kind,
+                self.type,
+                self.title,
+                self.condition,
+                self.marks,
+                self.tags,
+                self.schema,
+                self.style,
+            ),
+        )
+
+
+type StyleFunction = Callable[[NodeView, DrawnNode], Style | None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,11 +133,62 @@ class Drawing:
     `nodes` are in topological order, ties broken by name; `edges` are
     `(dependency, node)` pairs in the order of their nodes, then of their
     dependencies' names. Neither depends on `PYTHONHASHSEED` (Q90). `str()` of a
-    drawing is its DOT text.
+    drawing is its DOT text. `graph_style` and `edge_style` are the `Style`s
+    `styled` gave the whole graph and every edge; `show_types` says whether a
+    label shows its node's type.
     """
 
     nodes: tuple[DrawnNode, ...]
     edges: tuple[tuple[str, str], ...]
+    graph_style: Style | None = None
+    edge_style: Style | None = None
+    show_types: bool = True
+
+    def styled(
+        self,
+        *,
+        graph: Style | None = None,
+        node: Style | None = None,
+        edge: Style | None = None,
+        style: StyleFunction | None = None,
+    ) -> Drawing:
+        """A new drawing with these styles added, for DOT, Mermaid and SVG alike (Q139).
+
+        `graph` styles the whole drawing (`fill`, `dot`, `mermaid`); `edge`
+        every edge (`stroke`, `stroke_width`, `dashed`, `dot`, `mermaid`);
+        `node` every node. `style(view, drawn)` is called once per node, in
+        drawing order, with its `NodeView` and `DrawnNode`, and returns a
+        `Style` or `None`. Later wins: a node's kind and marks, then what an
+        earlier `styled` gave it, then `node`, then `style(...)`; for an edge,
+        `edge`, then a path's red. A bad `Style` made inside `style` is raised
+        naming the node and the attribute. A `graph` or `edge` style setting
+        what it can't is a `ValueError`; anything but a `Style`, and a `style`
+        returning anything but a `Style` or `None`, a `TypeError`.
+        """
+        for name, given in (("graph", graph), ("node", node), ("edge", edge)):
+            if given is not None and not isinstance(given, Style):
+                msg = f"{name} must be a fnloom.Style, got {type(given).__name__}"
+                raise TypeError(msg)
+        if style is not None and not callable(style):
+            msg = f"style must be callable, got {type(style).__name__}"
+            raise TypeError(msg)
+        check_scope("graph", graph)
+        check_scope("edge", edge)
+        nodes = tuple(
+            dataclasses.replace(
+                n,
+                style=merged(
+                    n.style, node, None if style is None else _called(style, n)
+                ),
+            )
+            for n in self.nodes
+        )
+        return dataclasses.replace(
+            self,
+            nodes=nodes,
+            graph_style=merged(self.graph_style, graph),
+            edge_style=merged(self.edge_style, edge),
+        )
 
     def to_dot(self, *, orient: Orient = "LR", legend: bool = True) -> str:
         """The drawing as Graphviz DOT text.
@@ -97,10 +200,15 @@ class Drawing:
         _checked_orient(orient)
         lines = [
             "digraph {",
-            f"  graph [rankdir={orient}]",
+            f"  graph [{_listed(_dot_graph(orient, self.graph_style))}]",
             _NODE_DEFAULTS,
         ]
-        lines.extend(f"  {_quoted(n.name)} [{_dot_attributes(n)}]" for n in self.nodes)
+        if self.edge_style is not None:
+            lines.append(f"  edge [{_listed(_dot_edge(self.edge_style))}]")
+        lines.extend(
+            f"  {_quoted(n.name)} [{_listed(_dot_attributes(n, self.show_types))}]"
+            for n in self.nodes
+        )
         on_path = {n.name for n in self.nodes if "path" in n.marks}
         for dependency, node in self.edges:
             styled = " [color=red]" if {dependency, node} <= on_path else ""
@@ -119,18 +227,44 @@ class Drawing:
         """
         _checked_orient(orient)
         ids = {n.name: f"n{i}" for i, n in enumerate(self.nodes)}
-        lines = [f"flowchart {orient}"]
-        lines.extend(f'  {ids[n.name]}["{_mermaid_label(n)}"]' for n in self.nodes)
+        lines = _mermaid_init(self.graph_style)
+        lines.append(f"flowchart {orient}")
+        lines.extend(
+            f"  {ids[n.name]}{_mermaid_node(n, self.show_types)}" for n in self.nodes
+        )
         on_path = {n.name for n in self.nodes if "path" in n.marks}
         red: list[str] = []
         for i, (dependency, node) in enumerate(self.edges):
             lines.append(f"  {ids[dependency]} --> {ids[node]}")
             if {dependency, node} <= on_path:
                 red.append(str(i))
+        if self.edge_style is not None and self.edges:
+            edge = _mermaid_style(self.edge_style)
+            if edge:
+                lines.append(f"  linkStyle default {edge}")
         if red:
             lines.append(f"  linkStyle {','.join(red)} stroke:red")
         lines.extend(_mermaid_classes(self.nodes, ids))
+        for n in self.nodes:
+            own = "" if n.style is None else _mermaid_style(n.style)
+            if own:
+                lines.append(f"  style {ids[n.name]} {own}")
         return "\n".join(lines) + "\n"
+
+    def to_svg(self, *, orient: Orient = "LR", legend: bool = True) -> str:
+        """The drawing as an SVG image, laid out in pure Python (Q146).
+
+        Nothing needs installing. Each node sits one layer past every node it
+        reads, nodes are ordered within a layer to cut crossings, and each is
+        sized from its text, so no two overlap and every edge points along
+        `orient`. Styles are drawn as `to_dot` draws them; the `dot` and
+        `mermaid` passthroughs are not read. The text is the same on every run.
+        `orient` is checked as `to_dot` checks it.
+        """
+        _checked_orient(orient)
+        from fnloom._svg import svg  # noqa: PLC0415  # only an SVG needs the layout
+
+        return svg(self, orient, legend=legend)
 
     def render(
         self,
@@ -139,19 +273,27 @@ class Drawing:
         format: str | None = None,  # noqa: A002  # Graphviz's own word for it
         orient: Orient = "LR",
         legend: bool = True,
+        engine: Engine = "dot",
     ) -> Path:
-        """Writes the drawing to `path` and returns it (Q94).
+        """Writes the drawing to `path` and returns it (Q94, Q146).
 
         `format`, or else the path's suffix, is read in lower case: `"svg"` for
         `graph.svg`. `"dot"` and `"gv"` write `to_dot()`'s text, never Graphviz's
         laid-out DOT, and `"mmd"` writes `to_mermaid()`'s (with no legend),
         needing nothing.
-        Any other format is made by Graphviz's `dot` executable, which must be on
-        `PATH`: `FileNotFoundError` when it isn't, saying how to get it, and
-        `RuntimeError` with `dot`'s own message when it fails, as for a format it
-        doesn't know. `ValueError` for no format and a path with no suffix, and
-        `FileNotFoundError` naming the folder when `path`'s folder doesn't exist.
+        Any other format is made by `engine`. `"dot"`, the default, is Graphviz's
+        `dot` executable, which must be on `PATH`: `FileNotFoundError` when it
+        isn't, giving the command that installs it, and `RuntimeError` with
+        `dot`'s own message when it fails, as for a format it doesn't know.
+        `"builtin"` is `to_svg()`, which needs nothing and writes `svg` only. A
+        file never changes engine with the machine: only `engine` chooses.
+        `ValueError` for an unknown engine, a format the builtin engine doesn't
+        write, and no format with a path with no suffix; `FileNotFoundError`
+        naming the folder when `path`'s folder doesn't exist.
         """
+        if engine not in _ENGINES:
+            msg = f"engine must be one of {', '.join(_ENGINES)}, got {engine!r}"
+            raise ValueError(msg)
         target = Path(path)
         given = format if format is not None else target.suffix
         chosen = given.lower().removeprefix(".")
@@ -164,10 +306,21 @@ class Drawing:
         if chosen == "mmd":
             target.write_text(self.to_mermaid(orient=orient), encoding="utf-8")
             return target
-        text = self.to_dot(orient=orient, legend=legend)
         if chosen in _DOT_SUFFIXES:
+            text = self.to_dot(orient=orient, legend=legend)
             target.write_text(text, encoding="utf-8")
             return target
+        if engine == "builtin":
+            if chosen != "svg":
+                msg = (
+                    f"the builtin engine writes svg only, not {chosen}: "
+                    "use engine='dot' for other formats"
+                )
+                raise ValueError(msg)
+            text = self.to_svg(orient=orient, legend=legend)
+            target.write_text(text, encoding="utf-8")
+            return target
+        text = self.to_dot(orient=orient, legend=legend)
         target.write_bytes(_graphviz(text, chosen))
         return target
 
@@ -176,14 +329,17 @@ class Drawing:
         del cycle  # a drawing holds no drawing, so never a cycle
         printer.text(self.to_dot())
 
-    def _repr_svg_(self) -> str | None:
-        """An SVG for Jupyter, or `None` without Graphviz, so it shows the text."""
-        if shutil.which("dot") is None:
-            return None
-        try:
-            return _graphviz(self.to_dot(), "svg").decode()
-        except RuntimeError:
-            return None
+    def _repr_svg_(self) -> str:
+        """An SVG for Jupyter: Graphviz's when `dot` runs, else `to_svg()`'s.
+
+        A preview is not a file, so it may follow the machine (Q146).
+        """
+        if shutil.which("dot") is not None:
+            try:
+                return _graphviz(self.to_dot(), "svg").decode()
+            except RuntimeError, FileNotFoundError:
+                pass
+        return self.to_svg()
 
     @override
     def __str__(self) -> str:
@@ -191,36 +347,163 @@ class Drawing:
         return self.to_dot()
 
 
+def _called(style: StyleFunction, node: DrawnNode) -> Style | None:
+    """`style(view, node)`, its refusals and its result named by the node."""
+    if node.view is None:
+        msg = (
+            f"node {node.name!r} has no view for the style function: "
+            "draw it from a driver"
+        )
+        raise ValueError(msg)
+    try:
+        chosen = style(node.view, node)
+    except StyleValueError as error:
+        msg = f"style for node {node.name!r}: {error}"
+        raise ValueError(msg) from error
+    except StyleTypeError as error:
+        msg = f"style for node {node.name!r}: {error}"
+        raise TypeError(msg) from error
+    if chosen is not None and not isinstance(chosen, Style):
+        msg = (
+            f"the style function returned {type(chosen).__name__} for node "
+            f"{node.name!r}: return a fnloom.Style or None"
+        )
+        raise TypeError(msg)
+    return chosen
+
+
+@dataclass(frozen=True, slots=True)
+class Display:
+    """What a drawing's labels show, and whether it draws inputs."""
+
+    show_types: bool = True
+    show_tags: tuple[str, ...] = ()
+    show_schema: bool = False
+    hide_inputs: bool = False
+
+
+def display(
+    *,
+    show_types: object = True,
+    show_tags: object = (),
+    show_schema: object = False,
+    hide_inputs: object = False,
+) -> Display:
+    """The display options of a `draw*` method, checked, naming the one that's wrong."""
+    for name, value in (
+        ("show_types", show_types),
+        ("show_schema", show_schema),
+        ("hide_inputs", hide_inputs),
+    ):
+        if not isinstance(value, bool):
+            msg = f"{name} must be a bool, got {type(value).__name__}"
+            raise TypeError(msg)
+    if isinstance(show_tags, str) or not isinstance(show_tags, tuple | list):
+        msg = (
+            "show_tags must be a tuple of tag names, such as ('owner',), "
+            f"got {type(show_tags).__name__}"
+        )
+        raise TypeError(msg)
+    tags = tuple(typing.cast("Sequence[object]", show_tags))
+    if wrong := [type(t).__name__ for t in tags if not isinstance(t, str)]:
+        msg = f"show_tags must hold str tag names, got {', '.join(wrong)}"
+        raise TypeError(msg)
+    names = typing.cast("tuple[str, ...]", tags)
+    if repeated := sorted({t for t in names if names.count(t) > 1}):
+        msg = f"show_tags names a tag twice: {', '.join(map(repr, repeated))}"
+        raise ValueError(msg)
+    return Display(
+        show_types=bool(show_types),
+        show_tags=names,
+        show_schema=bool(show_schema),
+        hide_inputs=bool(hide_inputs),
+    )
+
+
 def drawing(
     views: NodeViews,
     names: Iterable[str],
     marks: Mapping[str, Iterable[Mark]] = MappingProxyType({}),
+    shown: Display = Display(),  # noqa: B008  # frozen, never mutated
 ) -> Drawing:
-    """The drawing of `names`, each marked as `marks` says.
+    """The drawing of `names`, each marked as `marks` says, shown as `shown` says.
 
-    Only edges between drawn nodes are drawn.
+    Only edges between drawn nodes are drawn. `hide_inputs` leaves out every
+    input not requested as an output.
     """
     drawn = set(names)
+    if shown.hide_inputs:
+        drawn = {
+            n
+            for n in drawn
+            if not views[n].is_input or "output" in set(marks.get(n, ()))
+        }
     order = topological(drawn, views)
     nodes: list[DrawnNode] = []
     edges: list[tuple[str, str]] = []
     for name in order:
         view = views[name]
-        shown = view.tags.get(_DISPLAY_NAME)
-        if isinstance(shown, tuple):
-            shown = ", ".join(shown)
+        title = view.tags.get(_DISPLAY_NAME)
+        if isinstance(title, tuple):
+            title = ", ".join(title)
         nodes.append(
             DrawnNode(
                 name=name,
                 kind="input" if view.is_input else "function",
                 type=type_text(view.type),
-                title=shown or name,
+                title=title or name,
                 condition=condition_text(view.config) if view.config else None,
                 marks=frozenset(marks.get(name, ())),
+                tags=_shown_tags(view, shown.show_tags),
+                schema=schema_fields(view.type) if shown.show_schema else (),
+                view=view,
             )
         )
         edges.extend((dep, name) for dep in view.dependencies if dep in drawn)
-    return Drawing(tuple(nodes), tuple(edges))
+    return Drawing(tuple(nodes), tuple(edges), show_types=shown.show_types)
+
+
+def _shown_tags(view: NodeView, names: Sequence[str]) -> tuple[tuple[str, str], ...]:
+    """The `(name, value)` of each tag in `names` the node has, in `names`' order."""
+    shown: list[tuple[str, str]] = []
+    for name in names:
+        value = view.tags.get(name)
+        if value is not None:
+            shown.append((name, value if isinstance(value, str) else ", ".join(value)))
+    return tuple(shown)
+
+
+def schema_fields(annotation: object) -> tuple[tuple[str, str], ...]:
+    """The `(field, type)` pairs of a `TypedDict`, dataclass or `NamedTuple` class.
+
+    In declaration order, each type as a label shows it; `()` for any other type.
+    A field with no annotation, as in `collections.namedtuple`, has type `""`.
+    """
+    if not isinstance(annotation, type):
+        return ()
+    if typing.is_typeddict(annotation):
+        names = list(annotationlib.get_annotations(annotation))
+    elif dataclasses.is_dataclass(annotation):
+        names = [f.name for f in dataclasses.fields(annotation)]
+    elif issubclass(annotation, tuple) and hasattr(annotation, "_fields"):
+        names = list(typing.cast("tuple[str, ...]", annotation._fields))
+    else:
+        return ()
+    hints = _hints(annotation)
+    return tuple(
+        (name, type_text(hints[name]) if name in hints else "") for name in names
+    )
+
+
+def _hints(cls: type) -> dict[str, object]:
+    """`cls`'s field annotations, resolved where they can be, else as written."""
+    try:
+        hints: dict[str, object] = dict(typing.get_type_hints(cls, include_extras=True))
+    except Exception:  # noqa: BLE001  # any unresolvable name: fall back to the text
+        return dict(
+            annotationlib.get_annotations(cls, format=annotationlib.Format.STRING)
+        )
+    return hints
 
 
 def with_context(views: NodeViews, names: Sequence[str]) -> dict[str, list[Mark]]:
@@ -238,6 +521,8 @@ def type_text(annotation: object) -> str:
     """`annotation` as a label shows it: whole, cut to 80 characters (Q91)."""
     if isinstance(annotation, Unresolved):
         text = annotation.name
+    elif isinstance(annotation, str):
+        text = annotation
     else:
         text = inspect.formatannotation(annotation)
     if len(text) > _TYPE_WIDTH:
@@ -277,12 +562,21 @@ def _quoted(text: str) -> str:
     return f'"{_escaped(text)}"'
 
 
-def _label(node: DrawnNode) -> str:
-    """The label's lines: the title, the type, and the condition if any."""
-    lines = [node.title, node.type]
+def label_lines(node: DrawnNode, *, show_types: bool = True) -> list[str]:
+    """A label's lines: title, type, condition, shown tags, then schema fields."""
+    lines = [node.title]
+    if show_types:
+        lines.append(node.type)
     if node.condition is not None:
         lines.append(node.condition)
+    lines.extend(f"{name}={value}" for name, value in node.tags)
+    lines.extend(f"{name}: {kind}" if kind else name for name, kind in node.schema)
+    return lines
+
+
+def _label(node: DrawnNode, show_types: bool) -> str:  # noqa: FBT001  # private
     # Each line escaped alone, so the `\n` between them stays a line break.
+    lines = label_lines(node, show_types=show_types)
     return "\\n".join(_escaped(line) for line in lines)
 
 
@@ -307,9 +601,73 @@ def _styles(kind: Kind, marks: Iterable[str]) -> dict[str, str]:
     return styles
 
 
-def _dot_attributes(node: DrawnNode) -> str:
-    attributes = {"label": f'"{_label(node)}"', **_styles(node.kind, node.marks)}
+def _listed(attributes: Mapping[str, str]) -> str:
     return " ".join(f"{key}={value}" for key, value in attributes.items())
+
+
+def _with(base: dict[str, str], added: Mapping[str, str]) -> dict[str, str]:
+    """`base` without the keys `added` sets, then `added` in its own order."""
+    kept = {k: v for k, v in base.items() if k not in added}
+    return {**kept, **added}
+
+
+def _dot_style(style: Style, base: Mapping[str, str]) -> dict[str, str]:
+    """A node's `Style` as DOT attributes, in vocabulary order, then passthrough."""
+    out: dict[str, str] = {}
+    if style.dashed is not None or style.shape is not None:
+        given = base.get("style")
+        tokens = list(_DEFAULT_TOKENS) if given is None else given.strip('"').split(",")
+        if style.shape is not None:
+            tokens = [t for t in tokens if t != "rounded"]
+            if style.shape == "rounded":
+                tokens.insert(0, "rounded")
+        if style.dashed is True and "dashed" not in tokens:
+            tokens.insert(0, "dashed")
+        if style.dashed is False:
+            tokens = [t for t in tokens if t != "dashed"]
+        out["style"] = _quoted(",".join(tokens))
+    if style.shape is not None:
+        out["shape"] = "box" if style.shape in {"box", "rounded"} else style.shape
+    out |= _dot_vocabulary(style, fill="fillcolor")
+    return out
+
+
+def _dot_vocabulary(style: Style, *, fill: str) -> dict[str, str]:
+    """The colours, width and passthrough of `style`; `fill` names its attribute."""
+    out: dict[str, str] = {}
+    if style.fill is not None:
+        out[fill] = _quoted(hex_colour(style.fill))
+    if style.stroke is not None:
+        out["color"] = _quoted(hex_colour(style.stroke))
+    if style.font_color is not None:
+        out["fontcolor"] = _quoted(hex_colour(style.font_color))
+    if style.stroke_width is not None:
+        out["penwidth"] = number(style.stroke_width)
+    for key, value in (style.dot or {}).items():
+        out.pop(key, None)
+        out[key] = _quoted(value)
+    return out
+
+
+def _dot_attributes(node: DrawnNode, show_types: bool = True) -> dict[str, str]:  # noqa: FBT001, FBT002  # private
+    base = {"label": f'"{_label(node, show_types)}"', **_styles(node.kind, node.marks)}
+    if node.style is None:
+        return base
+    return _with(base, _dot_style(node.style, base))
+
+
+def _dot_graph(orient: str, style: Style | None) -> dict[str, str]:
+    base = {"rankdir": orient}
+    if style is None:
+        return base
+    return _with(base, _dot_vocabulary(style, fill="bgcolor"))
+
+
+def _dot_edge(style: Style) -> dict[str, str]:
+    out: dict[str, str] = {}
+    if style.dashed is not None:
+        out["style"] = "dashed" if style.dashed else "solid"
+    return _with(out, _dot_vocabulary(style, fill="fillcolor"))
 
 
 def _dot_legend(nodes: Sequence[DrawnNode]) -> list[str]:
@@ -319,18 +677,21 @@ def _dot_legend(nodes: Sequence[DrawnNode]) -> list[str]:
     # underscores until no drawn node has it.
     taken = {n.name for n in nodes}
     lines = ["  subgraph cluster_legend {", '    label="Legend"']
-    for key in ("function", "input", "output", "override", "path", "context"):
+    for key in LEGEND_KEYS:
         if key in used:
             kind: Kind = "input" if key == "input" else "function"
             marks = () if key in {"function", "input"} else (key,)
             attributes = {"label": _quoted(key), **_styles(kind, marks)}
-            listed = " ".join(f"{k}={v}" for k, v in attributes.items())
             entry = f"legend: {key}"
             while entry in taken:
                 entry = f"_{entry}"
-            lines.append(f"    {_quoted(entry)} [{listed}]")
+            lines.append(f"    {_quoted(entry)} [{_listed(attributes)}]")
     lines.append("  }")
     return lines
+
+
+# The legend's entries, in the order it lists them.
+LEGEND_KEYS = ("function", "input", "output", "override", "path", "context")
 
 
 # Mermaid's entity codes for the characters a quoted label can't hold as they are.
@@ -343,13 +704,66 @@ _MERMAID_ESCAPES = {
     "`": "#96;",
 }
 
+# Each `Style` shape's Mermaid brackets around the quoted label.
+_MERMAID_SHAPES = {
+    "box": ("[", "]"),
+    "rounded": ("(", ")"),
+    "ellipse": ("([", "])"),
+    "circle": ("((", "))"),
+    "diamond": ("{", "}"),
+    "hexagon": ("{{", "}}"),
+    "cylinder": ("[(", ")]"),
+    "parallelogram": ("[/", "/]"),
+}
 
-def _mermaid_label(node: DrawnNode) -> str:
-    lines = [node.title, node.type]
-    if node.condition is not None:
-        lines.append(node.condition)
+
+def _mermaid_label(node: DrawnNode, show_types: bool = True) -> str:  # noqa: FBT001, FBT002  # private
+    lines = label_lines(node, show_types=show_types)
     escaped = ("".join(_MERMAID_ESCAPES.get(c, c) for c in line) for line in lines)
     return "<br>".join(line.replace("\n", " ") for line in escaped)
+
+
+def _mermaid_node(node: DrawnNode, show_types: bool) -> str:  # noqa: FBT001  # private
+    """The node's shape and label, as written after its id."""
+    shape = (
+        "box" if node.style is None or node.style.shape is None else node.style.shape
+    )
+    opening, closing = _MERMAID_SHAPES[shape]
+    return f'{opening}"{_mermaid_label(node, show_types)}"{closing}'
+
+
+def _mermaid_style(style: Style) -> str:
+    """`style` as a Mermaid style list, in vocabulary order, then passthrough."""
+    out: dict[str, str] = {}
+    if style.fill is not None:
+        out["fill"] = hex_colour(style.fill)
+    if style.stroke is not None:
+        out["stroke"] = hex_colour(style.stroke)
+    if style.font_color is not None:
+        out["color"] = hex_colour(style.font_color)
+    if style.stroke_width is not None:
+        out["stroke-width"] = f"{number(style.stroke_width)}px"
+    if style.dashed is not None:
+        out["stroke-dasharray"] = "5 5" if style.dashed else "0"
+    for key, value in (style.mermaid or {}).items():
+        out.pop(key, None)
+        out[key] = value
+    return ",".join(f"{key}:{value}" for key, value in out.items())
+
+
+def _mermaid_init(style: Style | None) -> list[str]:
+    """A graph style as Mermaid theme variables, in an `init` directive."""
+    if style is None:
+        return []
+    variables: dict[str, str] = {}
+    if style.fill is not None:
+        variables["background"] = hex_colour(style.fill)
+    for key, value in (style.mermaid or {}).items():
+        variables.pop(key, None)
+        variables[key] = value
+    if not variables:
+        return []
+    return [f"%%{{init: {json.dumps({'themeVariables': variables})}}}%%"]
 
 
 # Each kind's and mark's Mermaid style, as `_STYLES` gives DOT's.
@@ -377,18 +791,40 @@ def _mermaid_classes(nodes: Sequence[DrawnNode], ids: Mapping[str, str]) -> list
     return lines
 
 
-_NO_GRAPHVIZ = (
-    "rendering needs Graphviz's 'dot' on PATH; install Graphviz "
-    "(https://graphviz.org/download/), or write the DOT text with "
-    "drawing.to_dot() or render(path) to a .dot path"
+# The command that installs Graphviz, by `sys.platform`'s prefix.
+_INSTALL = (
+    ("darwin", "brew install graphviz"),
+    ("win32", "winget install graphviz"),
+    (
+        "linux",
+        "apt-get install graphviz (Debian, Ubuntu; else your package manager)",
+    ),
 )
+
+
+def no_graphviz_message(format: str = "svg") -> str:  # noqa: A002  # Graphviz's word
+    """Why `render` can't make `format`, and every way on from there."""
+    command = next(
+        (c for prefix, c in _INSTALL if sys.platform.startswith(prefix)),
+        "see https://graphviz.org/download/",
+    )
+    builtin = (
+        ", or render(path, engine='builtin') for an SVG drawn in pure Python"
+        if format == "svg"
+        else ""
+    )
+    return (
+        f"rendering {format} needs Graphviz's 'dot' on PATH. Install it with: "
+        f"{command} (all platforms: https://graphviz.org/download/). Needing "
+        f"nothing: render a .mmd (Mermaid) or .dot path for the text{builtin}"
+    )
 
 
 def _graphviz(text: str, format: str) -> bytes:  # noqa: A002  # Graphviz's word
     """`text` laid out by Graphviz's `dot` in `format`."""
     dot = shutil.which("dot")
     if dot is None:
-        raise FileNotFoundError(_NO_GRAPHVIZ)
+        raise FileNotFoundError(no_graphviz_message(format))
     done = subprocess.run(  # noqa: S603  # `dot` from PATH, its arguments ours
         [dot, f"-T{format}"],
         input=text.encode(),

@@ -30,7 +30,7 @@ from fnloom import _async, _checks, _core, _hooks, _steps, _types, _wrappers
 from fnloom._caching import Cache, CacheOutcome, CacheRun
 from fnloom._decorators import Source, Value
 from fnloom._defaults import default_problems
-from fnloom._drawing import Drawing, Mark, drawing, with_context
+from fnloom._drawing import Drawing, Mark, display, drawing, with_context
 from fnloom._export import export
 from fnloom._extract import is_generated
 from fnloom._functions import (
@@ -1482,45 +1482,109 @@ class Driver[R = dict[str, object]]:
         """Returns the named nodes and every node depending on them, sorted."""
         return sorted({*names, *self._graph.downstream_of(list(names))})
 
-    def draw(self) -> Drawing:
+    def draw(
+        self,
+        *,
+        show_types: bool = True,
+        show_tags: Sequence[str] = (),
+        show_schema: bool = False,
+        hide_inputs: bool = False,
+    ) -> Drawing:
         """A drawing of every node and input (Q90).
 
         Each input is one node, with an edge to each node that reads it; config is
         never drawn, since it is never a node (Q93). See `Drawing` for the text.
-        """
-        return drawing(self._nodes, self._nodes)
 
-    def draw_upstream_of(self, *names: str) -> Drawing:
+        Every `draw*` method takes these display options (Q139): `show_types`
+        puts each node's type in its label; `show_tags` names tags whose values
+        are printed under it, `name=value`, a tuple value joined by `, `, in the
+        order named; `show_schema` adds a line `field: type` for each field of a
+        return type that is a `TypedDict`, dataclass or `NamedTuple`, in
+        declaration order; `hide_inputs` leaves out the inputs, all but one
+        requested as an output. A wrong option is a `TypeError` naming it, and a
+        tag named twice a `ValueError`.
+        """
+        shown = display(
+            show_types=show_types,
+            show_tags=show_tags,
+            show_schema=show_schema,
+            hide_inputs=hide_inputs,
+        )
+        return drawing(self._nodes, self._nodes, shown=shown)
+
+    def draw_upstream_of(
+        self,
+        *names: str,
+        show_types: bool = True,
+        show_tags: Sequence[str] = (),
+        show_schema: bool = False,
+        hide_inputs: bool = False,
+    ) -> Drawing:
         """A drawing of the named nodes and every node and input they depend on.
 
         Every unknown name is raised in one `ValueError`, sorted; a non-`str`, or
-        no name at all, is a `TypeError`.
+        no name at all, is a `TypeError`. Display options as `draw` takes them.
         """
+        shown = display(
+            show_types=show_types,
+            show_tags=show_tags,
+            show_schema=show_schema,
+            hide_inputs=hide_inputs,
+        )
         self._check_drawn(names)
-        return drawing(self._nodes, {*names, *self._graph.upstream_of(list(names))})
+        drawn = {*names, *self._graph.upstream_of(list(names))}
+        return drawing(self._nodes, drawn, shown=shown)
 
-    def draw_downstream_of(self, *names: str) -> Drawing:
+    def draw_downstream_of(
+        self,
+        *names: str,
+        show_types: bool = True,
+        show_tags: Sequence[str] = (),
+        show_schema: bool = False,
+        hide_inputs: bool = False,
+    ) -> Drawing:
         """A drawing of the named nodes and every node depending on them (Q90).
 
         Each drawn node's other dependencies are drawn too, marked `context`, so
         every drawn node shows all it reads. Names are checked as
-        `draw_upstream_of` checks them.
+        `draw_upstream_of` checks them. Display options as `draw` takes them.
         """
+        shown = display(
+            show_types=show_types,
+            show_tags=show_tags,
+            show_schema=show_schema,
+            hide_inputs=hide_inputs,
+        )
         self._check_drawn(names)
         downstream = sorted({*names, *self._graph.downstream_of(list(names))})
         context = with_context(self._nodes, downstream)
-        return drawing(self._nodes, [*downstream, *context], context)
+        return drawing(self._nodes, [*downstream, *context], context, shown)
 
-    def draw_path_between(
-        self, upstream: str, downstream: str, *, context: bool = True
+    def draw_path_between(  # noqa: PLR0913  # the display options, keyword-only
+        self,
+        upstream: str,
+        downstream: str,
+        *,
+        context: bool = True,
+        show_types: bool = True,
+        show_tags: Sequence[str] = (),
+        show_schema: bool = False,
+        hide_inputs: bool = False,
     ) -> Drawing:
         """A drawing of every node on a path from `upstream` to `downstream` (Q90).
 
         The path's nodes, as `what_is_the_path_between` gives them, are marked
         `path`. With `context`, each one's other dependencies are drawn too,
         marked `context`. `ValueError` when there is no path, and for unknown
-        endpoints as `what_is_the_path_between` raises it.
+        endpoints as `what_is_the_path_between` raises it. Display options as
+        `draw` takes them.
         """
+        shown = display(
+            show_types=show_types,
+            show_tags=show_tags,
+            show_schema=show_schema,
+            hide_inputs=hide_inputs,
+        )
         path = self.what_is_the_path_between(upstream, downstream)
         if not path:
             msg = f"no path from {upstream!r} to {downstream!r}"
@@ -1528,15 +1592,19 @@ class Driver[R = dict[str, object]]:
         marks: dict[str, list[Mark]] = {name: ["path"] for name in path}
         if context:
             marks |= with_context(self._nodes, path)
-        return drawing(self._nodes, marks, marks)
+        return drawing(self._nodes, marks, marks, shown)
 
-    def draw_execution(
+    def draw_execution(  # noqa: PLR0913  # the display options, keyword-only
         self,
         final_vars: Sequence[str | Callable[..., object]],
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
         validate: bool = True,
+        show_types: bool = True,
+        show_tags: Sequence[str] = (),
+        show_schema: bool = False,
+        hide_inputs: bool = False,
     ) -> Drawing:
         """A drawing of what `execute` would compute for this request (Q92).
 
@@ -1551,8 +1619,15 @@ class Driver[R = dict[str, object]]:
         input the run would miss were supplied; an unknown name and an override
         `Builder.with_strict_overrides` refuses are still a `ValueError`, and a
         malformed request a `TypeError`. A driver with a cache draws every node
-        the plan has, since which are hits is known only when it runs.
+        the plan has, since which are hits is known only when it runs. Display
+        options as `draw` takes them.
         """
+        shown = display(
+            show_types=show_types,
+            show_tags=show_tags,
+            show_schema=show_schema,
+            hide_inputs=hide_inputs,
+        )
         shape = self._shape(final_vars, inputs, overrides)
         if validate:
             problems = self.validate(final_vars, inputs=inputs, overrides=overrides)
@@ -1577,7 +1652,7 @@ class Driver[R = dict[str, object]]:
         marks: dict[str, list[Mark]] = {name: ["override"] for name in shape.overridden}
         for name in shape.planned:
             marks.setdefault(name, []).append("output")
-        return drawing(self._nodes, drawn, marks)
+        return drawing(self._nodes, drawn, marks, shown)
 
     def export(
         self,
@@ -1949,35 +2024,100 @@ class AsyncDriver[R = dict[str, object]]:
         """Returns the named nodes and every node depending on them, sorted."""
         return self._driver.what_is_downstream_of(*names)
 
-    def draw(self) -> Drawing:
+    def draw(
+        self,
+        *,
+        show_types: bool = True,
+        show_tags: Sequence[str] = (),
+        show_schema: bool = False,
+        hide_inputs: bool = False,
+    ) -> Drawing:
         """A drawing of every node and input; see `Driver.draw`."""
-        return self._driver.draw()
+        return self._driver.draw(
+            show_types=show_types,
+            show_tags=show_tags,
+            show_schema=show_schema,
+            hide_inputs=hide_inputs,
+        )
 
-    def draw_upstream_of(self, *names: str) -> Drawing:
+    def draw_upstream_of(
+        self,
+        *names: str,
+        show_types: bool = True,
+        show_tags: Sequence[str] = (),
+        show_schema: bool = False,
+        hide_inputs: bool = False,
+    ) -> Drawing:
         """The named nodes and their dependencies; see `Driver.draw_upstream_of`."""
-        return self._driver.draw_upstream_of(*names)
+        return self._driver.draw_upstream_of(
+            *names,
+            show_types=show_types,
+            show_tags=show_tags,
+            show_schema=show_schema,
+            hide_inputs=hide_inputs,
+        )
 
-    def draw_downstream_of(self, *names: str) -> Drawing:
+    def draw_downstream_of(
+        self,
+        *names: str,
+        show_types: bool = True,
+        show_tags: Sequence[str] = (),
+        show_schema: bool = False,
+        hide_inputs: bool = False,
+    ) -> Drawing:
         """The named nodes and their dependents; see `Driver.draw_downstream_of`."""
-        return self._driver.draw_downstream_of(*names)
+        return self._driver.draw_downstream_of(
+            *names,
+            show_types=show_types,
+            show_tags=show_tags,
+            show_schema=show_schema,
+            hide_inputs=hide_inputs,
+        )
 
-    def draw_path_between(
-        self, upstream: str, downstream: str, *, context: bool = True
+    def draw_path_between(  # noqa: PLR0913  # the display options, keyword-only
+        self,
+        upstream: str,
+        downstream: str,
+        *,
+        context: bool = True,
+        show_types: bool = True,
+        show_tags: Sequence[str] = (),
+        show_schema: bool = False,
+        hide_inputs: bool = False,
     ) -> Drawing:
         """The nodes on a path; see `Driver.draw_path_between`."""
-        return self._driver.draw_path_between(upstream, downstream, context=context)
+        return self._driver.draw_path_between(
+            upstream,
+            downstream,
+            context=context,
+            show_types=show_types,
+            show_tags=show_tags,
+            show_schema=show_schema,
+            hide_inputs=hide_inputs,
+        )
 
-    def draw_execution(
+    def draw_execution(  # noqa: PLR0913  # the display options, keyword-only
         self,
         final_vars: Sequence[str | Callable[..., object]],
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
         validate: bool = True,
+        show_types: bool = True,
+        show_tags: Sequence[str] = (),
+        show_schema: bool = False,
+        hide_inputs: bool = False,
     ) -> Drawing:
         """What a run would compute; see `Driver.draw_execution`."""
         return self._driver.draw_execution(
-            final_vars, inputs=inputs, overrides=overrides, validate=validate
+            final_vars,
+            inputs=inputs,
+            overrides=overrides,
+            validate=validate,
+            show_types=show_types,
+            show_tags=show_tags,
+            show_schema=show_schema,
+            hide_inputs=hide_inputs,
         )
 
     def export(

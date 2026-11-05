@@ -1,0 +1,80 @@
+digraph {
+  graph [rankdir=LR bgcolor="#f5f5f5" splines="ortho"]
+  node [shape=box style="rounded,filled" fillcolor="#b4d8e4" fontname=Helvetica]
+  edge [style=dashed color="#808080"]
+  "rate" [label="rate\nfloat" style="dashed,filled" fillcolor="#eeeeee" fontcolor="#777777" color="#000080"]
+  "region" [label="region\nstr" style="dashed,filled" fillcolor="#eeeeee" fontcolor="#777777" color="#000080"]
+  "units" [label="units\nint" style="dashed,filled" fillcolor="#eeeeee" fontcolor="#777777" color="#000080"]
+  "sales" [label="sales\nfloat\nowner=ann, bo\nstage=raw" style="filled" shape=ellipse fillcolor="#ffd700" color="#000080" peripheries="2"]
+  "totals" [label="totals\ndrawing_golden_sales.Totals\nnet: float\ntax: float" color="#000080"]
+  "report" [label="report\nstr\nstage=final" style="dashed,rounded,filled" color="#000080" penwidth=2]
+  "region" -> "sales"
+  "units" -> "sales"
+  "rate" -> "totals"
+  "sales" -> "totals" [color=red]
+  "region" -> "report"
+  "totals" -> "report" [color=red]
+  subgraph cluster_legend {
+    label="Legend"
+    "legend: function" [label="function"]
+    "legend: input" [label="input" style="dashed,filled" fillcolor="#ffffff"]
+    "legend: path" [label="path" color=red]
+    "legend: context" [label="context" color="#999999" fontcolor="#777777" fillcolor="#eeeeee"]
+  }
+}
+
+%%{init: {"themeVariables": {"background": "#f5f5f5"}}}%%
+flowchart LR
+  n0["rate<br>float"]
+  n1["region<br>str"]
+  n2["units<br>int"]
+  n3(["sales<br>float<br>owner=ann, bo<br>stage=raw"])
+  n4["totals<br>drawing_golden_sales.Totals<br>net: float<br>tax: float"]
+  n5["report<br>str<br>stage=final"]
+  n1 --> n3
+  n2 --> n3
+  n0 --> n4
+  n3 --> n4
+  n1 --> n5
+  n4 --> n5
+  linkStyle default stroke:#808080,stroke-dasharray:5 5
+  linkStyle 3,5 stroke:red
+  classDef function fill:#b4d8e4,stroke:#333333
+  class n3,n4,n5 function
+  classDef input fill:#ffffff,stroke:#333333,stroke-dasharray:5 5
+  class n0,n1,n2 input
+  classDef path stroke:red,stroke-width:2px
+  class n3,n4,n5 path
+  classDef context fill:#eeeeee,stroke:#999999,color:#777777
+  class n0,n1,n2 context
+  style n0 stroke:#000080
+  style n1 stroke:#000080
+  style n2 stroke:#000080
+  style n3 fill:#ffd700,stroke:#000080,font-weight:bold
+  style n4 stroke:#000080
+  style n5 stroke:#000080,stroke-width:2px,stroke-dasharray:5 5
+
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="357.8" height="640.5" viewBox="0 0 357.8 640.5" font-family="Helvetica,Arial,sans-serif" font-size="14">
+<rect width="100%" height="100%" fill="#f5f5f5"/>
+<g class="edge"><title>region -&gt; sales</title><polyline points="222.8,68 167.2,123" fill="none" stroke="#808080" stroke-width="1" stroke-dasharray="5,3"/><polygon points="167.2,132 163.1,123 171.3,123" fill="#808080" stroke="#808080"/></g>
+<g class="edge"><title>units -&gt; sales</title><polyline points="146.6,68 167.2,123" fill="none" stroke="#808080" stroke-width="1" stroke-dasharray="5,3"/><polygon points="167.2,132 163.1,123 171.3,123" fill="#808080" stroke="#808080"/></g>
+<g class="edge"><title>rate -&gt; totals</title><polyline points="41.2,220.2 41.2,256.5 132.9,311.5" fill="none" stroke="#808080" stroke-width="1" stroke-dasharray="5,3"/><polygon points="132.9,320.5 128.8,311.5 137,311.5" fill="#808080" stroke="#808080"/></g>
+<g class="edge"><title>sales -&gt; totals</title><polyline points="167.2,256.5 132.9,311.5" fill="none" stroke="#ff0000" stroke-width="1" stroke-dasharray="5,3"/><polygon points="132.9,320.5 128.8,311.5 137,311.5" fill="#ff0000" stroke="#ff0000"/></g>
+<g class="edge"><title>region -&gt; report</title><polyline points="222.8,68 257.9,132 257.9,256.5 243.6,320.5 243.6,408.5 221.4,463.5" fill="none" stroke="#808080" stroke-width="1" stroke-dasharray="5,3"/><polygon points="221.4,472.5 217.4,463.5 225.5,463.5" fill="#808080" stroke="#808080"/></g>
+<g class="edge"><title>totals -&gt; report</title><polyline points="132.9,408.5 221.4,463.5" fill="none" stroke="#ff0000" stroke-width="1" stroke-dasharray="5,3"/><polygon points="221.4,472.5 217.4,463.5 225.5,463.5" fill="#ff0000" stroke="#ff0000"/></g>
+<g class="node"><title>rate</title><rect x="16" y="168.2" width="50.5" height="52" rx="6" fill="#eeeeee" stroke="#000080" stroke-width="1" stroke-dasharray="5,3"/><text text-anchor="middle" fill="#777777"><tspan x="41.2" y="190.2">rate</tspan><tspan x="41.2" y="208.2">float</tspan></text></g>
+<g class="node"><title>region</title><rect x="191.4" y="16" width="62.9" height="52" rx="6" fill="#eeeeee" stroke="#000080" stroke-width="1" stroke-dasharray="5,3"/><text text-anchor="middle" fill="#777777"><tspan x="222.8" y="38">region</tspan><tspan x="222.8" y="56">str</tspan></text></g>
+<g class="node"><title>units</title><rect x="119.8" y="16" width="53.6" height="52" rx="6" fill="#eeeeee" stroke="#000080" stroke-width="1" stroke-dasharray="5,3"/><text text-anchor="middle" fill="#777777"><tspan x="146.6" y="38">units</tspan><tspan x="146.6" y="56">int</tspan></text></g>
+<g class="node"><title>sales</title><ellipse cx="167.2" cy="194.2" rx="82.7" ry="62.2" fill="#ffd700" stroke="#000080" stroke-width="2"/><text text-anchor="middle" fill="#000000"><tspan x="167.2" y="172.2">sales</tspan><tspan x="167.2" y="190.2">float</tspan><tspan x="167.2" y="208.2">owner=ann, bo</tspan><tspan x="167.2" y="226.2">stage=raw</tspan></text></g>
+<g class="node"><title>totals</title><rect x="30.3" y="320.5" width="205.3" height="88" rx="6" fill="#b4d8e4" stroke="#000080" stroke-width="2"/><text text-anchor="middle" fill="#000000"><tspan x="132.9" y="342.5">totals</tspan><tspan x="132.9" y="360.5">drawing_golden_sales.Totals</tspan><tspan x="132.9" y="378.5">net: float</tspan><tspan x="132.9" y="396.5">tax: float</tspan></text></g>
+<g class="node"><title>report</title><rect x="175.4" y="472.5" width="92.1" height="70" rx="6" fill="#b4d8e4" stroke="#000080" stroke-width="2" stroke-dasharray="5,3"/><text text-anchor="middle" fill="#000000"><tspan x="221.4" y="494.5">report</tspan><tspan x="221.4" y="512.5">str</tspan><tspan x="221.4" y="530.5">stage=final</tspan></text></g>
+<g class="legend">
+<rect x="16" y="560.5" width="325.8" height="64" fill="none" stroke="#000000"/>
+<text text-anchor="middle" fill="#000000"><tspan x="178.9" y="578.5">Legend</tspan></text>
+<rect x="28" y="590.5" width="73" height="26" rx="6" fill="#b4d8e4" stroke="#000000" stroke-width="1"/><text text-anchor="middle" fill="#000000"><tspan x="64.5" y="608.5">function</tspan></text>
+<rect x="119" y="590.5" width="54.4" height="26" rx="6" fill="#ffffff" stroke="#000000" stroke-width="1" stroke-dasharray="5,3"/><text text-anchor="middle" fill="#000000"><tspan x="146.2" y="608.5">input</tspan></text>
+<rect x="191.4" y="590.5" width="51.2" height="26" rx="6" fill="#b4d8e4" stroke="#ff0000" stroke-width="2"/><text text-anchor="middle" fill="#000000"><tspan x="217" y="608.5">path</tspan></text>
+<rect x="260.6" y="590.5" width="69.1" height="26" rx="6" fill="#eeeeee" stroke="#999999" stroke-width="1"/><text text-anchor="middle" fill="#777777"><tspan x="295.2" y="608.5">context</tspan></text>
+</g>
+</svg>

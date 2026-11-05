@@ -380,6 +380,7 @@ def test_public_api_is_exported() -> None:
         "RunStart",
         "Source",
         "Step",
+        "Style",
         "Target",
         "UnfingerprintableError",
         "ValidationError",
