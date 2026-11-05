@@ -940,8 +940,8 @@ class _Walk:
         owner = cls.__qualname__
         if vars(cls).get("__pydantic_complete__") is False:
             msg = (
-                f"pydantic model {owner!r} is not complete (an annotation names"
-                f" something not defined yet); {_ADVICE}"
+                f"model {owner!r} is not built yet (defer_build or an unresolved"
+                f" forward reference); call {owner}.model_rebuild() first"
             )
             raise UncacheableError(msg)
         parts = [b"pydantic-model"]

@@ -302,22 +302,31 @@ def test_a_model_class_counts_the_types_it_validates_by(template: str) -> None:
     assert version(2, "str") != one
 
 
-def test_a_model_with_an_unresolved_annotation_is_refused() -> None:
-    """Until its forward references resolve, a model's types are unknown."""
-    module = make_module(
-        "pydantic_forward",
-        """
-        from pydantic import BaseModel
-
-        class Model(BaseModel):
-            later: "Later"
-
-        def f():
-            return Model
-        """,
-    )
-    with pytest.raises(UncacheableError, match="not complete"):
+@pytest.mark.parametrize(
+    "body",
+    [
+        "class Model(BaseModel):\n    later: 'Later'\n",
+        (
+            "class Model(BaseModel):\n"
+            "    model_config = ConfigDict(defer_build=True)\n"
+            "    x: int\n"
+        ),
+    ],
+    ids=["forward reference", "defer_build"],
+)
+def test_a_model_not_built_yet_is_refused_until_rebuilt(body: str) -> None:
+    """An unbuilt model's types are unknown; the reason says what to do."""
+    source = "from pydantic import BaseModel, ConfigDict\n"
+    source += body + "class Later(BaseModel):\n    y: int\n"
+    module = make_module("pydantic_unbuilt", source + "def f():\n    return Model\n")
+    with pytest.raises(UncacheableError) as caught:
         code_version(module.f)
+    assert caught.value.reason == (
+        "model 'Model' is not built yet (defer_build or an unresolved forward"
+        " reference); call Model.model_rebuild() first"
+    )
+    module.Model.model_rebuild()
+    assert len(code_version(module.f)) == 32  # noqa: PLR2004  # the digest size
 
 
 def test_a_hash_of_your_own_counts() -> None:
