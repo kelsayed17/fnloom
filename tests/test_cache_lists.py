@@ -310,3 +310,14 @@ def test_a_later_with_cache_replaces_the_lists() -> None:
         .build()
     )
     assert _behaviors(driver)["units"] == "default"
+
+
+def test_a_name_repeated_in_one_list_is_accepted() -> None:
+    """`recompute=["units", "units"]` names one node once."""
+    driver = (
+        Builder()
+        .with_modules(_sales())
+        .with_cache(MemoryCache(), recompute=["units", "units"])
+        .build()
+    )
+    assert _behaviors(driver)["units"] == "recompute"

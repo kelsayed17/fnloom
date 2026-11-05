@@ -137,7 +137,7 @@ class CacheSettings:
             given = lists[list_name]
             if given is True:
                 continue
-            for name in _names_of(given, f"with_cache {list_name}"):
+            for name in dict.fromkeys(_names_of(given, f"with_cache {list_name}")):
                 named.setdefault(name, []).append(list_name)
         if twice := sorted(n for n, where in named.items() if len(where) > 1):
             listed = "; ".join(
@@ -316,12 +316,16 @@ def refuse_bad_fields(nodes: Sequence[NodeDef]) -> None:
 
     At build, cache or not: a `TypeError` for a function with `fields=` that
     extracts nothing, else a `ValueError` for a field it does not extract, with
-    a `did you mean`; each lists every such problem.
+    a `did you mean`; each lists every such problem. A `@pipe_output` step or
+    relay node lowered from an extracting function shares its origin, so only
+    the producer is checked, and a function counts as extracting by its origin.
     """
     extracted: dict[str, list[str]] = {}
+    extracting_origins: set[int] = set()
     for node in nodes:
         if (extracting := _extract.extractor(node)) is not None:
             extracted.setdefault(extracting.producer, []).append(extracting.field)
+            extracting_origins.add(id(node.origin))
     types: list[str] = []
     values: list[str] = []
     for node in nodes:
@@ -331,6 +335,9 @@ def refuse_bad_fields(nodes: Sequence[NodeDef]) -> None:
         if policy is None or not policy.fields:
             continue
         known = extracted.get(node.name)
+        if known is None and id(node.origin) in extracting_origins:
+            # A node lowered from the producer's function, not the producer.
+            continue
         if known is None:
             types.append(
                 f"node {node.name!r}: @cache(fields=...) needs @extract_fields or "
@@ -521,8 +528,13 @@ def _field_key(
     if settled.behavior != "default" or made.behavior != "disable":
         return own
     as_default = replace(made, policy=replace(made.policy, behavior="default"))
+    # The producer was keyed already, so a failing constant warned once.
     shadow = _node_key(
-        producer, as_default, _code(producer, made.policy, versions), stored=True
+        producer,
+        as_default,
+        _code(producer, made.policy, versions),
+        stored=True,
+        warn=False,
     )
     if shadow.static is None:
         reason = f"producer {producer.name!r}: {shadow.reason}"
@@ -574,24 +586,18 @@ def _extraction_parts(node: NodeDef) -> tuple[list[bytes], str | None]:
         return parts, reason
 
 
-def _node_key(
-    node: NodeDef,
-    settled: _Resolved,
-    code: bytes | UncacheableError,
-    *,
-    stored: bool | None = None,
-) -> NodeKey:
-    """`node`'s key parts, given its policy and its code version or why it has none.
+def _key_params(
+    node: NodeDef, ignore: frozenset[str], *, warn: bool
+) -> tuple[list[KeyParam], str | None]:
+    """`node`'s key parameters, the ignored ones left out, and why one has no version.
 
-    `stored` says whether a `default` node is looked up and stored; by default,
-    unless it is an extracted field.
+    A constant is versioned by its stable fingerprint; one that fails warns when
+    `warn` is set.
     """
-    policy = settled.policy
-    behavior = settled.behavior
     params: list[KeyParam] = []
     reason: str | None = None
     for param in node.params:
-        if param.name in policy.ignore:
+        if param.name in ignore:
             continue
         # A group item is keyed by its place too, `xs[0]` or `xs['k']`: no plain
         # parameter has such a name, so a move between places or into a group misses.
@@ -609,8 +615,29 @@ def _node_key(
             version = None
             failed = f"cannot fingerprint value() of parameter {param.name!r}"
             reason = reason or f"{failed} of node {node.name!r}: {error!r}"
-            _warn_build(reason)
+            if warn:
+                _warn_build(reason)
         params.append((key_name, None, version))
+    return params, reason
+
+
+def _node_key(
+    node: NodeDef,
+    settled: _Resolved,
+    code: bytes | UncacheableError,
+    *,
+    stored: bool | None = None,
+    warn: bool = True,
+) -> NodeKey:
+    """`node`'s key parts, given its policy and its code version or why it has none.
+
+    `stored` says whether a `default` node is looked up and stored; by default,
+    unless it is an extracted field. Without `warn`, a failing fingerprint is
+    not reported, as when the node was keyed, and reported, already.
+    """
+    policy = settled.policy
+    behavior = settled.behavior
+    params, reason = _key_params(node, policy.ignore, warn=warn)
     extraction, unkeyed = _extraction_parts(node)
     checked, unchecked = check_parts(node.checks)
     reason = reason or unkeyed or unchecked

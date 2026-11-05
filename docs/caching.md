@@ -357,6 +357,11 @@ A field `fields=` doesn't name keeps the default: keyed, never stored, run whene
 doesn't extract is a `ValueError` at build, with a `did you mean`, and `fields=` on a function that extracts nothing is
 a `TypeError`. A `with_cache` list naming a field node wins over `fields=`, as it wins over `@cache` on any node.
 
+A field that `@pipe_output` steps is two nodes: the field itself is `<field>.raw`, and the public `<field>` is the
+last step's value. `fields=` applies to the field node, so it works with steps unchanged. A `with_cache` list must name
+`<field>.raw` to give the field a policy: naming the public `<field>` gives that node the behavior, but it still reads
+the field node, which under a `disable` producer has no key, so nothing is stored.
+
 ## Fingerprints
 
 An input's or override's version is its **fingerprint**: a hash of its exact type and its whole content, computed

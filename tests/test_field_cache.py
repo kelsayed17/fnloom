@@ -1,6 +1,7 @@
 """Per-field cache control: `@cache(fields=...)` and `fnloom.FieldCache` (Q147)."""
 
 import json
+import warnings
 from typing import TYPE_CHECKING
 
 import pytest
@@ -358,3 +359,63 @@ def scored(ranked: float) -> float:
         capsys.readouterr()
         run(["totals", "scored"], inputs=REQUEST)
         assert capsys.readouterr().out.split() == ["report"]
+
+
+def test_a_failing_producer_constant_warns_once() -> None:
+    """The stored field's key reads the producer's constants without warning again."""
+    module = make_module(
+        "field_cache_constant",
+        """
+from fnloom import cache, extract_fields, parameterize, register_fingerprint, value
+
+class Rate:
+    pass
+
+def _refuse(rate: Rate) -> object:
+    raise RuntimeError("no fingerprint")
+
+register_fingerprint(Rate, _refuse)
+
+@cache(behavior="disable", fields={"totals": "default"})
+@extract_fields({"totals": dict})
+@parameterize(report={"rate": value(Rate())})
+def report_of(region: str, rate: Rate) -> dict:
+    return {"totals": {"north": len(region)}}
+""",
+    )
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        driver = Builder().with_modules(module).with_cache(MemoryCache()).build()
+    assert [str(w.message).count("cannot fingerprint value()") for w in caught] == [1]
+    outcome = driver.explain_cache(["totals"], inputs=REQUEST)["totals"]
+    assert outcome.status == "uncacheable"
+
+
+PIPED = """
+from fnloom import cache, extract_fields, pipe_output, step
+
+def _rounded(x: float) -> float:
+    return round(x, 1)
+
+@cache(behavior="disable", fields={{"rate": "default"}})
+@pipe_output(step(_rounded){on_output})
+@extract_fields({{"totals": float, "rate": float}})
+def report(region: str) -> dict:
+    print("report")
+    return {{"totals": float(len(region)), "rate": 0.21}}
+"""
+
+
+@pytest.mark.parametrize("on_output", ["", '.on_output("rate")'])
+def test_a_piped_field_takes_its_policy(
+    on_output: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`fields=` beside `@pipe_output` builds, and the field is stored and served."""
+    module = make_module(
+        f"field_cache_piped_{bool(on_output)}", PIPED.format(on_output=on_output)
+    )
+    driver = Builder().with_modules(module).with_cache(MemoryCache()).build()
+    assert driver.execute(["rate"], inputs=REQUEST) == {"rate": 0.2}
+    capsys.readouterr()
+    assert driver.execute(["rate"], inputs=REQUEST) == {"rate": 0.2}
+    assert capsys.readouterr().out.split() == []
