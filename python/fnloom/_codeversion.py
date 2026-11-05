@@ -367,10 +367,28 @@ def _is_immutable(value: object) -> bool:
     return False
 
 
+def _stable(value: object) -> bytes:
+    """`value`'s fingerprint, the same on every hash seed: a set's members sorted.
+
+    A value the canonical form can't write (holding itself, too deep, or a
+    record with an unset field) gets its plain fingerprint, which refuses it or
+    says what it can't read.
+    """
+    # Imported here: `_canonical` imports this module.
+    from fnloom._canonical import stable_fingerprint  # noqa: PLC0415
+
+    try:
+        return stable_fingerprint(value)
+    except UnfingerprintableError:
+        raise
+    except Exception:  # noqa: BLE001  # the plain fingerprint says why
+        return fingerprint(value)
+
+
 def _fingerprint(value: object, what: str) -> bytes:
     """`value`'s fingerprint, or an `UncacheableError` saying `what` was refused."""
     try:
-        return fingerprint(value)
+        return _stable(value)
     except UnfingerprintableError as error:
         at = f" at {error.path}" if error.path else ""
         held = _article(error.type_name)
@@ -737,7 +755,7 @@ class _Walk:
         # would only say that it cannot be taken.
         classes = {self.value(cls, where) for cls in _instance_types(value)}
         try:
-            data = fingerprint(value)
+            data = _stable(value)
         except UnfingerprintableError:
             return _hash([b"read", self.value(value, where)])
         return _hash([b"value", data, *sorted(classes)])

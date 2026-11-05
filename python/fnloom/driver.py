@@ -11,7 +11,7 @@ import typing
 
 # Imported for real, not under TYPE_CHECKING: the public signatures annotate with
 # them, and `inspect.signature` resolves those annotations at run time.
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import replace
 from types import MappingProxyType, ModuleType
@@ -27,8 +27,15 @@ from typing import (
 )
 
 from fnloom import _async, _checks, _core, _hooks, _steps, _types, _wrappers
-from fnloom._caching import Cache, CacheOutcome, CacheRun
-from fnloom._decorators import Source, Value
+from fnloom._caching import (
+    NO_SETTINGS,
+    Cache,
+    CacheOutcome,
+    CacheRun,
+    CacheSettings,
+    refuse_bad_fields,
+)
+from fnloom._decorators import CacheBehavior, Source, Value
 from fnloom._defaults import default_problems
 from fnloom._drawing import Drawing, Mark, drawing, with_context
 from fnloom._export import export
@@ -339,14 +346,19 @@ def _returning(
     return call
 
 
-def _edge_mismatches(functions: Mapping[str, NodeView]) -> list[str]:
+def _edge_mismatches(
+    functions: Mapping[str, NodeView], loose: AbstractSet[str] | Sequence[str] = ()
+) -> list[str]:
     """A line for each parameter that a function node feeds with a type it rejects.
 
     `functions` are the function nodes' views; a parameter reading anything else
-    reads an input, and has no edge to check.
+    reads an input, and has no edge to check. The edges into the nodes `loose`
+    names are not checked (Q149).
     """
     found: list[str] = []
     for view in functions.values():
+        if loose and view.name in loose:
+            continue
         for p in view.params:
             if not isinstance(p.binding, Source):
                 continue
@@ -366,6 +378,28 @@ def _edge_mismatches(functions: Mapping[str, NodeView]) -> list[str]:
                 line += "; import what the unresolved annotation names at run time"
             found.append(line)
     return sorted(found)
+
+
+def _lowered_names(
+    names: Sequence[str], steps_of: Mapping[str, AbstractSet[str]]
+) -> frozenset[str]:
+    """`names`, and each step node lowered from one of them (Q149).
+
+    A `@pipe_input`, `@pipe_output` or `@mutate` makes step nodes, such as
+    `total.raw`, whatever their names: the edges into them are the node's own.
+    """
+    return frozenset[str](names).union(
+        *(steps_of.get(name, frozenset[str]()) for name in names)
+    )
+
+
+def _unknown_consumers(views: NodeViews, names: Sequence[str]) -> str | None:
+    """Why some names given to `without_edge_type_checks` are no computed node."""
+    functions = views.functions
+    if not (unknown := [name for name in names if name not in functions]):
+        return None
+    listed = ", ".join(f"{name!r}{suggest(name, functions)}" for name in unknown)
+    return f"without_edge_type_checks names no computed node of this graph: {listed}"
 
 
 def _input_views(views: NodeViews) -> dict[str, InputView]:
@@ -1117,7 +1151,12 @@ class Driver[R = dict[str, object]]:
     def _hints(self, line: str) -> list[str]:
         """The lines explaining a missing input in `line`: config keys, left out."""
         hints: list[str] = []
-        if (hint := _config_hint(line, self._config)) is not None:
+        keys: dict[str, object] = dict(self._config)
+        if self._builder is not None:
+            # A namespace's own `config=` keys are config keys too (Q112).
+            for overlay in self._builder._overlays.values():  # noqa: SLF001  # this driver's own builder
+                keys.update(dict.fromkeys(overlay))
+        if (hint := _config_hint(line, keys)) is not None:
             hints.append(hint)
         if line.startswith(_MISSING):
             hints += _left_out_hints(line, self._left_out)
@@ -1592,9 +1631,12 @@ class Driver[R = dict[str, object]]:
         With no `final_vars`, every node and input; with them, the nodes
         `draw_execution` draws for the same arguments, checked as it checks them.
         The document is `{"format": "fnloom.export/1", "fnloom", "graph_version",
-        "config", "request", "nodes"}`: `nodes` in topological order, each with
-        its kind, type, parameters, tags, doc, function, config conditions,
-        source, code version and marks; an input with whether it is required and
+        "config", "namespace_config", "edge_checks", "request", "nodes"}`:
+        `namespace_config` holds each namespace's own `config=`, `edge_checks` is
+        `"on"`, `"off"` or the nodes whose edges the build skipped, and `nodes`
+        are in topological order, each with its kind, type, parameters, tags,
+        doc, function, config conditions, source, code version, marks and the
+        module it `replaced`, if any; an input with whether it is required and
         its consumers. No value is exported: `request` lists names, and config
         values and `value()` bindings are their `repr`. `json.dumps` of it is the
         same text on every run (Q96).
@@ -1617,6 +1659,7 @@ class Driver[R = dict[str, object]]:
                 "inputs": sorted(shape.supplied),
                 "overrides": sorted(shape.overridden),
             }
+        builder = self._builder
         return export(
             drawn,
             self._nodes,
@@ -1624,6 +1667,8 @@ class Driver[R = dict[str, object]]:
             config=self._config,
             request=request,
             version=importlib.metadata.version("fnloom"),
+            namespace_config={} if builder is None else builder._overlays,  # noqa: SLF001  # this driver's own builder
+            edge_checks="on" if builder is None else builder._edge_setting(),  # noqa: SLF001  # this driver's own builder
         )
 
     def _missing_inputs(self, shape: _Shape) -> set[str]:
@@ -2392,6 +2437,126 @@ def _unimportable_module(module: ModuleType) -> str | None:
     )
 
 
+def _checked_overlay(namespace: str, keys: object) -> dict[str, object]:
+    """A namespace's `config=`, copied; `TypeError` for a non-mapping or key."""
+    if not isinstance(keys, Mapping):
+        msg = (
+            f"config under namespace {namespace!r} takes a mapping, "
+            f"got {type(keys).__name__}"
+        )
+        raise TypeError(msg)
+    given: dict[object, object] = dict(typing.cast("Mapping[object, object]", keys))
+    if not_str := sorted(type(k).__name__ for k in given if not isinstance(k, str)):
+        msg = (
+            f"config keys under namespace {namespace!r} must be str, "
+            f"got: {', '.join(not_str)}"
+        )
+        raise TypeError(msg)
+    return {str(k): v for k, v in given.items()}
+
+
+def _checked_overlays(
+    overlays: Mapping[str, Mapping[str, object]] | None,
+) -> Mapping[str, Mapping[str, object]]:
+    """Each namespace's `config=`, checked and read-only (Q112)."""
+    if overlays is None or not overlays:
+        return MappingProxyType[str, Mapping[str, object]]({})
+    checked: dict[str, Mapping[str, object]] = {}
+    for namespace, keys in overlays.items():
+        if (name := checked_namespace(namespace)) is None:
+            msg = (
+                "config needs a namespace: with_modules(..., namespace=..., config=...)"
+            )
+            raise TypeError(msg)
+        checked[name] = MappingProxyType(_checked_overlay(name, keys))
+    return MappingProxyType(checked)
+
+
+def _overlaid_with(
+    overlays: Mapping[str, Mapping[str, object]],
+    namespace: str,
+    keys: Mapping[str, object],
+) -> dict[str, Mapping[str, object]]:
+    """`overlays` with `keys` as `namespace`'s; a differing second one is refused."""
+    added = _checked_overlay(namespace, keys)
+    if not added:
+        # An empty `config=` overlays nothing: it is no config of the namespace's.
+        return dict(overlays)
+    current = overlays.get(namespace)
+    if current is not None and not _same_overlay(current, added):
+        msg = (
+            f"namespace {namespace!r} already has config {_shown_config(current)}, "
+            f"so config {_shown_config(added)} is refused"
+        )
+        raise ValueError(msg)
+    return {**overlays, namespace: added}
+
+
+def _same_overlay(one: Mapping[str, object], other: Mapping[str, object]) -> bool:
+    """Whether two `config=` mappings hold the same keys, each the same value."""
+    if one.keys() != other.keys():
+        return False
+    for key in one:
+        a, b = one[key], other[key]
+        if a is b:
+            continue
+        try:
+            same = typing.cast("object", a == b)
+        except Exception:  # noqa: BLE001  # an `==` that raises: not the same
+            return False
+        if not isinstance(same, bool) or not same:
+            return False
+    return True
+
+
+def _shown_config(config: Mapping[str, object]) -> str:
+    """`config` as a dict literal, its keys sorted."""
+    return "{" + ", ".join(f"{k!r}: {config[k]!r}" for k in sorted(config)) + "}"
+
+
+def _checked_replace(replace: object) -> tuple[str, ...]:
+    """`replace=` as a tuple of names; `TypeError` for a `str` or a non-`str` item."""
+    if isinstance(replace, str) or not isinstance(replace, Sequence | AbstractSet):
+        msg = f"replace takes a tuple of node names, got {type(replace).__name__}" + (
+            f" {replace!r}: write ({replace!r},)" if isinstance(replace, str) else ""
+        )
+        raise TypeError(msg)
+    items = list(typing.cast("Sequence[object] | AbstractSet[object]", replace))
+    if bad := sorted({type(n).__name__ for n in items if not isinstance(n, str)}):
+        msg = f"replace names must be str, got: {', '.join(bad)}"
+        raise TypeError(msg)
+    names = [str(n) for n in items]
+    if "" in names:
+        msg = "replace names must not be empty"
+        raise ValueError(msg)
+    return tuple(sorted(set(names)))
+
+
+def _checked_replaces(
+    replaces: Sequence[Sequence[str]], count: int
+) -> tuple[tuple[str, ...], ...]:
+    """Each module's `replace=` names, one per module; empty when none replaces."""
+    if not replaces or not any(replaces):
+        return ()
+    if len(replaces) != count:
+        msg = (
+            f"replaces must hold one per module: {_counted(count, 'module')}, "
+            f"{_counted(len(replaces), 'replace')}"
+        )
+        raise ValueError(msg)
+    return tuple(_checked_replace(names) for names in replaces)
+
+
+def _checked_consumers(names: Sequence[object]) -> tuple[str, ...]:
+    """Edge-check names once each, sorted; `TypeError` for a non-`str`."""
+    if isinstance(names, str):
+        names = (names,)
+    if bad := sorted({type(n).__name__ for n in names if not isinstance(n, str)}):
+        msg = f"without_edge_type_checks takes node names as str, got: {', '.join(bad)}"
+        raise TypeError(msg)
+    return tuple(sorted({str(n) for n in names}))
+
+
 def _builder_of[R](  # noqa: PLR0913, PLR0917  # pickle passes each part positionally
     names: tuple[str, ...],
     settings: _Settings,
@@ -2401,19 +2566,27 @@ def _builder_of[R](  # noqa: PLR0913, PLR0917  # pickle passes each part positio
     namespaces: tuple[str | None, ...] = (),
     result_builder: _ResultBuilder[R] | None = None,
     bound: Mapping[str, Mapping[str, Source | Value]] | None = None,
+    overlays: Mapping[str, Mapping[str, object]] | None = None,
+    replaces: tuple[tuple[str, ...], ...] = (),
+    cache_settings: CacheSettings = NO_SETTINGS,
 ) -> Builder[R]:
     """A pickled builder, its modules imported again by name, its functions too.
 
     `namespaces` holds each module's namespace, in order, or is empty for none.
     `result_builder` pickles by Python's own rules, as a hook does, and so do the
-    values `bound` holds, each namespace's `bind=`.
+    values `bound` holds, each namespace's `bind=`, and those `overlays` holds,
+    each namespace's `config=`. `replaces` holds each module's `replace=`.
+    `cache_settings` are `with_cache`'s lists.
     """
     modules = tuple(importlib.import_module(name) for name in names)
     return Builder(
         modules,
         namespaces=namespaces,
         bound=bound,
+        overlays=overlays,
+        replaces=replaces,
         store=store,
+        cache_settings=cache_settings,
         config=config,
         functions=from_references(functions),
         result_builder=result_builder,
@@ -2434,6 +2607,8 @@ class _Changes(TypedDict, total=False):
     output_type_checks: bool
     value_checks: tuple[_types.ValueCheck, ...]
     node_wrappers: tuple[NodeWrapper, ...]
+    edge_checks: bool
+    loose_edges: tuple[str, ...]
 
 
 class _Settings(TypedDict):
@@ -2453,6 +2628,8 @@ class _Settings(TypedDict):
     output_type_checks: bool
     value_checks: tuple[_types.ValueCheck, ...]
     node_wrappers: tuple[NodeWrapper, ...]
+    edge_checks: bool
+    loose_edges: tuple[str, ...]
 
 
 class Builder[R = dict[str, object]]:
@@ -2480,21 +2657,30 @@ class Builder[R = dict[str, object]]:
         deep_type_checks: bool = False,
         numeric_widening: bool = False,
         store: CacheStore | None = None,
+        cache_settings: CacheSettings = NO_SETTINGS,
         config: Mapping[str, object] | None = None,
         hooks: Sequence[Hook] = (),
         result_builder: _ResultBuilder[R] | None = None,
         output_type_checks: bool = False,
         value_checks: Sequence[ValueCheck] = (),
         node_wrappers: Sequence[NodeWrapper] = (),
+        overlays: Mapping[str, Mapping[str, object]] | None = None,
+        replaces: Sequence[Sequence[str]] = (),
+        edge_checks: bool = True,
+        loose_edges: Sequence[str] = (),
     ) -> None:
         """Starts with the given modules (none by default), checking input types.
 
         `namespaces` holds each module's namespace, in order, or is empty when
         none has one (see `with_modules`); a `ValueError` when it is given with
         another length, or holds a bad namespace. `bound` holds each namespace's
-        `bind=`, checked as `with_modules` checks it.
+        `bind=`, and `overlays` each namespace's `config=`, checked as
+        `with_modules` checks them. `replaces` holds each module's `replace=`
+        names, in order, or is empty when none replaces. `edge_checks` and
+        `loose_edges` are `without_edge_type_checks`'s settings.
         `functions` are the node sources of `with_functions`. `store`, when
-        given, caches the results of the driver's runs in it.
+        given, caches the results of the driver's runs in it, by
+        `cache_settings`, `with_cache`'s lists.
         `config`, copied, selects `@config.when*` variants (see `with_config`).
         The other settings are those of `without_input_type_checks`,
         `without_override_type_checks`, `with_strict_overrides`,
@@ -2510,6 +2696,10 @@ class Builder[R = dict[str, object]]:
         self._modules = _checked_modules(modules)
         self._namespaces = _checked_namespaces(namespaces, len(self._modules))
         self._bound = _checked_bound(bound)
+        self._overlays = _checked_overlays(overlays)
+        self._replaces = _checked_replaces(replaces, len(self._modules))
+        self._edge_checks = edge_checks
+        self._loose_edges = _checked_consumers(loose_edges)
         self._functions = checked_functions(functions)
         self._check_inputs = check_inputs
         self._check_overrides = check_overrides
@@ -2522,6 +2712,7 @@ class Builder[R = dict[str, object]]:
         self._value_checks = _checked_value_checks(value_checks)
         self._wrappers = _wrappers.checked(node_wrappers)
         self._store = store
+        self._cache_settings = cache_settings
         # Never changed once made: `with_config` makes a new dict.
         self._config: dict[str, object] = (
             {} if config is None else _checked_config(config)
@@ -2541,6 +2732,9 @@ class Builder[R = dict[str, object]]:
             tuple[str | None, ...],
             _ResultBuilder[R] | None,
             Mapping[str, Mapping[str, Source | Value]],
+            dict[str, dict[str, object]],
+            tuple[tuple[str, ...], ...],
+            CacheSettings,
         ],
     ]:
         """The modules' names and namespaces, the functions' references, the settings.
@@ -2566,6 +2760,9 @@ class Builder[R = dict[str, object]]:
             self._result_builder,
             # Plain dicts: a `MappingProxyType` doesn't pickle.
             {namespace: dict(bind) for namespace, bind in self._bound.items()},
+            {namespace: dict(keys) for namespace, keys in self._overlays.items()},
+            self._replaces,
+            self._cache_settings,
         )
 
     def _settings(self) -> _Settings:
@@ -2581,7 +2778,15 @@ class Builder[R = dict[str, object]]:
             "output_type_checks": self._output_type_checks,
             "value_checks": self._value_checks,
             "node_wrappers": self._wrappers,
+            "edge_checks": self._edge_checks,
+            "loose_edges": self._loose_edges,
         }
+
+    def _edge_setting(self) -> str | list[str]:
+        """The export's `edge_checks`: `"on"`, `"off"`, or the nodes skipped (Q149)."""
+        if not self._edge_checks:
+            return "off"
+        return list(self._loose_edges) if self._loose_edges else "on"
 
     def _with(  # noqa: PLR0913  # keyword-only, one per builder part
         self,
@@ -2589,8 +2794,11 @@ class Builder[R = dict[str, object]]:
         *,
         namespaces: tuple[str | None, ...] | None = None,
         bound: Mapping[str, Mapping[str, Source | Value]] | None = None,
+        overlays: Mapping[str, Mapping[str, object]] | None = None,
+        replaces: tuple[tuple[str, ...], ...] | None = None,
         functions: tuple[FunctionSource, ...] | None = None,
         store: CacheStore | None = None,
+        cache_settings: CacheSettings | None = None,
         config: Mapping[str, object] | None = None,
         **settings: Unpack[_Changes],
     ) -> Builder[R]:
@@ -2604,7 +2812,12 @@ class Builder[R = dict[str, object]]:
             self._modules if modules is None else modules,
             namespaces=self._namespaces if namespaces is None else namespaces,
             bound=self._bound if bound is None else bound,
+            overlays=self._overlays if overlays is None else overlays,
+            replaces=self._replaces if replaces is None else replaces,
             store=self._store if store is None else store,
+            cache_settings=self._cache_settings
+            if cache_settings is None
+            else cache_settings,
             config=self._config if config is None else config,
             result_builder=self._result_builder,
             **{**self._settings(), **settings},
@@ -2618,6 +2831,8 @@ class Builder[R = dict[str, object]]:
         *modules: ModuleType,
         namespace: str | None = None,
         bind: Mapping[str, Source | Value] | None = None,
+        config: Mapping[str, object] | None = None,
+        replace: Sequence[str] | None = None,
     ) -> Builder[R]:
         """Returns a new builder with `modules` appended to this one's.
 
@@ -2634,12 +2849,30 @@ class Builder[R = dict[str, object]]:
         which reads `x` as a name outside the namespace, or to `value(v)`. It
         holds for the whole namespace, across `with_modules` calls.
 
+        `config` is the namespace's own config (Q112): its nodes select their
+        `@config` variants, run their `@resolve`s and `config.matches`
+        predicates, and keep their steps, by the builder's config overlaid with
+        these keys. It holds for the whole namespace, across calls; the driver's
+        `config` stays the builder's own.
+
+        `replace` names nodes the one module given replaces (Q150): its node of
+        each name stands for the node of that name a module given earlier
+        defines, for every reader, under `namespace` when one is given. At
+        build, a name that no earlier module defines, or that this module
+        doesn't, under the config, is a `ValueError` naming it; so is replacing
+        an extracted field, or a node whose function extracts fields. Without
+        it, a name two modules define fails the build (Q74).
+
         `TypeError` when an item is not a module, such as a function, when
-        `namespace` is neither a `str` nor `None`, when `bind` is given without a
-        namespace or binds something other than `source` or `value`; `ValueError`
-        for a `str` that is not a dotted identifier path, a key that is no
-        identifier, or a key the namespace already binds otherwise. At build, a
-        key the namespace defines, or that no node of it reads, is a `ValueError`.
+        `namespace` is neither a `str` nor `None`, when `bind` or `config` is
+        given without a namespace, `bind` binds something other than `source` or
+        `value`, a `config` key is no `str`, `replace` is a `str` or names
+        something other than a `str`, or is given with other than one module;
+        `ValueError` for a `str` that is not a dotted identifier path, a key that
+        is no identifier, a key the namespace already binds otherwise, or a
+        `config` that differs from the one the namespace already has. At build,
+        a key the namespace defines, or that no node of it reads, is a
+        `ValueError`.
         """
         checked = checked_namespace(namespace)
         bound = self._bound
@@ -2650,10 +2883,33 @@ class Builder[R = dict[str, object]]:
                 )
                 raise TypeError(msg)
             bound = _bound_with(self._bound, checked, bind)
+        overlays = self._overlays
+        if config is not None:
+            if checked is None:
+                msg = (
+                    "config needs a namespace: with_modules(..., namespace=..., "
+                    "config=...); use with_config for the whole builder"
+                )
+                raise TypeError(msg)
+            overlays = _overlaid_with(self._overlays, checked, config)
+        replaces = self._replaces
+        if replace is not None or replaces:
+            names = () if replace is None else _checked_replace(replace)
+            if names and len(modules) != 1:
+                msg = (
+                    "replace takes one module, whose nodes replace earlier ones: "
+                    f"got {_counted(len(modules), 'module')}"
+                )
+                raise TypeError(msg)
+            earlier = replaces or ((),) * len(self._modules)
+            replaces = (*earlier, *((names,) if modules else ()))
+            replaces = (*replaces, *((),) * (len(modules) - 1))
         return self._with(
             (*self._modules, *modules),
             namespaces=(*self._namespaces, *(checked,) * len(modules)),
             bound=bound,
+            overlays=overlays,
+            replaces=replaces,
         )
 
     def with_functions(self, *items: Callable[..., object] | NodeSpec) -> Builder[R]:
@@ -2702,6 +2958,23 @@ class Builder[R = dict[str, object]]:
         refusing a badly typed input.
         """
         return self._with(check_overrides=False)
+
+    def without_edge_type_checks(self, *consumers: str) -> Builder[R]:
+        """Returns a new builder whose build skips edge type checks (Q149).
+
+        With no argument, no edge is checked; with node names, only the edges
+        into those nodes are skipped, and every other edge is still checked.
+        Cumulative: names given again are added. An edge check compares a
+        node's return type with the parameter it feeds, at build; input and
+        override checks are separate (`without_input_type_checks`, Q10). The
+        setting is in the export as `edge_checks`, and in `graph_version`. A
+        name that is no computed node of the graph is a `ValueError` at build;
+        one that is no `str` is a `TypeError` here.
+        """
+        if not consumers:
+            return self._with(edge_checks=False)
+        names = _checked_consumers(consumers)
+        return self._with(loose_edges=tuple(sorted({*self._loose_edges, *names})))
 
     def with_strict_overrides(self) -> Builder[R]:
         """Returns a new builder whose driver refuses an unsupplied overridden input.
@@ -2850,7 +3123,10 @@ class Builder[R = dict[str, object]]:
             self._modules,
             namespaces=self._namespaces,
             bound=self._bound,
+            overlays=self._overlays,
+            replaces=self._replaces,
             store=self._store,
+            cache_settings=self._cache_settings,
             config=self._config,
             result_builder=build,
             **self._settings(),
@@ -2858,7 +3134,16 @@ class Builder[R = dict[str, object]]:
         built._functions = self._functions
         return built
 
-    def with_cache(self, store: CacheStore) -> Builder[R]:
+    def with_cache(  # noqa: PLR0913  # Hamilton's lists, keyword-only
+        self,
+        store: CacheStore,
+        *,
+        recompute: Iterable[str] | Literal[True] = (),
+        disable: Iterable[str] | Literal[True] = (),
+        default: Iterable[str] | Literal[True] = (),
+        default_behavior: CacheBehavior = "default",
+        ignore: Mapping[str, Iterable[str]] | None = None,
+    ) -> Builder[R]:
         """Returns a new builder whose driver caches every node's result in `store`.
 
         A node's `@cache` policy changes how it is cached. Each run computes every
@@ -2866,13 +3151,31 @@ class Builder[R = dict[str, object]]:
         stored results nearest the outputs, and runs and stores the rest. Code
         versions are read at build, so rebuild after editing code. A stored value is
         returned as it is, not copied: a cached node must not mutate its arguments.
+
+        `recompute`, `disable` and `default` each name nodes given that behavior
+        (Q143). The most specific setting wins: a list naming the node, then its
+        `@cache(behavior=...)` (for an extracted field, its producer's
+        `fields=`), then `default_behavior`. A list given `True` sets
+        `default_behavior` for every node no list names: it counts as the
+        default, not as a name, so a node's own `@cache` still wins over it.
+        `ignore` maps a consumer to parameters left out of its key, as its own
+        `@cache(ignore=...)` does (Q50). `TypeError` for a bare `str` or a
+        non-`str` name; `ValueError` for a name in two lists, two lists given
+        `True`, or `True` against another `default_behavior`. The build refuses a
+        name that is no node, or a parameter the consumer does not have, with a
+        `did you mean`.
         """
         if not all(
             callable(getattr(store, m, None)) for m in ("get", "put", "discard")
         ):
             msg = f"a cache store needs get, put and discard methods, not {store!r}"
             raise TypeError(msg)
-        return self._with(store=store)
+        settings = CacheSettings.checked(
+            {"recompute": recompute, "disable": disable, "default": default},
+            default_behavior,
+            ignore,
+        )
+        return self._with(store=store, cache_settings=settings)
 
     def build(self) -> Driver[R]:
         """Scans the modules and returns a `Driver`; `ValueError` on a bad node.
@@ -2895,7 +3198,11 @@ class Builder[R = dict[str, object]]:
         """
         nodes, views, graph, unmatched, left_out, owner = self._scanned(awaits=False)
         # Called here, so a `CacheWarning` points at the caller's `build`.
-        cache = None if self._store is None else Cache.of(self._store, nodes)
+        cache = (
+            None
+            if self._store is None
+            else Cache.of(self._store, nodes, self._cache_settings)
+        )
         return self._driver(graph, views, unmatched, left_out, cache, owner)
 
     def build_async(
@@ -2917,7 +3224,11 @@ class Builder[R = dict[str, object]]:
         checked = _async.checked_sync_nodes(sync_nodes)
         nodes, views, graph, unmatched, left_out, owner = self._scanned(awaits=True)
         # Called here, so a `CacheWarning` points at the caller's `build_async`.
-        cache = None if self._store is None else Cache.of(self._store, nodes)
+        cache = (
+            None
+            if self._store is None
+            else Cache.of(self._store, nodes, self._cache_settings)
+        )
         built = AsyncDriver(
             self._driver(graph, views, unmatched, left_out, cache, owner),
             {node.name: node for node in nodes},
@@ -2947,16 +3258,22 @@ class Builder[R = dict[str, object]]:
             namespaces=self._namespaces,
             bound=self._bound,
             used=used,
+            overlays=self._overlays,
+            replaces=self._replaces,
         )
         nodes = _checks.attached(
             resolve(scanned.nodes, self._rules, self._value_checks)
         )
         if unbuilt := _steps.unbuilt_targets(self._modules, nodes):
             raise ValueError("\n".join(unbuilt))
-        nodes, stepped = _steps.lowered(nodes, self._config, self._bound, used)
+        steps_of: dict[str, set[str]] = {}
+        nodes, stepped = _steps.lowered(
+            nodes, self._config, self._bound, used, self._overlays, steps_of=steps_of
+        )
         _refuse_unread(self._bound, used)
         relays = _steps.relays(nodes)
         _checks.refuse_unreadable(nodes)
+        refuse_bad_fields(nodes)
         unmatched = scanned.unmatched
         if unmatched:
             # A field of a forward-referenced `TypedDict` is first known resolved.
@@ -2978,7 +3295,15 @@ class Builder[R = dict[str, object]]:
         if self._wrappers:
             nodes = self._chained(nodes, views, relays, awaits=awaits)
         graph = _graph_of(nodes)
-        if mismatches := _edge_mismatches(views.functions):
+        if (
+            self._loose_edges
+            and (unknown := _unknown_consumers(views, self._loose_edges)) is not None
+        ):
+            raise ValueError(unknown)
+        loose = _lowered_names(self._loose_edges, steps_of)
+        if self._edge_checks and (
+            mismatches := _edge_mismatches(views.functions, loose)
+        ):
             raise ValueError("\n".join(mismatches))
         if problems := default_problems(nodes):
             raise ValueError("\n".join(problems))

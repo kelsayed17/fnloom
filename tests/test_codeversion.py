@@ -362,9 +362,7 @@ def test_only_functions_have_code_versions() -> None:
         code_version(len)
 
 
-# Builds a module from fixed source, with a set literal, helpers and a library call. A
-# frozenset of strings held in a global would not do: it is fingerprinted in iteration
-# order, which the hash seed changes.
+# Builds a module from fixed source, with a set literal, helpers and a library call.
 _SEEDED = """
 import json, sys, textwrap, types
 from fnloom._codeversion import code_version
@@ -383,10 +381,67 @@ print(code_version(module.f).hex())
 """
 
 
-def _version_in_subprocess(seed: str) -> str:
-    """The hex code version of `_SEEDED`'s `f`, taken by a fresh interpreter."""
+_SET_DEFAULTS = """
+import sys, types
+from fnloom._codeversion import code_version
+source = '''
+REGIONS = frozenset({"north", "south", "east", "west"})
+def f(x, allowed={"alpha", "beta", "gamma", "delta"},
+      *, frozen=frozenset({"eu", "us", "uk", "jp"})):
+    return x in allowed or x in frozen or x in REGIONS
+'''
+module = types.ModuleType("cv_set_defaults")
+sys.modules["cv_set_defaults"] = module
+exec(compile(source, "cv_set_defaults", "exec"), module.__dict__)
+print(code_version(module.f).hex())
+"""
+
+
+def test_set_defaults_are_stable_across_hash_seeds() -> None:
+    """A `set` or `frozenset` default, or a global frozenset, is seed-independent."""
+    versions = {
+        _version_in_subprocess(seed, _SET_DEFAULTS)
+        for seed in ("0", "1", "2", "3", "12345")
+    }
+    assert len(versions) == 1
+
+
+_SUBCLASS_DEFAULT = """
+class S({base}):
+    pass
+
+K = S({items})
+K.mode = {mode!r}
+
+def f(t=K):
+    return t.mode
+"""
+
+
+@pytest.mark.parametrize(
+    ("base", "items"), [("frozenset", "{1, 2}"), ("dict", "{'k': {1, 2}}")]
+)
+def test_a_container_subclass_default_sees_its_attributes(
+    base: str, items: str
+) -> None:
+    """A set-holding subclass with state of its own never hides that state.
+
+    Two attribute values give two versions, or the default is refused.
+    """
+    found: list[bytes | None] = []
+    for mode in ("x", "y"):
+        source = _SUBCLASS_DEFAULT.format(base=base, items=items, mode=mode)
+        try:
+            found.append(_version(source, module=f"cv_subclass_{base}"))
+        except UncacheableError:
+            found.append(None)
+    assert found[0] is None or found[0] != found[1]
+
+
+def _version_in_subprocess(seed: str, code: str = _SEEDED) -> str:
+    """The hex code version a fresh interpreter prints for `code`, `_SEEDED`'s `f`."""
     result = subprocess.run(  # noqa: S603  # runs this interpreter on fixed code
-        [sys.executable, "-c", _SEEDED],
+        [sys.executable, "-c", code],
         capture_output=True,
         check=True,
         text=True,

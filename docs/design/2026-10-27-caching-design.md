@@ -371,3 +371,10 @@ Where the code departs from the sections above, each with its reason. The sectio
 - **`@cache(format=...)`** (Plan 4 follow-up): a `Format` is a name with a `dumps`/`loads` pair, and `DiskCache`
   records the name in the entry's header where it recorded the serializer's (§7). Names resolve against the store
   when the driver is built (Q55). The built-in `json` format refuses what would not load back exactly (Q54).
+- **Driver lists and per-field policies** (Plan 12 items 5 and 9, Q143 and Q147). A node's behavior is settled at
+  build, from a `with_cache` list naming it, its `@cache`, or `default_behavior`, and the source is kept for
+  `explain_cache`'s reasons. A field with a policy of its own is an ordinary entry of the key plan: under `default`
+  it is stored, keyed by its producer's key and the field; under a `disable` producer it reads the producer's sources
+  in the producer's place, with the producer's would-be static part framed into its own. The binding's walk and
+  `MemoryCache` needed no change: a field is one more node whose stored flag is set, and a plan computing a
+  `recompute` field passes its producer as not stored, so the producer is never looked up there.

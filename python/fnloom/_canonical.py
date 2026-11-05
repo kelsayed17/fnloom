@@ -9,10 +9,14 @@ the same on every `PYTHONHASHSEED`.
 import dataclasses
 import hashlib
 import json
-from collections.abc import Mapping
+import typing
+from typing import TYPE_CHECKING
 
 from fnloom._codeversion import class_version
 from fnloom._fingerprint import fingerprint
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
 
 # How deep a canonical form, or an export's `stable_repr`, looks into a value: past
 # it, a value has no form, rather than exhausting the stack.
@@ -20,6 +24,9 @@ DEPTH = 100
 
 # What a canonical form's hash is framed with, so it can't pass for a fingerprint.
 _FORMAT = "fnloom.canonical/1"
+
+# The containers a canonical form walks, by exact type; `dict` by its pairs.
+_WALKED = frozenset({set, frozenset, list, tuple})
 
 
 class UnwritableError(Exception):
@@ -49,15 +56,33 @@ def parts(value: object) -> list[object]:
     """The parts `value` is written and versioned from, or `[]` for a whole value.
 
     A dataclass instance's parts are all its fields, `repr=False` ones included:
-    they hold state as much as the others do.
+    they hold state as much as the others do. A builtin container is walked,
+    and a subclass of one only when it holds no state of its own (a named
+    tuple, an empty-`__dict__` `OrderedDict`): one with instance attributes or
+    slots, or any other mapping, may hold state its members don't show, so it
+    is a whole value, which `fingerprint` reads or refuses.
     """
-    if isinstance(value, (set, frozenset, list, tuple)):
-        return list(value)
-    if isinstance(value, Mapping):
-        return [part for pair in value.items() for part in pair]
+    if isinstance(value, (set, frozenset, list, tuple)) and _stateless(value):
+        return list(typing.cast("Iterable[object]", value))
+    if isinstance(value, dict) and _stateless(value):
+        pairs = typing.cast("dict[object, object]", value).items()
+        return [part for pair in pairs for part in pair]
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
         return [getattr(value, f.name) for f in dataclasses.fields(value)]
     return []
+
+
+def _stateless(value: object) -> bool:
+    """Whether a container holds nothing beyond its members: no attribute, no slot."""
+    if type(value) in _WALKED or type(value) is dict:
+        return True
+    if getattr(value, "__dict__", None):
+        return False
+    return all(
+        not getattr(cls, "__slots__", ())
+        for cls in type(value).__mro__
+        if cls.__module__ != "builtins"
+    )
 
 
 def _holds_a_set(value: object) -> bool:
@@ -68,7 +93,7 @@ def _holds_a_set(value: object) -> bool:
         if id(current) in seen:
             continue
         seen.add(id(current))
-        if isinstance(current, (set, frozenset)):
+        if isinstance(current, (set, frozenset)) and _stateless(current):
             return True
         waiting.extend(parts(current))
     return False

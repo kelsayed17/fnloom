@@ -536,11 +536,17 @@ Hamilton makes every such parameter an input shared by every step that has it (Q
 unbound is refused when decorating.
 
 - `.named("x")` names a step's node `<node>.x`.
+- `namespace=` on `@pipe_input` or `@pipe_output`, or `.named("x", namespace=...)` on one step, replaces the `<node>`
+  part: `None` drops it, so the step is `x` or `with_clip`, and a dotted path such as `"sales"` names it
+  `sales.with_clip`. The default, `...`, keeps `<node>`; a step's own namespace wins over the decorator's, and under a
+  [module namespace](#namespaces) the step stays within it. `.raw` and the node itself keep their names. A name two
+  nodes would have fails the build, naming what made each (Q140).
 - `.when(mode="fast")`, `.when_not`, `.when_in` and `.when_not_in` run a step only under that [config](#config). A
   step's number counts every step written, so names don't change with the config.
 - `on_input="b"` on `@pipe_input` feeds the parameter `b` rather than the first.
-- On a function with [extracted fields](#extracting-fields), `@pipe_output`'s steps apply to each field, and
-  `.on_output("p")` picks the fields a step applies to.
+- On a function with [extracted fields](#extracting-fields), `@pipe_output`'s steps apply to each field.
+  `on_output=("p", "q")` on `@pipe_output` picks the fields for every step, and `.on_output("p")` for one step, which
+  wins. A field the function doesn't extract is refused at build.
 - With `@parameterize`, each row gets its own chain, named under the row (Q108).
 
 The first step must take the parameter's own type, checked at build, and so must each step the one before it.
@@ -678,7 +684,50 @@ A few details:
 - `with_modules` returns a new builder instead of changing the one you called it on, so you can share and extend a
   builder safely.
 - Passing the same module twice adds its nodes once.
-- Defining the same name in two different modules is a `ValueError` naming both.
+- Defining the same name in two different modules is a `ValueError` naming both, unless the later one replaces it.
+
+### Replacing a node
+
+`with_modules(module, replace=("doubled",))` makes `module`'s node `doubled` stand for the one a module given earlier
+defines, for every reader (Q150). Only the names given are replaced; any other name both define still fails:
+
+```python
+# file: halved.py
+def doubled(base: int) -> int:
+    """Not doubled at all: half the base size."""
+    return base // 2
+```
+
+```python
+import fnloom
+import halved
+import report
+import sizes
+
+driver = (
+    fnloom.Builder()
+    .with_modules(sizes, report)
+    .with_modules(halved, replace=("doubled",))
+    .build()
+)
+driver.execute(["message"], inputs={"base": 21})
+# -> {'message': 'size 10'}
+driver.nodes["doubled"].replaced
+# -> 'sizes'
+driver.nodes["doubled"].module
+# -> 'halved'
+```
+
+A name that no module given earlier defines, or that `module` doesn't, is a `ValueError` at build naming it, so a
+typo fails rather than doing nothing. Both are read under the build's config: a name only a `@config` variant gives
+under another config fails too. Under `namespace=`, the names are the namespace's. `replace=` takes one module, and
+refuses an extracted field or a node whose function extracts fields.
+
+The replacement takes the whole node: the earlier function's `@tag`s, output checks, `@cache` policy and steps go
+with it, and the replacing function's own apply. A `@mutate` whose target is the replaced function would be lost, so
+it fails the build, naming the mutator: mutate the replacing function instead. When both modules give `@config`
+variants of the name, each module selects its own, and then the later one replaces. The export's entry for the node
+names the module replaced as `replaced`, beside its `module`.
 
 ## Namespaces
 
@@ -791,6 +840,54 @@ and `rebuild()`. `with_modules` refuses `bind=` without `namespace=`, a binding 
 and a key the namespace already binds to something else. `build()` refuses a key no selected node of the namespace
 reads, and a key the namespace defines.
 
+`config=` gives a namespace a config of its own (Q112): its nodes select their [`@config`](#config) variants, run
+their `@resolve`s and `config.matches` predicates, and keep their steps by the builder's config overlaid with these
+keys. Like `bind=`, it holds for the whole namespace:
+
+```python
+# file: regional_rates.py
+from fnloom import config
+
+
+@config.when(region="eu")
+def rate__eu() -> float:
+    """The EU's rate."""
+    return 0.2
+
+
+@config.when(region="us")
+def rate__us() -> float:
+    """The US's rate."""
+    return 0.1
+
+
+def tax(rate: float, sales: float) -> float:
+    """The tax on the sales."""
+    return rate * sales
+```
+
+```python
+import fnloom
+import regional_rates
+
+driver = (
+    fnloom.Builder()
+    .with_modules(regional_rates, namespace="eu", config={"region": "eu"})
+    .with_modules(regional_rates, namespace="us", config={"region": "us"})
+    .build()
+)
+driver.execute(["eu.tax", "us.tax"], inputs={"sales": 100.0})
+# -> {'eu.tax': 20.0, 'us.tax': 10.0}
+dict(driver.config)
+# -> {}
+driver.export()["namespace_config"]
+# -> {'eu': {'region': "'eu'"}, 'us': {'region': "'us'"}}
+```
+
+`driver.config` stays the builder's own. The export lists each namespace's keys as `namespace_config`, and they're in
+`graph_version`. `config=` without `namespace=` is a `TypeError`, as is a key that is no `str`; a second `config=` for
+the namespace that differs from the first is a `ValueError`.
+
 A few details:
 
 - A parameter can't read another namespace's node: a parameter `net` in namespace `us` reads `us.net` or the plain
@@ -801,9 +898,10 @@ A few details:
   `what_is_the_path_between` and suggestions all use full names.
 - The same module under the same namespace twice counts once. Under two namespaces, the same function makes a node in
   each, so passing the function in `final_vars` is a `TypeError` naming both nodes: pass a name instead.
-- Names clash as they do without namespaces, and nothing overrides: a `@parameterize` row named `"eu.net"` in a module
-  given without a namespace is a build error naming both definitions. Hamilton's `allow_module_overrides()` silently
-  keeps the later module's function instead.
+- Names clash as they do without namespaces, and nothing overrides unless named in
+  [`replace=`](#replacing-a-node): a `@parameterize` row named `"eu.net"` in a module given without a namespace is a
+  build error naming both definitions. Hamilton's `allow_module_overrides()` silently keeps the later module's
+  function instead.
 - Cache keys use the full node name, and each function keeps one code version. `with_functions` takes no
   `namespace=`.
 
@@ -1099,6 +1197,7 @@ variant after its node, followed by `__` and anything you like: `cost__post` and
 | `@config.when_not(carrier="post")` | every key differs from its value |
 | `@config.when_in(carrier=["courier", "express"])` | every key is one of its values |
 | `@config.when_not_in(carrier=["post"])` | every key is none of its values |
+| `@config.matches(predicate)` | `predicate`, called with the config keys it names, returns `True` ([below](#a-predicate-of-config-keys)) |
 | `@config.default` | no other variant of its node matches |
 
 ```python
@@ -1209,6 +1308,56 @@ Mistakes are refused rather than guessed at (Q58, Q59):
   `@config.when({"name": "x"})`.
 
 The decorators never change your function, and add no tags (Q60).
+
+### A predicate of config keys
+
+`@config.matches(predicate)` keeps a variant when `predicate` returns `True` (Q148). Its parameters are the config
+keys it reads, as a [`@resolve`](#bindings-and-decorators-from-config) function's are: a parameter with a default is an
+optional key, and a missing required key never matches, so the predicate isn't called. Name it with a leading `_`, or
+mark it `@exclude`: a public function a module defines is a node, and the build refuses a predicate that is one:
+
+```python
+# file: vat.py
+from fnloom import config
+
+
+def _is_eu(region: str, year: int = 2024) -> bool:
+    return region == "eu" and year >= 2021
+
+
+@config.matches(_is_eu)
+def vat__eu() -> float:
+    """The EU's rate."""
+    return 0.2
+
+
+@config.default
+def vat__none() -> float:
+    """No VAT elsewhere."""
+    return 0.0
+```
+
+```python
+import fnloom
+import vat
+
+builder = fnloom.Builder().with_modules(vat)
+builder.with_config({"region": "eu"}).build().execute(["vat"])
+# -> {'vat': 0.2}
+builder.with_config({"region": "eu", "year": 2020}).build().execute(["vat"])
+# -> {'vat': 0.0}
+builder.build().execute(["vat"])
+# -> {'vat': 0.0}
+builder.with_config({"region": "eu"}).build().nodes["vat"].config[0].kind
+# -> 'matches'
+```
+
+- It must return a `bool`: anything else, even a truthy value, is a `TypeError` at build naming the predicate and
+  the variant. An error it raises gets a note naming both.
+- It stacks with `config.when*`, every condition holding, and two variants that both match fail as any two do.
+- Its code version is part of the cache key of the variant it selects, and of that node's export `version`, where the
+  condition shows as `matches(vat._is_eu)`. Edit the predicate and the variant misses, and `diff` says so.
+- `*args`, `**kwargs` and positional-only parameters are refused when decorating: each parameter must name a key.
 
 ## Extracting fields
 

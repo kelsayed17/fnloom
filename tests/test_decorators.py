@@ -218,7 +218,7 @@ def test_cache_records_ignore_and_version() -> None:
         return x + y
 
     cache(ignore=("y", "x"), version="2")(g)
-    assert decorations(g).cache == CachePolicy("default", frozenset("xy"), "2")
+    assert decorations(g).cache == CachePolicy(None, frozenset("xy"), "2")
 
 
 def test_cache_composes_with_parameterize_and_tag_in_either_order() -> None:
@@ -276,9 +276,9 @@ def test_cache_records_a_format_by_object_or_name() -> None:
         return x
 
     cache(format="json")(g)
-    assert decorations(g).cache == CachePolicy("default", frozenset(), None, "json")
+    assert decorations(g).cache == CachePolicy(None, frozenset(), None, "json")
     cache(format=JSON)(h)
-    assert decorations(h).cache == CachePolicy("default", frozenset(), None, JSON)
+    assert decorations(h).cache == CachePolicy(None, frozenset(), None, JSON)
 
 
 def test_cache_format_errors() -> None:
