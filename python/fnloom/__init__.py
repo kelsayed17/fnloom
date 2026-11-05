@@ -33,7 +33,16 @@ from fnloom._extract import extract_columns, extract_fields
 from fnloom._fingerprint import fingerprint, register_fingerprint
 from fnloom._frames import FrameBuilder, frame
 from fnloom._functions import NodeSpec, node
-from fnloom._hooks import Hook, LogFailures, NodeEnd, NodeStart, RunEnd, RunStart
+from fnloom._hooks import (
+    BuildEnd,
+    Hook,
+    LogFailures,
+    NodeEnd,
+    NodeStart,
+    PrintNodes,
+    RunEnd,
+    RunStart,
+)
 from fnloom._resolve import inject, resolve
 from fnloom._steps import (
     Step,
@@ -71,6 +80,7 @@ __all__ = [
     "MISSING",
     "AsyncDriver",
     "AsyncPreparedPlan",
+    "BuildEnd",
     "Builder",
     "CacheOutcome",
     "CachePolicy",
@@ -95,6 +105,7 @@ __all__ = [
     "NodeView",
     "Param",
     "PreparedPlan",
+    "PrintNodes",
     "RunEnd",
     "RunStart",
     "Source",
