@@ -375,9 +375,10 @@ source text, so it works in a notebook too. It hashes:
   `bytes`, `None`, an enum member, or a tuple or frozenset of these) by its fingerprint; a `typing.NewType` by its
   name and its supertype, by these rules.
 
-A pydantic model class counts what pydantic takes out of its body too: each field's default, constraints and other
-`Field(...)` settings, its private attributes' defaults, its validators' fields and modes, and its `model_config`,
-each setting by the rules for defaults.
+A pydantic model class counts what pydantic takes out of its body too: each field's type as resolved, with every class,
+`NewType`, alias and `Annotated` validator it names (a nested model by its own version), its default, constraints and
+other `Field(...)` settings, its private attributes' defaults, its validators' fields and modes, and its
+`model_config`, each setting by the rules for defaults. A model whose annotations are not resolved yet is refused.
 
 A name read by a string constant counts as read by name, so `globals()["RATE"]` and `getattr(config, "RATE")` see
 `RATE`. Your own code is any module that is neither built in, nor the standard library, nor installed: a module whose

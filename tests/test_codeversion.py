@@ -932,3 +932,11 @@ def test_a_newtype_global_counts_by_its_name_and_supertype() -> None:
     user = version(supertype="Base")
     assert user != one
     assert version(v=2, supertype="Base") != user
+    assert version(supertype="list[int]") != version(supertype="list[str]")
+
+
+def test_a_newtype_with_attributes_of_its_own_is_refused() -> None:
+    """State set on a `NewType` is not its name or supertype, so it may change."""
+    source = "from typing import NewType\nS = NewType('S', int)\nS.extra = 1\n"
+    with pytest.raises(UncacheableError, match="global 'S' of 'f' is a NewType"):
+        _version(source + "def f(x):\n    return S.extra\n")
