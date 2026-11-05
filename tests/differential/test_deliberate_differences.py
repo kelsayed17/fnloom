@@ -5576,6 +5576,30 @@ def test_q117_static_checks_are_a_function(tmp_path: Path) -> None:
         "orphan_b: no owner tag",
     ]
 
+    class Owner(fnloom.Hook):
+        """The same check as an `after_build` hook, which refuses the build."""
+
+        @override
+        def after_build(self, event: fnloom.BuildEnd) -> None:
+            problems = sorted(
+                f"{name}: no owner tag"
+                for name, node in event.nodes.items()
+                if not node.is_input and "owner" not in node.tags
+            )
+            if problems:
+                raise ValueError("; ".join(problems))
+
+    builder = fnloom.Builder().with_modules(fnloom_module).with_hooks(Owner())
+    with pytest.raises(ValueError, match="orphan_a: no owner tag; orphan_b: no owner"):
+        builder.build()
+    # Carried through `rebuild()`, which Q117 named as its condition.
+    sound = make_module(
+        "q117_sound",
+        "import fnloom\n@fnloom.tag(owner='a')\ndef ok(x: int) -> int:\n    return x\n",
+    )
+    kept = fnloom.Builder().with_modules(sound).with_hooks(Owner()).build()
+    assert kept.rebuild().hooks == kept.hooks
+
 
 _Q110_IMPORTING = """
 import importlib
