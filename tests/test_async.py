@@ -1139,7 +1139,7 @@ def test_an_async_recompute_node_is_awaited_first(
     unknown = fnloom.CacheOutcome("unknown", "downstream of recompute node 'text'")
     assert driver.explain_cache(["shout"], inputs=inputs) == {
         "shout": unknown,
-        "text": fnloom.CacheOutcome("miss", "policy recompute"),
+        "text": fnloom.CacheOutcome("miss", "policy recompute (decorator)"),
         "words": unknown,
     }
 

@@ -767,10 +767,10 @@ def test_explain_names_every_outcome_and_runs_nothing(
     assert store.puts == []
     downstream = CacheOutcome("unknown", "downstream of recompute node 'load'")
     unchanging = {
-        "client": CacheOutcome("uncacheable", "policy disable"),
+        "client": CacheOutcome("uncacheable", "policy disable (decorator)"),
         "counted": CacheOutcome("uncacheable", "items[0]: Model"),
         "fetched": CacheOutcome("uncacheable", "reads uncacheable 'client'"),
-        "load": CacheOutcome("miss", "policy recompute"),
+        "load": CacheOutcome("miss", "policy recompute (decorator)"),
         # An uncacheable source outweighs one whose version is not known yet.
         "mixed": CacheOutcome("uncacheable", "reads uncacheable 'scaled'"),
         "parsed": downstream,
@@ -846,7 +846,7 @@ def test_explain_names_the_nearest_recompute_node() -> None:
     )
     driver = _cached(module, MemoryCache())
     outcomes = driver.explain_cache(["last"], inputs={"path": "p", "other": 1})
-    recompute = CacheOutcome("miss", "policy recompute")
+    recompute = CacheOutcome("miss", "policy recompute (decorator)")
     assert outcomes == {
         "first": recompute,
         "last": CacheOutcome("unknown", "downstream of recompute node 'second'"),

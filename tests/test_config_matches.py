@@ -430,3 +430,30 @@ def rows__other() -> int:
         .build()
     )
     assert driver.execute(["rows"]) == {"rows": 2}
+
+
+_FIELDS = """
+from fnloom import cache, config, extract_fields
+
+def _is_eu(region: str) -> bool:
+    return {test}
+
+@config.matches(_is_eu)
+@cache(behavior="disable", fields={{"net": "default"}})
+@extract_fields({{"net": float}})
+def amounts__eu() -> dict:
+    return {{"net": 1.0}}
+"""
+
+
+def test_a_stored_field_s_key_has_the_predicate_s_version() -> None:
+    """A field stored apart from its `disable` producer misses on an edited predicate."""
+    store = MemoryCache()
+    cfg = {"region": "eu"}
+    first = make_module("matches_fields", _FIELDS.format(test='region == "eu"'))
+    driver = Builder().with_modules(first).with_config(cfg).with_cache(store).build()
+    assert driver.execute(["net"]) == {"net": 1.0}
+    assert driver.explain_cache(["net"])["net"].status == "hit"
+    edited = make_module("matches_fields", _FIELDS.format(test='region in ("eu",)'))
+    again = Builder().with_modules(edited).with_config(cfg).with_cache(store).build()
+    assert again.explain_cache(["net"])["net"].status == "miss"
