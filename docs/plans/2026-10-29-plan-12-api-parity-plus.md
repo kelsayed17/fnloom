@@ -178,6 +178,15 @@ graphviz`), plus `render("x.mmd")` and `render("x.dot")` as the dependency-free 
 
 Either way the missing-`dot` message improves. The plan reports which was chosen when the PR opens.
 
+**Outcome (PR B, 2026-11-05): the bar was met, so the builtin engine ships.** On every docs example graph the builtin
+layout has as many crossings as `dot` (0 to 3), and on the benchmark generator's 200-node `layered` graph exactly as
+many (171). It has no overlapping node or label and every edge points along `orient` on all of them. Layers come from
+network simplex, as `dot`'s do, giving the same total edge length as `dot` on the 200-node graphs measured; ordering is
+barycentre and median sweeps from three starting orders, then sifting. On a further stress set, eleven random
+200-node graphs drawn LR and TB, 21 of 22 cases are within 1.5x of `dot` (most 1.1x to 1.4x); the one outside is
+1.58x, against a `dot` TB count lower than its own LR count for the same graph. A 1000-node graph lays out in about
+2.5 seconds: sifting is bounded by the graph's layer widths, never by time, so the output stays deterministic.
+
 ### 9. Per-field cache control (sideways) → Q147
 
 Hamilton: `@cache(..., target_="a")` applies the behaviour to the named output node of a multi-output function.

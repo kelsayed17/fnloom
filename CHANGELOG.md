@@ -28,9 +28,26 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `.on_output` over `on_output=`. A namespace that is no dotted identifier path is refused when decorating, and a
   name two nodes would have fails the build naming what made each. `apply_to(...).named(name, namespace=)` does the
   same for `@mutate` (Q140).
+- `fnloom.Style(fill=, stroke=, font_color=, stroke_width=, dashed=, shape=, dot=, mermaid=)` and
+  `Drawing.styled(graph=, node=, edge=, style=)`, returning a new drawing that DOT, Mermaid and SVG all draw alike.
+  `style(view, drawn)` is called once per node with its `NodeView`. A colour is `#rrggbb` or a CSS name from
+  `Style.COLOURS`; anything else is a `ValueError` naming the attribute, and the node when a style function made it.
+  Passthrough keys are identifiers and values `str`: quoted and escaped in DOT, and refused in Mermaid when they hold
+  `, ; " { } %` or a line break. Attributes are written in a fixed order. Every `draw*` method takes `show_types`,
+  `show_tags`, `show_schema` (a `TypedDict`, dataclass or `NamedTuple` return type's fields) and `hide_inputs`, and
+  `fnloom draw` takes `--no-types`, `--show-tag`, `--show-schema` and `--hide-inputs`. `DrawnNode` gains `tags`,
+  `schema`, `style` and `view` (the `NodeView`, left out of equality, `repr` and pickling), and `Drawing` gains
+  `graph_style`, `edge_style` and `show_types` (Q139).
+- `Drawing.to_svg(*, orient="LR", legend=True)`, an SVG laid out in pure Python, and `render(path, engine="dot" |
+  "builtin")`: `"dot"` stays the default, and `"builtin"` writes `to_svg()` with nothing installed. `fnloom draw`
+  takes `--engine builtin` (Q146).
 
 ### Changed
 
+- Without Graphviz, a drawing's `_repr_svg_` (Jupyter's preview) is the builtin SVG, where it was `None`. The
+  `FileNotFoundError` for a missing `dot` gives the platform's install command (`brew install graphviz`, `apt-get
+  install graphviz`, `winget install graphviz`), and names `.mmd`, `.dot` and, for an SVG, `engine="builtin"` as the
+  ways that need nothing (Q146).
 - `NodeView.tags` is now `Mapping[str, str | tuple[str, ...]]`: code that reads a tag as a `str` needs an
   `isinstance(value, str)` check (or `tags.get("k")` handled as either) to type-check. `Driver.nodes` is typed
   `NodeViews`, which has `tagged`. A node's `display_name` tag given as a tuple is drawn joined by `, `.

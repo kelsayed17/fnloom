@@ -609,7 +609,7 @@ def test_q139_drawing_style() -> None:
     )
     assert sorted(seen) == sorted(styled)
     assert sorted(n.name for n in drawing.nodes) == hamilton_drawn
-    with pytest.raises(ValueError, match="node 'a'.*fill 'redd' is not a colour"):
+    with pytest.raises(ValueError, match=r"node 'a'.*fill 'redd' is not a colour"):
         driver.draw().styled(style=lambda *_: fnloom.Style(fill="redd"))
 
 
@@ -632,9 +632,14 @@ def test_q146_an_svg_without_graphviz(
     monkeypatch.setattr(shutil, "which", lambda _: None)
     drawing = fnloom.build(module).draw()
     written = drawing.render(tmp_path / "f.svg", engine="builtin")
-    titles = [t.text for t in ET.parse(written).iter("{http://www.w3.org/2000/svg}title")]  # noqa: S314  # our own file
+    titles = [
+        t.text
+        for t in ET.parse(written).iter("{http://www.w3.org/2000/svg}title")  # noqa: S314  # our own file
+    ]  # our own file
     assert {"a", "root", "left", "right", "join"} <= set(titles)
-    with pytest.raises(FileNotFoundError, match="brew install graphviz|apt-get|winget"):
+    with pytest.raises(
+        FileNotFoundError, match=r"brew install graphviz|apt-get|winget"
+    ):
         drawing.render(tmp_path / "g.svg")
 
 

@@ -7,15 +7,14 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import pytest
 
+import drawing_golden
 import fnloom
 from fnloom import Drawing, DrawnNode, Style
 from helpers import make_module
-
-import drawing_golden
 
 if TYPE_CHECKING:
     from fnloom import NodeView
@@ -117,7 +116,7 @@ def test_a_style_checks_every_other_field() -> None:
         Style(dot={"width": 2})  # ty: ignore[invalid-argument-type]
     for key in ("a b", "1x", "", "x-y", 'a"'):
         with pytest.raises(
-            ValueError, match="Style dot key .* is not an attribute name"
+            ValueError, match=r"Style dot key .* is not an attribute name"
         ):
             Style(dot={key: "v"})
     Style(mermaid={"font-weight": "bold"})  # a CSS name may hold `-`
@@ -190,7 +189,7 @@ def test_styles_merge_field_by_field() -> None:
 
 
 def test_the_style_function_sees_each_node_once_in_order() -> None:
-    """`style(view, drawn)`: the full `NodeView` and its `DrawnNode`, in drawing order."""
+    """`style(view, drawn)`: the `NodeView` and the `DrawnNode`, in drawing order."""
     seen: list[tuple[str, str, object]] = []
 
     def style(view: NodeView, drawn: DrawnNode) -> Style | None:
@@ -206,7 +205,7 @@ def test_the_style_function_sees_each_node_once_in_order() -> None:
 
 
 def test_precedence_later_wins() -> None:
-    """Kind and marks, then `node`, then `style(...)`; edges: `edge`, then the path's red."""
+    """Kind and marks, then `node`, then `style(...)`; edges: `edge`, then red."""
     drawing = (
         _driver()
         .draw_path_between("sales", "totals")
@@ -234,16 +233,16 @@ def test_a_bad_style_names_the_node_and_the_attribute() -> None:
     with pytest.raises(
         ValueError, match="style for node 'rate': Style fill 'blu' is not a colour"
     ):
-        drawing.styled(style=lambda view, _: Style(fill="blu"))
+        drawing.styled(style=lambda *_: Style(fill="blu"))
     with pytest.raises(
         TypeError, match="style for node 'rate': Style dashed must be a bool"
     ):
-        drawing.styled(style=lambda view, _: Style(dashed="yes"))  # ty: ignore[invalid-argument-type]
+        drawing.styled(style=lambda *_: Style(dashed="yes"))  # ty: ignore[invalid-argument-type]
     with pytest.raises(TypeError, match="returned dict for node 'rate'"):
-        drawing.styled(style=lambda view, _: {"fill": "red"})  # ty: ignore[invalid-argument-type]
+        drawing.styled(style=lambda *_: {"fill": "red"})  # ty: ignore[invalid-argument-type]
     with pytest.raises(KeyError, match="mine"):  # the function's own error, untouched
-        drawing.styled(style=lambda view, _: {}["mine"])
-    with pytest.raises(TypeError, match="node must be a fnloom.Style, got dict"):
+        drawing.styled(style=lambda *_: {}["mine"])
+    with pytest.raises(TypeError, match=r"node must be a fnloom\.Style, got dict"):
         drawing.styled(node={"fill": "red"})  # ty: ignore[invalid-argument-type]
     with pytest.raises(TypeError, match="style must be callable, got Style"):
         drawing.styled(style=Style())  # ty: ignore[invalid-argument-type]
@@ -251,7 +250,7 @@ def test_a_bad_style_names_the_node_and_the_attribute() -> None:
         (DrawnNode(name="n", kind="function", type="int", title="n"),), ()
     )
     with pytest.raises(ValueError, match="node 'n' has no view for the style function"):
-        hand_made.styled(style=lambda view, _: None)
+        hand_made.styled(style=lambda *_: None)
 
 
 def test_a_graph_and_an_edge_style_take_their_own_fields() -> None:
@@ -287,7 +286,7 @@ def test_every_writer_draws_the_vocabulary() -> None:
     line = _dot_line(drawing.to_dot(), "region")
     assert line == (
         '  "region" [label="region\\nstr" style="filled" shape=hexagon '
-        'fillcolor="#112233" color="#000080" fontcolor="#ffffff" penwidth=1.5 a="2" z="1"]'
+        'fillcolor="#112233" color="#000080" fontcolor="#ffffff" penwidth=1.5 a="2" z="1"]'  # noqa: E501  # one line of DOT
     )
     mermaid = drawing.to_mermaid()
     assert '  n1{{"region<br>str"}}' in mermaid
@@ -350,7 +349,7 @@ def test_a_graph_style_in_each_writer() -> None:
     )
     assert drawing.to_dot().splitlines()[1] == '  graph [rankdir=LR bgcolor="#fffff0"]'
     assert drawing.to_mermaid().splitlines()[0] == (
-        '%%{init: {"themeVariables": {"background": "#fffff0", "lineColor": "#333333"}}}%%'
+        '%%{init: {"themeVariables": {"background": "#fffff0", "lineColor": "#333333"}}}%%'  # noqa: E501  # one line of Mermaid
     )
     assert '<rect width="100%" height="100%" fill="#fffff0"/>' in drawing.to_svg()
 
@@ -365,7 +364,7 @@ def test_an_unstyled_drawing_is_written_as_before() -> None:
 
 
 def test_styled_drawings_are_plain_data() -> None:
-    """Equal by value, pickled whole, the view left out of equality, `repr` and pickling."""
+    """Equal by value, pickled whole; the view kept out of equality, repr, pickles."""
     drawing = (
         _driver()
         .draw(show_tags=("owner",))
@@ -441,7 +440,7 @@ def test_every_draw_method_takes_the_display_options() -> None:
         .with_modules(make_module("styled_sales_async", SALES))
         .build_async()
     )
-    options = {
+    options: dict[str, Any] = {
         "show_types": False,
         "show_tags": ("stage",),
         "show_schema": True,

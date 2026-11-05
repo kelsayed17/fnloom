@@ -255,7 +255,7 @@ def test_draw_with_the_builtin_engine(
         '<?xml version="1.0" encoding="UTF-8"?>\n<svg '
     )
     status, _, err = _run(capsys, "draw", str(flow), "--engine", "builtin")
-    assert status == 2
+    assert status == 2  # noqa: PLR2004  # a usage error
     assert "--engine makes an image: give a file with -o" in err
     status, _, err = _run(
         capsys, "draw", str(flow), "--engine", "builtin", "-o", str(tmp_path / "g.png")

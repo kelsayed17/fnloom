@@ -7,14 +7,13 @@ import xml.etree.ElementTree as ET
 from typing import TYPE_CHECKING
 
 import pytest
+from benches.generate import generated
 
 import fnloom
-from benches.generate import generated
+import test_drawing
 from fnloom import Drawing, DrawnNode, Style
 from fnloom._svg import Layout, layout, text_width
 from helpers import make_module
-
-import test_drawing
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -23,6 +22,7 @@ if TYPE_CHECKING:
 
 ORIENTS: tuple[Orient, ...] = ("LR", "TB", "RL", "BT")
 _SVG = "{http://www.w3.org/2000/svg}"
+_EPSILON = 1e-9
 
 
 def _probe() -> Drawing:
@@ -33,7 +33,7 @@ def _probe() -> Drawing:
 
 def _random_dag(n: int, seed: int) -> str:
     """`n` functions, each reading up to three of the 25 before it."""
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # noqa: S311  # a seeded shape, not cryptography
     lines = []
     for i in range(n):
         k = rng.choice([0, 1, 1, 2, 2, 3]) if i else 0
@@ -69,8 +69,8 @@ def _check_layout(drawing: Drawing, orient: Orient) -> Layout:
     for (a, *r), (b, *s) in itertools.combinations(rects, 2):
         apart = r[2] <= s[0] or s[2] <= r[0] or r[3] <= s[1] or s[3] <= r[1]
         assert apart, f"{a!r} and {b!r} overlap"
-    assert all(0 <= r[2] and r[4] <= placed.height for r in rects)
-    assert all(0 <= r[1] and r[3] <= placed.width for r in rects)
+    assert all(r[2] >= 0 and r[4] <= placed.height for r in rects)
+    assert all(r[1] >= 0 and r[3] <= placed.width for r in rects)
     axis, sign = {"LR": (0, 1), "RL": (0, -1), "TB": (1, 1), "BT": (1, -1)}[orient]
     named = {r[0]: r[1:] for r in rects}
     for (dependency, node), route in zip(drawing.edges, placed.edges, strict=True):
@@ -149,7 +149,7 @@ def _crossings(placed: Layout) -> int:
             a: tuple[float, float], b: tuple[float, float], c: tuple[float, float]
         ) -> int:
             v = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
-            return (v > 1e-9) - (v < -1e-9)
+            return (v > _EPSILON) - (v < -_EPSILON)
 
         return side(p, q, r) * side(p, q, s) < 0 and side(r, s, p) * side(r, s, q) < 0
 
@@ -185,7 +185,7 @@ def test_edges_are_as_short_as_a_layering_allows() -> None:
     x = {b.name: b.x for b in placed.boxes}
     assert x["seed"] < x["a"] < x["b"] < x["c"] < x["late"]
     assert x["c"] == x["x"]  # the same layer
-    assert len(placed.edges[-1]) <= 4  # x -> late: through no other layer
+    assert len(placed.edges[-1]) <= 4  # x -> late: through no other layer  # noqa: PLR2004  # out, two stubs and the tip
 
 
 def test_the_svg_is_well_formed() -> None:
@@ -242,7 +242,7 @@ def test_styles_and_marks_are_drawn() -> None:
     assert 'fill="#ffd700"' in text
     assert 'stroke="#0000ff" stroke-width="2" stroke-dasharray="5,3"' in text  # x -> a
     assert (
-        text.count('stroke="#ff0000" stroke-width="2" stroke-dasharray="5,3"') == 2
+        text.count('stroke="#ff0000" stroke-width="2" stroke-dasharray="5,3"') == 2  # noqa: PLR2004  # the path's two edges
     )  # path edges
     assert 'class="legend"' not in text
     assert 'class="legend"' in drawing.to_svg()
@@ -251,7 +251,7 @@ def test_styles_and_marks_are_drawn() -> None:
 def test_text_widths_come_from_the_table() -> None:
     """Helvetica's widths for ASCII, a full em past it."""
     assert text_width("i") < text_width("m")
-    assert text_width("…") == 14
+    assert text_width("…") == 14  # noqa: PLR2004  # an em at 14px
 
 
 def test_render_with_the_builtin_engine_needs_nothing(
