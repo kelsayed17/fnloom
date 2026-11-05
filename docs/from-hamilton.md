@@ -47,7 +47,7 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `@cache(behavior="recompute")`, `@cache(behavior="disable")` | The same, imported from `fnloom` ([Caching](#caching)) (Q152) |
 | `@cache(behavior="ignore")` on a producer | `@cache(ignore=("name",))` on the consumer instead (Q50) |
 | `@cache(format=...)` | The same, imported from `fnloom`: a format's name, or a `fnloom.Format` ([Caching](caching.md#stores)) (Q55) |
-| `target_=...` | Not there. fnloom adds `version=` to pin a code version (Q147) |
+| `@cache(..., target_="x")` on an `@extract_fields` function | `@cache(fields={"x": "default"})`, or a `fnloom.FieldCache(behavior=, format=)` per field. A stored field is served apart from its producer, so a `disable` producer's field hits without running it; `recompute` on a field runs the producer again, where Hamilton reruns only the field's getter on the stored producer; a field the function doesn't extract fails the build ([Per-field policies](caching.md#per-field-policies), Q147). `version=` pins a code version |
 | `@config.when`, `when_not`, `when_in`, `when_not_in` | The same, imported from `fnloom`, with the same `foo__variant` naming ([Config](writing-nodes.md#config)) (Q153) |
 | `@config.when(name="x")` | The same on `when`, `when_not` and `when_in`. On `when_not_in`, Hamilton reads `name` as a config key, while fnloom reads it as the node name, as on the other forms (Q59) |
 | `@config.default` | Not in Hamilton: the variant used when no other matches (Q154) |
@@ -193,7 +193,7 @@ value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](
 | | Hamilton 1.90.0 | fnloom |
 | --- | --- | --- |
 | Turning it on | `Builder().with_cache(path=...)` | `Builder().with_cache(fnloom.DiskCache(path))`, or `fnloom.MemoryCache()` (Q158) |
-| Per-node behavior | `@cache(behavior=...)`, or lists of names given to `with_cache` | `@cache(behavior=...)` on the function only (Q143) |
+| Per-node behavior | `@cache(behavior=...)`, or lists of names given to `with_cache`; a list given `True` beats every `@cache`, and a name that is no node is ignored | The same lists and precedence, but `True` counts as `default_behavior`, so a node's own `@cache` still wins; a name that is no node fails the build with a `did you mean`, and `explain_cache` says which setting each policy came from ([Behavior from the driver](caching.md#behavior-from-the-driver), Q143) |
 | `ignore` | `@cache(behavior="ignore")` on the producer hides it from every consumer | `@cache(ignore=("name",))` on a consumer, per parameter; the producer is `disable` (Q50) |
 | A code version | The function's source, hashed on every run | Its code, helpers, constants and libraries, read once at build (Q16, Q48) |
 | A helper or global the node reads | Not seen | Seen; a mutable global makes the node uncacheable unless it gives `@cache(version=...)` (Q48) |

@@ -109,6 +109,11 @@ class _Extractor:
         self._fill = fill
 
     @property
+    def producer(self) -> str:
+        """The name of the node whose value this node reads the field from."""
+        return self._producer
+
+    @property
     def field(self) -> str:
         """The field or column this node reads."""
         return self._field
