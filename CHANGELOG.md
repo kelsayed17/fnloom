@@ -7,6 +7,16 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ## [Unreleased]
 
+### Added
+
+- `fnloom.frame(library="pandas", *, flatten=True, separator=".", join="strict")`, a result builder for
+  `with_result_builder` making one pandas or polars frame: a frame output flattened into `<output>.<column>` columns in
+  request then column order, a series one column, scalars broadcast, all scalars one row. `join="strict"` refuses
+  outputs on different pandas indexes or of different polars lengths with a `ValueError` naming them; `join="outer"`
+  is Hamilton's `PandasDataFrameResult` frame, without its log; polars refuses it. Two columns of one name are a
+  `ValueError` naming both. The library is imported by `frame`, never by `import fnloom` (Q144).
+  `with_result_builder(pandas.DataFrame)` is unchanged (Q89).
+
 ## [0.3.0] - 2026-11-03
 
 ### Added

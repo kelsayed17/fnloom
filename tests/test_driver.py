@@ -396,6 +396,7 @@ def test_public_api_is_exported() -> None:
         "extract_columns",
         "extract_fields",
         "fingerprint",
+        "frame",
         "group",
         "inject",
         "mutate",
