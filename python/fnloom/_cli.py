@@ -167,7 +167,8 @@ def _parser() -> argparse.ArgumentParser:
     draw.add_argument(
         "--hide-inputs",
         action="store_true",
-        help="leave out the inputs, all but one requested as an output",
+        help="leave out the inputs the command doesn't name "
+        "(an output, a NODE drawn from, a path's end)",
     )
     draw.add_argument(
         "--engine",

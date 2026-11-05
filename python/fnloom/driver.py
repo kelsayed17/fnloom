@@ -1539,9 +1539,10 @@ class Driver[R = dict[str, object]]:
         are printed under it, `name=value`, a tuple value joined by `, `, in the
         order named; `show_schema` adds a line `field: type` for each field of a
         return type that is a `TypedDict`, dataclass or `NamedTuple`, in
-        declaration order; `hide_inputs` leaves out the inputs, all but one
-        requested as an output. A wrong option is a `TypeError` naming it, and a
-        tag named twice a `ValueError`.
+        declaration order; `hide_inputs` leaves out every input the call doesn't
+        name, keeping one requested as an output, drawn from, or at a path's end.
+        A wrong option is a `TypeError` naming it, and a tag named twice a
+        `ValueError`.
         """
         shown = display(
             show_types=show_types,
@@ -1572,7 +1573,7 @@ class Driver[R = dict[str, object]]:
         )
         self._check_drawn(names)
         drawn = {*names, *self._graph.upstream_of(list(names))}
-        return drawing(self._nodes, drawn, shown=shown)
+        return drawing(self._nodes, drawn, shown=shown, named=names)
 
     def draw_downstream_of(
         self,
@@ -1597,7 +1598,7 @@ class Driver[R = dict[str, object]]:
         self._check_drawn(names)
         downstream = sorted({*names, *self._graph.downstream_of(list(names))})
         context = with_context(self._nodes, downstream)
-        return drawing(self._nodes, [*downstream, *context], context, shown)
+        return drawing(self._nodes, [*downstream, *context], context, shown, names)
 
     def draw_path_between(  # noqa: PLR0913  # the display options, keyword-only
         self,
@@ -1631,7 +1632,7 @@ class Driver[R = dict[str, object]]:
         marks: dict[str, list[Mark]] = {name: ["path"] for name in path}
         if context:
             marks |= with_context(self._nodes, path)
-        return drawing(self._nodes, marks, marks, shown)
+        return drawing(self._nodes, marks, marks, shown, (upstream, downstream))
 
     def draw_execution(  # noqa: PLR0913  # the display options, keyword-only
         self,
@@ -1691,7 +1692,7 @@ class Driver[R = dict[str, object]]:
         marks: dict[str, list[Mark]] = {name: ["override"] for name in shape.overridden}
         for name in shape.planned:
             marks.setdefault(name, []).append("output")
-        return drawing(self._nodes, drawn, marks, shown)
+        return drawing(self._nodes, drawn, marks, shown, shape.planned)
 
     def export(
         self,

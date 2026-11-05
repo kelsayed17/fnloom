@@ -125,7 +125,8 @@ Every `draw*` method, on both drivers, takes four display options. `show_types=F
 label. `show_tags` names tags whose values are printed under the type, as `name=value`, in the order named, a list
 value joined by commas. `show_schema=True` adds a `field: type` line for each field of a return type that is a
 `TypedDict`, a dataclass or a `NamedTuple`, in declaration order, read from its annotations. `hide_inputs=True` leaves
-the inputs out, all but one requested as an output. This module returns a `TypedDict`:
+the inputs out, all but those the call names: a requested output, a node drawn from (`draw_upstream_of`,
+`draw_downstream_of`) or an end of `draw_path_between`. This module returns a `TypedDict`:
 
 ```python
 # file: orders.py

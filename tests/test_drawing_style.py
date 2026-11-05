@@ -422,16 +422,49 @@ def test_show_schema() -> None:
     assert _nodes(_driver().draw())["totals"].schema == ()
 
 
-def test_hide_inputs() -> None:
-    """Inputs and their edges left out, but not one requested as an output."""
-    driver = _driver()
-    drawing = driver.draw(hide_inputs=True)
+def _names(drawing: Drawing) -> list[str]:
+    return [n.name for n in drawing.nodes]
+
+
+def test_hide_inputs_on_draw() -> None:
+    """Every input and its edges left out: `draw` names none."""
+    drawing = _driver().draw(hide_inputs=True)
     assert {n.kind for n in drawing.nodes} == {"function"}
     assert all(a in _nodes(drawing) and b in _nodes(drawing) for a, b in drawing.edges)
-    run = driver.draw_execution(
+
+
+def test_hide_inputs_keeps_a_requested_output() -> None:
+    """`draw_execution`: an input requested as an output stays; the others go."""
+    run = _driver().draw_execution(
         ["totals", "units"], inputs={"region": "eu", "units": 2}, hide_inputs=True
     )
-    assert [n.name for n in run.nodes] == ["units", "sales", "totals"]
+    assert _names(run) == ["units", "sales", "totals"]
+    assert ("units", "sales") in run.edges
+
+
+def test_hide_inputs_keeps_a_node_drawn_upstream_of() -> None:
+    """`draw_upstream_of("region", ...)`: `region` stays, `units` goes."""
+    drawing = _driver().draw_upstream_of("region", "sales", hide_inputs=True)
+    assert _names(drawing) == ["region", "sales"]
+    assert drawing.edges == (("region", "sales"),)
+
+
+def test_hide_inputs_keeps_a_node_drawn_downstream_of() -> None:
+    """`draw_downstream_of("region")`: `region` stays; its context inputs go."""
+    drawing = _driver().draw_downstream_of("region", hide_inputs=True)
+    assert "region" in _names(drawing)
+    assert {"units", "rate"}.isdisjoint(_names(drawing))
+    assert ("region", "sales") in drawing.edges
+
+
+def test_hide_inputs_keeps_a_paths_ends() -> None:
+    """`draw_path_between("units", "report")`: `units` stays; context inputs go."""
+    drawing = _driver().draw_path_between("units", "report", hide_inputs=True)
+    # `regional`, a function `report` reads, stays as context.
+    assert sorted(_names(drawing)) == ["regional", "report", "sales", "totals", "units"]
+    assert _nodes(drawing)["units"].marks == {"path"}
+    one = _driver().draw_path_between("units", "units", hide_inputs=True)
+    assert _names(one) == ["units"]
 
 
 def test_every_draw_method_takes_the_display_options() -> None:

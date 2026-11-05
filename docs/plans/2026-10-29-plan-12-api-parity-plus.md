@@ -178,15 +178,20 @@ graphviz`), plus `render("x.mmd")` and `render("x.dot")` as the dependency-free 
 
 Either way the missing-`dot` message improves. The plan reports which was chosen when the PR opens.
 
-**Outcome (PR B, 2026-11-05): the bar was met, so the builtin engine ships.** On every docs example graph the builtin
-layout has as many crossings as `dot` (0 to 3), and on the benchmark generator's 200-node `layered` graph exactly as
-many (171). It has no overlapping node or label and every edge points along `orient` on all of them. Layers come from
-network simplex, as `dot`'s do, giving the same total edge length as `dot` on the 200-node graphs measured; ordering is
-barycentre and median sweeps from three starting orders, then sifting. On a further stress set, eleven random
-200-node graphs drawn LR and TB, 21 of 22 cases are within 1.5x of `dot` (most 1.1x to 1.4x); the one outside is
-1.58x, against a `dot` TB count lower than its own LR count for the same graph. A sparse 1000-node graph lays out in about
-2.5 seconds, and dense ones take longer (150 nodes with 2222 edges, 7.6 seconds): sifting is bounded by the graph's
-layer widths, never by time, so the output stays deterministic.
+**Outcome (PR B, 2026-11-05): the builtin engine ships, with one miss on the stress set, accepted by the
+maintainer.** On every docs example graph the builtin layout has as many crossings as `dot` (0 to 3), and on the
+benchmark generator's 200-node `layered` graph exactly as many (171). It has no overlapping node or label and every
+edge points along `orient` in every case measured. Layers come from network simplex, as `dot`'s do, giving the same
+total edge length as `dot` on the 200-node graphs measured; ordering is barycentre and median sweeps from three
+starting orders, then sifting. On a further stress set, eleven random 200-node graphs drawn LR and TB, 21 of 22 cases
+are within 1.5x of `dot` (most 1.1x to 1.4x).
+
+**Miss:** random graph seed 2 drawn TB has 348 crossings against `dot`'s 220, **1.58x, over the 1.5x bar.** (Drawn
+LR it is 1.43x, against 244.) This was accepted because `dot` stays the default for files and the builtin engine is
+chosen only by `engine="builtin"` or for a notebook preview without `dot`.
+
+A sparse 1000-node graph lays out in about 2.5 seconds, and dense ones take longer (150 nodes with 2222 edges, 7.6
+seconds): sifting is bounded by the graph's layer widths, never by time, so the output stays deterministic.
 
 ### 9. Per-field cache control (sideways) → Q147
 

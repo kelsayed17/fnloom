@@ -442,19 +442,18 @@ def drawing(
     names: Iterable[str],
     marks: Mapping[str, Iterable[Mark]] = MappingProxyType({}),
     shown: Display = Display(),  # noqa: B008  # frozen, never mutated
+    named: Iterable[str] = (),
 ) -> Drawing:
     """The drawing of `names`, each marked as `marks` says, shown as `shown` says.
 
     Only edges between drawn nodes are drawn. `hide_inputs` leaves out every
-    input not requested as an output.
+    input the call didn't name: `named` are the names it did (the outputs
+    requested, the nodes drawn from, a path's endpoints).
     """
     drawn = set(names)
     if shown.hide_inputs:
-        drawn = {
-            n
-            for n in drawn
-            if not views[n].is_input or "output" in set(marks.get(n, ()))
-        }
+        kept = set(named)
+        drawn = {n for n in drawn if not views[n].is_input or n in kept}
     order = topological(drawn, views)
     nodes: list[DrawnNode] = []
     edges: list[tuple[str, str]] = []
