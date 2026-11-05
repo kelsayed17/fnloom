@@ -185,7 +185,6 @@ def test_any_is_one_object_after_copy_deepcopy_and_pickle() -> None:
 
 def test_a_str_subclass_value_is_stored_as_plain_str() -> None:
     """A `str` subclass, alone or as an item, reads back as a plain `str`."""
-
     module = make_module(
         "tags_str_subclass",
         HEADER

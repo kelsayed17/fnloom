@@ -517,9 +517,7 @@ def c(b: int) -> int:
             n.name for n in built.list_available_variables(tag_filter=tag_filter)
         )
         query = {k: fnloom.ANY if v is None else v for k, v in tag_filter.items()}
-        assert found == sorted(v.name for v in fnloom_nodes.tagged(**query)), (
-            tag_filter
-        )
+        assert found == sorted(v.name for v in fnloom_nodes.tagged(**query)), tag_filter
 
 
 def _pairs(quirk: str) -> list[tuple[str, str]]:

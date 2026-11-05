@@ -35,9 +35,10 @@ def checked_value(key: str, value: object) -> TagValue:
     """`value` as a tag value: a `str`, or a non-empty tuple of distinct `str`.
 
     A `list` or `tuple` is kept in written order. A `str` subclass, alone or as
-    an item, is kept as a plain `str`, so views and exports hold one type. `TypeError` for anything else,
-    an unordered collection included; `ValueError` for an empty sequence or a
-    repeated item. Both name the tag `key`.
+    an item, is kept as a plain `str`, so views and exports hold one type.
+    `TypeError` for anything else, an unordered collection included;
+    `ValueError` for an empty sequence or a repeated item. Both name the tag
+    `key`.
     """
     if isinstance(value, str):
         return str.__str__(value)
