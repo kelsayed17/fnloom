@@ -12,13 +12,14 @@ import annotationlib
 import inspect
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
-from types import MappingProxyType
+from types import EllipsisType, MappingProxyType
 from typing import TYPE_CHECKING
 
 from fnloom._config import Condition, ConfigPolicy, build_conditions, matches
 from fnloom._decorators import _ATTRIBUTE, RESOLVING, Source, Value, decorations
 from fnloom._extract import extractor
 from fnloom._fingerprint import fingerprint
+from fnloom._namespaces import checked_namespace, qualified
 from fnloom._scan import NodeDef, Within, _payload
 from fnloom._types import opaque, resolved_hints, type_matches
 from fnloom._view import Param
@@ -34,15 +35,20 @@ _FORWARD = annotationlib.Format.FORWARDREF
 
 _NO_TAGS = MappingProxyType[str, str]({})
 
+# A step's namespace: `...` for its node's own name, `None` for none, or a path.
+type StepNamespace = str | EllipsisType | None
+
 
 @dataclass(frozen=True, slots=True)
 class Step:
     """One step: a function and its bindings, as `step(...)` made it.
 
     `bindings` bind its parameters after the first, by name. `label` replaces the
-    `with_<function>` part of its node's name, from `.named`. `conditions` are
-    the config conditions it runs under, all of which must hold; `fields` the
-    extracted fields it applies to, from `.on_output`, or `None` for all.
+    `with_<function>` part of its node's name, from `.named`. `namespace` is what
+    goes before it: `...` for the node's own name, `None` for nothing, or a
+    dotted path (Q140). `conditions` are the config conditions it runs under,
+    all of which must hold; `fields` the extracted fields it applies to, from
+    `.on_output`, or `None` for all.
     """
 
     fn: Callable[..., object]
@@ -50,13 +56,22 @@ class Step:
     label: str | None = None
     conditions: tuple[Condition, ...] = ()
     fields: tuple[str, ...] | None = None
+    namespace: StepNamespace = ...
 
-    def named(self, name: str) -> Step:
-        """This step, its node named `<node>.<name>` rather than `<node>.with_<fn>`."""
+    def named(self, name: str, namespace: StepNamespace = ...) -> Step:
+        """This step, its node named `<node>.<name>` rather than `<node>.with_<fn>`.
+
+        `namespace` replaces the `<node>` part (Q140): `None` drops it, so the
+        node is `<name>`, and a dotted path names it `<namespace>.<name>`. `...`,
+        the default, keeps the step's namespace as it is, by default `<node>`.
+        Under a module's namespace, the step's stays within it.
+        """
         if not isinstance(name, str) or not name.isidentifier():
             msg = f"a step's name must be an identifier, got {name!r}"
             raise ValueError(msg)
-        return replace(self, label=name)
+        if namespace is ...:
+            return replace(self, label=name)
+        return replace(self, label=name, namespace=checked_namespace(namespace))
 
     def _gated(self, kind: ConditionKind, keys: Mapping[str, object]) -> Step:
         added = build_conditions(kind, None, keys, None).conditions
@@ -80,10 +95,35 @@ class Step:
 
     def on_output(self, *fields: str) -> Step:
         """This step, on these extracted fields only, for `@pipe_output`."""
-        if not fields or not all(isinstance(f, str) for f in fields):
-            msg = "on_output takes one or more field names"
-            raise TypeError(msg)
-        return replace(self, fields=tuple(fields))
+        return replace(self, fields=_checked_fields(fields))
+
+
+def _checked_fields(fields: Sequence[object]) -> tuple[str, ...]:
+    """`fields` as a tuple of distinct names; `TypeError` for none or a non-`str`."""
+    if not fields or not all(isinstance(f, str) for f in fields):
+        msg = "on_output takes one or more field names"
+        raise TypeError(msg)
+    twice = sorted({f for f in fields if fields.count(f) > 1}, key=str)
+    if twice:
+        msg = f"on_output names {', '.join(repr(f) for f in twice)} twice"
+        raise ValueError(msg)
+    return tuple(str(f) for f in fields)
+
+
+def _step_namespace(namespace: object) -> StepNamespace:
+    """A decorator's `namespace=`: `...`, or what `checked_namespace` allows."""
+    return ... if namespace is ... else checked_namespace(namespace)
+
+
+def _in_namespace(
+    steps: tuple[Step, ...], namespace: StepNamespace
+) -> tuple[Step, ...]:
+    """`steps`, each without a namespace of its own given `namespace` (Q140)."""
+    if namespace is ...:
+        return steps
+    return tuple(
+        replace(s, namespace=namespace) if s.namespace is ... else s for s in steps
+    )
 
 
 def _named(fn: Callable[..., object]) -> str:
@@ -194,16 +234,18 @@ def _steps(given: Sequence[object], decorator: str) -> tuple[Step, ...]:
 
 
 def pipe_input[F: Callable[..., object]](
-    *steps: Step, on_input: str | None = None
+    *steps: Step, namespace: StepNamespace = ..., on_input: str | None = None
 ) -> Callable[[F], F]:
     """Runs `steps` on a parameter's value before the function reads it (Q104).
 
     The steps feed the parameter `on_input`, by default the first one: the first
     step takes what the parameter would have read, and the function reads the
-    last step. `TypeError` for no steps, a function with no parameters, or an
-    `on_input` naming none of its parameters.
+    last step. `namespace` names the steps as `Step.named`'s does, for each step
+    not given one of its own (Q140). `TypeError` for no steps, a function with no
+    parameters, or an `on_input` naming none of its parameters; a namespace that
+    is no dotted identifier path is refused here.
     """
-    recorded = _steps(steps, "pipe_input")
+    recorded = _in_namespace(_steps(steps, "pipe_input"), _step_namespace(namespace))
     if on_input is not None and not isinstance(on_input, str):
         msg = f"on_input must be one parameter's name, got {on_input!r}"
         raise TypeError(msg)
@@ -227,14 +269,33 @@ def pipe_input[F: Callable[..., object]](
     return apply
 
 
-def pipe_output[F: Callable[..., object]](*steps: Step) -> Callable[[F], F]:
+def pipe_output[F: Callable[..., object]](
+    *steps: Step,
+    namespace: StepNamespace = ...,
+    on_output: str | Sequence[str] | None = None,
+) -> Callable[[F], F]:
     """Runs `steps` on the function's value: the node named after it is the last's.
 
     The function itself runs as `<node>.raw`. On a function with extracted
-    fields, the steps apply to each field, or to those `.on_output` names.
-    `TypeError` for no steps.
+    fields, the steps apply to each field, or to those `on_output` names; a
+    step's own `.on_output` wins over `on_output`, as the more specific. On a
+    function without fields, `on_output` may name only the node itself.
+    `namespace` names the steps as `Step.named`'s does, for each step not given
+    one of its own; `.raw` and the node keep their names (Q140). `TypeError` for
+    no steps or a malformed `on_output`; a namespace that is no dotted
+    identifier path is refused here, and a field the function doesn't extract
+    at build.
     """
-    recorded = _steps(steps, "pipe_output")
+    recorded = _in_namespace(_steps(steps, "pipe_output"), _step_namespace(namespace))
+    if on_output is not None:
+        given = (on_output,) if isinstance(on_output, str) else on_output
+        if not isinstance(given, (list, tuple)):
+            msg = f"on_output takes a field name or a list of them, got {on_output!r}"
+            raise TypeError(msg)
+        fields = _checked_fields(given)
+        recorded = tuple(
+            replace(s, fields=fields) if s.fields is None else s for s in recorded
+        )
 
     def apply(fn: F) -> F:
         current = decorations(fn)
@@ -279,6 +340,13 @@ def _kept(
         for s, label in zip(steps, _labels(steps), strict=True)
         if not s.conditions or matches(ConfigPolicy(s.conditions, False, None), config)  # noqa: FBT003  # not a default variant
     ]
+
+
+def _step_name(owner: NodeDef, s: Step, label: str) -> str:
+    """`s`'s node's name: its label under its namespace, within the module's (Q140)."""
+    if s.namespace is ...:
+        return f"{owner.name}.{label}"
+    return qualified(owner.namespace, qualified(s.namespace, label))
 
 
 def _step_node(
@@ -349,6 +417,8 @@ def lowered(
     takes them (Q112).
     """
     out: list[NodeDef] = []
+    # What made each node in `out`, for a name made twice (Q140).
+    owners: list[str] = []
     made: set[str] = set()
     problems: list[str] = []
     by_origin: dict[int, set[str]] = {}
@@ -375,21 +445,51 @@ def lowered(
                 if field_target and piped:
                     # A field's final node stands for no function in a request.
                     made.add(current.name)
-            if extracting is None and fields is not None:
-                unknown = sorted(
-                    {f for s in steps_out for f in s.fields or () if f not in fields}
-                )
-                problems.extend(
-                    f"{node.name}: on_output names {f!r}, which it doesn't extract"
-                    for f in unknown
-                )
+            if not field_target:
+                problems.extend(_unknown_fields(node, steps_out, fields))
         made.update(n.name for n in extra)
         out.append(current)
+        owners.append(f"the {_kind(node)} {node.name!r}")
         out.extend(extra)
+        owners.extend(f"a step of {node.name!r}" for _ in extra)
     if problems:
         raise ValueError("\n".join(sorted(set(problems))))
-    _refuse_twice(out)
+    _refuse_twice(out, owners)
     return out, frozenset(made)
+
+
+def _unknown_fields(
+    node: NodeDef, steps: Sequence[Step], fields: set[str] | None
+) -> list[str]:
+    """A line for each `on_output` field `node`'s function doesn't extract.
+
+    Without fields, the one output a step can name is the node itself, as in
+    Hamilton; any other name is refused, not ignored (Q106, Q140).
+    """
+    named = {f for s in steps for f in s.fields or ()}
+    if fields is not None:
+        return [
+            f"{node.name}: on_output names {f!r}, which it doesn't extract"
+            for f in sorted(named - fields)
+        ]
+    own = _bare(node)
+    return [
+        f"{node.name}: on_output names {f!r}, but it extracts no fields; name "
+        f"{own!r} or leave it out"
+        for f in sorted(named - {own})
+    ]
+
+
+def _bare(node: NodeDef) -> str:
+    """`node`'s name within its module's namespace."""
+    if node.namespace is None:
+        return node.name
+    return node.name.removeprefix(f"{node.namespace}.")
+
+
+def _kind(node: NodeDef) -> str:
+    """What `node` is, for an error naming it: an extracted field or a function."""
+    return "field" if extractor(node) is not None else "function"
 
 
 def _within(
@@ -448,7 +548,7 @@ def _fed(
     reads = target.binding.name
     made: list[NodeDef] = []
     for s, label in kept:
-        made_node = _step_node(s, f"{node.name}.{label}", reads, node, names)
+        made_node = _step_node(s, _step_name(node, s, label), reads, node, names)
         made.append(made_node)
         reads = made_node.name
     head = made[0].params[0]
@@ -491,7 +591,7 @@ def _piped(
     made = [raw]
     reads = raw.name
     for s, label in kept:
-        made_node = _step_node(s, f"{name}.{label}", reads, node, names)
+        made_node = _step_node(s, _step_name(node, s, label), reads, node, names)
         made.append(made_node)
         reads = made_node.name
     last = made[-1]
@@ -505,14 +605,22 @@ def _piped(
     return final, made
 
 
-def _refuse_twice(nodes: Sequence[NodeDef]) -> None:
-    seen: set[str] = set()
-    twice: set[str] = set()
-    for node in nodes:
-        (twice if node.name in seen else seen).add(node.name)
+def _refuse_twice(nodes: Sequence[NodeDef], owners: Sequence[str]) -> None:
+    """`ValueError` for a name two nodes have, naming what made each (Q140)."""
+    by_name: dict[str, list[str]] = {}
+    for node, owner in zip(nodes, owners, strict=True):
+        by_name.setdefault(node.name, []).append(owner)
+    twice = sorted(
+        f"{name!r} is made twice: by {' and by '.join(sorted(found))}"
+        for name, found in by_name.items()
+        if len(found) > 1
+    )
     if twice:
-        listed = ", ".join(repr(n) for n in sorted(twice))
-        msg = f"two nodes are named {listed}; give one step a name with .named(...)"
+        listed = "\n".join(twice)
+        msg = (
+            f"{listed}\ngive one step a name with .named(...), or a namespace of its "
+            "own"
+        )
         raise ValueError(msg)
 
 
@@ -532,10 +640,14 @@ class Target:
     label: str | None = None
     conditions: tuple[Condition, ...] = ()
     fields: tuple[str, ...] | None = None
+    namespace: StepNamespace = ...
 
-    def named(self, name: str) -> Target:
-        """The step's node named `<node>.<name>`; see `Step.named`."""
-        return replace(self, label=Step(_passed, {}).named(name).label)
+    def named(self, name: str, namespace: StepNamespace = ...) -> Target:
+        """The step's node named `<node>.<name>`, or `namespace`'s; see `Step.named`."""
+        named = replace(Step(_passed, {}), namespace=self.namespace).named(
+            name, namespace
+        )
+        return replace(self, label=named.label, namespace=named.namespace)
 
     def _gated(self, kind: ConditionKind, keys: Mapping[str, object]) -> Target:
         added = build_conditions(kind, None, keys, None).conditions
@@ -597,6 +709,7 @@ def _same(one: Step, other: Step) -> bool:
     if (
         one.fn is not other.fn
         or one.label != other.label
+        or one.namespace != other.namespace
         or one.conditions != other.conditions
         or one.fields != other.fields
         or one.bindings.keys() != other.bindings.keys()
@@ -664,6 +777,7 @@ def mutate[F: Callable[..., object]](
                 label=target.label,
                 conditions=target.conditions,
                 fields=target.fields,
+                namespace=target.namespace,
             )
             current = decorations(target.fn)
             mutations = current.mutations

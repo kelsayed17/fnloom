@@ -514,3 +514,341 @@ def a(x: int) -> int:
     assert "a.raw" in kept.node_names()
     assert "a.raw" in dropped.node_names()
     assert dropped.execute(["a"], inputs={"x": 1}) == {"a": 1}
+
+
+# ---- namespace= and on_output= (Q140) ---------------------------------------------
+
+NAMESPACED = """
+from fnloom import pipe_input, pipe_output, step
+
+def _inc(v: int) -> int:
+    return v + 1
+
+def _dbl(v: int) -> int:
+    return v * 2
+
+@pipe_input(step(_inc), namespace=None)
+def bare(a: int) -> int:
+    return a
+
+@pipe_input(step(_inc), step(_dbl), namespace="sales")
+def shared(a: int) -> int:
+    return a
+
+@pipe_input(step(_inc).named("bump", namespace="taxes"), step(_dbl).named("twice"))
+def renamed(a: int) -> int:
+    return a
+
+@pipe_input(step(_inc).named("lone", namespace=None))
+def alone(a: int) -> int:
+    return a
+
+@pipe_output(step(_dbl), namespace=None)
+def out_bare(a: int) -> int:
+    return a
+
+@pipe_output(step(_inc), namespace="regions")
+def out_shared(a: int) -> int:
+    return a
+
+@pipe_output(step(_inc).named("first", namespace="eu"), step(_dbl).named("then"))
+def out_named(a: int) -> int:
+    return a
+"""
+
+
+def test_namespace_names_the_steps() -> None:
+    """`...` prefixes `<node>.`, `None` nothing, a `str` itself (Q140)."""
+    driver = _driver(NAMESPACED, "namespaced")
+    deps = {name: driver.nodes[name].dependencies for name in driver.node_names()}
+    assert deps["with_inc"] == ("a",)
+    assert deps["bare"] == ("with_inc",)
+    assert deps["sales.with_inc"] == ("a",)
+    assert deps["sales.with_dbl"] == ("sales.with_inc",)
+    assert deps["shared"] == ("sales.with_dbl",)
+    assert deps["taxes.bump"] == ("a",)
+    assert deps["renamed.twice"] == ("taxes.bump",)
+    assert deps["lone"] == ("a",)
+    # `.raw` and the node itself keep their names; only the steps move.
+    assert deps["with_dbl"] == ("out_bare.raw",)
+    assert deps["out_bare"] == ("with_dbl",)
+    assert deps["regions.with_inc"] == ("out_shared.raw",)
+    assert deps["eu.first"] == ("out_named.raw",)
+    assert deps["out_named.then"] == ("eu.first",)
+    names = [
+        "bare",
+        "shared",
+        "renamed",
+        "alone",
+        "out_bare",
+        "out_shared",
+        "out_named",
+    ]
+    assert driver.execute(names, inputs={"a": 3}) == {
+        "bare": 4,
+        "shared": 8,
+        "renamed": 8,
+        "alone": 4,
+        "out_bare": 6,
+        "out_shared": 4,
+        "out_named": 8,
+    }
+
+
+def test_a_steps_own_namespace_wins() -> None:
+    """`.named(n, namespace=)` given beats the decorator's; `...` inherits it."""
+    source = """
+from fnloom import pipe_input, step
+
+def _inc(v: int) -> int:
+    return v + 1
+
+@pipe_input(
+    step(_inc).named("own", namespace="eu"),
+    step(_inc).named("kept"),
+    step(_inc).named("none", namespace=None),
+    namespace="sales",
+)
+def f(a: int) -> int:
+    return a
+"""
+    driver = _driver(source, "own_namespace")
+    assert {"eu.own", "sales.kept", "none"} <= set(driver.node_names())
+    assert driver.execute(["f"], inputs={"a": 0}) == {"f": 3}
+
+
+def test_namespaces_under_a_module_namespace() -> None:
+    """Under `with_modules(namespace=)`, a step's namespace is within it (Q74)."""
+    module = make_module("module_namespaced", NAMESPACED)
+    driver = fnloom.Builder().with_modules(module, namespace="eu").build()
+    names = set(driver.node_names())
+    assert {"eu.with_inc", "eu.sales.with_inc", "eu.taxes.bump", "eu.lone"} <= names
+    assert {"eu.renamed.twice", "eu.with_dbl", "eu.out_bare.raw"} <= names
+    assert driver.execute(["eu.shared"], inputs={"a": 3}) == {"eu.shared": 8}
+
+
+def _namespaced_input(namespace: object) -> object:
+    return pipe_input(step(_two, n=1), namespace=namespace)  # ty: ignore[invalid-argument-type]  # refused is the point
+
+
+def _namespaced_output(namespace: object) -> object:
+    return pipe_output(step(_two, n=1), namespace=namespace)  # ty: ignore[invalid-argument-type]  # refused is the point
+
+
+def _named_in(namespace: object) -> object:
+    return step(_two, n=1).named("x", namespace=namespace)  # ty: ignore[invalid-argument-type]  # refused is the point
+
+
+def _fields(on_output: object) -> object:
+    return pipe_output(step(_two, n=1), on_output=on_output)  # ty: ignore[invalid-argument-type]  # refused is the point
+
+
+@pytest.mark.parametrize(
+    ("make", "given", "error", "match"),
+    [
+        (_namespaced_input, "1x", ValueError, "'1x' is not a dotted"),
+        (_namespaced_input, "", ValueError, "dotted"),
+        (_namespaced_output, "a.", ValueError, "dotted"),
+        (_namespaced_output, 3, TypeError, "str or None"),
+        (_named_in, "a b", ValueError, "dotted"),
+        (_named_in, 1, TypeError, "str or None"),
+        (_fields, (), TypeError, "on_output"),
+        (_fields, 3, TypeError, "on_output"),
+        (_fields, ["p", 3], TypeError, "on_output"),
+        (_fields, {"p"}, TypeError, "on_output"),
+        (_fields, ["p", "p"], ValueError, "'p' twice"),
+    ],
+)
+def test_bad_namespaces_and_fields_are_refused_when_decorating(
+    make: object, given: object, error: type[Exception], match: str
+) -> None:
+    """A namespace must be a dotted identifier path, as a module's is (Q74, Q140)."""
+    assert callable(make)
+    with pytest.raises(error, match=match):
+        make(given)
+
+
+def test_dotted_namespaces_are_paths() -> None:
+    """`namespace="eu.sales"` prefixes both parts."""
+    source = """
+from fnloom import pipe_input, step
+
+def _inc(v: int) -> int:
+    return v + 1
+
+@pipe_input(step(_inc), namespace="eu.sales")
+def f(a: int) -> int:
+    return a
+"""
+    driver = _driver(source, "dotted_steps")
+    assert driver.nodes["f"].dependencies == ("eu.sales.with_inc",)
+
+
+ON_OUTPUT = """
+from fnloom import extract_fields, pipe_output, step
+
+def _inc(v: int) -> int:
+    return v + 1
+
+def _dbl(v: int) -> int:
+    return v * 2
+
+@pipe_output(step(_inc), step(_dbl).on_output("z"), on_output=("x", "y"))
+@extract_fields({"x": int, "y": int, "z": int})
+def d(a: int) -> dict:
+    return {"x": a, "y": a * 10, "z": a * 100}
+"""
+
+
+def test_on_output_applies_every_step_and_a_steps_own_wins() -> None:
+    """`on_output=` picks the fields for each step that names none (Q140)."""
+    driver = _driver(ON_OUTPUT, "on_output_all")
+    names = set(driver.node_names())
+    assert {"x.with_inc", "y.with_inc", "z.with_dbl"} <= names
+    assert not {"x.with_dbl", "y.with_dbl", "z.with_inc"} & names
+    assert driver.execute(["x", "y", "z"], inputs={"a": 1}) == {
+        "x": 2,
+        "y": 11,
+        "z": 200,
+    }
+    one = ON_OUTPUT.replace('on_output=("x", "y")', 'on_output="y"')
+    assert _driver(one, "on_output_one").execute(["x", "y"], inputs={"a": 1}) == {
+        "x": 1,
+        "y": 11,
+    }
+
+
+def test_on_output_naming_no_field_is_refused_at_build() -> None:
+    """A field the function doesn't extract is a `ValueError` naming it (Q140)."""
+    unknown = ON_OUTPUT.replace('on_output=("x", "y")', 'on_output=("x", "w")')
+    with pytest.raises(ValueError, match="d: on_output names 'w'"):
+        _driver(unknown, "on_output_w")
+
+
+ON_ITSELF = """
+from fnloom import pipe_output, step
+
+def _inc(v: int) -> int:
+    return v + 1
+
+@pipe_output(step(_inc), on_output="k")
+def k(a: int) -> int:
+    return a
+"""
+
+
+@pytest.mark.parametrize(
+    "changed",
+    [
+        ON_ITSELF.replace('on_output="k"', 'on_output="zz"'),
+        ON_ITSELF.replace('step(_inc), on_output="k"', 'step(_inc).on_output("zz")'),
+    ],
+)
+def test_on_output_on_a_function_without_fields(changed: str) -> None:
+    """Its own name is the one target; any other is refused, not ignored."""
+    assert _driver(ON_ITSELF, "own_target").execute(["k"], inputs={"a": 1}) == {"k": 2}
+    with pytest.raises(ValueError, match=r"k: on_output names 'zz'.*no fields"):
+        _driver(changed, "other_target")
+
+
+_TWICE_HEADER = """
+from fnloom import extract_fields, pipe_input, pipe_output, step
+
+def _inc(v: int) -> int:
+    return v + 1
+
+def _dbl(v: int) -> int:
+    return v * 2
+"""
+
+
+@pytest.mark.parametrize(
+    ("source", "match"),
+    [
+        (
+            """
+@pipe_input(step(_inc), namespace=None)
+def f(a: int) -> int:
+    return a
+
+@pipe_input(step(_dbl).named("with_inc", namespace=None))
+def g(a: int) -> int:
+    return a
+""",
+            r"'with_inc' is made twice: by a step of 'f' and by a step of 'g'",
+        ),
+        (
+            """
+def with_inc(a: int) -> int:
+    return a
+
+@pipe_input(step(_inc), namespace=None)
+def f(a: int) -> int:
+    return a
+""",
+            r"'with_inc' is made twice: by a step of 'f' and by the function 'with_inc",
+        ),
+        (
+            """
+@pipe_input(step(_inc), namespace="sales")
+def f(a: int) -> int:
+    return a
+
+@pipe_output(step(_inc), namespace="sales")
+def g(a: int) -> int:
+    return a
+""",
+            r"'sales.with_inc' is made twice: by a step of 'f' and by a step of 'g'",
+        ),
+        (
+            """
+@pipe_output(step(_inc), namespace=None)
+@extract_fields({"x": int, "y": int})
+def d(a: int) -> dict:
+    return {"x": a, "y": a}
+""",
+            r"'with_inc' is made twice: by a step of 'x' and by a step of 'y'",
+        ),
+    ],
+)
+def test_a_name_made_twice_names_both(source: str, match: str) -> None:
+    """A shared or prefix-free step name another node has fails the build (Q140)."""
+    with pytest.raises(ValueError, match=match):
+        _driver(_TWICE_HEADER + source, "made_twice")
+
+
+def test_namespaced_names_do_not_change_with_the_config() -> None:
+    """A dropped step leaves the others' numbers, under a namespace too (Q104)."""
+    source = """
+from fnloom import pipe_input, step
+
+def _inc(v: int) -> int:
+    return v + 1
+
+@pipe_input(step(_inc).when(mode="a"), step(_inc), namespace=None)
+def f(a: int) -> int:
+    return a
+"""
+    with_a = _driver(source, "ns_stable_a", mode="a")
+    without = _driver(source, "ns_stable_b", mode="b")
+    assert {"with_inc", "with_inc_1"} <= set(with_a.node_names())
+    assert "with_inc_1" in without.node_names()
+    assert "with_inc" not in without.node_names()
+    assert without.execute(["f"], inputs={"a": 0}) == {"f": 1}
+
+
+def test_mutate_targets_take_a_namespace() -> None:
+    """`apply_to(fn).named(n, namespace=)` names the step as `Step.named` does."""
+    source = """
+from fnloom import apply_to, mutate
+
+def total(a: int) -> int:
+    return a
+
+@mutate(apply_to(total).named("rounded", namespace="taxes"))
+def _round(v: int) -> int:
+    return v + 1
+"""
+    driver = _driver(source, "mutate_namespace")
+    assert driver.nodes["total"].dependencies == ("taxes.rounded",)
+    assert driver.execute(["total"], inputs={"a": 1}) == {"total": 2}

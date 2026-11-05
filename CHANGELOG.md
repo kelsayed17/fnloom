@@ -7,6 +7,20 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ## [Unreleased]
 
+### Added
+
+- `pipe_input(..., namespace=)`, `pipe_output(..., namespace=, on_output=)` and `step(...).named(name, namespace=)`,
+  with Hamilton's names: `...` (the default) keeps `<node>.<label>`, `None` names a step `<label>`, and a dotted path
+  `<path>.<label>`, within a module's namespace. A step's own namespace wins over the decorator's, and a step's own
+  `.on_output` over `on_output=`. A namespace that is no dotted identifier path is refused when decorating, and a
+  name two nodes would have fails the build naming what made each. `apply_to(...).named(name, namespace=)` does the
+  same for `@mutate` (Q140).
+
+### Changed
+
+- `.on_output(...)` on a `@pipe_output` function without extracted fields naming anything but the node itself is a
+  `ValueError` at build; it was ignored (Q106, Q140). The error for two nodes of one name now names what made each.
+
 ## [0.3.0] - 2026-11-03
 
 ### Added

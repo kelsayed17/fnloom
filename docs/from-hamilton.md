@@ -69,7 +69,7 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `@inject(param=source("x"))` | The same, imported from `fnloom` ([Bindings and decorators from config](writing-nodes.md#bindings-and-decorators-from-config), Q109) |
 | `@resolve(when=ResolveAt.CONFIG_AVAILABLE, decorate_with=...)` with `hamilton.enable_power_user_mode` | `@fnloom.resolve(decorate_with)`, with no power-user mode (Q110) |
 | `@pipe`, `@flow`, `collapse=True`, `@check_output(schema=...)` | Not there: `pipe` is a `pipe_input` that silently drops `collapse`, `flow` doesn't exist in 1.90.0, `collapse=True` raises `NotImplementedError` there, and a pandera schema is a custom check (Q155, Q114) |
-| `@pipe_input(..., namespace=...)`, `.named(name, namespace=...)`, `@pipe_output(..., on_output=...)` | Not there: a step's node is always `<node>.<label>`, and `.on_output(...)` on each step picks the fields (Q140) |
+| `@pipe_input(..., namespace=...)`, `.named(name, namespace=...)`, `@pipe_output(..., on_output=...)` | The same names: `None` drops the `<fn>.` prefix and a `str` replaces it. A name made twice fails the build naming what made each, where Hamilton names one function; a step's own namespace and `.on_output` win over the decorator's, where Hamilton drops or refuses them; an unknown field is refused, never ignored; and a namespace must be a dotted identifier path ([Steps](writing-nodes.md#steps), Q140) |
 
 </div>
 
