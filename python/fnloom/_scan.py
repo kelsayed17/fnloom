@@ -1247,7 +1247,7 @@ def _replacement_problems(
                     f"which no module given before {replacing_one.module!r} "
                     f"defines{where}"
                 )
-            problems.append(f"replace names {name!r}, {why} under this config")
+            problems.append(f"replace names {name!r}, {why}, under this config")
     return problems
 
 

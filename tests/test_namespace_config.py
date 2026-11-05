@@ -270,3 +270,12 @@ def tax(rate: float) -> float:
     assert fnloom.Builder().with_modules(
         module, namespace="eu", config={"region": "eu"}
     ).build().execute(["eu.tax"]) == {"eu.tax": 0.2}
+
+
+def test_an_empty_config_overlays_nothing() -> None:
+    """`config={}` is no overlay: not exported, and a later `config=` is accepted."""
+    module = _regional()
+    builder = Builder().with_modules(module, namespace="eu", config={})  # ty: ignore[invalid-argument-type]  # a module from make_module
+    assert builder._overlays == {}  # noqa: SLF001  # nothing recorded
+    later = builder.with_modules(module, namespace="eu", config={"region": "eu"})  # ty: ignore[invalid-argument-type]  # a module from make_module
+    assert later.build().execute(["eu.rate"]) == {"eu.rate": 0.2}

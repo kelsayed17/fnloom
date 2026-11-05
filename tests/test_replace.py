@@ -86,7 +86,7 @@ def test_a_name_no_earlier_module_defines_is_refused() -> None:
     with pytest.raises(
         ValueError,
         match="replace names 'totl', which module 'replace_discounted_typo' "
-        "doesn't define under this config",
+        "doesn't define, under this config",
     ):
         Builder().with_modules(sales).with_modules(
             discounted, replace=("totl",)
@@ -94,7 +94,7 @@ def test_a_name_no_earlier_module_defines_is_refused() -> None:
     with pytest.raises(
         ValueError,
         match="replace names 'bonus', which no module given before "
-        "'replace_extra' defines under this config",
+        "'replace_extra' defines, under this config",
     ):
         Builder().with_modules(sales).with_modules(extra, replace=("bonus",)).build()
 
@@ -137,7 +137,7 @@ def total__a(price: float) -> float:
     with pytest.raises(
         ValueError,
         match="replace names 'total', which no module given before "
-        "'replace_discounted_config' defines under this config",
+        "'replace_discounted_config' defines, under this config",
     ):
         builder.with_config({"mode": "b"}).build()
     # And the replacing module's own variant, absent under the config, is refused.
@@ -155,7 +155,7 @@ def total__a(price: float) -> float:
     with pytest.raises(
         ValueError,
         match="replace names 'total', which module 'replace_own_variant' "
-        "doesn't define under this config",
+        "doesn't define, under this config",
     ):
         Builder().with_modules(sales).with_modules(own, replace=("total",)).with_config(
             {"mode": "b"}

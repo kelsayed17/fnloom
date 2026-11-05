@@ -438,7 +438,13 @@ def _predicate_holds(
         error.add_note(f"in {shown}")
         raise
     if not isinstance(result, bool):
-        msg = f"{shown} must return a bool, got {type(result).__name__}"
+        kind = type(result)
+        got = (
+            kind.__name__
+            if kind.__module__ == "builtins"
+            else f"{kind.__module__}.{kind.__qualname__}"
+        )
+        msg = f"{shown} must return a bool, got {got}"
         raise TypeError(msg)
     return result
 
@@ -472,9 +478,21 @@ def _matches(
     bad: set[_Unequal],
     where: str | None = None,
 ) -> bool:
-    # Every condition is evaluated, so every bad comparison is found.
-    held = [_holds(condition, config, bad, where) for condition in policy.conditions]
-    return all(held)
+    # Every `when*` condition is evaluated, so every bad comparison is found. A
+    # predicate runs only once they all hold: it never sees a config its variant
+    # was already ruled out for (Q148).
+    held = [
+        _holds(condition, config, bad, where)
+        for condition in policy.conditions
+        if condition.kind != "matches"
+    ]
+    if not all(held):
+        return False
+    return all(
+        _holds(condition, config, bad, where)
+        for condition in policy.conditions
+        if condition.kind == "matches"
+    )
 
 
 def matches(policy: ConfigPolicy, config: Mapping[str, object]) -> bool:

@@ -347,3 +347,32 @@ def test_a_builder_with_a_predicate_pickles(tmp_path: object) -> None:  # noqa: 
     loaded = pickle.loads(pickle.dumps(driver))  # noqa: S301  # our own bytes
     assert loaded.execute(["matched_rate"]) == driver.execute(["matched_rate"])
     assert loaded.execute(["matched_rate"]) == {"matched_rate": 0.2}
+
+
+def test_a_predicate_runs_only_when_the_when_conditions_hold() -> None:
+    """A variant a `when` already rules out never calls its predicate."""
+    module = make_module(
+        "matches_after_when",
+        """
+from fnloom import config
+
+def _big(limit: int) -> bool:
+    return limit > 10
+
+@config.when(engine="spark")
+@config.matches(_big)
+def rows__spark() -> int:
+    return 1
+
+@config.default
+def rows__other() -> int:
+    return 2
+""",
+    )
+    driver = (
+        Builder()
+        .with_modules(module)
+        .with_config({"engine": "pandas", "limit": "n/a"})
+        .build()
+    )
+    assert driver.execute(["rows"]) == {"rows": 2}

@@ -2446,6 +2446,9 @@ def _overlaid_with(
 ) -> dict[str, Mapping[str, object]]:
     """`overlays` with `keys` as `namespace`'s; a differing second one is refused."""
     added = _checked_overlay(namespace, keys)
+    if not added:
+        # An empty `config=` overlays nothing: it is no config of the namespace's.
+        return dict(overlays)
     current = overlays.get(namespace)
     if current is not None and not _same_overlay(current, added):
         msg = (
