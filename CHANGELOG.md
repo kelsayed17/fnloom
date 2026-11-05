@@ -28,9 +28,13 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - `NodeView.tags` is now `Mapping[str, str | tuple[str, ...]]`: code that reads a tag as a `str` needs an
   `isinstance(value, str)` check (or `tags.get("k")` handled as either) to type-check. `Driver.nodes` is typed
   `NodeViews`, which has `tagged`. A node's `display_name` tag given as a tuple is drawn joined by `, `.
-- On a `@pipe_output` function without extracted fields, `.on_output(...)` picks the `@parameterize` rows it names,
-  where it applied to every row; naming no node of the function is a `ValueError` at build, where it was ignored (Q106,
-  Q140). The error for two nodes of one name now names what made each.
+- On a `@pipe_output` function without extracted fields, `.on_output(...)` (and `@mutate`'s
+  `apply_to(...).on_output(...)`) picks the `@parameterize` rows it names, where it applied to every row; naming no
+  node of the function is a `ValueError` at build, where it was ignored (Q106, Q140). The error for two nodes of one
+  name now names what made each.
+- A step named with `.named(...)` counts toward the numbers of its function's unnamed steps, as in Hamilton:
+  `step(_inc).named("first"), step(_inc)` makes `<node>.with_inc_1` for the second step, where it was
+  `<node>.with_inc` (Q104, Q140).
 
 ## [0.3.0] - 2026-11-03
 

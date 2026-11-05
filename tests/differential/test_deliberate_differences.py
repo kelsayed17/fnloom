@@ -5863,3 +5863,35 @@ def k(a: int) -> int:
     assert "1x.with_inc" in {v.name for v in hamilton.list_available_variables()}
     with pytest.raises(ValueError, match="'1x' is not a dotted identifier path"):
         make_module("q140_path_f", ours)
+
+
+_Q140_MUTATE = """
+from {package} import apply_to, mutate
+
+def f(a: int) -> int:
+    return a
+
+@mutate(apply_to(f).named("m", namespace="z"))
+def _plus(v: int) -> int:
+    return v + 10
+"""
+
+
+@pytest.mark.deliberate("Q140")
+def test_q140_mutate_keeps_a_targets_namespace(tmp_path: Path) -> None:
+    """Hamilton drops `apply_to(f).named(n, namespace=)`'s namespace; fnloom keeps."""
+    module = _module_from_file(
+        tmp_path,
+        "q140_mutate_h",
+        _Q140_MUTATE.format(package="hamilton.function_modifiers"),
+    )
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    assert "f.m" in {v.name for v in hamilton.list_available_variables()}
+    built = fnloom.build(
+        make_module("q140_mutate_f", _Q140_MUTATE.format(package="fnloom"))
+    )
+    assert "z.m" in built.node_names()
+    assert "f.m" not in built.node_names()
+    assert built.execute(["f"], inputs={"a": 1}) == hamilton.execute(
+        ["f"], inputs={"a": 1}
+    )

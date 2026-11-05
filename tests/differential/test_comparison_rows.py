@@ -313,6 +313,15 @@ def out_shared(a: int) -> int:
 @extract_fields({{"x": int, "y": int, "z": int}})
 def fields(a: int) -> dict:
     return {{"x": a, "y": a * 10, "z": a * 100}}
+
+@pipe_input(
+    step(_inc).named("with_inc", namespace="counted"),
+    step(_inc),
+    step(_dbl).named("x2"),
+    step(_inc),
+)
+def counting(a: int) -> int:
+    return a
 """
 
 
@@ -341,6 +350,11 @@ def test_q140_step_namespaces_and_on_output_name_alike(tmp_path: Path) -> None:
         "regions.with_inc",
         "x.with_inc",
         "y.with_dbl",
+        # A named step counts too: the unnamed ones after it are `_1`, `_2`.
+        "counted.with_inc",
+        "counting.with_inc_1",
+        "counting.x2",
+        "counting.with_inc_2",
     } <= expected
     assert "z.with_inc" not in expected
     fnloom_module = make_module("rows_steps_f", _Q140_STEPS.format(package="fnloom"))

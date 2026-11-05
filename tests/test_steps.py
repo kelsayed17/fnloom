@@ -653,7 +653,7 @@ def _fields(on_output: object) -> object:
         (_named_in, "a b", ValueError, "dotted"),
         (_named_in, 1, TypeError, "str or None"),
         (_fields, (), TypeError, "on_output"),
-        (_fields, 3, TypeError, "on_output"),
+        (_fields, 3, TypeError, "a str, list or tuple"),
         (_fields, ["p", 3], TypeError, "on_output"),
         (_fields, {"p"}, TypeError, "on_output"),
         (_fields, ["p", "p"], ValueError, "'p' twice"),
@@ -893,4 +893,67 @@ def g(z: int) -> int:
     module = make_module("shadowed", source)
     assert fnloom.build(module).execute(["g"], inputs={"x": 1}) == {"g": 200}
     with pytest.raises(ValueError, match=r"eu\.g reads 'z' from outside namespace"):
+        fnloom.Builder().with_modules(module, namespace="eu").build()
+
+
+def test_a_named_step_counts_toward_the_numbers() -> None:
+    """As in Hamilton, a named step of a function numbers the unnamed after it."""
+    source = """
+from fnloom import pipe_input, step
+
+def _inc(v: int) -> int:
+    return v + 1
+
+@pipe_input(step(_inc).named("with_inc", namespace="p"), step(_inc))
+def f(a: int) -> int:
+    return a
+"""
+    driver = _driver(source, "named_counts")
+    assert driver.nodes["f"].dependencies == ("f.with_inc_1",)
+    assert driver.nodes["f.with_inc_1"].dependencies == ("p.with_inc",)
+
+
+_BOUND = """
+from fnloom import pipe_output, step
+
+def _inc(v: int) -> int:
+    return v + 1
+
+@pipe_output(step(_inc).named("x", namespace=None))
+def f(a: int) -> int:
+    return a
+
+def g(x: int) -> int:
+    return x * 100
+"""
+
+
+def test_a_step_named_like_a_bind_key_is_refused() -> None:
+    """A step is a node of its namespace: `bind=` of its name is refused (Q140).
+
+    A function of that name would be refused too (Q112).
+    """
+    module = make_module("bound_step", _BOUND)
+    with pytest.raises(
+        ValueError, match=r"bind names 'x' under namespace 'eu'.*'eu\.x'"
+    ):
+        fnloom.Builder().with_modules(
+            module, namespace="eu", bind={"x": fnloom.source("y")}
+        ).build()
+
+
+def test_a_step_reading_its_own_name_from_outside_is_a_cycle() -> None:
+    """The step is the reader: the message says it would read itself."""
+    source = """
+from fnloom import pipe_input, step
+
+def _inc(v: int) -> int:
+    return v + 1
+
+@pipe_input(step(_inc).named("a", namespace=None))
+def f(a: int) -> int:
+    return a
+"""
+    module = make_module("self_read", source)
+    with pytest.raises(ValueError, match=r"step 'eu\.a' reads 'a'.*itself, a cycle"):
         fnloom.Builder().with_modules(module, namespace="eu").build()

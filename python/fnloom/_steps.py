@@ -64,8 +64,9 @@ class Step:
 
         `namespace` replaces the `<node>` part (Q140): `None` drops it, so the
         node is `<name>`, and a dotted path names it `<namespace>.<name>`. `...`,
-        the default, keeps the step's namespace as it is, by default `<node>`.
-        Under a module's namespace, the step's stays within it.
+        the default, keeps a namespace given earlier, by an earlier `.named`;
+        without one, the decorator's `namespace=` applies, and without that,
+        `<node>`. Under a module's namespace, the step's stays within it.
         """
         if not isinstance(name, str) or not name.isidentifier():
             msg = f"a step's name must be an identifier, got {name!r}"
@@ -291,7 +292,7 @@ def pipe_output[F: Callable[..., object]](
     if on_output is not None:
         given = (on_output,) if isinstance(on_output, str) else on_output
         if not isinstance(given, (list, tuple)):
-            msg = f"on_output takes a field name or a list of them, got {on_output!r}"
+            msg = f"on_output takes a str, list or tuple of names, got {on_output!r}"
             raise TypeError(msg)
         fields = _checked_fields(given)
         recorded = tuple(
@@ -321,14 +322,15 @@ def _labels(steps: Sequence[Step]) -> list[str]:
     seen: dict[str, int] = {}
     labels: list[str] = []
     for s in steps:
-        if s.label is not None:
-            labels.append(s.label)
-            continue
         fn_name = getattr(s.fn, "__name__", "step")
         base = f"with{fn_name}" if fn_name.startswith("_") else f"with_{fn_name}"
         count = seen.get(base, 0)
+        # A named step counts too, as in Hamilton (Q140).
         seen[base] = count + 1
-        labels.append(base if count == 0 else f"{base}_{count}")
+        if s.label is not None:
+            labels.append(s.label)
+        else:
+            labels.append(base if count == 0 else f"{base}_{count}")
     return labels
 
 
@@ -473,14 +475,23 @@ def _shadowed(
     made: set[str],
     bound: Mapping[str, Mapping[str, Source | Value]],
 ) -> list[str]:
-    """A line for each node reading outside its namespace a name a step has in it.
+    """A line for each name a step takes that its module namespace reads elsewhere.
 
     Names were resolved before the steps were made, so with `namespace=None` or
     a `str`, a step can take a name a node of its module namespace reads from
-    outside: refused rather than read from the wrong node (Q74, Q140). A name
-    the namespace's `bind=` sends outside on purpose is left alone.
+    outside, or one its `bind=` binds. A step is a node of the namespace like
+    any other: a `bind=` of its name is refused, as one of a function's is
+    (Q112), and an outside read is refused rather than read from the wrong
+    node (Q74, Q140). A name `bind=` sends outside on purpose is left alone.
     """
-    found: list[str] = []
+    found = [
+        f"bind names {key!r} under namespace {namespace!r}, but a step there is "
+        f"named {qualified(namespace, key)!r}; give the step another name or "
+        "namespace, or drop the binding"
+        for namespace, keys in bound.items()
+        for key in keys
+        if qualified(namespace, key) in made
+    ]
     for node in nodes:
         if node.namespace is None:
             continue
@@ -494,11 +505,19 @@ def _shadowed(
             if not isinstance(binding, Source) or binding.name in sent:
                 continue
             inside = qualified(node.namespace, binding.name)
-            if inside in made and inside != binding.name:
+            if inside not in made or inside == binding.name:
+                continue
+            if inside == node.name:
+                found.append(
+                    f"step {node.name!r} reads {binding.name!r} from outside "
+                    f"namespace {node.namespace!r}, which is its own name there: "
+                    "it would read itself, a cycle; give the step another name"
+                )
+            else:
                 found.append(
                     f"{node.name} reads {binding.name!r} from outside namespace "
                     f"{node.namespace!r}, but a step there is named {inside!r}; "
-                    "name the step otherwise, or read it as a source"
+                    "give the step another name or namespace"
                 )
     return found
 
