@@ -3213,7 +3213,7 @@ class Builder[R = dict[str, object]]:
             raise ValueError("\n".join(unbuilt))
         steps_of: dict[str, set[str]] = {}
         nodes, stepped = _steps.lowered(
-            nodes, self._config, self._bound, used, self._overlays, steps_of
+            nodes, self._config, self._bound, used, self._overlays, steps_of=steps_of
         )
         _refuse_unread(self._bound, used)
         relays = _steps.relays(nodes)

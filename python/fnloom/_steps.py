@@ -411,12 +411,13 @@ def relays(nodes: Sequence[NodeDef]) -> frozenset[str]:
     )
 
 
-def lowered(
+def lowered(  # noqa: PLR0913  # the build's parts, the last keyword-only
     nodes: Sequence[NodeDef],
     config: Mapping[str, object],
     bound: Mapping[str, Mapping[str, Source | Value]] | None = None,
     used: dict[str, set[str]] | None = None,
     overlays: Mapping[str, Mapping[str, object]] | None = None,
+    *,
     steps_of: dict[str, set[str]] | None = None,
 ) -> tuple[list[NodeDef], frozenset[str]]:
     """`nodes` with each `@pipe_input` and `@pipe_output` lowered to step nodes.
@@ -430,6 +431,7 @@ def lowered(
     of the step nodes each node was lowered to, by its name (Q149).
     """
     configs = overlaid(config, overlays)
+    lowered_to: dict[str, set[str]] = {} if steps_of is None else steps_of
     out: list[NodeDef] = []
     # What made each node in `out`, for a name made twice (Q140).
     owners: list[str] = []
@@ -471,8 +473,7 @@ def lowered(
                     _unknown_fields(node, steps_out, known, extracts=fields is not None)
                 )
         made.update(n.name for n in extra)
-        if steps_of is not None and extra:
-            steps_of.setdefault(node.name, set()).update(n.name for n in extra)
+        lowered_to.setdefault(node.name, set()).update(n.name for n in extra)
         out.append(current)
         owners.append(f"the {_kind(node)} {node.name!r}")
         out.extend(extra)
