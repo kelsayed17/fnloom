@@ -594,6 +594,9 @@ is written into Plan 10's last task.
 Plan 12's PRs A to G ship as 0.4.0. Plan 10's implementation plan follows Plan 12, and Plan 10 ends in the release after
 that instead of 0.3.0.
 
+**Amended (orchestrator, 2026-11-05):** Plan 10 ships together with Plan 12 as 0.4.0, built after Plan 12's PRs A to G
+merge. Its implementation plan is [Plan 10](../plans/2026-11-05-plan-10-absence-and-fan-out.md).
+
 #### A. Absence (needs nothing from B or C)
 
 1. Core: the `Absent` outcome, `Dependency::Admits`, skip propagation in `Plan::run`, may-be-absent at build; Rust
@@ -675,3 +678,6 @@ that instead of 0.3.0.
   pulls on any worker; a total order key; branch hits inside the scheduler; single-flight rules; per-call contexts;
   deadlines that abandon; every place absence meets; amended rows listed; export/2 only when needed; tasks split.
 - **2026-10-29:** approved by the maintainer; the three open questions decided (§13); `run_many` added as task 24.
+- **2026-11-05:** the release is amended: Plan 10 ships together with Plan 12 as 0.4.0, not 0.3.0, which shipped
+  without it (§12.3). The [implementation plan](../plans/2026-11-05-plan-10-absence-and-fan-out.md) records where it
+  fixes a shape this design left to the builder.

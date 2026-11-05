@@ -225,7 +225,8 @@ tests against Hamilton for every kept behaviour; benchmarks for anything on the 
 9. **Plan 10: typed absence and dynamic fan-out, sequential.** Designed and approved 2026-10-29
    ([the dynamic execution design](../design/2026-10-28-dynamic-execution-design.md), milestones A and B): `ABSENT`
    and its consumer rules, `Parallelizable` and `Collect` with nesting and per-branch caching. 0.3.0 shipped
-   without it (maintainer, 2026-11-03); Plan 10's implementation plan follows Plan 12.
+   without it (maintainer, 2026-11-03). [Plan 10's implementation plan](2026-11-05-plan-10-absence-and-fan-out.md)
+   is built after Plan 12's PRs A to G, and ships together with Plan 12 as 0.4.0 (orchestrator, 2026-11-05).
 10. **Plan 11: the parallel executor and partial results.** The same design, milestones C to E: the core
     `Scheduler`, `with_threads(...)` for free-threaded 3.14t, `run_many`, the async driver on the scheduler, and
     `absent_on` for partial results. The rest of "Beyond Hamilton" (streaming, incremental execution, sweeps) is left
