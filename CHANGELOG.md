@@ -7,6 +7,22 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-11-05
+
+### Fixed
+
+- `register_fingerprint` now applies to pydantic models. A model class could not be code-versioned (pydantic's
+  generated class attributes, such as `__class_vars__` and `model_config`, were refused as mutable), so its values
+  were refused even when registered, and a node reading one was `uncacheable`. A model class is now versioned by its
+  body and by what pydantic takes out of it: fields' resolved types (with the classes, aliases and `Annotated`
+  validators they name), defaults and `Field(...)` settings, private attributes, validators' settings and
+  `model_config`.
+- A frozen pydantic model (`ConfigDict(frozen=True)`) is fingerprinted without a registration, by its class, its
+  fields in order, the names of the fields set, its extra fields and its private attributes. A model that is not
+  frozen still needs one. fnloom never imports pydantic.
+- A node reading a `typing.NewType` global is cacheable: the `NewType` is versioned by its name and its supertype
+  (a class, a generic alias or another `NewType`), where it used to make the node `uncacheable`.
+
 ## [0.3.0] - 2026-11-03
 
 ### Added
@@ -358,7 +374,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - The type stub `fnloom/_core.pyi` matches the extension: `Graph`, `KeyPlan` and `ObserverBase` construct through `__new__`,
   and `Plan.run`'s `observers` defaults to `()` in its runtime signature too.
 
-[Unreleased]: https://github.com/kelsayed17/fnloom/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/kelsayed17/fnloom/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/kelsayed17/fnloom/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/kelsayed17/fnloom/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kelsayed17/fnloom/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/kelsayed17/fnloom/compare/v0.1.0...v0.1.1
