@@ -236,6 +236,12 @@ tests against Hamilton for every kept behaviour; benchmarks for anything on the 
     a test for every row of [Coming from Hamilton](../from-hamilton.md)'s comparison tables, then the four rows where
     fnloom is behind and the seven where it is only different, each made strictly better (Q139 on). Independent of
     Plans 10 and 11. PR 0 shipped in 0.3.0; PRs A to G ship as 0.4.0 (maintainer, 2026-11-03).
+12. **Plan 13: instance methods as nodes** (*new*, requested 2026-11-05, [#51](https://github.com/kelsayed17/fnloom/issues/51)).
+    `Builder.with_modules(Sales(client))` collects an instance's public methods as nodes, as it collects a module's
+    functions: `self` is bound and never a dependency, and the instance's long-lived state (a client) never becomes
+    an input. It keeps a client's lifetime in the app's scope instead of giving fnloom a second node lifetime. Needs a
+    design first (cache keys for `self`, collisions, async and generator methods, inheritance, pickling). After
+    Plan 11.
 
 ## Done means
 
