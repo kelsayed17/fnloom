@@ -16,6 +16,7 @@ from fnloom._config import (
     Condition,
     Found,
     Selection,
+    overlaid,
     redefinitions,
     resolve_variants,
 )
@@ -91,6 +92,8 @@ class NodeDef:
     # A field's extractor, kept when a check or a wrapper replaces its payload,
     # so the node is still known as a field: see `_extract.extractor`.
     extracting: _Extractor | None = None
+    # The module whose node of this name this one replaced, by `replace=` (Q150).
+    replaced: str | None = None
 
 
 def core_inputs(params: tuple[Param, ...]) -> list[tuple[str, bool]]:
@@ -980,6 +983,8 @@ def scan(  # noqa: PLR0913  # keyword-only options, one per kind of source
     namespaces: Sequence[str | None] = (),
     bound: Mapping[str, Mapping[str, Source | Value]] = _NO_BINDS,
     used: dict[str, set[str]] | None = None,
+    overlays: Mapping[str, Mapping[str, object]] | None = None,
+    replaces: Sequence[Sequence[str]] = (),
 ) -> Scanned:
     """`collect`, with the reason each node that no variant gave is absent.
 
@@ -1001,7 +1006,13 @@ def scan(  # noqa: PLR0913  # keyword-only options, one per kind of source
     doesn't define reads the binding instead. `ValueError` for a bound name the
     namespace defines. `used`, when given, gathers each namespace's bound names
     some node reads.
+
+    `overlays` holds each namespace's `config=` (Q112): its variants, its
+    `@resolve`s and its `config.matches` predicates see `config` overlaid with
+    it. `replaces` holds each module's `replace=` names, in order (Q150): see
+    `_made`.
     """
+    configs = overlaid(config, overlays)
     gathered = _functions(modules, namespaces)
     groups = gathered.functions
     given = _given(functions, groups.get(None, ()))
@@ -1020,19 +1031,30 @@ def scan(  # noqa: PLR0913  # keyword-only options, one per kind of source
     if selecting:
         namespaced = any(namespace is not None for namespace in groups)
         entries, selection = _selected(
-            entries, gathered.configured, config, namespaced=namespaced
+            entries, gathered.configured, config, namespaced=namespaced, configs=configs
         )
         unmatched = selection.unmatched
     # Only the functions the config kept are resolved, so an unselected
-    # variant's `@resolve` never runs (Q110).
-    resolved = {id(entry): _resolved_entry(entry, config) for _, entry in entries}
-    entries = [(namespace, resolved[id(entry)]) for namespace, entry in entries]
-    given = [resolved.get(id(entry), entry) for entry in given]
+    # variant's `@resolve` never runs (Q110). A function is resolved once per
+    # config it is seen under: a namespace's `config=` resolves it apart.
+    resolved: dict[tuple[int, int], Found | NodeSpec] = {}
+    for namespace, entry in entries:
+        seen = configs.get(namespace, config)
+        if (key := (id(seen), id(entry))) not in resolved:
+            resolved[key] = _resolved_entry(entry, seen)
+
+    def resolved_of(namespace: str | None, entry: Found | NodeSpec) -> Found | NodeSpec:
+        return resolved.get((id(configs.get(namespace, config)), id(entry)), entry)
+
+    entries = [
+        (namespace, resolved_of(namespace, entry)) for namespace, entry in entries
+    ]
+    given = [resolved_of(None, entry) for entry in given]
     # Each namespace's names, from every function given under it, unselected
     # variants too: reading a name no variant gave is the unmatched error. A
     # resolved function's names are its resolved decorators'.
     names = {
-        namespace: _names_in(namespace, [resolved.get(id(e), e) for e in group])
+        namespace: _names_in(namespace, [resolved_of(namespace, e) for e in group])
         for namespace, group in groups.items()
         if namespace is not None
     }
@@ -1049,7 +1071,8 @@ def scan(  # noqa: PLR0913  # keyword-only options, one per kind of source
         for key in within.bound.keys() & within.names.keys()
     ):
         raise ValueError("; ".join(defined))
-    seen = _made(entries, given, names, awaits=awaits)
+    replacing = _replacing(modules, namespaces, replaces)
+    seen = _made(entries, given, names, awaits=awaits, replacing=replacing)
     # A node a plain function or another variant defines is not missing.
     missing = {n: why for n, why in unmatched.items() if n not in seen}
     for name in missing.keys() & gathered.variants.keys():
@@ -1093,11 +1116,13 @@ def _selected(
     config: Mapping[str, object],
     *,
     namespaced: bool,
+    configs: Mapping[str | None, Mapping[str, object]],
 ) -> tuple[list[_Entry], Selection]:
     """`entries` with only the variants `config` selects, and the selection.
 
     `ValueError` first for a config-decorated function a module defines twice.
-    With `namespaced`, each namespace selects its own variants (Q74).
+    With `namespaced`, each namespace selects its own variants (Q74), by its
+    config in `configs` when it has one (Q112).
     """
     if redefined := sorted(line for m in configured for line in redefinitions(m)):
         raise ValueError("; ".join(redefined))
@@ -1106,6 +1131,7 @@ def _selected(
         [entry for _, entry in functions],
         config,
         [namespace for namespace, _ in functions] if namespaced else (),
+        configs or None,
     )
     chosen = {id(e) for e in selection.functions}
     kept = [(n, e) for n, e in entries if isinstance(e, NodeSpec) or id(e) in chosen]
@@ -1140,23 +1166,121 @@ def _names_in(namespace: str, group: Sequence[Found | NodeSpec]) -> Within:
     return Within(namespace, {name: f"{namespace}.{name}" for name in names})
 
 
-def _made(
+class _Replacing(NamedTuple):
+    """One module's `replace=` (Q150): its namespace, its module, and the names."""
+
+    namespace: str | None
+    module: str
+    names: tuple[str, ...]
+
+
+def _replacing(
+    modules: Sequence[ModuleType],
+    namespaces: Sequence[str | None],
+    replaces: Sequence[Sequence[str]],
+) -> dict[tuple[str | None, str], _Replacing]:
+    """Each `replace=`, by the namespace and module name it was given with.
+
+    `ValueError` for a module given again under the same namespace with a
+    `replace=`: the repeat makes no nodes, so it could replace nothing.
+    """
+    if not replaces:
+        return {}
+    under = namespaces or (None,) * len(modules)
+    found: dict[tuple[str | None, str], _Replacing] = {}
+    given: set[tuple[str | None, int]] = set()
+    for module, namespace, names in zip(modules, under, replaces, strict=True):
+        key = (namespace, id(module))
+        if names and key in given:
+            where = "" if namespace is None else f" under namespace {namespace!r}"
+            msg = (
+                f"module {module.__name__!r} is given again{where} with replace=, "
+                "so it makes no new nodes to replace with"
+            )
+            raise ValueError(msg)
+        given.add(key)
+        if names:
+            found[namespace, module.__name__] = _Replacing(
+                namespace, module.__name__, tuple(names)
+            )
+    return found
+
+
+def _bare(name: str, namespace: str | None) -> str:
+    """`name` as written in its namespace: `eu.total` is `total` under `eu`."""
+    return name if namespace is None else name.removeprefix(f"{namespace}.")
+
+
+def _refused_replacement(old: NodeDef, new: NodeDef) -> str | None:
+    """Why `new` can't replace `old`, or `None`: neither may be or give fields."""
+    for node in (old, new):
+        if _extract.is_generated(node):
+            return f"it is a field of {_definition(node, set())} in {node.module!r}"
+        if decorations(node.origin).extract is not None:
+            return (
+                f"{_definition(node, set())} in {node.module!r} extracts fields; "
+                "a replacement takes one node, not a function's fields"
+            )
+    return None
+
+
+def _replacement_problems(
+    replacing: Mapping[tuple[str | None, str], _Replacing],
+    defined: Mapping[tuple[str | None, str], set[str]],
+    replaced: set[tuple[str | None, str, str]],
+) -> list[str]:
+    """A line for each `replace=` name that replaced nothing, and why (Q150)."""
+    problems: list[str] = []
+    for key, replacing_one in replacing.items():
+        where = (
+            ""
+            if replacing_one.namespace is None
+            else f" under namespace {replacing_one.namespace!r}"
+        )
+        for name in replacing_one.names:
+            if (*key, name) in replaced:
+                continue
+            if name not in defined.get(key, set()):
+                why = f"which module {replacing_one.module!r} doesn't define{where}"
+            else:
+                why = (
+                    f"which no module given before {replacing_one.module!r} "
+                    f"defines{where}"
+                )
+            problems.append(f"replace names {name!r}, {why} under this config")
+    return problems
+
+
+def _made(  # one pass over the nodes, replacements in it
     entries: list[_Entry],
     given: Sequence[Found | NodeSpec],
     names: Mapping[str, Within],
     *,
     awaits: bool,
+    replacing: Mapping[tuple[str | None, str], _Replacing] | None = None,
 ) -> dict[str, NodeDef]:
     """The nodes `entries` make, by name; `ValueError` naming every clash, sorted.
 
     `given` are the sources given to `with_functions`, which a clash line names;
     `names` holds each namespace's names, which its nodes read first.
+
+    `replacing` holds each module's `replace=` (Q150): a node it names, made
+    by that module, stands for the node of that name an earlier module made,
+    keeping its place, and names that module as `replaced`. A name it
+    replaced nothing with, because no earlier module or not this one made
+    it, is a `ValueError`, as is replacing a field or a node with fields.
     """
     # The ids of the given sources, and of the nodes they make, for the clash lines.
     sourced = {id(e) for e in given}
     from_given: set[int] = set()
     seen: dict[str, NodeDef] = {}
     clashes: list[tuple[str, str]] = []
+    by_module = (
+        dict[tuple[str | None, str], _Replacing]() if replacing is None else replacing
+    )
+    # The names each replacing module made, and those it did replace.
+    defined: dict[tuple[str | None, str], set[str]] = {}
+    replaced: set[tuple[str | None, str, str]] = set()
     for namespace, entry in entries:
         if isinstance(entry, NodeSpec):
             fn = entry.fn
@@ -1167,21 +1291,46 @@ def _made(
                 awaits=awaits,
                 bind=entry.bind or None,
             )
+            replaces = None
         else:
             within = None if namespace is None else names[namespace]
             made = _node_defs(*entry, awaits=awaits, within=within)
+            # A function given to `with_functions` replaces nothing.
+            replaces = (
+                None if id(entry) in sourced else by_module.get((namespace, entry[0]))
+            )
         if sourced and id(entry) in sourced:
             from_given.update(id(node) for node in made)
         for node in made:
-            if node.name in seen:
-                clash = _duplicate(seen[node.name], node, from_given)
-                clashes.append((node.name, clash))
-            else:
+            bare = _bare(node.name, namespace)
+            if replaces is not None:
+                defined.setdefault((namespace, replaces.module), set()).add(bare)
+            old = seen.get(node.name)
+            if old is None:
                 seen[node.name] = node
-    if clashes:
+            elif (
+                replaces is not None
+                and bare in replaces.names
+                and old.module != node.module
+                and id(old) not in from_given
+            ):
+                # Said once: a refused replacement is not also one that missed.
+                replaced.add((namespace, replaces.module, bare))
+                if (refused := _refused_replacement(old, node)) is not None:
+                    clashes.append(
+                        (node.name, f"replace names {bare!r}, but {refused}")
+                    )
+                    continue
+                seen[node.name] = replace(node, replaced=old.module)
+            else:
+                clash = _duplicate(old, node, from_given)
+                clashes.append((node.name, clash))
+    # A `replace=` that missed comes first: a misspelt name is why a clash is left.
+    problems = sorted(_replacement_problems(by_module, defined, replaced))
+    if clashes or problems:
         # Sorted by node name; a name clashing more than once keeps scan order.
         clashes.sort(key=lambda clash: clash[0])
-        raise ValueError("; ".join(message for _, message in clashes))
+        raise ValueError("; ".join([*problems, *(message for _, message in clashes)]))
     return seen
 
 

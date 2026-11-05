@@ -7,6 +7,24 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ## [Unreleased]
 
+### Added
+
+- `@config.matches(predicate, *, name=None)`: a variant kept when `predicate`, called with the config keys its
+  parameters name, returns `True`. A defaulted parameter is an optional key, a missing required key never matches,
+  and a result that is no `bool` is a `TypeError` at build. It stacks with `config.when*` and falls back to
+  `@config.default`. The predicate's code version is in the selected variant's cache key and export `version`, and
+  the export shows the condition as `matches(<module.qualname>)` (Q148).
+- `Builder.without_edge_type_checks(*consumers)` turns edge type checks off for every edge, or only for the edges into
+  the nodes named; an unknown name is a `ValueError` at build. Input checks stay on. The export's new `edge_checks`
+  field records it, and it is in `graph_version` (Q149).
+- `with_modules(..., namespace="eu", config={...})` gives a namespace a config of its own, overlaid on the builder's
+  for its `@config` variants, `@resolve`s, `config.matches` predicates and steps, as `@subdag(config=)` does.
+  `Driver.config` stays the builder's own; the export's new `namespace_config` field lists each overlay, which is in
+  `graph_version` (Q112 amended: `config=` per copy was not planned).
+- `with_modules(module, replace=("total",))` replaces the node `total` that earlier modules define, for every reader.
+  A name no earlier module, or not this one, defines under the config is a `ValueError` at build. `NodeView.replaced`
+  and the export entry's `replaced` name the module replaced (Q74 amended, Q150).
+
 ## [0.3.0] - 2026-11-03
 
 ### Added

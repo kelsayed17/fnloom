@@ -1,9 +1,12 @@
 """What `@config.when*` and `@config.default` record, and how the build resolves it."""
 
+import annotationlib
 import ast
 import inspect
+import typing
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, replace
+from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal
 
 from fnloom import _extract
@@ -13,7 +16,7 @@ from fnloom._namespaces import qualified
 if TYPE_CHECKING:
     from types import ModuleType
 
-type ConditionKind = Literal["when", "when_not", "when_in", "when_not_in"]
+type ConditionKind = Literal["when", "when_not", "when_in", "when_not_in", "matches"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -22,9 +25,12 @@ class Condition:
 
     Attributes:
         kind: `"when"` (equals), `"when_not"` (differs), `"when_in"` or
-            `"when_not_in"` (member of `values`).
-        key: The config key.
-        values: What the key is compared with. `when` and `when_not` hold one.
+            `"when_not_in"` (member of `values`), or `"matches"`: a predicate
+            of config keys returned `True` (Q148).
+        key: The config key; for `"matches"`, the predicate's qualified name,
+            `module.qualname`.
+        values: What the key is compared with. `when` and `when_not` hold one;
+            `matches` holds the predicate.
     """
 
     kind: ConditionKind
@@ -51,6 +57,10 @@ class ConfigPolicy:
 
 def _sort_key(condition: Condition) -> tuple[str, str, str]:
     # The repr breaks a tie between equal keys and kinds, so order never matters.
+    # A predicate's repr holds its address: two of one name keep their written
+    # order instead, which the stable sort keeps on every run.
+    if condition.kind == "matches":
+        return (condition.key, condition.kind, "")
     return (condition.key, condition.kind, repr(condition.values))
 
 
@@ -86,12 +96,7 @@ def build_conditions(
     if not given:
         msg = f"config.{kind} needs at least one condition"
         raise ValueError(msg)
-    if name is not None and not isinstance(name, str):
-        msg = f"config.{kind} name must be a str, got {type(name).__name__}"
-        raise TypeError(msg)
-    if name == "":
-        msg = f"config.{kind} name must not be empty"
-        raise ValueError(msg)
+    checked_name = _checked_name(kind, name)
     bad = sorted(
         (key, type(value).__name__)
         for key, value in given.items()
@@ -110,7 +115,7 @@ def build_conditions(
             key=_sort_key,
         )
     )
-    return ConfigPolicy(built, default=False, name=name)
+    return ConfigPolicy(built, default=False, name=checked_name)
 
 
 def _is_collection(value: object) -> bool:
@@ -158,7 +163,10 @@ def merge(current: ConfigPolicy | None, new: ConfigPolicy) -> ConfigPolicy:
     if current is None:
         return new
     if current.default != new.default and (current.conditions or new.conditions):
-        msg = "@config.default cannot be combined with a config.when* on one function"
+        msg = (
+            "@config.default cannot be combined with a config.when* or "
+            "config.matches on one function"
+        )
         raise ValueError(msg)
     if current.name is not None and new.name is not None and current.name != new.name:
         msg = f"node name set twice: {current.name!r} and {new.name!r}"
@@ -224,6 +232,100 @@ class config:  # noqa: N801  # Hamilton's name
             raise TypeError(msg)
         node_name(fn, None)
         return _record(fn, ConfigPolicy((), default=True, name=None))
+
+    @staticmethod
+    def matches[F: Callable[..., object]](
+        predicate: Callable[..., bool], *, name: str | None = None
+    ) -> Callable[[F], F]:
+        """Keeps the node when `predicate`, called with config keys, returns `True`.
+
+        The predicate's parameters are config keys, as `@resolve`'s are (Q110):
+        a defaulted one is optional, and a missing required key never matches
+        (Q57). It must return a `bool`, else a `TypeError` at build naming it.
+        It combines with `config.when*` (every condition must hold), and with
+        `@config.default` on another variant. Its code version is in the cache
+        key of the variant it selects, and in the export (Q148).
+        """
+        condition = matches_condition(predicate)
+        _checked_name("matches", name)
+
+        def apply(fn: F) -> F:
+            node_name(fn, name)
+            return _record(fn, ConfigPolicy((condition,), default=False, name=name))
+
+        return apply
+
+
+def overlaid(
+    config: Mapping[str, object],
+    overlays: Mapping[str, Mapping[str, object]] | None,
+) -> dict[str | None, Mapping[str, object]]:
+    """The config each namespace with a `config=` selects by: `config`, overlaid (Q112).
+
+    A namespace without one, and a node of none, select by `config` itself.
+    """
+    if overlays is None or not overlays:
+        return {}
+    return {
+        namespace: MappingProxyType({**config, **keys})
+        for namespace, keys in overlays.items()
+    }
+
+
+def _checked_name(kind: str, name: object) -> str | None:
+    """`name=`; `TypeError` for one that is no `str`, `ValueError` for an empty one."""
+    if name is not None and not isinstance(name, str):
+        msg = f"config.{kind} name must be a str, got {type(name).__name__}"
+        raise TypeError(msg)
+    if name == "":
+        msg = f"config.{kind} name must not be empty"
+        raise ValueError(msg)
+    return name
+
+
+def matches_condition(predicate: object) -> Condition:
+    """The `"matches"` condition of `predicate`, checked; see `config.matches`."""
+    if not callable(predicate):
+        msg = (
+            "config.matches takes a function of config keys, "
+            f"got {type(predicate).__name__}"
+        )
+        raise TypeError(msg)
+    unnamed = [
+        p.name
+        for p in _parameters(predicate)
+        if p.kind in {p.VAR_POSITIONAL, p.VAR_KEYWORD, p.POSITIONAL_ONLY}
+    ]
+    if unnamed:
+        listed = ", ".join(unnamed)
+        msg = f"config.matches: the predicate must name each config key, not {listed}"
+        raise TypeError(msg)
+    return Condition("matches", predicate_name(predicate), (predicate,))
+
+
+def _parameters(predicate: Callable[..., object]) -> list[inspect.Parameter]:
+    """`predicate`'s parameters, its annotations unevaluated."""
+    forward = annotationlib.Format.FORWARDREF
+    signature = inspect.signature(predicate, annotation_format=forward)
+    return list(signature.parameters.values())
+
+
+def predicate_name(predicate: object) -> str:
+    """A predicate's `module.qualname`, as `matches(...)` shows it."""
+    module = str(getattr(predicate, "__module__", None) or "")
+    qualname = str(
+        getattr(predicate, "__qualname__", None) or type(predicate).__qualname__
+    )
+    return f"{module}.{qualname}" if module else qualname
+
+
+def predicates(conditions: Sequence[Condition]) -> list[Callable[..., object]]:
+    """The predicates of the `"matches"` conditions among `conditions`, in order."""
+    return [
+        typing.cast("Callable[..., object]", c.values[0])
+        for c in conditions
+        if c.kind == "matches"
+    ]
 
 
 def _record[F: Callable[..., object]](fn: F, policy: ConfigPolicy) -> F:
@@ -313,9 +415,42 @@ def _equal(key: str, have: object, want: object, bad: set[_Unequal]) -> bool:
     return False
 
 
-def _holds(
-    condition: Condition, config: Mapping[str, object], bad: set[_Unequal]
+def _predicate_holds(
+    condition: Condition, config: Mapping[str, object], where: str | None
 ) -> bool:
+    """Whether a `"matches"` predicate returns `True` for `config` (Q148).
+
+    A required parameter the config has no key for never matches (Q57).
+    `TypeError` for a result that is no `bool`; an error the predicate raises
+    is raised, with a note naming it.
+    """
+    predicate = typing.cast("Callable[..., object]", condition.values[0])
+    params = _parameters(predicate)
+    if any(p.default is p.empty and p.name not in config for p in params):
+        return False
+    shown = f"config.matches({condition.key})"
+    if where is not None:
+        shown += f" on {where}"
+    given = {p.name: config[p.name] for p in params if p.name in config}
+    try:
+        result = predicate(**given)
+    except Exception as error:
+        error.add_note(f"in {shown}")
+        raise
+    if not isinstance(result, bool):
+        msg = f"{shown} must return a bool, got {type(result).__name__}"
+        raise TypeError(msg)
+    return result
+
+
+def _holds(
+    condition: Condition,
+    config: Mapping[str, object],
+    bad: set[_Unequal],
+    where: str | None = None,
+) -> bool:
+    if condition.kind == "matches":
+        return _predicate_holds(condition, config, where)
     if condition.key not in config:
         return False
     have = config[condition.key]
@@ -332,10 +467,13 @@ def _unequal_error(bad: set[_Unequal]) -> TypeError:
 
 
 def _matches(
-    policy: ConfigPolicy, config: Mapping[str, object], bad: set[_Unequal]
+    policy: ConfigPolicy,
+    config: Mapping[str, object],
+    bad: set[_Unequal],
+    where: str | None = None,
 ) -> bool:
     # Every condition is evaluated, so every bad comparison is found.
-    held = [_holds(condition, config, bad) for condition in policy.conditions]
+    held = [_holds(condition, config, bad, where) for condition in policy.conditions]
     return all(held)
 
 
@@ -398,10 +536,13 @@ _OPERATORS: dict[ConditionKind, str] = {
     "when_not": "!=",
     "when_in": "in",
     "when_not_in": "not in",
+    "matches": "",
 }
 
 
 def _need(condition: Condition) -> str:
+    if condition.kind == "matches":
+        return f"matches({condition.key})"
     if condition.kind in {"when", "when_not"}:
         shown = repr(condition.values[0])
     else:
@@ -464,7 +605,10 @@ def _pick(
         listed = ", ".join(repr(label) for label in defaults)
         return None, f"node {node!r} has more than one @config.default: {listed}"
     hits = [
-        v for v in variants if not v.policy.default and _matches(v.policy, config, bad)
+        v
+        for v in variants
+        if not v.policy.default
+        and _matches(v.policy, config, bad, labels[id(v.function)])
     ]
     if len(hits) > 1:
         culprits = sorted(labels[id(v.function)] for v in hits)
@@ -503,12 +647,15 @@ def resolve_variants(
     functions: Sequence[Found],
     config: Mapping[str, object],
     namespaces: Sequence[str | None] = (),
+    configs: Mapping[str | None, Mapping[str, object]] | None = None,
 ) -> Selection:
     """Selects one variant per node; see `select`. Also says why a node has none.
 
     `namespaces`, when given, holds the namespace of each of `functions`, in
     order (Q74): a variant's node is named under it, so each namespace selects
     its own, and a function found under two namespaces is a variant in each.
+    `configs` holds the config a namespace selects with when it is not
+    `config`: the builder's, overlaid with the namespace's own `config=` (Q112).
     """
     under = namespaces or (None,) * len(functions)
     groups = _groups(functions, under)
@@ -518,14 +665,15 @@ def resolve_variants(
     bad: set[_Unequal] = set()
     for node in sorted(groups):
         variants = groups[node]
-        picked, problem = _pick(node, variants, config, bad)
+        seen = config if configs is None else configs.get(variants[0].namespace, config)
+        picked, problem = _pick(node, variants, seen, bad)
         if problem is not None:
             problems.append((node, problem))
         elif picked is not None:
             chosen.add((picked.namespace, id(picked.function)))
-            missing.update(_not_given(picked, variants, config))
+            missing.update(_not_given(picked, variants, seen))
         else:
-            reason = unmatched(node, config, variants)
+            reason = unmatched(node, seen, variants)
             for produced in sorted({p for v in variants for p in v.produces}):
                 missing[produced] = reason
     # A bad comparison leaves the selection unknown, so it is raised first.

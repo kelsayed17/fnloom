@@ -479,7 +479,13 @@ sentinel.execute(["label"], overrides={"total": float("nan")})["label"]
 ```
 
 The `without_input_type_checks()` opt-out turns off both the input and override checks. Edge checks stay on: they
-cost nothing per run, and a graph whose edges disagree is a bug whatever you supply.
+cost nothing per run, and a graph whose edges disagree is usually a bug whatever you supply.
+
+When an edge disagrees on purpose, such as a node returning a wider type than a reader declares, turn its check off
+by name with `without_edge_type_checks("label")`: only the edges into `label` are skipped, and every other edge is
+still checked (Q149). With no names, no edge is checked. A name that is no computed node fails the build, with a
+`did you mean`. Input checks are unchanged either way, and the export records the setting as `edge_checks`, in
+`graph_version` too.
 
 ## Execution order
 

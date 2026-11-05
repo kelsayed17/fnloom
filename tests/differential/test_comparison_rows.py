@@ -210,27 +210,74 @@ def tax__any() -> float:
         assert driver.execute(["tax"]) == {"tax": expected}
 
 
-@pytest.mark.deliberate("Q148")
-def test_q148_config_predicate_is_hamilton_only() -> None:
-    """Hamilton's `@config(lambda cfg: ...)` picks; fnloom has no such form."""
-    hamilton_module = make_module(
-        "rows_lambda_h",
-        HAMILTON_HEADER
-        + """
-@config(lambda cfg: cfg.get("r") == "eu", target_name="t")
+_Q148_HAMILTON = """
+@config(
+    lambda cfg: cfg.get("r") == "eu" and cfg.get("y", 2020) >= 2020, target_name="t"
+)
 def t__eu() -> int:
     return 1
-""",
+
+@config(lambda cfg: cfg.get("r") == "us", target_name="t")
+def t__us() -> int:
+    return 2
+
+@config(
+    lambda cfg: cfg.get("r") != "us"
+    and not (cfg.get("r") == "eu" and cfg.get("y", 2020) >= 2020),
+    target_name="t",
+)
+def t__other() -> int:
+    return 3
+"""
+
+_Q148_FNLOOM = """
+@config.matches(lambda r, y=2020: r == "eu" and y >= 2020)
+def t__eu() -> int:
+    return 1
+
+@config.matches(lambda r: r == "us")
+def t__us() -> int:
+    return 2
+
+@config.default
+def t__other() -> int:
+    return 3
+"""
+
+
+@pytest.mark.deliberate("Q148")
+def test_q148_config_predicate_picks_the_same_variant() -> None:
+    """`@config(lambda cfg: ...)` and `@config.matches` pick alike over a config grid.
+
+    Hamilton's predicate reads the whole config, so a variant for "no other
+    matched" must be written out; fnloom's reads its keys from its signature, a
+    missing required key never matches, and `@config.default` is the fallback.
+    """
+    hamilton_module = make_module("rows_q148_h", HAMILTON_HEADER + _Q148_HAMILTON)
+    fnloom_module = make_module("rows_q148_f", FNLOOM_HEADER + _Q148_FNLOOM)
+    grid: list[dict[str, object]] = [
+        {"r": region, "y": year}
+        for region in ("eu", "us", "uk")
+        for year in (2010, 2020, 2030)
+    ]
+    grid += [{"r": "eu"}, {"r": "us"}, {"r": "uk"}]
+    for cfg in grid:
+        hamilton = (
+            hamilton_driver.Builder()
+            .with_modules(hamilton_module)
+            .with_config(cfg)
+            .build()
+        )
+        ours = fnloom.Builder().with_modules(fnloom_module).with_config(cfg).build()
+        assert ours.execute(["t"]) == hamilton.execute(["t"]), cfg
+    # fnloom: a predicate returning no bool is refused at build, naming it.
+    truthy = make_module(
+        "rows_q148_truthy",
+        FNLOOM_HEADER
+        + "@config.matches(lambda r: r)\ndef t__any() -> int:\n    return 1\n",
     )
-    hamilton = (
-        hamilton_driver.Builder()
-        .with_modules(hamilton_module)
-        .with_config({"r": "eu"})
-        .build()
-    )
-    assert hamilton.execute(["t"]) == {"t": 1}
-    with pytest.raises(TypeError, match="config"):
-        fnloom.config(lambda cfg: cfg.get("r") == "eu")  # ty: ignore[too-many-positional-arguments]  # refused is the point
+    with pytest.raises(TypeError, match=r"must return a bool, got str"):
+        fnloom.Builder().with_modules(truthy).with_config({"r": "eu"}).build()
 
 
 @pytest.mark.deliberate("Q103")
@@ -523,6 +570,156 @@ def test_q97_hamiltons_cli_needs_typer_and_reads_config_from_a_context_file() ->
         "modules",
         "context_path",
     ]
+
+
+_Q112_REGIONAL = """
+@config.when(region="eu")
+def rate__eu() -> float:
+    return 0.2
+
+@config.when(region="us")
+def rate__us() -> float:
+    return 0.1
+
+def tax(rate: float, sales: float) -> float:
+    return rate * sales
+"""
+
+_Q112_SUBDAGS = """
+from hamilton.function_modifiers import subdag
+import rows_q112_regional_h as regional
+
+@subdag(regional, config={"region": "eu"})
+def eu(tax: float) -> float:
+    return tax
+
+@subdag(regional, config={"region": "us"})
+def us(tax: float) -> float:
+    return tax
+"""
+
+
+@pytest.mark.deliberate("Q112")
+def test_q112_namespace_config_against_subdag_config() -> None:
+    """A namespace's `config=` gives the values `@subdag(config=)` gives."""
+    make_module("rows_q112_regional_h", HAMILTON_HEADER + _Q112_REGIONAL)
+    hamilton_module = make_module("rows_q112_subdags_h", _Q112_SUBDAGS)
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    expected = hamilton.execute(
+        ["eu", "us", "eu.tax", "us.tax"], inputs={"sales": 10.0}
+    )
+    regional = make_module("rows_q112_regional_f", FNLOOM_HEADER + _Q112_REGIONAL)
+    ours = (
+        fnloom.Builder()
+        .with_modules(regional, namespace="eu", config={"region": "eu"})
+        .with_modules(regional, namespace="us", config={"region": "us"})
+        .build()
+    )
+    assert ours.execute(["eu.tax", "us.tax"], inputs={"sales": 10.0}) == {
+        "eu.tax": expected["eu.tax"],
+        "us.tax": expected["us.tax"],
+    }
+    assert (expected["eu"], expected["us"]) == (2.0, 1.0)
+    # The same variant is picked in each copy, by name.
+    picked = {
+        name: getattr(ours.nodes[name].origin, "__name__", None)
+        for name in ("eu.rate", "us.rate")
+    }
+    assert picked == {"eu.rate": "rate__eu", "us.rate": "rate__us"}
+    # fnloom: the driver's config stays its own; the overlay is in the export.
+    assert ours.config == {}
+    assert ours.export()["namespace_config"] == {
+        "eu": {"region": "'eu'"},
+        "us": {"region": "'us'"},
+    }
+
+
+_Q150_SALES = """
+def price() -> float:
+    return 10.0
+
+def total(price: float, quantity: int) -> float:
+    return price * quantity
+
+def report(total: float) -> float:
+    return total + 1
+"""
+
+_Q150_DISCOUNTED = """
+def total(price: float, quantity: int) -> float:
+    return price * quantity * 0.9
+"""
+
+
+@pytest.mark.deliberate("Q150")
+def test_q150_replace_against_allow_module_overrides() -> None:
+    """With one name colliding, `replace=` gives what `allow_module_overrides()` does.
+
+    Hamilton's override is silent and covers every collision; fnloom's names
+    the node, and a typo fails the build.
+    """
+    sales = make_module("rows_q150_sales", _Q150_SALES)
+    discounted = make_module("rows_q150_discounted", _Q150_DISCOUNTED)
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(sales, discounted)
+        .allow_module_overrides()
+        .build()
+    )
+    expected = hamilton.execute(["total", "report"], inputs={"quantity": 2})
+    ours = (
+        fnloom.Builder()
+        .with_modules(sales)
+        .with_modules(discounted, replace=("total",))
+        .build()
+    )
+    assert ours.execute(["total", "report"], inputs={"quantity": 2}) == expected
+    assert sorted(v.name for v in hamilton.list_available_variables()) == (
+        ours.node_names()
+    )
+    assert ours.nodes["total"].replaced == "rows_q150_sales"
+    # Hamilton accepts the override with no collision at all; fnloom refuses a typo.
+    assert hamilton_driver.Builder().with_modules(
+        sales
+    ).allow_module_overrides().build().execute(["price"]) == {"price": 10.0}
+    with pytest.raises(ValueError, match="replace names 'totl'"):
+        fnloom.Builder().with_modules(sales).with_modules(
+            discounted, replace=("totl",)
+        ).build()
+
+
+_Q149_LOOSE = """
+def code() -> str:
+    return "7"
+
+def count(code: int) -> int:
+    return code
+
+def label(code: float) -> str:
+    return str(code)
+"""
+
+
+@pytest.mark.deliberate("Q149")
+def test_q149_loose_edges_against_no_edge_and_input_type_checking() -> None:
+    """Edges off give Hamilton's values; off per node, the other edges stay checked."""
+    module = make_module("rows_q149", _Q149_LOOSE)
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_adapters(lifecycle.NoEdgeAndInputTypeChecking())
+        .build()
+    )
+    expected = hamilton.execute(["count", "label"])
+    ours = fnloom.Builder().with_modules(module).without_edge_type_checks().build()
+    assert ours.execute(["count", "label"]) == expected
+    # Hamilton: without the adapter, the edge fails at build, as fnloom's does.
+    with pytest.raises(ValueError, match="count"):
+        hamilton_driver.Builder().with_modules(module).build()
+    # fnloom: off for one consumer only; the other edge is still checked.
+    with pytest.raises(ValueError, match=r"label\.code requires float"):
+        fnloom.Builder().with_modules(module).without_edge_type_checks("count").build()
+    assert ours.export()["edge_checks"] == "off"
 
 
 # ---- Caching -----------------------------------------------------------------------

@@ -14,7 +14,7 @@ import re
 from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any
 
-from fnloom._caching import check_parts
+from fnloom._caching import check_parts, with_predicates
 from fnloom._canonical import DEPTH, UnwritableError, stable_fingerprint
 from fnloom._codeversion import UncacheableError, code_version
 from fnloom._decorators import Source, Value, decorations
@@ -42,11 +42,16 @@ def export(  # noqa: PLR0913  # one argument per part of the document
     config: Mapping[str, object],
     request: Mapping[str, list[str]] | None,
     version: str,
+    namespace_config: Mapping[str, Mapping[str, object]] | None = None,
+    edge_checks: str | list[str] = "on",
 ) -> dict[str, Any]:
     """The document for `drawing`'s nodes, in its order, with its marks.
 
     `request` is the outputs, input names and override names of a run, or `None`
-    for the whole graph. `version` is fnloom's.
+    for the whole graph. `version` is fnloom's. `namespace_config` holds each
+    namespace's own `config=` (Q112), and `edge_checks` says which edges the
+    build checked: `"on"`, `"off"`, or the nodes whose edges it skipped (Q149).
+    Both enter `graph_version` when not the default.
     """
     versions: dict[int, tuple[str | None, str | None]] = {}
     nodes = [
@@ -61,11 +66,22 @@ def export(  # noqa: PLR0913  # one argument per part of the document
         )
         for drawn in drawing.nodes
     ]
+    overlays = {
+        namespace: {key: stable_repr(keys[key]) for key in sorted(keys)}
+        for namespace, keys in sorted((namespace_config or {}).items())
+    }
+    settings: dict[str, Any] = {}
+    if overlays:
+        settings["namespace_config"] = overlays
+    if edge_checks != "on":
+        settings["edge_checks"] = edge_checks
     return {
         "format": FORMAT,
         "fnloom": version,
-        "graph_version": _graph_version(nodes, views),
+        "graph_version": _graph_version(nodes, views, settings),
         "config": {key: stable_repr(config[key]) for key in sorted(config)},
+        "namespace_config": overlays,
+        "edge_checks": edge_checks,
         "request": None if request is None else dict(request),
         "nodes": nodes,
     }
@@ -190,6 +206,7 @@ def _node(  # noqa: PLR0913  # the node's parts, and its build's
         "module": view.module,
         "function": None,
         "namespace": view.namespace,
+        "replaced": view.replaced,
         "config": [condition_text([c]) for c in view.config],
         "source": None,
         "version": None,
@@ -210,7 +227,7 @@ def _node(  # noqa: PLR0913  # the node's parts, and its build's
         key = id(built)
         if key not in versions:
             versions[key] = _version(built)
-        entry["version"], unversioned = versions[key]
+        entry["version"], unversioned = _with_predicates(*versions[key], view, built)
         if checks and entry["version"] is not None:
             parts, unchecked = check_parts(checks)
             if unchecked is not None:
@@ -227,6 +244,26 @@ def _node(  # noqa: PLR0913  # the node's parts, and its build's
         ) is not None and policy.version is not None:
             entry["pinned"] = policy.version
     return entry
+
+
+def _with_predicates(
+    version: str | None,
+    unversioned: str | None,
+    view: NodeView,
+    built: Callable[..., object],
+) -> tuple[str | None, str | None]:
+    """`version` folded with each `config.matches` predicate's, as the cache keys it.
+
+    Unchanged for a node with no predicate, no version, or a pinned version;
+    `None` and why when a predicate has no version (Q148).
+    """
+    policy = decorations(built).cache
+    if not view.config or version is None or (policy and policy.version is not None):
+        return version, unversioned
+    folded = with_predicates(bytes.fromhex(version), view.config)
+    if isinstance(folded, UncacheableError):
+        return None, folded.reason
+    return folded.hex(), unversioned
 
 
 def _check(check: Check) -> dict[str, Any]:
@@ -291,14 +328,17 @@ def _version(fn: Callable[..., object]) -> tuple[str | None, str | None]:
 
 
 def _graph_version(
-    nodes: Sequence[Mapping[str, Any]], views: Mapping[str, NodeView]
+    nodes: Sequence[Mapping[str, Any]],
+    views: Mapping[str, NodeView],
+    settings: Mapping[str, Any],
 ) -> str | None:
     """A hash of every node's name, kind, type, params, conditions and version.
 
-    Tags and docs are left out: they don't change what a node computes. A
-    `value()` is hashed by its `value_version`. `None` when a node is
-    unversioned, or a `value()` it is bound to has no fingerprint: a change there
-    could not be seen (Q96).
+    And the build `settings` other than the defaults: the namespaces' `config=`
+    (Q112) and the edge checks (Q149). Tags and docs are left out: they don't
+    change what a node computes. A `value()` is hashed by its `value_version`.
+    `None` when a node is unversioned, or a `value()` it is bound to has no
+    fingerprint: a change there could not be seen (Q96).
     """
     parts: list[object] = []
     for node in nodes:
@@ -319,7 +359,12 @@ def _graph_version(
         parts.append(
             [*named, bound, node["config"], node.get("checks", []), node["version"]]
         )
-    text = json.dumps([FORMAT, parts], sort_keys=True)
+    # Without settings, the text is what it was before they existed, so a
+    # graph_version stays the same across that change.
+    hashed: list[object] = (
+        [FORMAT, parts] if not settings else [FORMAT, parts, settings]
+    )
+    text = json.dumps(hashed, sort_keys=True)
     return hashlib.sha256(text.encode()).hexdigest()
 
 

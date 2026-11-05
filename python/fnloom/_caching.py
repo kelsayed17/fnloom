@@ -30,6 +30,7 @@ from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
 from fnloom import _core, _extract
 from fnloom._canonical import stable_fingerprint
 from fnloom._codeversion import UncacheableError, class_version, code_version
+from fnloom._config import predicate_name, predicates
 from fnloom._decorators import CacheBehavior, CachePolicy, Source, decorations
 from fnloom._fingerprint import fingerprint, forget_class_versions
 from fnloom._scan import core_inputs
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Mapping, Sequence
 
     from fnloom._checks import Check
+    from fnloom._config import Condition
     from fnloom._hooks import Dispatch
     from fnloom._scan import NodeDef
 
@@ -152,8 +154,44 @@ def node_keys(nodes: Sequence[NodeDef]) -> dict[str, NodeKey]:
                 # Up: `node_keys`, `Cache.of`, `Builder.build`, its caller.
                 _warn_build(code.reason, stacklevel=5)
             versions[id(node.origin)] = code
+        if (
+            policy.behavior != "disable"
+            and policy.version is None
+            and isinstance(code, bytes)
+            and node.config
+        ):
+            code = with_predicates(code, node.config)
         keys[node.name] = _node_key(node, policy, code)
     return keys
+
+
+def with_predicates(
+    code: bytes, conditions: Sequence[Condition]
+) -> bytes | UncacheableError:
+    """`code` folded with the code version of each `config.matches` predicate (Q148).
+
+    So an edited predicate misses on the variant it selects. `code` itself when
+    no condition is a predicate; an `UncacheableError` when a predicate has no
+    version, saying which.
+    """
+    found = predicates(conditions)
+    if not found:
+        return code
+    parts = [code, b"matches"]
+    for predicate in found:
+        try:
+            parts.append(code_version(predicate))
+        except UncacheableError as error:
+            return UncacheableError(
+                f"config.matches predicate {predicate_name(predicate)!r}: "
+                f"{error.reason}"
+            )
+        except Exception as error:  # noqa: BLE001  # a failing version: uncacheable
+            return UncacheableError(
+                f"cannot read the code version of config.matches predicate "
+                f"{predicate_name(predicate)!r}: {error!r}"
+            )
+    return _core.hash_parts(parts)
 
 
 def _field_policy(producer: CachePolicy) -> CachePolicy:
