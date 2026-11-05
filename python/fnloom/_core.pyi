@@ -1,4 +1,4 @@
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Self, final
 
 __all__ = [
@@ -32,8 +32,13 @@ def _panic_for_test() -> None: ...
 class Graph:
     def __new__(
         cls,
-        nodes: list[
-            tuple[str, list[tuple[str, bool]], dict[str, str], Callable[..., Any]]
+        nodes: Sequence[
+            tuple[
+                str,
+                list[tuple[str, bool]],
+                Mapping[str, str | tuple[str, ...]],
+                Callable[..., Any],
+            ]
         ],
         renames: dict[str, dict[str, str]] | None = None,
     ) -> Self: ...

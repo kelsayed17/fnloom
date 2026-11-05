@@ -193,10 +193,10 @@ def test_every_row_that_is_not_a_mapping_is_listed_sorted_in_one_message() -> No
 def test_every_non_str_tag_is_listed_sorted_in_one_message() -> None:
     """Two non-str tag values are both named, sorted, in one `TypeError`."""
     with pytest.raises(TypeError) as excinfo:
-        tag(zone=1, area=["a"], ok="s")  # ty: ignore[invalid-argument-type]
+        tag(zone=1, area={"a"}, ok="s")  # ty: ignore[invalid-argument-type]
     assert str(excinfo.value) == (
-        "tag 'area': value must be str, got list; "
-        "tag 'zone': value must be str, got int"
+        "tag 'area': value must be str or a list or tuple of str, got set; "
+        "tag 'zone': value must be str or a list or tuple of str, got int"
     )
 
 

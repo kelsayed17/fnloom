@@ -20,6 +20,7 @@ from fnloom._decorators import _ATTRIBUTE, RESOLVING, Source, Value, decorations
 from fnloom._extract import extractor
 from fnloom._fingerprint import fingerprint
 from fnloom._scan import NodeDef, Within, _payload
+from fnloom._tags import TagValue
 from fnloom._types import opaque, resolved_hints, type_matches
 from fnloom._view import Param
 
@@ -32,7 +33,7 @@ if TYPE_CHECKING:
 # Annotations as written: a name imported only under TYPE_CHECKING is no error.
 _FORWARD = annotationlib.Format.FORWARDREF
 
-_NO_TAGS = MappingProxyType[str, str]({})
+_NO_TAGS = MappingProxyType[str, TagValue]({})
 
 
 @dataclass(frozen=True, slots=True)

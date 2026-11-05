@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use fnloom_core::graph::Graph as CoreGraph;
-use fnloom_core::node::{Dependency, InputSpec, NodeId, NodeSpec};
+use fnloom_core::node::{Dependency, InputSpec, NodeId, NodeSpec, TagValue};
 use fnloom_core::plan::Request;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -20,9 +20,25 @@ pub type PyCoreGraph = CoreGraph<Py<PyAny>>;
 type NodeTuple = (
     String,
     Vec<(String, bool)>,
-    BTreeMap<String, String>,
+    BTreeMap<String, PyTagValue>,
     Py<PyAny>,
 );
+
+/// A tag value as Python gives it: a `str`, or a `tuple` of them.
+#[derive(FromPyObject)]
+enum PyTagValue {
+    One(String),
+    Many(Vec<String>),
+}
+
+impl From<PyTagValue> for TagValue {
+    fn from(value: PyTagValue) -> Self {
+        match value {
+            PyTagValue::One(text) => Self::One(text),
+            PyTagValue::Many(items) => Self::Many(items),
+        }
+    }
+}
 
 /// An immutable dependency graph of Python functions, wired by parameter name.
 ///
@@ -180,7 +196,10 @@ fn node_spec((name, params, tags, function): NodeTuple) -> NodeSpec<Py<PyAny>> {
     NodeSpec {
         name,
         inputs,
-        tags,
+        tags: tags
+            .into_iter()
+            .map(|(key, value)| (key, value.into()))
+            .collect(),
         payload: function,
     }
 }

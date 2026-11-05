@@ -9,6 +9,13 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Added
 
+- `@tag` takes a `list` or `tuple` of strings as a value, kept as a tuple in written order. An empty sequence, a
+  repeated item, a non-`str` item, or an unordered collection (`set`, `frozenset`, `dict`) is refused when decorating,
+  naming the tag. `Driver.nodes.tagged(**query)` returns the views whose tags match: a `str` matches an equal value or
+  a tuple holding it, a sequence matches any item, `fnloom.ANY` matches a node with the tag. `fnloom draw` and `fnloom
+  export` take a repeatable `--tag key=value`, one per key (a key given twice is a usage error). A `str` subclass
+  value or item is kept as a plain `str`, and `fnloom.ANY` survives `copy`, `deepcopy` and `pickle`. The export writes
+  a tuple as a JSON list, and `diff` compares it in order (Q36, Q141).
 - `Builder.with_cache(store, *, recompute=(), disable=(), default=(), default_behavior="default", ignore=None)`: each
   list names nodes given that behavior, or is `True` for the default. A list naming a node wins over its
   `@cache(behavior=...)`, which wins over `default_behavior`; `True` counts as `default_behavior`, not as a name, so
@@ -25,6 +32,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Changed
 
+- `NodeView.tags` is now `Mapping[str, str | tuple[str, ...]]`: code that reads a tag as a `str` needs an
+  `isinstance(value, str)` check (or `tags.get("k")` handled as either) to type-check. `Driver.nodes` is typed
+  `NodeViews`, which has `tagged`. A node's `display_name` tag given as a tuple is drawn joined by `, `.
 - `explain_cache` (and a hook's cache outcome) names where a policy came from: `"policy recompute"` is now
   `"policy recompute (decorator)"`, `"policy disable"` is `"policy disable (decorator)"`, and `(driver)` or
   `(default)` mark a behavior from a `with_cache` list or `default_behavior`. A `default` node that a list or

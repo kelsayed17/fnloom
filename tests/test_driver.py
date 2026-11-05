@@ -349,6 +349,7 @@ def test_ten_thousand_node_chain_executes() -> None:
 def test_public_api_is_exported() -> None:
     """The package exports exactly its public names."""
     assert sorted(fnloom.__all__) == [
+        "ANY",
         "AsyncDriver",
         "AsyncPreparedPlan",
         "Builder",
