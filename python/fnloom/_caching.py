@@ -876,8 +876,13 @@ class CacheRun:
         outputs: Sequence[str],
         input_names: frozenset[str],
         override_names: frozenset[str],
+        fresh: Mapping[str, str] | None = None,
     ) -> None:
-        """Holds the request's plan, compiled with no hits, and its key plan."""
+        """Holds the request's plan, compiled with no hits, and its key plan.
+
+        `fresh` holds the producers an enclosing run's `recompute` fields need
+        fresh, so a nested run computing one never looks it up either.
+        """
         self._store = cache.store
         self._formats = cache.formats
         self._graph = graph
@@ -889,9 +894,14 @@ class CacheRun:
         actions = dict(steps)
         computed = [name for name, action in steps if action == "compute"]
         keys = [_planned(cache.keys[name], actions) for name in computed]
-        # The producer of each `recompute` field this plan computes, never looked
-        # up here, so the field reads a value the producer just made (Q147).
-        self._fresh: dict[str, str] = {}
+        # The producer of each `recompute` field this plan, or an enclosing one,
+        # computes: never looked up here, so the field reads a value the producer
+        # just made, even when a nested run computes the producer (Q147).
+        self._fresh: dict[str, str] = {
+            producer: field
+            for producer, field in (fresh or {}).items()
+            if actions.get(producer) == "compute"
+        }
         for name, k in sorted(zip(computed, keys, strict=True)):
             if k.fresh is not None and actions.get(k.fresh) == "compute":
                 self._fresh.setdefault(k.fresh, name)
@@ -947,7 +957,7 @@ class CacheRun:
             first = list(self._first)
             nested = graph.prepare(first, self._inputs, sorted(override_names))
             self._nested = CacheRun(
-                cache, graph, nested, first, input_names, override_names
+                cache, graph, nested, first, input_names, override_names, self._fresh
             )
             self._levels = (self, *self._nested._levels)  # noqa: SLF001  # the same class
         # Insertion order is recency order: a hit moves its plan to the end.

@@ -327,7 +327,7 @@ A field or column of `@extract_fields` or `@extract_columns` is keyed with its p
 
 A stored field is served on its own, so the producer can be `disable`, because its whole value can't be pickled,
 while a field of it is stored. When the field hits, the producer does not run. The field is keyed by what the
-producer's key would be, from its code and the values it reads:
+producer's key would be, from its code and the values it reads, less any parameter the producer's `ignore` names:
 
 ```python
 # file: ledger.py

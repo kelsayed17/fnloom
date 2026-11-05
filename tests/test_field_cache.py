@@ -320,3 +320,41 @@ def test_async_driver_serves_a_stored_field(capsys: pytest.CaptureFixture[str]) 
         "totals": {"north": 5}
     }
     assert capsys.readouterr().out.split() == []
+
+
+def test_a_recompute_field_reruns_a_producer_a_nested_run_computes(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A producer stays fresh when the pre-run of `recompute` nodes computes it.
+
+    `ranked` is `recompute` and reads the sibling field `rate`, so it runs first,
+    computing `report` without `totals`: that run must not load `report` either.
+    """
+    module = make_module(
+        "field_cache_nested",
+        REPORT.format(producer="default", fields='{"totals": "recompute"}')
+        + """
+@cache(behavior="recompute")
+def ranked(rate: float) -> float:
+    return rate * 10
+
+def scored(ranked: float) -> float:
+    return ranked + 1
+""",
+    )
+    for build in ("build", "build_async"):
+        builder = Builder().with_modules(module).with_cache(MemoryCache())
+        driver = getattr(builder, build)()
+        run = driver.execute
+        if build == "build_async":
+            import asyncio  # noqa: PLC0415  # only this branch runs a loop
+
+            def run(
+                outputs: list[str], driver: object = driver, **request: object
+            ) -> object:
+                return asyncio.run(driver.execute(outputs, **request))  # ty: ignore[unresolved-attribute]  # the async driver
+
+        run(["rate"], inputs=REQUEST)
+        capsys.readouterr()
+        run(["totals", "scored"], inputs=REQUEST)
+        assert capsys.readouterr().out.split() == ["report"]
