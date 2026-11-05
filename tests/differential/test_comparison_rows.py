@@ -11,7 +11,7 @@ import logging
 import shutil
 import sys
 import xml.etree.ElementTree as ET
-from typing import TYPE_CHECKING, override
+from typing import TYPE_CHECKING, Any, override
 
 import pandas as pd
 import pytest
@@ -507,14 +507,158 @@ def test_q156_public_type_helpers_agree() -> None:
 
 
 @pytest.mark.deliberate("Q89")
-def test_q89_hamilton_logs_mixed_index_types(caplog: pytest.LogCaptureFixture) -> None:
-    """Hamilton's frame builder only logs a warning when index types differ."""
+@pytest.mark.deliberate("Q144")
+def test_q89_hamilton_logs_mixed_index_types_and_frame_refuses_them(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Hamilton only logs a warning when index types differ; `frame()` refuses."""
     x = pd.Series([1, 2], index=[0, 1])
     y = pd.Series([3, 4], index=pd.to_datetime(["2020-01-01", "2020-01-02"]))
     with caplog.at_level(logging.WARNING, logger="hamilton.base"):
         frame = base.PandasDataFrameResult().build_result(x=x, y=y)  # ty: ignore[invalid-argument-type]  # Hamilton hints dicts; it takes any output
     assert len(frame) == len(x) + len(y)  # the indexes never align
     assert any("Multiple index types" in r.getMessage() for r in caplog.records)
+    caplog.clear()
+    with caplog.at_level(logging.DEBUG):
+        with pytest.raises(
+            ValueError,
+            match=r"x and y both have 2 rows, but their labels differ at row 0",
+        ):
+            fnloom.frame()({"x": x, "y": y})
+        # Outer: Hamilton's frame, and nothing logged.
+        assert fnloom.frame(join="outer")({"x": x, "y": y}).equals(frame)
+    assert not caplog.records
+
+
+def _hamilton_frame(outputs: dict[str, object]) -> pd.DataFrame:
+    """What Hamilton's `PandasDataFrameResult` builds from `outputs`."""
+    return base.PandasDataFrameResult().build_result(**outputs)  # ty: ignore[invalid-argument-type]  # Hamilton hints dicts; it takes any output
+
+
+# Each case: outputs of scalars, series and frames, in request order.
+_FRAME_CASES: dict[str, dict[str, object]] = {
+    "scalars": {"rate": 0.2, "region": "north", "count": 3},
+    "series": {
+        "prices": pd.Series([1.0, 2.0, 3.0]),
+        "quantities": pd.Series([1, 2, 3]),
+    },
+    "series_misaligned": {
+        "longer": pd.Series([1, 2, 3]),
+        "shorter": pd.Series([10, 20], index=[1, 7]),
+    },
+    "series_and_scalar": {"prices": pd.Series([1.0, 2.0]), "rate": 0.2},
+    "frames_and_series": {
+        "regions": pd.DataFrame({"north": [1, 2], "south": [3, 4]}),
+        "prices": pd.Series([1.5, 2.5]),
+        "sales": pd.DataFrame({"units": [5, 6]}, index=[1, 2]),
+        "rate": 0.2,
+    },
+}
+
+
+@pytest.mark.keeps("Q144")
+@pytest.mark.parametrize("case", list(_FRAME_CASES))
+def test_q144_frame_outer_is_pandas_dataframe_result(case: str) -> None:
+    """`frame("pandas", join="outer")` builds Hamilton's frame from the same outputs."""
+    outputs = _FRAME_CASES[case]
+    hamilton = _hamilton_frame(outputs)
+    ours = fnloom.frame("pandas", join="outer")(outputs)
+    assert ours.equals(hamilton)
+    assert list(ours.columns) == list(hamilton.columns)
+
+
+@pytest.mark.keeps("Q144")
+def test_q144_frame_through_both_drivers() -> None:
+    """Both drivers' frame builders give equal frames for one request."""
+    module = make_module(
+        "rows_q144",
+        """
+import pandas as pd
+
+
+def regions() -> pd.DataFrame:
+    return pd.DataFrame({"north": [1, 2, 3], "south": [4, 5, 6]})
+
+
+def revenue() -> pd.Series:
+    return pd.Series([1.0, 4.0, 9.0])
+
+
+def rate() -> float:
+    return 0.2
+""",
+    )
+    request: list[Any] = ["revenue", "regions", "rate"]  # Hamilton's list is invariant
+    hamilton = (
+        hamilton_driver.Builder()
+        .with_modules(module)
+        .with_adapters(base.PandasDataFrameResult())
+        .build()
+        .execute(request)
+    )
+    for join in ("strict", "outer"):
+        ours = (
+            fnloom.Builder()
+            .with_modules(module)
+            .with_result_builder(fnloom.frame(join=join))
+            .build()
+            .execute(request)
+        )
+        assert ours.equals(hamilton)
+        assert list(ours.columns) == [
+            "revenue",
+            "regions.north",
+            "regions.south",
+            "rate",
+        ]
+
+
+@pytest.mark.deliberate("Q144")
+def test_q144_frame_differs_where_hamilton_is_silent() -> None:
+    """A lone frame is flattened, and a name collision is refused in either order."""
+    table = pd.DataFrame({"p": [1, 2]})
+    # Hamilton returns a lone frame bare; fnloom names it as it would beside others.
+    assert list(_hamilton_frame({"table": table}).columns) == ["p"]
+    assert list(fnloom.frame()({"table": table}).columns) == ["table.p"]
+    # Hamilton refuses a series named like a column already flattened, but a frame
+    # flattened after the series silently replaces it.
+    with pytest.raises(ValueError, match=r"Series table\.p already exists"):
+        _hamilton_frame({"table": table, "table.p": pd.Series([9, 9])})
+    replaced = _hamilton_frame({"table.p": pd.Series([9, 9]), "table": table})
+    assert replaced["table.p"].tolist() == [1, 2]
+    cases: list[dict[str, object]] = [
+        {"table": table, "table.p": pd.Series([9, 9])},
+        {"table.p": pd.Series([9, 9]), "table": table},
+    ]
+    for outputs in cases:
+        with pytest.raises(ValueError, match=r"makes the column 'table\.p' twice"):
+            fnloom.frame()(outputs)
+
+
+@pytest.mark.deliberate("Q144")
+def test_q144_polars_frame_and_the_polars_class() -> None:
+    """Hamilton has no polars builder in base; fnloom has `frame("polars")` too."""
+    pl = pytest.importorskip("polars")
+    assert not hasattr(base, "PolarsDataFrameResult")
+    outputs = {"regions": pl.DataFrame({"north": [1, 2]}), "rate": 0.2}
+    built = fnloom.frame("polars")(outputs)
+    assert built.to_dict(as_series=False) == {
+        "regions.north": [1, 2],
+        "rate": [0.2, 0.2],
+    }
+    with pytest.raises(ValueError, match=r"polars has no index to align on"):
+        fnloom.frame("polars", join="outer")
+    # The class itself still builds by polars' own rules (Q89).
+    module = make_module(
+        "rows_q144_polars",
+        "import polars as pl\n"
+        "def north() -> pl.Series:\n"
+        "    return pl.Series([1, 2])\n",
+    )
+    plain = fnloom.Builder().with_modules(module).with_result_builder(pl.DataFrame)
+    assert plain.build().execute(["north"]).to_dict(as_series=False) == {
+        "north": [1, 2]
+    }
 
 
 @pytest.mark.deliberate("Q19")

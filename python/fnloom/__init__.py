@@ -32,6 +32,7 @@ from fnloom._decorators import (
 from fnloom._drawing import Drawing, DrawnNode
 from fnloom._extract import extract_columns, extract_fields
 from fnloom._fingerprint import fingerprint, register_fingerprint
+from fnloom._frames import FrameBuilder, frame
 from fnloom._functions import NodeSpec, node
 from fnloom._hooks import (
     BuildEnd,
@@ -95,6 +96,7 @@ __all__ = [
     "Driver",
     "FieldCache",
     "Format",
+    "FrameBuilder",
     "Group",
     "Hook",
     "InputView",
@@ -129,6 +131,7 @@ __all__ = [
     "extract_columns",
     "extract_fields",
     "fingerprint",
+    "frame",
     "group",
     "inject",
     "mutate",
