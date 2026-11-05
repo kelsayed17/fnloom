@@ -447,7 +447,7 @@ def amounts__eu() -> dict:
 
 
 def test_a_stored_field_s_key_has_the_predicate_s_version() -> None:
-    """A field stored apart from its `disable` producer misses on an edited predicate."""
+    """A field stored apart from a `disable` producer misses on an edited predicate."""
     store = MemoryCache()
     cfg = {"region": "eu"}
     first = make_module("matches_fields", _FIELDS.format(test='region == "eu"'))
