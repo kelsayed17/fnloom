@@ -242,6 +242,22 @@ def test_draw_takes_the_display_options(
     assert '"region"' not in out
 
 
+def test_draw_without_graphviz_names_the_flags(
+    flow: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The missing-`dot` hint gives `--engine builtin`, not a Python call."""
+    monkeypatch.setenv("PATH", str(tmp_path / "nothing"))
+    status, _, err = _run(capsys, "draw", str(flow), "-o", str(tmp_path / "g.svg"))
+    assert status == 1
+    assert "needs Graphviz's 'dot' on PATH" in err
+    assert "--engine builtin" in err
+    assert "--format mermaid or dot" in err
+    assert "render(" not in err
+
+
 def test_draw_with_the_builtin_engine(
     flow: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -260,8 +276,8 @@ def test_draw_with_the_builtin_engine(
     status, _, err = _run(
         capsys, "draw", str(flow), "--engine", "builtin", "-o", str(tmp_path / "g.png")
     )
-    assert status == 1
-    assert "the builtin engine writes svg only, not png" in err
+    assert status == 2  # noqa: PLR2004  # a usage error
+    assert "--engine builtin writes svg only, not png" in err
 
 
 def test_writing_to_a_file(

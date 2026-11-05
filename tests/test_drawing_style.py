@@ -7,6 +7,7 @@ import pickle
 import shutil
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -15,7 +16,7 @@ import pytest
 import drawing_golden
 import fnloom
 from fnloom import Drawing, DrawnNode, Style
-from helpers import make_module
+from helpers import fake_dot, make_module
 
 if TYPE_CHECKING:
     from fnloom import NodeView
@@ -24,7 +25,6 @@ GOLDEN = Path(__file__).parent / "golden" / "styled_drawing.txt"
 
 SALES = """
 import collections
-import copy
 import dataclasses
 from typing import NamedTuple, TypedDict
 from fnloom import tag
@@ -99,7 +99,7 @@ def test_a_style_checks_its_colours() -> None:
 def test_a_style_checks_every_other_field() -> None:
     """Width, dashes, shape and the passthroughs, each named when wrong."""
     with pytest.raises(
-        ValueError, match="stroke_width must be a number above 0 and at most 1000"
+        ValueError, match=r"stroke_width must be a number from 0.01 to 1000"
     ):
         Style(stroke_width=0)
     with pytest.raises(ValueError, match="stroke_width"):
@@ -149,9 +149,19 @@ def test_style_values_are_escaped() -> None:
     # One line per statement still: the unstyled text and the `edge` line.
     plain = _driver().draw().to_dot()
     assert len(dot.splitlines()) == len(plain.splitlines()) + 1
-    for bad in ('a"b', "a\nb", "a,b", "a;b", "a{b", "a}b", "a%b", "a\x00"):
+    refused = (
+        'a"b', "a\nb", "a\rb", "a,b", "a;b", "a{b", "a}b", "a%%b", "a\x00",
+        "a(b", "a)b", "a<b", "a>b", "a[b", "a]b", "a|b", "a-->b", "a==>b",
+        "a" + chr(0x2028) + "b", "a" + chr(0x85) + "b", "é",
+    )  # fmt: skip
+    for bad in refused:
         with pytest.raises(ValueError, match=r"Style mermaid\['color'\] .* can't take"):
             Style(mermaid={"color": bad})
+    # The allow-list: what CSS values need, nothing a flowchart reads.
+    Style(mermaid={"font-family": "Fira Sans 'x'", "width": "50%"})
+    Style(
+        mermaid={"stroke-dasharray": "5 5", "color": "#fff", "x": "a.b_c!d:e+f*g/h-i"}
+    )
     with pytest.raises(ValueError, match=r"Style dot\['x'\] .* can't take"):
         Style(dot={"x": "a\rb"})
     for colour in ('red"', "red\n"):
@@ -543,12 +553,14 @@ def test_no_style_value_breaks_dot() -> None:
     drawing = (
         _driver()
         .draw()
-        .styled(node=Style(stroke_width=1e-5), edge=Style(stroke_width=999.5))
+        .styled(node=Style(stroke_width=0.01), edge=Style(stroke_width=999.5))
     )
-    assert 'penwidth="1e-05"' in _dot_line(drawing.to_dot(), "sales")
+    assert 'penwidth="0.01"' in _dot_line(drawing.to_dot(), "sales")
     assert '  edge [penwidth="999.5"]' in drawing.to_dot()
-    for wide in (1001, 10**400, float("nan")):
-        with pytest.raises(ValueError, match="stroke_width must be a number above 0"):
+    for wide in (0.001, 0, 1001, 10**400, float("nan")):
+        with pytest.raises(
+            ValueError, match=r"stroke_width must be a number from 0.01 to 1000"
+        ):
             Style(stroke_width=wide)
     for word in ("node", "Edge", "graph", "digraph", "SUBGRAPH", "strict"):
         with pytest.raises(ValueError, match="is not an attribute name"):
@@ -615,3 +627,33 @@ def test_an_unresolvable_schema_keeps_inherited_fields() -> None:
     )
     node = _nodes(fnloom.build(module).draw(show_schema=True))["made"]
     assert node.schema == (("x", "Missing"), ("y", "int"))
+
+
+def test_dot_text_holds_no_control_character() -> None:
+    """Each but a line break becomes U+FFFD, so Graphviz's SVG stays XML."""
+    node = DrawnNode(name="n\x01", kind="function", type="int", title="a\x02b\rc\x7f")
+    dot = Drawing((node,), ()).to_dot()
+    assert '"n�" [label="a�b�c�\\nint"]' in dot
+    assert not any(ord(c) < 32 and c != "\n" for c in dot)  # noqa: PLR2004  # C0
+    dot_program = shutil.which("dot")
+    if dot_program is not None:
+        done = subprocess.run(  # noqa: S603  # Graphviz from PATH, our own text
+            [dot_program, "-Tsvg"],
+            input=dot,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        ET.fromstring(done.stdout)  # noqa: S314  # Graphviz's output of our text
+
+
+def test_a_lone_surrogate_never_escapes_the_preview(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Graphviz gets it replaced, as `?`, rather than a `UnicodeEncodeError`."""
+    fake_dot(tmp_path, "import sys\nsys.stdout.write(sys.stdin.read())\n")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    node = DrawnNode(name="n", kind="function", type="int", title="a\ud800b")
+    preview = Drawing((node,), ())._repr_svg_()  # Jupyter's hook
+    assert preview is not None
+    assert "a?b" in preview

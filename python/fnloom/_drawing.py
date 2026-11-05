@@ -204,9 +204,12 @@ class Drawing:
 
         `orient` is the direction edges point: `"LR"` (left to right), `"TB"`,
         `"RL"` or `"BT"`; any other value is a `ValueError`. `legend` adds a box
-        naming each kind and mark the drawing uses.
+        naming each kind and mark the drawing uses. A drawing made by hand with
+        two nodes of one name, or an edge to a node it doesn't have, is a
+        `ValueError` here and in every writer.
         """
         _checked_orient(orient)
+        checked_parts(self)
         lines = [
             "digraph {",
             f"  graph [{_listed(_dot_graph(orient, self.graph_style))}]",
@@ -232,9 +235,10 @@ class Drawing:
 
         Nodes are `n0`, `n1` and so on, in the drawing's order, each labelled
         with its title, type and condition. `orient` is checked as `to_dot`
-        checks it.
+        checks it, and the nodes and edges as `to_dot` checks them.
         """
         _checked_orient(orient)
+        checked_parts(self)
         ids = {n.name: f"n{i}" for i, n in enumerate(self.nodes)}
         lines = _mermaid_init(self.graph_style)
         lines.append(f"flowchart {orient}")
@@ -346,22 +350,44 @@ class Drawing:
         del cycle  # a drawing holds no drawing, so never a cycle
         printer.text(self.to_dot())
 
-    def _repr_svg_(self) -> str:
+    def _repr_svg_(self) -> str | None:
         """An SVG for Jupyter: Graphviz's when `dot` runs, else `to_svg()`'s.
 
-        A preview is not a file, so it may follow the machine (Q146).
+        A preview is not a file, so it may follow the machine (Q146). Past
+        3000 nodes and edges, or 20000 nodes and edge slots once layered, the
+        builtin preview is `None` and Jupyter shows the DOT text, so a preview
+        never hangs; `to_svg()` still draws any size.
         """
         if shutil.which("dot") is not None:
             try:
-                return _graphviz(self.to_dot(), "svg").decode()
+                return _graphviz(self.to_dot(), "svg").decode(errors="replace")
             except RuntimeError, FileNotFoundError:
                 pass
-        return self.to_svg()
+        from fnloom._svg import TooLargeError, svg  # noqa: PLC0415  # only an SVG needs it
+
+        try:
+            return svg(self, "LR", preview=True)
+        except TooLargeError:
+            return None
 
     @override
     def __str__(self) -> str:
         """The DOT text, as `to_dot()` writes it."""
         return self.to_dot()
+
+
+def checked_parts(drawing: Drawing) -> None:
+    """`ValueError` for two nodes of one name, or an edge to a node not drawn."""
+    seen: set[str] = set()
+    for n in drawing.nodes:
+        if n.name in seen:
+            msg = f"the drawing has two nodes named {n.name!r}"
+            raise ValueError(msg)
+        seen.add(n.name)
+    for a, b in drawing.edges:
+        if a not in seen or b not in seen:
+            msg = f"edge ({a!r}, {b!r}) joins a node the drawing doesn't have"
+            raise ValueError(msg)
 
 
 def _called(style: StyleFunction, node: DrawnNode) -> Style | None:
@@ -574,8 +600,17 @@ def _checked_orient(orient: object) -> None:
         raise ValueError(msg)
 
 
+# The control characters other than `\n`, which Graphviz copies into an SVG it
+# writes, making it XML no reader takes: each becomes U+FFFD, as in `to_svg()`.
+_DOT_CONTROLS = dict.fromkeys((*range(10), *range(11, 32), 127), "�")
+
+
 def _escaped(text: str) -> str:
-    """`text` for inside a DOT quoted string: backslashes, quotes, line breaks."""
+    """`text` for inside a DOT quoted string: backslashes, quotes, line breaks.
+
+    Other control characters become U+FFFD.
+    """
+    text = text.translate(_DOT_CONTROLS)
     return text.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
@@ -828,21 +863,29 @@ _INSTALL = (
 )
 
 
-def no_graphviz_message(format: str = "svg") -> str:  # noqa: A002  # Graphviz's word
-    """Why `render` can't make `format`, and every way on from there."""
+class GraphvizMissingError(FileNotFoundError):
+    """Graphviz's `dot` isn't on `PATH`: the message says how to get it."""
+
+
+def no_graphviz_message(format: str = "svg", *, cli: bool = False) -> str:  # noqa: A002  # Graphviz's word
+    """Why `render` can't make `format`, and every way on from there.
+
+    `cli` words the ways on as `fnloom draw`'s flags rather than Python calls.
+    """
     command = next(
         (c for prefix, c in _INSTALL if sys.platform.startswith(prefix)),
         "see https://graphviz.org/download/",
     )
-    builtin = (
-        ", or render(path, engine='builtin') for an SVG drawn in pure Python"
-        if format == "svg"
-        else ""
-    )
+    if cli:
+        text = "write a .mmd (Mermaid) or .dot file, or --format mermaid or dot"
+        builtin = ", or --engine builtin for an SVG drawn by fnloom itself"
+    else:
+        text = "render a .mmd (Mermaid) or .dot path for the text"
+        builtin = ", or render(path, engine='builtin') for an SVG drawn in pure Python"
     return (
         f"rendering {format} needs Graphviz's 'dot' on PATH. Install it with: "
         f"{command} (all platforms: https://graphviz.org/download/). Needing "
-        f"nothing: render a .mmd (Mermaid) or .dot path for the text{builtin}"
+        f"nothing: {text}{builtin if format == 'svg' else ''}"
     )
 
 
@@ -850,10 +893,11 @@ def _graphviz(text: str, format: str) -> bytes:  # noqa: A002  # Graphviz's word
     """`text` laid out by Graphviz's `dot` in `format`."""
     dot = shutil.which("dot")
     if dot is None:
-        raise FileNotFoundError(no_graphviz_message(format))
+        raise GraphvizMissingError(no_graphviz_message(format))
     done = subprocess.run(  # noqa: S603  # `dot` from PATH, its arguments ours
         [dot, f"-T{format}"],
-        input=text.encode(),
+        # A lone surrogate can't be UTF-8: it is replaced, not raised.
+        input=text.encode(errors="replace"),
         capture_output=True,
         check=False,
     )

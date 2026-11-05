@@ -115,11 +115,15 @@ _DOT_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _DOT_WORDS = frozenset({"node", "edge", "graph", "digraph", "subgraph", "strict"})
 # The widest stroke a style may ask for, in points.
 _WIDEST = 1000
+_THINNEST = 0.01
 # A Mermaid style property: a CSS name, which may hold `-` (`stroke-dasharray`).
 _MERMAID_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
-# What a Mermaid `style` statement can't hold: its separators, quotes, braces,
-# the `%%` of a directive, and any control character (a line break among them).
-_MERMAID_REFUSED = re.compile(r'[,;"{}%\x00-\x1f\x7f]')
+# A Mermaid value is checked against what it may hold, not what it may not:
+# ASCII letters, digits, space and `# . _ ! : + * / ' % -`. That leaves out the
+# `style` statement's `,` and `;`, quotes, every bracket, `<`, `>`, `|`, `=`
+# (so `-->` and `==>` can't form), line breaks of any kind (U+2028 and U+0085
+# among them, since nothing past ASCII is taken), and `%%`, a directive's mark.
+_MERMAID_REFUSED = re.compile(r"[^A-Za-z0-9#. _!:+*/'%-]|%%")
 # A DOT value is quoted and escaped, all but control characters other than `\n`.
 _DOT_REFUSED = re.compile(r"[\x00-\x09\x0b-\x1f\x7f]")
 
@@ -180,11 +184,13 @@ class Style:
 
     `fill`, `stroke` and `font_color` are colours: `"#rrggbb"`, or a CSS name in
     `Style.COLOURS` (`"red"`, `"lightblue"`), in any case. `stroke_width` is a
-    number above 0; `dashed` a `bool` (`False` takes a dashed outline away);
+    number from 0.01 to 1000; `dashed` a `bool` (`False` takes a dashed outline away);
     `shape` one of `Style.SHAPES`. `dot` and `mermaid` are passthroughs only
     their writer reads: identifier keys (Mermaid's may hold `-`) and `str`
-    values. A DOT value is quoted and escaped; a Mermaid value can't hold
-    `, ; " { } %` or a line break. Anything else is a `ValueError` (a value of
+    values. A DOT value is quoted and escaped, and written as given: a `URL`
+    or `href` is not checked. A Mermaid value may hold only ASCII letters,
+    digits, space and `# . _ ! : + * / ' % -`, and not `%%`, so it never breaks
+    the flowchart. Anything else is a `ValueError` (a value of
     the wrong type a `TypeError`) naming the attribute. Every field left `None`
     leaves that part as it was.
     """
@@ -246,9 +252,9 @@ def _check_width(value: object) -> None:
         raise StyleTypeError(msg)
     if (
         isinstance(value, float) and not math.isfinite(value)
-    ) or not 0 < value <= _WIDEST:
+    ) or not _THINNEST <= value <= _WIDEST:
         msg = (
-            f"Style stroke_width must be a number above 0 and at most {_WIDEST}, "
+            f"Style stroke_width must be a number from {_THINNEST} to {_WIDEST}, "
             f"got {value!r:.40}"
         )
         raise StyleValueError(msg)
@@ -275,7 +281,7 @@ def _passthrough(
             msg = f"Style {name}[{k!r}] must be a str, got {type(v).__name__}"
             raise StyleTypeError(msg)
         if refused.search(v) is not None:
-            msg = f"Style {name}[{k!r}] {v!r} holds a character {name} can't take"
+            msg = f"Style {name}[{k!r}] {v!r} holds text {name} can't take"
             raise StyleValueError(msg)
         entries[k] = v
     return Pairs(entries)

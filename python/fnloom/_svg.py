@@ -18,7 +18,7 @@ from bisect import bisect_left, bisect_right, insort
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from fnloom._drawing import LEGEND_KEYS, label_lines
+from fnloom._drawing import LEGEND_KEYS, checked_parts, label_lines
 from fnloom._style import Style, hex_colour, number
 
 if TYPE_CHECKING:
@@ -43,7 +43,10 @@ _CAP = 6
 _SWEEPS = 24
 _TRANSPOSES = 16
 _PLACEMENTS = 12
-_RANKINGS = 32
+# Network simplex's work bound, in swaps times the size of the graph part.
+_RANK_WORK = 2_000_000
+# The ordering sweeps' work bound, in sweeps times items and links.
+_ORDER_WORK = 3_000_000
 # Sifting's work bounds, in the sum of the squares of the layers' widths.
 _SIFT_EVERY = 40_000
 _SIFT_ONCE = 400_000
@@ -153,16 +156,14 @@ def _topological(drawing: Drawing) -> list[str]:
     """The nodes in an order where every edge points forward.
 
     A driver's drawing is in one already and keeps it; a hand-made one is
-    sorted, ties in its own order. `ValueError` for an edge to an undrawn node
-    or edges in a cycle.
+    sorted, ties in its own order. `ValueError` for two nodes of one name, an
+    edge to an undrawn node, or edges in a cycle.
     """
     names = [n.name for n in drawing.nodes]
     waiting = dict.fromkeys(names, 0)
     readers: dict[str, list[str]] = {name: [] for name in names}
+    checked_parts(drawing)
     for a, b in drawing.edges:
-        if a not in waiting or b not in waiting:
-            msg = f"edge ({a!r}, {b!r}) joins a node the drawing doesn't have"
-            raise ValueError(msg)
         waiting[b] += 1
         readers[a].append(b)
     position = {name: i for i, name in enumerate(names)}
@@ -320,8 +321,18 @@ class _Ranking:
             self.cut[f] = total
 
     def _improve(self, root: int, part: set[int]) -> None:
-        """Swaps a tree edge of negative cut value for a better one, while any is."""
-        for _ in range(_RANKINGS * max(1, len(part))):
+        """Swaps a tree edge of negative cut value for a better one, while any is.
+
+        Every edge already tight is the least length there is, so nothing runs.
+        Each swap costs about the part's size, so the swaps are bounded by
+        `_RANK_WORK` over it: work fixed by the graph, never by time, so a large
+        graph ends with feasible ranks, if not always the shortest.
+        """
+        inside = [e for v in part for e in self.incident[v] if self.edges[e][0] == v]
+        if all(self._slack(e) == 0 for e in inside):
+            return
+        pivots = max(1, _RANK_WORK // (len(part) + len(inside)))
+        for _ in range(pivots):
             self._ranges(root)
             self._cut_values(root, part)
             leaving = next((e for e in sorted(self.cut) if self.cut[e] < 0), None)
@@ -553,12 +564,16 @@ def _ordered(items: Sequence[_Item]) -> list[list[int]]:
     # gets is fixed by the graph alone: after every run, once, or not at all.
     width = sum(len(layer) ** 2 for layer in starts[0])
     every = width <= _SIFT_EVERY
+    # A sweep costs about the items and their links: the sweeps of each run
+    # are bounded so all six runs fit `_ORDER_WORK`.
+    size = len(items) + sum(len(item.down) for item in items)
+    sweeps = max(2, min(_SWEEPS, _ORDER_WORK // (6 * max(1, size))))
     best: list[list[int]] = []
     fewest = -1
     for start in starts:
         for first in (0, 1):
             median = bool(first)
-            found, least = _improved(start, items, first, median=median)
+            found, least = _improved(start, items, first, median=median, sweeps=sweeps)
             if every:
                 found, least = _polished(found, least, items, first, median=median)
             if fewest < 0 or least < fewest:
@@ -571,7 +586,12 @@ def _ordered(items: Sequence[_Item]) -> list[list[int]]:
 
 
 def _improved(
-    start: list[list[int]], items: Sequence[_Item], first: int, *, median: bool
+    start: list[list[int]],
+    items: Sequence[_Item],
+    first: int,
+    *,
+    median: bool,
+    sweeps: int = _SWEEPS,
 ) -> tuple[list[list[int]], int]:
     """The best order sweeps reach from `start`, and its crossings.
 
@@ -580,7 +600,7 @@ def _improved(
     """
     best, fewest = start, _crossings(start, items)
     current = start
-    for sweep in range(_SWEEPS):
+    for sweep in range(sweeps):
         if not fewest:
             break
         current = _swept(
@@ -678,13 +698,29 @@ def _place(layers: Sequence[Sequence[int]], items: list[_Item]) -> None:
                 items[i].order = order
 
 
-def layout(drawing: Drawing, orient: str, *, legend: bool = True) -> Layout:
+class TooLargeError(ValueError):
+    """A drawing past a preview's size bound (`PREVIEW_PARTS`, `PREVIEW_ITEMS`)."""
+
+
+# A notebook preview's bounds: nodes and edges, then nodes and edge slots once
+# layered. Past either, the preview shows text, so it can never hang.
+PREVIEW_PARTS = 3_000
+PREVIEW_ITEMS = 20_000
+
+
+def layout(
+    drawing: Drawing, orient: str, *, legend: bool = True, preview: bool = False
+) -> Layout:
     """Lays `drawing` out along `orient`; `legend` adds the legend's box below."""
     sizes = {
         n.name: _size(_lines(n, drawing.show_types), _shape(n)) for n in drawing.nodes
     }
     across = orient in {"LR", "RL"}
+    if preview and len(drawing.nodes) + len(drawing.edges) > PREVIEW_PARTS:
+        raise TooLargeError(len(drawing.nodes) + len(drawing.edges))
     items, chains = _items(drawing, sizes, across=across)
+    if preview and len(items) > PREVIEW_ITEMS:
+        raise TooLargeError(len(items))
     layers = _ordered(items)
     _place(layers, items)
     # Each layer's span along `orient`: as deep as its deepest node.
@@ -933,9 +969,11 @@ def _arrow(route: Sequence[tuple[float, float]], colour: str) -> str:
     return f'<polygon points="{points}" fill="{colour}" stroke="{colour}"/>'
 
 
-def svg(drawing: Drawing, orient: str, *, legend: bool = True) -> str:
+def svg(
+    drawing: Drawing, orient: str, *, legend: bool = True, preview: bool = False
+) -> str:
     """`drawing` as SVG text, laid out along `orient`."""
-    placed = layout(drawing, orient, legend=legend)
+    placed = layout(drawing, orient, legend=legend, preview=preview)
     background = "#ffffff"
     if drawing.graph_style is not None and drawing.graph_style.fill is not None:
         background = hex_colour(drawing.graph_style.fill)

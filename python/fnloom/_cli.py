@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import fnloom
 from fnloom import _export
+from fnloom._drawing import GraphvizMissingError, no_graphviz_message
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -340,13 +341,22 @@ def _draw(args: argparse.Namespace) -> int:
     if args.output is not None:
         # No --format: the file's suffix says, as `render` reads it.
         chosen = None if args.format is None else _TEXT_FORMATS.get(args.format)
-        drawing.render(
-            args.output,
-            format=chosen or args.format,
-            orient=args.orient,
-            legend=not args.no_legend,
-            engine=args.engine,
-        )
+        written = (chosen or args.format or args.output.suffix).lower().lstrip(".")
+        if args.engine == "builtin" and written not in {"svg", "dot", "gv", "mmd"}:
+            msg = f"--engine builtin writes svg only, not {written or 'no format'}"
+            raise _UsageError(msg)
+        try:
+            drawing.render(
+                args.output,
+                format=chosen or args.format,
+                orient=args.orient,
+                legend=not args.no_legend,
+                engine=args.engine,
+            )
+        except GraphvizMissingError as error:
+            raise GraphvizMissingError(
+                no_graphviz_message(written, cli=True)
+            ) from error
         return 0
     text_format = _TEXT_FORMATS.get(args.format or "dot")
     if text_format is None:

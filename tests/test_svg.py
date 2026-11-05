@@ -3,6 +3,7 @@
 import itertools
 import random
 import shutil
+import time
 import xml.etree.ElementTree as ET
 from typing import TYPE_CHECKING
 
@@ -12,7 +13,8 @@ from benches.generate import generated
 import fnloom
 import test_drawing
 from fnloom import Drawing, DrawnNode, Style
-from fnloom._svg import Layout, layout, text_width
+from fnloom import _svg as _svg_module
+from fnloom._svg import Layout, _Ranking, layout, text_width
 from helpers import make_module
 
 if TYPE_CHECKING:
@@ -294,3 +296,88 @@ def test_a_hand_made_drawing_in_any_order() -> None:
         Drawing(nodes, (("a", "b"), ("b", "c"), ("c", "a"))).to_svg()
     with pytest.raises(ValueError, match="joins a node the drawing doesn't have"):
         Drawing(nodes, (("a", "z"),)).to_svg()
+
+
+def test_a_hand_made_drawing_is_checked_by_every_writer() -> None:
+    """Two nodes of one name, or an edge to a node not drawn, in DOT, Mermaid, SVG."""
+    node = DrawnNode(name="a", kind="function", type="int", title="a")
+    twice = Drawing((node, node), ())
+    missing = Drawing((node,), (("a", "z"),))
+    for write in ("to_dot", "to_mermaid", "to_svg"):
+        with pytest.raises(ValueError, match="two nodes named 'a'"):
+            getattr(twice, write)()
+        with pytest.raises(ValueError, match=r"edge \('a', 'z'\) joins a node"):
+            getattr(missing, write)()
+
+
+def _layered_edges(width: int, depth: int, reads: int) -> list[tuple[int, int]]:
+    """Layers of `width`, each node reading `reads` nodes of the layer above."""
+    rng = random.Random(5)  # noqa: S311  # a seeded shape, not cryptography
+    edges = []
+    for layer in range(1, depth):
+        for column in range(width):
+            v = layer * width + column
+            above = range((layer - 1) * width, layer * width)
+            edges.extend((u, v) for u in sorted(rng.sample(above, reads)))
+    return edges
+
+
+def test_ranking_stops_at_once_when_every_edge_is_tight(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No swap at all when the start is already the shortest there is."""
+    swaps: list[int] = []
+    rerank = _Ranking._rerank  # noqa: SLF001  # counting the engine's swaps
+    monkeypatch.setattr(
+        _Ranking, "_rerank", lambda self, root: (swaps.append(root), rerank(self, root))
+    )
+    edges = _layered_edges(20, 40, 3)
+    rank = _Ranking(800, edges).ranks()
+    assert swaps == []
+    assert all(rank[b] - rank[a] == 1 for a, b in edges)
+
+
+def test_ranking_swaps_are_bounded_by_work(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Swaps never pass `_RANK_WORK` over the part's size; the ranks stay feasible."""
+    monkeypatch.setattr(_svg_module, "_RANK_WORK", 3000)
+    swaps: list[int] = []
+    rerank = _Ranking._rerank  # noqa: SLF001  # counting the engine's swaps
+    monkeypatch.setattr(
+        _Ranking, "_rerank", lambda self, root: (swaps.append(root), rerank(self, root))
+    )
+    drawing = fnloom.build(make_module("svg_bounded", _random_dag(300, seed=3))).draw()
+    edges = len(drawing.edges)
+    rank = _svg_module._ranks(drawing)  # noqa: SLF001  # the layering alone
+    assert 0 < len(swaps) <= 3000 // (len(drawing.nodes) + edges)
+    assert all(rank[b] - rank[a] >= 1 for a, b in drawing.edges)
+
+
+def test_a_thousand_nodes_lay_out_in_bounded_time() -> None:
+    """A benchmark: about two seconds here; the bound is generous for slow machines."""
+    drawing = fnloom.build(
+        make_module("svg_thousand", _random_dag(1000, seed=3))
+    ).draw()
+    started = time.perf_counter()
+    text = drawing.to_svg()
+    assert time.perf_counter() - started < 30  # noqa: PLR2004  # seconds, generously
+    assert text.count('<g class="node">') == len(drawing.nodes)
+
+
+def test_a_preview_too_large_to_lay_out_is_none(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without `dot`, `_repr_svg_` is `None` past the bounds, so Jupyter shows text."""
+    monkeypatch.setattr(shutil, "which", lambda _: None)
+    small = _probe()
+    assert small._repr_svg_() == small.to_svg()  # Jupyter's hook
+    lines = ["def n0(seed: int) -> int:\n    return 1\n"]
+    lines += [
+        f"def n{i}({', '.join(f'n{d}: int' for d in range(i))}) -> int:\n    return 1\n"
+        for i in range(1, 30)
+    ]
+    dense = fnloom.build(make_module("svg_complete", "\n".join(lines))).draw()
+    monkeypatch.setattr(_svg_module, "PREVIEW_ITEMS", 1000)  # 30 nodes, 4000-odd slots
+    assert dense._repr_svg_() is None  # Jupyter's hook
+    monkeypatch.setattr(_svg_module, "PREVIEW_PARTS", 100)  # 30 nodes and 435 edges
+    assert dense._repr_svg_() is None  # Jupyter's hook
+    assert dense.to_svg().startswith("<?xml")  # asked for, it is drawn

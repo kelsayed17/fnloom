@@ -166,7 +166,7 @@ orders_driver.draw(show_types=False, hide_inputs=True).to_mermaid().splitlines()
 
 `drawing.styled(graph=, node=, edge=, style=)` returns a new drawing with styles added, which `to_dot()`,
 `to_mermaid()` and `to_svg()` all draw. Each style is a `fnloom.Style`: `fill`, `stroke` and `font_color` are colours,
-`stroke_width` a number, `dashed` a `bool`, and `shape` one of `Style.SHAPES` (`"box"`, `"rounded"`, `"ellipse"`,
+`stroke_width` a number from 0.01 to 1000, `dashed` a `bool`, and `shape` one of `Style.SHAPES` (`"box"`, `"rounded"`, `"ellipse"`,
 `"circle"`, `"diamond"`, `"hexagon"`, `"cylinder"`, `"parallelogram"`). `graph` styles the whole drawing, `node` every
 node and `edge` every edge. `style` is a function called once per node, in drawing order, with its
 [`NodeView`](running.md#inspecting-a-graph) (its tags, config conditions, namespace and parameters) and its
@@ -203,8 +203,9 @@ driver.draw().styled(style=lambda view, drawn: Style(fill="gren"))
 ```
 
 `dot={...}` and `mermaid={...}` pass attributes only their writer reads: keys are identifiers (a Mermaid key may hold
-`-`, as CSS names do) and values are `str`. A DOT value is quoted and escaped. Mermaid's `style` statement can't quote,
-so a Mermaid value holding `,`, `;`, `"`, `{`, `}`, `%` or a line break is a `ValueError`. A graph's style takes
+`-`, as CSS names do) and values are `str`. A DOT value is quoted and escaped, and otherwise written as given: a
+`URL` or `href` is not checked. Mermaid's `style` statement can't quote, so a Mermaid value may hold only ASCII
+letters, digits, space and `# . _ ! : + * / ' % -`, and not `%%`; anything else is a `ValueError`. A graph's style takes
 `fill`, `dot` and `mermaid`, and an edge's takes `stroke`, `stroke_width`, `dashed`, `dot` and `mermaid`; any other
 field is a `ValueError`. Attributes are written in a fixed order, passthrough keys sorted, so a styled drawing's
 text is the same under every `PYTHONHASHSEED`.
@@ -240,6 +241,9 @@ the command that installs it on this platform (`brew install graphviz`, `apt-get
 graphviz`) and the formats that need nothing. `render(path, engine="builtin")` writes `to_svg()` instead, needing
 nothing; it makes `.svg` only. A file never changes engine by itself: only `engine` chooses, and `"dot"` is the
 default. In Jupyter, a drawing shows as Graphviz's image when `dot` is installed, and as the builtin SVG otherwise.
+A preview is bounded so it can't hang a notebook: past 3000 nodes and edges, or 20000 nodes and edge slots once
+layered (an edge spanning several layers takes a slot in each), the builtin preview is skipped and Jupyter shows the
+DOT text. `to_svg()` and `render` draw any size.
 
 ```python
 import tempfile

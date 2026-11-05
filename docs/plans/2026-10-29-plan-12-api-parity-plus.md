@@ -190,8 +190,12 @@ are within 1.5x of `dot` (most 1.1x to 1.4x).
 LR it is 1.43x, against 244.) This was accepted because `dot` stays the default for files and the builtin engine is
 chosen only by `engine="builtin"` or for a notebook preview without `dot`.
 
-A sparse 1000-node graph lays out in about 2.5 seconds, and dense ones take longer (150 nodes with 2222 edges, 7.6
-seconds): sifting is bounded by the graph's layer widths, never by time, so the output stays deterministic.
+Timing, measured after the review: each step's work is bounded by the graph's size, never by time, so the output stays
+deterministic. Network simplex returns at once when every edge is already tight, and its swaps are bounded by work, so
+it may stop short of the shortest layering on a very large graph. The ordering sweeps and sifting are bounded the
+same way. A 200-node graph takes about 0.5 s; a sparse 1000-node graph 1.6 s; 1500 nodes 2.6 s; 800 nodes with 2395
+edges 4.4 s; the complete DAG on 81 nodes, 85,000 edge slots, 2.4 s. Without `dot`, a notebook preview past 3000
+nodes and edges, or 20,000 nodes and edge slots, is skipped (Jupyter shows the DOT text), so a preview can't hang.
 
 ### 9. Per-field cache control (sideways) → Q147
 
