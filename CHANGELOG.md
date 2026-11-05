@@ -29,6 +29,19 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `isinstance(value, str)` check (or `tags.get("k")` handled as either) to type-check. `Driver.nodes` is typed
   `NodeViews`, which has `tagged`. A node's `display_name` tag given as a tuple is drawn joined by `, `.
 
+### Fixed
+
+- `register_fingerprint` now applies to pydantic models. A model class could not be code-versioned (pydantic's
+  generated class attributes, such as `__class_vars__` and `model_config`, were refused as mutable), so its values
+  were refused even when registered, and a node reading one was `uncacheable`. A model class is now versioned by its
+  body and by what pydantic takes out of it: fields' defaults and `Field(...)` settings, private attributes,
+  validators' settings and `model_config`.
+- A frozen pydantic model (`ConfigDict(frozen=True)`) is fingerprinted without a registration, by its class, its
+  fields in order, the names of the fields set, its extra fields and its private attributes. A model that is not
+  frozen still needs one. fnloom never imports pydantic.
+- A node reading a `typing.NewType` global is cacheable: the `NewType` is versioned by its name and its supertype,
+  where it used to make the node `uncacheable`.
+
 ## [0.3.0] - 2026-11-03
 
 ### Added
