@@ -109,8 +109,11 @@ _DATACLASS = frozenset({"__dataclass_fields__", "__dataclass_params__"})
 _NAMEDTUPLE = frozenset({"_field_defaults"})
 # pydantic: what a model class is built from, which `_Walk._model` counts from the
 # fields, private attributes and decorators pydantic moves out of the body, and every
-# `__pydantic_*__`. A frozen model's `__hash__`, when pydantic made it from the config.
+# `__pydantic_*__` and `__hash__` (a frozen model's, made from the config) that is not
+# a function of the user's own.
 _PYDANTIC = frozenset({"__class_vars__", "__private_attributes__", "__signature__"})
+# typing.NewType: what it holds; an attribute set on it beyond these is refused.
+_NEWTYPE = frozenset({"__module__", "__name__", "__qualname__", "__supertype__"})
 # enum: lookup tables built from the members, which count one by one.
 _ENUM = frozenset(
     {
@@ -138,15 +141,22 @@ def _generated(cls: type) -> frozenset[str]:
     if isinstance(cls, enum.EnumType):
         names |= _ENUM
     if model_fields(cls) is not None:
-        entries = vars(cls)
         names |= _PYDANTIC | {
-            name for name in entries if name.startswith("__pydantic_")
+            name
+            for name, entry in vars(cls).items()
+            if (name.startswith("__pydantic_") or name == "__hash__")
+            and not _user_code(entry)
         }
-        made = entries.get("__hash__")
-        home = sys.modules.get(getattr(made, "__module__", None) or "")
-        if isinstance(made, types.FunctionType) and home and not is_user_module(home):
-            names |= {"__hash__"}
     return names
+
+
+def _user_code(entry: object) -> bool:
+    """Whether a class body entry is a function of the user's own code."""
+    fn = getattr(entry, "__func__", entry)
+    if not isinstance(fn, types.FunctionType):
+        return False
+    home = sys.modules.get(fn.__globals__.get("__name__", ""))
+    return home is None or is_user_module(home)
 
 
 def _is_namedtuple(cls: type) -> bool:
@@ -568,8 +578,11 @@ class _Walk:
             case typing.NewType():
                 # An identity function, so its name and supertype are all it holds;
                 # the supertype (a class, or a `NewType` in turn) by these rules.
+                if set(vars(value)) - _NEWTYPE:
+                    raise where.refuse(value)
                 name = f"{value.__module__}.{value.__name__}"
-                supertype = self.value(value.__supertype__, where.within("supertype"))
+                inner = where.within("supertype")
+                supertype = self._annotation(value.__supertype__, inner)
                 return _hash([b"newtype", name.encode(), supertype])
             case _:
                 return self._object(value, where)
@@ -920,9 +933,17 @@ class _Walk:
 
         pydantic takes them out of the body: a field's default and constraints into a
         `FieldInfo`, a validator's fields and mode into its decorator's info. Each
-        setting counts by the rules for defaults; an annotation is the body's.
+        setting counts by the rules for defaults, and a field's type, which pydantic
+        validates by, as resolved (a parametrized generic's own): see `_annotation`.
+        A model whose annotations are not resolved yet is refused.
         """
         owner = cls.__qualname__
+        if vars(cls).get("__pydantic_complete__") is False:
+            msg = (
+                f"pydantic model {owner!r} is not complete (an annotation names"
+                f" something not defined yet); {_ADVICE}"
+            )
+            raise UncacheableError(msg)
         parts = [b"pydantic-model"]
         declared = (
             ("field", vars(cls).get("__pydantic_fields__", {})),
@@ -941,19 +962,78 @@ class _Walk:
         return _hash(parts)
 
     def _settings(self, settings: Mapping[str, object], where: _Where) -> bytes:
-        """Named settings in sorted order, each by the rules for a default.
-
-        A descriptor (a computed field's property) counts as a class body entry.
-        """
+        """Named settings, sorted: types by `_annotation`, others by `_setting`."""
         parts = [b"settings"]
         for name, value in sorted(settings.items()):
             inner = where.within(name)
-            if isinstance(value, _DESCRIPTORS):
-                digest = self._member(value, inner)
+            if name in _TYPE_SETTINGS:
+                digest = self._annotation(value, inner)
             else:
-                digest = self._default(value, inner)
+                digest = self._setting(value, inner)
             parts.append(_hash([name.encode(), digest]))
         return _hash(parts)
+
+    def _setting(self, value: object, where: _Where) -> bytes:
+        """A declared setting, by the rules for a default, looked into where needed.
+
+        A descriptor (a computed field's property) counts as a class body entry; a
+        list or tuple (a field's constraints) by item, and a dataclass instance (an
+        `AfterValidator`) by its class and fields, so code inside them is walked.
+        """
+        if isinstance(value, _DESCRIPTORS):
+            return self._member(value, where)
+        if type(value) in {list, tuple}:
+            items = [self._setting(item, where) for item in value]  # ty: ignore[not-iterable]
+            return _hash([b"items", type(value).__name__.encode(), *items])
+        if dataclasses.is_dataclass(value) and not isinstance(value, type):
+            parts = [b"record", self.value(type(value), where)]
+            for field in dataclasses.fields(value):
+                item = getattr(value, field.name, _UNSET)
+                digest = (
+                    _hash([b"unset"])
+                    if item is _UNSET
+                    else (self._setting(item, where))
+                )
+                parts.append(_hash([field.name.encode(), digest]))
+            return _hash(parts)
+        return self._default(value, where)
+
+    def _annotation(self, hint: object, where: _Where) -> bytes:  # noqa: PLR0911  # one return per form
+        """A type pydantic validates by, with everything it names.
+
+        Classes and `NewType`s by the global rules (a model's by its own version);
+        generic forms by origin and arguments; `Annotated` metadata and `Literal`
+        values as settings; type aliases by their value; type variables by name and
+        bounds. An annotation not resolved yet (a string) is refused.
+        """
+        if isinstance(hint, type | typing.NewType) or hint is None:
+            return self.value(hint, where)
+        if isinstance(hint, str | typing.ForwardRef):
+            msg = (
+                f"{where.kind} {where.name!r} of {where.owner!r} is the unresolved"
+                f" annotation {hint!r}; {_ADVICE}"
+            )
+            raise UncacheableError(msg)
+        if isinstance(hint, list | tuple):  # `Callable[[int], str]`'s parameters
+            return _hash([b"hints", *(self._annotation(h, where) for h in hint)])
+        if isinstance(hint, typing.TypeVar):
+            bounds = (hint.__bound__, *hint.__constraints__)
+            parts = [self._annotation(bound, where) for bound in bounds]
+            return _hash([b"type-variable", hint.__name__.encode(), *parts])
+        if isinstance(hint, typing.TypeAliasType):
+            value = self._annotation(hint.__value__, where)
+            return _hash([b"type-alias", hint.__name__.encode(), value])
+        origin = typing.get_origin(hint)
+        if origin is typing.Annotated:
+            base = self._annotation(hint.__origin__, where)  # ty: ignore[unresolved-attribute]
+            metadata = self._setting(tuple(hint.__metadata__), where)  # ty: ignore[unresolved-attribute]
+            return _hash([b"annotated", base, metadata])
+        if origin is typing.Literal:
+            return _hash([b"literal", self._setting(typing.get_args(hint), where)])
+        if origin is not None:
+            args = [self._annotation(arg, where) for arg in typing.get_args(hint)]
+            return _hash([b"generic", self._annotation(origin, where), *args])
+        return self._default(hint, where)
 
     def _member(self, member: object, where: _Where) -> bytes:
         """A class body entry's part: functions unwrapped from their descriptors."""
@@ -974,9 +1054,12 @@ class _Walk:
 # The descriptors `_Walk._member` unwraps.
 _DESCRIPTORS = (staticmethod, classmethod, property, functools.cached_property)
 
+# The settings of pydantic's declarations that hold a type, read by `_annotation`.
+_TYPE_SETTINGS = frozenset({"annotation", "return_type", "json_schema_input_type"})
+
 
 def _declaration(info: object) -> dict[str, object]:
-    """A pydantic declaration's public settings by name, its annotation left out.
+    """A pydantic declaration's public settings by name.
 
     A decorator's info is a dataclass; a `FieldInfo` or private attribute has slots.
     """
@@ -991,7 +1074,7 @@ def _declaration(info: object) -> dict[str, object]:
     return {
         name: getattr(info, name)
         for name in names
-        if not name.startswith("_") and name != "annotation" and hasattr(info, name)
+        if not name.startswith("_") and hasattr(info, name)
     }
 
 

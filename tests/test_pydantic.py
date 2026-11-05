@@ -25,7 +25,7 @@ pydantic = pytest.importorskip("pydantic")
 # What the fixture modules import, loaded up front: a model class made after a
 # test forgot `pydantic.main` would be another `BaseModel`'s.
 _ = (pydantic.BaseModel, pydantic.ConfigDict, pydantic.Field, pydantic.PrivateAttr)
-_ = pydantic.field_validator
+_ = (pydantic.field_validator, pydantic.AfterValidator, pydantic.RootModel)
 
 MODELS = """
 from pydantic import BaseModel, ConfigDict, Field
@@ -227,6 +227,97 @@ def test_a_model_class_counts_its_body_fields_and_config(
     assert len(one) == 32  # noqa: PLR2004  # the digest size
     assert _model_version() == one
     assert _model_version(**edit) != one
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        """
+        class Inner(BaseModel):
+            y: int
+
+            @field_validator("y")
+            @classmethod
+            def scale(cls, y):
+                return y * {v}
+
+        class Model(BaseModel):
+            inner: Inner
+        """,
+        """
+        class Mode(enum.Enum):
+            A = {v}
+
+        class Model(BaseModel):
+            mode: Mode
+        """,
+        """
+        Alias = {t}
+
+        class Model(BaseModel):
+            x: Alias
+        """,
+        """
+        class Generic_(BaseModel, Generic[T]):
+            x: T
+
+        Model = Generic_[{t}]
+        """,
+        """
+        class Model(RootModel[{t}]):
+            pass
+        """,
+        """
+        class Model(BaseModel):
+            x: Annotated[int, AfterValidator(lambda x: x * {v})]
+        """,
+        """
+        class Model(BaseModel):
+            x: int
+
+            @classmethod
+            def __pydantic_init_subclass__(cls, **kwargs):
+                return {v}
+        """,
+    ],
+    ids=["nested model", "enum", "alias", "generic", "root model", "annotated", "hook"],
+)
+def test_a_model_class_counts_the_types_it_validates_by(template: str) -> None:
+    """A field's type is what pydantic validates by: the classes it names count."""
+    header = """
+        import enum
+        from typing import Annotated, Generic, TypeVar
+        from pydantic import AfterValidator, BaseModel, RootModel, field_validator
+
+        T = TypeVar("T")
+        """
+
+    def version(v: int, t: str) -> bytes:
+        body = textwrap.dedent(header) + textwrap.dedent(template.format(v=v, t=t))
+        module = make_module("pydantic_typed", body + "\ndef f():\n    return Model\n")
+        return code_version(module.f)
+
+    one = version(1, "int")
+    assert version(1, "int") == one
+    assert version(2, "str") != one
+
+
+def test_a_model_with_an_unresolved_annotation_is_refused() -> None:
+    """Until its forward references resolve, a model's types are unknown."""
+    module = make_module(
+        "pydantic_forward",
+        """
+        from pydantic import BaseModel
+
+        class Model(BaseModel):
+            later: "Later"
+
+        def f():
+            return Model
+        """,
+    )
+    with pytest.raises(UncacheableError, match="not complete"):
+        code_version(module.f)
 
 
 def test_a_hash_of_your_own_counts() -> None:
