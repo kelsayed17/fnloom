@@ -57,9 +57,9 @@ Also read `docs/plans/2026-10-28-roadmap-ahead-of-hamilton.md` and
 - Plan 10's first PR starts only after Plan 12's PRs A to G have merged to `main`. Those PRs are tags, drawing `Style`,
   `PrintNodes` and `after_build`, step namespaces, driver cache lists with per-field cache, `config.matches`,
   `replace=` with namespace config, and `frame()`.
-- Plan 10 ships **together with Plan 12 as 0.4.0**. The design's "0.3.0" is stale: 0.3.0 shipped without it. The PR
-  that adds this plan records it as a dated amendment in the design's §12.3 and change log, and in the roadmap's
-  Plan 10 item.
+- Plan 10 ships as **0.5.0**, the release after Plan 12's 0.4.0 (maintainer, 2026-11-03, design §12.3). The design's
+  "0.3.0" is stale: 0.3.0 shipped without it. The PR that adds this plan links it from the design's §12.3 and change
+  log, and from the roadmap's Plan 10 item.
 - Before each PR, re-read the files it touches on `main`. Plan 12 may have moved a name this plan cites. Where it did,
   follow `main`, and say so in the PR body.
 
@@ -143,6 +143,18 @@ Change any of them before the build starts.
 15. **The after-expand event is `fnloom.ExpandEnd`**, with fields `run_id`, `node`, `branch` and `items`.
 16. **`keys.rs`'s constant `ABSENT`** (an optional input not supplied) is renamed `NOT_SUPPLIED`, so the word "absent"
     means one thing.
+17. **`Step.block: Option<BlockId>` instead of §5's action set** (`Expand`, `Compute`, `Collect`). An expand step keeps
+    today's `Compute` or `UseOverride` action and names its block, since an overridden expand still runs its block
+    over the override's items. A collect is an ordinary `Compute` step whose collect edges `gather` from the block.
+18. **`PlanError::OutputsInBlocks(Vec<OutputInBlock>)` and `PlanError::OverridesInBlocks(Vec<String>)`** instead of
+    §4.3's single `OutputInBlock`, so one error lists every culprit, as `MissingInputs` does.
+19. **`Parallelizable[T | Absent]` is refused at build**, naming the node: an item can't be absent, since an item is
+    an input to its block (§7.3). An expand admits absence as a whole with `Parallelizable[T] | Absent`.
+20. **`bool(ABSENT)` raising (call 8) is an addition beyond the design**, listed for the maintainer to confirm or drop.
+    Task 3 tests that fnloom's own value paths never take a value's truth value.
+21. **The run loop is chosen per plan.** A plan with no block and no node that may be absent runs today's
+    `execute` loop unchanged (no `Slot` wrapper, no rule checks), so the instruction-count gate sees no change. The
+    absence- and block-aware loop runs only plans that need it.
 
 ## Register rows
 
@@ -157,7 +169,7 @@ these, each in its task:
 | Q121 | 8 | KEEP | |
 | Q122 | 8 | FIX | Rust in Task 7; Plan 11 reruns it in parallel |
 | Q123 | 8 | FIX | Rust in Task 6; Plan 11 reruns it in parallel |
-| Q124 | 8 | REFUSE | Rust in Task 6 |
+| Q124 | 6 | REFUSE | Row text in Task 6; Python differential test in Task 8 |
 | Q125 | 9 | FIX, REFUSE | |
 | Q126 | 9 | REFUSE | |
 | Q127 | 8 | KEEP (edges), FIX (items, typing) | |
@@ -167,8 +179,8 @@ these, each in its task:
 | Q131 | 13 | FIX | |
 | Q132 | 8 | FIX *Planned* | Refused on `build_async` until Plan 11 (call 6) |
 | Q135 | 2 | FIX | |
-| Q136 | 8 | FIX | Rust in Task 6 |
-| Q137 | 8 | DROP | |
+| Q136 | 6 | FIX | Row text in Task 6; Python differential test in Task 8 |
+| Q137 | 8 | DROP | Worded with `with_threads(...)` marked *Planned* (Plan 11) |
 | Q138 | 8 | KEEP | |
 
 Plan 11's rows are Q133 (`absent_on`, `GracefulErrorAdapter`) and Q134 (executors). Q157 stays DEFER until Plan 11.
@@ -274,8 +286,18 @@ Each PR follows the same steps:
 
 B1 runs in parallel with A2 and A3 because they touch disjoint code. A2 is Python, except the binding's observer.
 A3 is the store, the fingerprints and `keys.rs`. B1 is `fnloom-core` plus the one-line defaults the binding needs to
-compile. B1 waits for A1 because both rewrite `run.rs`'s slot table. B3, B4 and B5 share only the CHANGELOG and the
-register, where each appends rows.
+compile. B1 waits for A1 because both rewrite `run.rs`'s slot table.
+
+**Textual collisions between parallel PRs**, each resolved by merging `main` in, never by rebasing:
+
+- **A2 and A3:** `python/fnloom/_core.pyi`. A2 adds `ObserverBase.skipped`, and A3 changes `KeyPlan`'s node entry.
+  The two edits are in different classes. A3 puts its tests in `tests/test_caching.py` and `tests/test_stores.py`,
+  not in `tests/test_absence.py`, which A2 parametrizes. Both append to `CHANGELOG.md`.
+- **A2 or A3 and B1:** none in code. `crates/fnloom-py/src/graph.rs` gets B1's defaults (`expands: false`, `collect:
+  None`) in the node-spec builder, and A2 doesn't touch that file.
+- **B3 and B4:** `tests/differential/test_deliberate_differences.py` (Q129 and Q131 append separate test functions),
+  `docs/quirk-register.md` (separate rows, plus Q95's amendment in B4 only), and `CHANGELOG.md`.
+- **B4 and B5:** `docs/writing-nodes.md` (B5 only; B4 writes `docs/drawing.md`) and `CHANGELOG.md`.
 
 ## Review Focus
 
@@ -303,15 +325,18 @@ register, where each appends rows.
 
 **Files:**
 
-- Modify: `crates/fnloom-core/src/node.rs`, `graph.rs`, `run.rs`, `testing.rs`, `examples/embed.rs` (the new fields
-  only), `benches/core.rs`
+- Modify: `crates/fnloom-core/src/node.rs`, `graph.rs`, `plan.rs`, `run.rs`, `testing.rs`, `examples/embed.rs` (the
+  new fields only), `benches/core.rs`
 - Modify: `crates/fnloom-py/src/graph.rs` (compiles with `declines: false` until Task 2)
 - Test: the `#[cfg(test)]` modules of `graph.rs` and `run.rs`
 
 **Interfaces:**
 
 - Produces:
-    - `Dependency::Admits` (a parameter that receives absence as its value).
+    - `Dependency::Admits { optional: bool }`: a parameter that receives absence as its value. `optional` says
+      whether it has a default, which is all that matters when the edge reads an `Input` node, since an input is never
+      absent. `plan.rs` treats `Admits { optional: false }` as `Required` and `Admits { optional: true }` as `Optional`
+      wherever it decides whether an input is missing (`plan_actions`, `missing_inputs`, `passed_args`).
     - `NodeSpec.declines: bool` (its annotation admits `Absent`).
     - `Node.declines: bool` and `Node.may_be_absent: bool`.
     - `Evaluate::is_absent(&self, value: &Self::Value) -> bool { false }`, asked only of a node with `declines`, and of
@@ -325,6 +350,8 @@ register, where each appends rows.
 - An absent output is returned as its (absent) value.
 - `may_be_absent` is computed in `Graph::build` in topological order. A node may be absent if it `declines`, or if it
   is a function with a `Required` edge from a node that may be absent.
+- `Plan` records `needs_rules: bool`, true when a step's node may be absent. `Plan::run` keeps today's `execute` loop
+  for a plan without it, and runs the absence-aware loop only for a plan with it (call 21).
 - [ ] **Step 1: Write the failing Rust tests**
     - `may_be_absent_follows_required_edges_only`: chain `a(declines) -> b(Required) -> c(Optional on b) -> d(Admits
       on b)`. Assert `a` and `b` may be absent, and `c` and `d` may not.
@@ -339,6 +366,10 @@ register, where each appends rows.
     - `is_absent_is_asked_only_of_declining_nodes`: a counting evaluator on a 200-node chain with no declining node
       counts 0 calls.
     - `a_ten_thousand_node_skip_chain_runs_without_recursion`.
+    - `an_admits_edge_to_an_unsupplied_input_is_missing_unless_defaulted`: `Admits { optional: false }` on an input
+      left out gives `PlanError::MissingInputs` naming it, and `Admits { optional: true }` plans it as
+      `SkipOptionalInput`, omitted from the args.
+    - `a_plan_with_nothing_absent_runs_the_plain_loop`: `needs_rules` is false for a graph with no declining node.
 - [ ] **Step 2: Run them to see them fail.** Run `cargo test -p fnloom-core`. Expected: they don't compile (no
   `Admits`, `declines` or `is_absent`).
 - [ ] **Step 3: Implement.** Make the slot table `Vec<Option<Slot<V>>>`, with `struct Slot<V> { value: V, absent:
@@ -364,13 +395,16 @@ register, where each appends rows.
     - `fnloom.Absent`: a `@final` pyclass, `module = "fnloom"`, with exactly one instance, `fnloom.ABSENT`. Its
       `__repr__` is `"fnloom.ABSENT"`, `__reduce__` returns `"ABSENT"`, and `__copy__` and `__deepcopy__` return
       self. `__bool__` raises `TypeError` (call 8).
-    - `_absence.admits_absent(annotation: object) -> bool`: true for `Absent`, or a union holding it, seen through
-      `Annotated` and PEP 695 aliases.
+    - `_absence.admits_absent(annotation: object) -> bool`: true for `Absent`, or a union holding it at the top level,
+      seen through `Annotated` and PEP 695 aliases. It never looks inside generic arguments: `list[int | Absent]`
+      and `Collect[T | Absent]` don't admit absence (the second is a collect mode, read in Task 8).
     - `_absence.without_absent(annotation: object) -> object`: the annotation with `Absent` removed.
-    - `_absence.dependency(param: Param) -> Literal["required", "optional", "admits"]`: `admits` when the annotation
-      admits `Absent`; else `optional` with a default; else `required`.
-    - `_scan.core_inputs(params) -> list[tuple[str, Literal["required","optional","admits"], None]]`: the third
-      element is the collect mode, always `None` until Task 8.
+    - `_absence.dependency(param: Param) -> Literal["required", "optional", "admits", "admits_optional"]`: an
+      admitting annotation gives `admits`, or `admits_optional` with a default. Otherwise it is `optional` with a
+      default, and `required` without.
+    - `_scan.core_inputs(params) -> list[tuple[str, Literal["required","optional","admits","admits_optional"],
+      None]]`: the third element is the collect mode, always `None` until Task 8. The binding maps the kinds to
+      `Dependency`.
     - `_core.Graph(nodes, renames)`, where each node is `(name, inputs, tags, payload, declines: bool)`, and
       `Graph.may_be_absent() -> list[str]`, sorted.
     - `NodeView.may_be_absent: bool` and `Param.admits_absent: bool`.
@@ -386,6 +420,7 @@ register, where each appends rows.
     - `test_a_defaulted_consumer_gets_its_default`;
     - `test_returning_absent_without_admitting_it_is_a_type_error`: the message is the one above;
     - `test_may_be_absent_is_known_at_build`: over `driver.nodes`, for a chain with each rule;
+    - `test_admits_absent_reads_the_top_level_only`: `float | Absent` admits, and `list[float | Absent]` doesn't;
     - `test_absent_is_a_singleton_with_no_truth_value`: `pickle`, `copy` and `deepcopy` give `is ABSENT`; `bool(ABSENT)`
       raises `TypeError` matching `is ABSENT`;
     - `test_t_or_absent_feeds_t_on_an_edge`: `float | Absent` into `float`, into `float | Absent`, and into
@@ -417,15 +452,16 @@ register, where each appends rows.
 - Modify:
     - `python/fnloom/`: `driver.py`, `_hooks.py`, `_checks.py`, `_wrappers.py`, `_extract.py`, `_export.py`,
       `_drawing.py`, and `frame()`'s module (Plan 12 PR G);
-    - `crates/fnloom-py/src/observer.rs`;
+    - `crates/fnloom-py/src/observer.rs` (`ObserverBase.skipped`, forwarding the core's `Observer::skipped`) and
+      `python/fnloom/_core.pyi` (its stub);
     - `docs/`: `hooks.md`, `running.md`, `drawing.md`, `quirk-register.md` (Q19, Q84, Q95 amended).
 - Test: `tests/test_absence.py`, `tests/test_hooks.py`, `tests/test_export.py`, `tests/test_drawing.py`,
   `tests/test_results.py`
 
 **Interfaces:**
 
-- Consumes: `NodeView.may_be_absent`, and the binding's `ObserverBase` gaining `skipped(self, node: str, *, branch:
-  tuple[int, ...]) -> None`.
+- Consumes: `NodeView.may_be_absent`.
+- Produces in the binding: `ObserverBase.skipped(self, node: str, *, branch: tuple[int, ...]) -> None`.
 - Produces:
     - `RunEnd.skipped: tuple[tuple[str, tuple[int, ...]], ...]` (call 10).
     - `_export.FORMAT_2 = "fnloom.export/2"`: a node gains `"may_be_absent": bool`, and the document uses `/2` only
@@ -450,6 +486,12 @@ register, where each appends rows.
       golden file.
     - `test_diff_reads_export_1_and_2`.
     - `test_the_may_be_absent_mark_is_drawn_and_hash_seed_stable` (three `PYTHONHASHSEED` values).
+    - `test_fnloom_never_takes_absents_truth_value` (call 20). Run `ABSENT` as an output, a node input and a stored
+      value through these paths, each of which must neither raise nor test truth:
+        - `PrintNodes` at verbosity 2 and `LogFailures`;
+        - `MemoryCache` and `DiskCache`;
+        - the default dict result, a result builder and `frame()`'s refusal;
+        - `Driver.export` of the run, and `draw_execution`.
 - [ ] **Step 3: Run them to see them fail.** Expected: FAIL (`RunEnd` has no `skipped`, and the input isn't refused).
 - [ ] **Step 4: Implement.**
     - `Dispatch.skipped(node, branch)` gathers the pairs, and `_Forward.skipped` forwards them.
@@ -473,9 +515,16 @@ register, where each appends rows.
 - Produces: `_absence.Rules`, a frozen table built once per `AsyncDriver`. For each node it holds `declines` and,
   for each source it reads, a kind. `Rules.arguments(node, values) -> dict[str, object] | Skip` applies §7.2.
   `_async._Run` uses it in `_started` and `_store`.
+- `_async.Schedule` maps `admits` to required and `admits_optional` to optional when it decides which inputs are
+  missing, as Task 1 does in `plan.rs`.
+- The return check, on the async path: the binding's `Caller` doesn't run async nodes, so `_Run._store` (and
+  `_inline` for a sync node run on the loop) applies it. `_absence.returned(node, value) -> object` raises the same
+  `TypeError` as the binding when `value is ABSENT` and the node doesn't decline.
 - [ ] **Step 1: Write the failing tests.** Parametrize every test in `tests/test_absence.py` over `driver_kind in
   ("sync", "async")`, with a `run(driver_kind, ...)` helper in `tests/helpers.py`. Add
-  `test_async_skips_fire_no_node_events_and_list_in_run_end`.
+  `test_async_skips_fire_no_node_events_and_list_in_run_end`,
+  `test_async_return_check_on_async_and_inline_sync_nodes` and
+  `test_async_admits_input_left_out_is_missing_unless_defaulted`.
 - [ ] **Step 2: Run them to see them fail.** Expected: FAIL, async only.
 - [ ] **Step 3: Implement `Rules`** and use it in `_Run`. A skipped node is stored as absent and completes its
   dependents' counts without being scheduled.
@@ -492,7 +541,8 @@ register, where each appends rows.
     - `crates/fnloom-py/src/`: `fingerprint.rs`, `keys.rs`, `store.rs`;
     - `python/fnloom/`: `_stores.py`, `_caching.py`, `_core.pyi`;
     - `docs/caching.md`.
-- Test: `tests/test_caching.py`, `tests/test_stores.py`, `tests/test_absence.py`
+- Test: `tests/test_caching.py` and `tests/test_stores.py` only, so A2's edits to `tests/test_absence.py` don't
+  collide
 
 **Interfaces:**
 
@@ -526,14 +576,19 @@ register, where each appends rows.
 **Files:**
 
 - Create: `crates/fnloom-core/src/block.rs`
-- Modify: `crates/fnloom-core/src/{node.rs,graph.rs,error.rs,lib.rs,testing.rs}`, `crates/fnloom-py/src/graph.rs`
-  (passes `expands: false` and `collect: None` until Task 8)
+- Modify:
+    - `crates/fnloom-core/src/`: `node.rs`, `graph.rs`, `error.rs`, `lib.rs`, `testing.rs`;
+    - `crates/fnloom-core/src/plan.rs`: `action_for` matches `NodeKind` exhaustively, so `Expand` plans as `Compute`;
+    - `crates/fnloom-py/src/graph.rs`: passes `expands: false` and `collect: None` until Task 8;
+    - `docs/quirk-register.md`: the row text of Q124 and Q136, from design §10.
 - Test: `block.rs`'s test module
 
 **Interfaces:**
 
 - Produces:
-    - `NodeKind::Expand(P)`, chosen by `NodeSpec.expands: bool`.
+    - `NodeKind::Expand(P)`, chosen by `NodeSpec.expands: bool`. `Node::payload()` returns the expand's payload as it
+      does a function's, so `run.rs`'s `compute` and the binding's `Graph.__traverse__` (which visits each payload)
+      need no change.
     - `pub enum Collect { Present, All }`, with `InputSpec.collect: Option<Collect>` and `Edge.collect:
       Option<Collect>`.
     - `Node.block: Option<NodeId>`, the innermost enclosing expand.
@@ -553,6 +608,8 @@ register, where each appends rows.
     - The node fails as `CollectsOwnBlock` when its final path extends the full `path(m)` of one of its collect edges.
 - `may_be_absent` through collects: a collect edge propagates absence only when the collected block's expand may be
   absent, and only by its `dependency` (§7.4).
+- An edge from an expand into its own block passes no absence on. Its consumers read items, and an item is never
+  absent. An absent expand makes the block run no branches, and the collects take over (§7.4).
 - Display texts, quoted the way `quoted` quotes:
     - `'total' reads 'prices' both through Collect and directly, so it would be inside the block of 'tickers' it
       collects: 'tickers' -> 'prices' -> 'total'`;
@@ -568,21 +625,27 @@ register, where each appends rows.
     - `a_node_may_collect_one_block_and_expand_another` (Q136): its path is `[]` and its own block is new;
     - `nested_blocks_record_their_path`;
     - `may_be_absent_crosses_a_collect_only_from_an_absent_expand`;
+    - `an_expand_that_may_be_absent_does_not_make_its_block_nodes_absent`;
     - `discovery_has_no_recursion`: a 50,000-node chain inside one block, and 1,000 nested blocks.
-- [ ] **Step 2: Run them to see them fail.** Run `cargo test -p fnloom-core block`.
-- [ ] **Step 3: Implement `block.rs`**, with `pub(crate) fn discover<P>(nodes: &[Node<P>], order: &[NodeId]) ->
+- [ ] **Step 2: Write the register rows** Q124 and Q136, in design §10's words. Their differential tests come in
+  Task 8, the first task that can build a block from Python.
+- [ ] **Step 3: Run the tests to see them fail.** Run `cargo test -p fnloom-core block`.
+- [ ] **Step 4: Implement `block.rs`**, with `pub(crate) fn discover<P>(nodes: &[Node<P>], order: &[NodeId]) ->
   Result<Vec<Option<NodeId>>, BuildError>`. `Graph` stores the paths as one flat `Vec<NodeId>`, with offsets, so
   `block_path` borrows.
-- [ ] **Step 4: Run the tests to see them pass.**
-- [ ] **Step 5: Run `scripts/check.sh`, then commit** `core: Expand and Collect, block discovery (Q123, Q124, Q136)`.
+- [ ] **Step 5: Run the tests to see them pass.**
+- [ ] **Step 6: Run `scripts/check.sh`, then commit** `core: Expand and Collect, block discovery (Q123, Q124, Q136)`.
 
 ### Task 7: sub-plans in `prepare`, and `Plan::run` over blocks (design task 7)
 
 **Files:**
 
 - Create: `crates/fnloom-core/src/branch.rs`
-- Modify: `crates/fnloom-core/src/{plan.rs,run.rs,error.rs}`, `crates/fnloom-core/benches/core.rs`,
-  `docs/rust-core.md`
+- Modify:
+    - `crates/fnloom-core/src/`: `plan.rs`, `run.rs`, `error.rs`;
+    - `crates/fnloom-core/benches/core.rs`, `docs/rust-core.md`;
+    - `crates/fnloom-py/src/errors.rs`: `run_error` destructures `RunError::Node` without `..`, so it must name the new
+      fields to compile. Here it ignores them, and Task 10 adds the note.
 - Test: the test modules of `plan.rs` and `branch.rs`
 
 **Interfaces:**
@@ -595,6 +658,16 @@ register, where each appends rows.
       `steps`.
     - `Step.block: Option<BlockId>`, set on an expand step, computed or overridden.
     - `Plan::blocks(&self) -> &[SubPlan]`.
+    - **Step order over contracted blocks.** `topological_order` orders a graph in which each reached block is
+      contracted into its expand step:
+        - the expand step waits for its own inputs and for every node in its block's `reads`;
+        - a collect step waits for the expand of each block it collects, in place of the block nodes its collect
+          edges read;
+        - block members are left out of the outer order, and their in-edges and out-edges are rewritten as above.
+
+        Waiting counts are therefore the rewritten in-degree, not `node.inputs.len()` (which today would leave a
+        collect waiting forever). Inside a sub-plan the same rule contracts each nested block, and the sub-plan's own
+        expand counts as already done. Ties are broken by id, as today.
     - `PlanError::OutputsInBlocks(Vec<OutputInBlock>)`, with `OutputInBlock { node, expand, collects: Vec<String> }`,
       and `PlanError::OverridesInBlocks(Vec<String>)`. Both are checked after `UnknownOverrides` and before
       `MissingInputs`.
@@ -626,7 +699,12 @@ register, where each appends rows.
 - `Observer` gains methods whose defaults delegate to the existing ones, so today's observers see no change:
     - `pre_node_in(&mut self, node: &str, branch: &[usize], args)`, defaulting to `pre_node`;
     - `post_node_in(&mut self, node: &str, branch: &[usize], outcome)`, defaulting to `post_node`;
-    - `post_expand(&mut self, node: &str, branch: &[usize], items: usize) -> Result<(), E> { Ok(()) }`.
+    - `post_expand(&mut self, node: &str, branch: &[usize], items: usize) -> Result<(), E> { Ok(()) }`;
+    - `hit_in(&mut self, node: &str, branch: &[usize], value: &V) -> Result<(), E> { Ok(()) }`. The core fires it for
+      each step whose `lookup` returned a value, in plan order within the branch, after the reverse walk has chosen
+      the hits and before the first needed step runs.
+- A `lookup` hit for a node that may be absent is asked `is_absent`, as a computed value is, so a replayed declared
+  absence skips its consumers. A hit for a node that can't be absent is never asked.
 - Run order (§4.3): pull item *i*, run branch *i*'s sub-plan to its end, then pull the next.
     - A `Collect::Present` edge gathers the present branch values, and `Collect::All` gathers every branch value.
     - An absent expand applies §7.2 to each collect edge as a whole.
@@ -635,6 +713,12 @@ register, where each appends rows.
 - [ ] **Step 1: Write the failing tests.**
     - `branches_run_in_item_order_and_collect_in_branch_order`;
     - `an_empty_expand_gives_empty_collects`;
+    - `an_expand_requested_alone_returns_a_list`: the output is `finish_items(.., exhausted: true)`'s value (Q121),
+      and its block's sub-plan is not compiled, since nothing collects it in the request;
+    - `an_outer_value_read_only_by_the_block_and_named_after_the_expand_runs_first`: the block reads `zz_rate`, which
+      sorts after the expand `picked`. `zz_rate` still runs before `picked`;
+    - the same inside a nested block, `a_nested_blocks_outer_read_named_after_its_expand_runs_first`;
+    - `a_collect_runs_after_its_block`: the plan has no step left waiting;
     - `outer_values_are_computed_once_and_shared`;
     - `an_output_in_a_block_is_refused_naming_its_collects`;
     - `an_override_of_a_block_node_is_refused`;
@@ -650,11 +734,15 @@ register, where each appends rows.
     - `an_evaluator_without_blocks_gets_a_broken_plan_error`;
     - `observer_events_carry_branch_paths_in_reference_order`;
     - `lookup_is_asked_in_reverse_need_order_and_a_hit_skips_upstream`;
+    - `hit_in_fires_for_each_hit_in_plan_order`;
+    - `a_lookup_hit_that_is_absent_skips_its_consumers`;
+    - `a_plan_without_blocks_or_absence_runs_the_plain_loop` (call 21);
     - `no_recursion_on_a_1000_deep_nesting_or_a_50000_chain_in_a_block`.
 - [ ] **Step 2: Run them to see them fail.**
 - [ ] **Step 3: Implement.**
-    - `prepare` compiles a `SubPlan` per reached block, with the same Kahn order ties by id. An outer value read by a
-      block is released after the expand step.
+    - `prepare` compiles a `SubPlan` per reached block, with the contracted Kahn order above. An outer value read by
+      a block is released after the expand step.
+    - `Plan::run` dispatches on `needs_rules` and whether `blocks` is empty, so today's loop runs plans with neither.
     - `branch.rs` runs a sub-plan with `struct Frame { block: BlockId, iterator: V, index: usize, position: usize,
       slots, collected: Vec<Vec<Slot<V>>> }` on a `Vec<Frame>`.
     - Before a branch runs, the reverse walk from `collected` asks `lookup` and marks needed steps in a `Vec<bool>`.
@@ -689,6 +777,8 @@ Rows Q118 to Q124, Q127, Q132 (*Planned*), Q136, Q137 and Q138.
       `Absent`, with `Absent` stripped from `T`.
     - Both readers see through a top-level `Absent` in a union, which is how an expand or a collect parameter admits
       absence as a whole.
+    - `Parallelizable[T | Absent]` is a `ValueError` at build: `'picked' yields items of type T | Absent, but an item
+      can't be absent; write Parallelizable[T] | Absent to let the expand decline as a whole` (call 19).
     - The node tuple gains `expands: bool`, and inputs become `(source, dependency, collect_mode | None)`. `_core.Graph`
       gains `blocks() -> dict[str, list[str]]` (node to block path) and `Plan.blocks() -> dict[str, list[tuple[str,
       str]]]` (expand to its sub-plan steps).
@@ -699,7 +789,9 @@ Rows Q118 to Q124, Q127, Q132 (*Planned*), Q136, Q137 and Q138.
       `finish(exhausted: bool) -> list[object] | Items`, and records items only when the expand is an output or
       stored.
     - `_scan`: a generator function is a node when its return annotation is `Parallelizable[...]`. Every other
-      generator stays refused as today.
+      generator stays refused as today. The refusal in `_check_kind` (called from `_node_defs`) moves to after
+      `resolve`, because only a resolved return annotation says whether the function is an expand. A string
+      annotation is unresolved at scan time.
     - `Builder.build_async()` raises `TypeError: blocks run on the async driver from Plan 11; 'picked' expands` (call
       6, Q132).
 - Edge checks:
@@ -719,9 +811,14 @@ Rows Q118 to Q124, Q127, Q132 (*Planned*), Q136, Q137 and Q138.
     - `deliberate(...)` for Q118 (no flag), Q122 (nesting works; Hamilton's result is wrong), Q123 (two collects),
       Q124 (refused naming the path; Hamilton is run with a 2 s timeout in a subprocess, since it spins), Q127 (a
       `str` item into an `int` consumer is a `TypeError` naming the expand and the index), Q136 and Q137 (no executor
-      settings).
+      settings). Q137's fnloom cell reads: "No executor settings; grouping is found from the graph (§4.2).
+      `with_threads(...)` is *Planned* for Plan 11".
 - [ ] **Step 3: Write the fnloom-only tests** in `tests/test_blocks.py`:
-    - `test_aliases_type_check_as_iterable_and_list`, a `ty` snippet in `tests/typing/`;
+    - `test_aliases_type_check_as_iterable_and_list`: this task creates `tests/typing/blocks.py`, a module that
+      uses `Parallelizable[str]` as a generator return and calls `len()` and `[0]` on a `Collect[float]`. `check.sh`
+      already runs `uv run ty check`, and `[tool.ty.src] include` in `pyproject.toml` already lists `tests`, so ty
+      checks the snippet with no new step. The pytest test imports the module and runs it;
+    - `test_parallelizable_of_t_or_absent_is_refused`;
     - `test_views_report_block_and_kind`;
     - `test_extract_on_an_expand_is_refused`;
     - `test_build_async_refuses_blocks`;
@@ -816,12 +913,15 @@ Rows Q118 to Q124, Q127, Q132 (*Planned*), Q136, Q137 and Q138.
 **Files:**
 
 - Create: `tests/test_blocks_caching.py`
-- Modify: `crates/fnloom-py/src/keys.rs`, `crates/fnloom-py/src/plan.rs` (`lookup`), `python/fnloom/_caching.py`,
-  `docs/caching.md`
+- Modify:
+    - `crates/fnloom-py/src/`: `keys.rs`, `plan.rs` (`lookup`), `observer.rs` (`hit_in`);
+    - `python/fnloom/`: `_caching.py`, `_hooks.py` (`Dispatch.hit`), `_core.pyi`;
+    - `docs/caching.md`.
+- Test: `tests/test_blocks_caching.py`, `tests/test_threads.py`
 
 **Interfaces:**
 
-- Consumes: `Evaluate::lookup` and `post_node_in`, from Task 7.
+- Consumes: `Evaluate::lookup`, `Observer::hit_in` and `post_node_in`, from Task 7.
 - Produces:
     - `keys.rs`: `BlockKeys`, one per block per prepared plan, built like `KeyPlan` over the sub-plan's steps.
     - A per-run `BranchKeys` (pyclass) that computes a branch's keys once its item's version is known, memoised by
@@ -834,6 +934,9 @@ Rows Q118 to Q124, Q127, Q132 (*Planned*), Q136, Q137 and Q138.
     - `CacheRun`: late nodes (every node downstream of an expand) enter the `KeyPlan` with `stat = None` and
       `stored = False`, so the walk at `begin` passes through them to their outer sources. A `Collect` node's sources
       include its blocks' expands and their `reads`.
+    - `ObserverBase.hit_in(self, node: str, *, branch: tuple[int, ...], value: object) -> None` forwards the core's
+      `hit_in` to `Dispatch.hit(node, branch, value)`. That fires `before_node` and `after_node` with `cache` outcome
+      `hit`, as an outer hit fires today (Q85).
 
 - [ ] **Step 1: Write the failing tests.**
     - `test_a_second_run_hits_every_branch_and_runs_nothing_inside`.
@@ -842,7 +945,12 @@ Rows Q118 to Q124, Q127, Q132 (*Planned*), Q136, Q137 and Q138.
     - `test_a_hit_at_a_blocks_exit_skips_its_upstream_in_that_branch`.
     - `test_unfingerprintable_items_without_stored_items_are_uncacheable` (Review Focus 3).
     - `test_policies_apply_per_branch`: `recompute` and `disable` on block nodes, and Plan 12 PR E's driver lists.
-    - `test_branch_hits_fire_hit_events` (Q85's events, `cache` outcome `hit`, with `branch`).
+    - `test_branch_hits_fire_hit_events`: Q85's events, `cache` outcome `hit`, with `branch`, in plan order within
+      each branch.
+    - In `tests/test_threads.py`, `test_a_block_graph_shared_by_threads`: 16 threads share one cached driver and run
+      a nested fan-out with mixed hits and misses. Every result equals the single-threaded one, and every
+      `current_branch()` read inside a node equals that node's own branch. Run on 3.14 and 3.14t. It checks that
+      `BranchKeys` and `Items` are per run and that the context variable is per call.
 - [ ] **Step 2: Run them to see them fail. Step 3: Implement. Step 4: Run the tests to see them pass**, plus
   `pytest tests/test_caching*.py`.
 - [ ] **Step 5: Run `scripts/check.sh`, then commit** `Caching blocks: content-addressed branch keys`.
@@ -966,6 +1074,8 @@ Rows Q118 to Q124, Q127, Q132 (*Planned*), Q136, Q137 and Q138.
     - `test_collect_drops_declined_branches_in_order`;
     - `test_collect_with_absent_keeps_places`;
     - `test_an_absent_expand_is_not_an_empty_one`: `[]` against `ABSENT`, a default, and a skip;
+    - `test_a_replayed_declined_branch_skips_its_consumers`: a branch node's declared `ABSENT`, served by `lookup`,
+      is asked `is_absent` (Task 7), so its block consumers skip again without running;
     - `test_items_already_pulled_are_dropped_when_the_expand_declines_midway`: a generator annotated
       `-> Parallelizable[str] | Absent` that returns `ABSENT` after two yields declines as a whole. Without `| Absent`,
       the same generator fails with the return check's `TypeError`;
@@ -995,12 +1105,17 @@ Rows Q118 to Q124, Q127, Q132 (*Planned*), Q136, Q137 and Q138.
     - `listing(category: str, item: str | None = None) -> list[str] | Absent` declines when `item` is given.
     - `picked(listing: list[str] | Absent, item: str | None = None) -> Parallelizable[str]` yields `[item]` or the
       listing.
-    - `details(picked: str, endpoint: Endpoint) -> Detail` is called once per item.
+    - `details(picked: str, endpoint: Endpoint) -> Detail` is called once per item. `Endpoint` is a frozen
+      dataclass holding only its base URL, so it fingerprints and `details` is cacheable. The test's call log lives
+      outside it, in a module-level list the fake fetch appends to.
     - `summary(details: Collect[Detail]) -> Summary`.
 - [ ] **Step 1: Write the failing end-to-end tests** in `tests/test_fan_out_example.py`:
     - `test_the_listing_fans_out_one_call_per_item`;
     - `test_naming_one_item_skips_the_listing`: the endpoint's call log has one call and the listing has none;
-    - `test_a_second_run_is_served_from_the_cache`.
+    - `test_a_second_run_is_served_from_the_cache`;
+    - `test_naming_one_item_after_a_full_run_hits_its_branch`: after a full-listing run, a run naming one listed
+      item makes no endpoint call. Its one branch is served from what the full run stored, since branch keys are
+      content-addressed.
 - [ ] **Step 2: Run them, implement any gap found, and run them to see them pass.** A gap is a bug in an earlier
   task: fix it there, in its own commit, with a test.
 - [ ] **Step 3: Add the benchmarks** for §12.2's rows without threads, against Hamilton's synchronous executor where
@@ -1018,10 +1133,10 @@ Rows Q118 to Q124, Q127, Q132 (*Planned*), Q136, Q137 and Q138.
         - the task hooks row cites Q130 instead of Q157;
         - "Not there yet" keeps only the parallel executor and `GracefulErrorAdapter`.
 - [ ] **Step 5: Update the roadmap and the design.**
-    - Roadmap item 9 says Plan 10 is built and released in 0.4.0, and the status line says so. The ledger row "A
-      node can't skip" becomes **fixed (0.4.0)**.
+    - Roadmap item 9 says Plan 10 is built and ships in 0.5.0, and the status line says so. The ledger row "A node
+      can't skip" becomes **fixed (0.5.0)**.
     - The design gets a §14 change-log line saying what was built, and any departure the PRs made.
 - [ ] **Step 6: Run `scripts/check.sh`, then commit** `Plan 10 close-out: benchmarks, docs, roadmap`.
 
-The 0.4.0 release PR itself follows Plan 12's and this plan's last merges, as for 0.3.0 (#34). It is not part of
-this plan.
+The 0.5.0 release PR itself follows this plan's last merge, as 0.3.0 did (#34), after Plan 12's 0.4.0. It is not
+part of this plan.

@@ -57,7 +57,7 @@ and the design's change log takes a row when the item is approved.
 | Dynamic execution (`Parallelizable`, `Collect`) | Designed and approved 2026-10-29: [the dynamic execution design](../design/2026-10-28-dynamic-execution-design.md). `Parallelizable[T]` and `Collect[T]` with no experimental flag, blocks compiled once into a reusable plan, nesting, content-addressed cache keys per branch, and `Builder.with_threads(...)` for a parallel executor on free-threaded 3.14t, correct on 3.14. Plan 10 builds absence and sequential blocks; Plan 11 the executor |
 | Plugin ecosystem (dask, ray, spark, pandera, mlflow, UI, tracker) | Not built in (design §2 non-goal). Plan 6's hooks make each one writable outside fnloom (Q84) |
 | A failing node logs its inputs | Done in Plan 6: `after_node` gets `ok=False` with the node, its inputs and its error, and `fnloom.LogFailures` (*new*) is the ready-made hook that logs them (Q88) |
-| `NodeExecutionMethod` and `GracefulErrorAdapter` (node-execution wrappers) | `NodeExecutionMethod` done in Plan 8: `Builder.with_node_wrappers(*wrappers)`, Q24's ordered chain, any number per driver (Q111). Graceful partial failure is designed for Plan 10: `@fnloom.absent_on(*errors)` and `Builder.with_absent_on(...)` turn chosen errors into absence, and `Collect` keeps the branches that succeeded ([design](../design/2026-10-28-dynamic-execution-design.md) §7.5) |
+| `NodeExecutionMethod` and `GracefulErrorAdapter` (node-execution wrappers) | `NodeExecutionMethod` done in Plan 8: `Builder.with_node_wrappers(*wrappers)`, Q24's ordered chain, any number per driver (Q111). Graceful partial failure is designed for Plan 11: `@fnloom.absent_on(*errors)` and `Builder.with_absent_on(...)` turn chosen errors into absence, and `Collect` keeps the branches that succeeded ([design](../design/2026-10-28-dynamic-execution-design.md) §7.5) |
 | `StaticValidator` | Decided in Plan 9: not planned (Q117). A function over `Driver.nodes` after `build()` raises one `ValueError` listing every problem |
 | Async hook methods | Out of scope for Plan 6 (its decision 13): hook methods are plain `def`, called on the loop's thread on the async driver, and an `async def` method is a `TypeError` from `with_hooks` (Q84, Q86) |
 | A function in `final_vars` | Done in Plan 5: matched by identity, never by name (Q30) |
@@ -226,7 +226,8 @@ tests against Hamilton for every kept behaviour; benchmarks for anything on the 
    ([the dynamic execution design](../design/2026-10-28-dynamic-execution-design.md), milestones A and B): `ABSENT`
    and its consumer rules, `Parallelizable` and `Collect` with nesting and per-branch caching. 0.3.0 shipped
    without it (maintainer, 2026-11-03). [Plan 10's implementation plan](2026-11-05-plan-10-absence-and-fan-out.md)
-   is built after Plan 12's PRs A to G, and ships together with Plan 12 as 0.4.0 (orchestrator, 2026-11-05).
+   is built after Plan 12's PRs A to G, and ships as 0.5.0, the release after Plan 12's 0.4.0 (maintainer,
+   2026-11-03).
 10. **Plan 11: the parallel executor and partial results.** The same design, milestones C to E: the core
     `Scheduler`, `with_threads(...)` for free-threaded 3.14t, `run_many`, the async driver on the scheduler, and
     `absent_on` for partial results. The rest of "Beyond Hamilton" (streaming, incremental execution, sweeps) is left
