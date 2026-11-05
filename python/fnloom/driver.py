@@ -11,7 +11,7 @@ import typing
 
 # Imported for real, not under TYPE_CHECKING: the public signatures annotate with
 # them, and `inspect.signature` resolves those annotations at run time.
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import replace
 from types import MappingProxyType, ModuleType
@@ -27,8 +27,15 @@ from typing import (
 )
 
 from fnloom import _async, _checks, _core, _hooks, _steps, _types, _wrappers
-from fnloom._caching import Cache, CacheOutcome, CacheRun
-from fnloom._decorators import Source, Value
+from fnloom._caching import (
+    NO_SETTINGS,
+    Cache,
+    CacheOutcome,
+    CacheRun,
+    CacheSettings,
+    refuse_bad_fields,
+)
+from fnloom._decorators import CacheBehavior, Source, Value
 from fnloom._defaults import default_problems
 from fnloom._drawing import Drawing, Mark, drawing, with_context
 from fnloom._export import export
@@ -2401,12 +2408,14 @@ def _builder_of[R](  # noqa: PLR0913, PLR0917  # pickle passes each part positio
     namespaces: tuple[str | None, ...] = (),
     result_builder: _ResultBuilder[R] | None = None,
     bound: Mapping[str, Mapping[str, Source | Value]] | None = None,
+    cache_settings: CacheSettings = NO_SETTINGS,
 ) -> Builder[R]:
     """A pickled builder, its modules imported again by name, its functions too.
 
     `namespaces` holds each module's namespace, in order, or is empty for none.
     `result_builder` pickles by Python's own rules, as a hook does, and so do the
-    values `bound` holds, each namespace's `bind=`.
+    values `bound` holds, each namespace's `bind=`. `cache_settings` are
+    `with_cache`'s lists.
     """
     modules = tuple(importlib.import_module(name) for name in names)
     return Builder(
@@ -2414,6 +2423,7 @@ def _builder_of[R](  # noqa: PLR0913, PLR0917  # pickle passes each part positio
         namespaces=namespaces,
         bound=bound,
         store=store,
+        cache_settings=cache_settings,
         config=config,
         functions=from_references(functions),
         result_builder=result_builder,
@@ -2480,6 +2490,7 @@ class Builder[R = dict[str, object]]:
         deep_type_checks: bool = False,
         numeric_widening: bool = False,
         store: CacheStore | None = None,
+        cache_settings: CacheSettings = NO_SETTINGS,
         config: Mapping[str, object] | None = None,
         hooks: Sequence[Hook] = (),
         result_builder: _ResultBuilder[R] | None = None,
@@ -2494,7 +2505,8 @@ class Builder[R = dict[str, object]]:
         another length, or holds a bad namespace. `bound` holds each namespace's
         `bind=`, checked as `with_modules` checks it.
         `functions` are the node sources of `with_functions`. `store`, when
-        given, caches the results of the driver's runs in it.
+        given, caches the results of the driver's runs in it, by
+        `cache_settings`, `with_cache`'s lists.
         `config`, copied, selects `@config.when*` variants (see `with_config`).
         The other settings are those of `without_input_type_checks`,
         `without_override_type_checks`, `with_strict_overrides`,
@@ -2522,6 +2534,7 @@ class Builder[R = dict[str, object]]:
         self._value_checks = _checked_value_checks(value_checks)
         self._wrappers = _wrappers.checked(node_wrappers)
         self._store = store
+        self._cache_settings = cache_settings
         # Never changed once made: `with_config` makes a new dict.
         self._config: dict[str, object] = (
             {} if config is None else _checked_config(config)
@@ -2541,6 +2554,7 @@ class Builder[R = dict[str, object]]:
             tuple[str | None, ...],
             _ResultBuilder[R] | None,
             Mapping[str, Mapping[str, Source | Value]],
+            CacheSettings,
         ],
     ]:
         """The modules' names and namespaces, the functions' references, the settings.
@@ -2566,6 +2580,7 @@ class Builder[R = dict[str, object]]:
             self._result_builder,
             # Plain dicts: a `MappingProxyType` doesn't pickle.
             {namespace: dict(bind) for namespace, bind in self._bound.items()},
+            self._cache_settings,
         )
 
     def _settings(self) -> _Settings:
@@ -2591,6 +2606,7 @@ class Builder[R = dict[str, object]]:
         bound: Mapping[str, Mapping[str, Source | Value]] | None = None,
         functions: tuple[FunctionSource, ...] | None = None,
         store: CacheStore | None = None,
+        cache_settings: CacheSettings | None = None,
         config: Mapping[str, object] | None = None,
         **settings: Unpack[_Changes],
     ) -> Builder[R]:
@@ -2605,6 +2621,9 @@ class Builder[R = dict[str, object]]:
             namespaces=self._namespaces if namespaces is None else namespaces,
             bound=self._bound if bound is None else bound,
             store=self._store if store is None else store,
+            cache_settings=self._cache_settings
+            if cache_settings is None
+            else cache_settings,
             config=self._config if config is None else config,
             result_builder=self._result_builder,
             **{**self._settings(), **settings},
@@ -2851,6 +2870,7 @@ class Builder[R = dict[str, object]]:
             namespaces=self._namespaces,
             bound=self._bound,
             store=self._store,
+            cache_settings=self._cache_settings,
             config=self._config,
             result_builder=build,
             **self._settings(),
@@ -2858,7 +2878,16 @@ class Builder[R = dict[str, object]]:
         built._functions = self._functions
         return built
 
-    def with_cache(self, store: CacheStore) -> Builder[R]:
+    def with_cache(  # noqa: PLR0913  # Hamilton's lists, keyword-only
+        self,
+        store: CacheStore,
+        *,
+        recompute: Iterable[str] | Literal[True] = (),
+        disable: Iterable[str] | Literal[True] = (),
+        default: Iterable[str] | Literal[True] = (),
+        default_behavior: CacheBehavior = "default",
+        ignore: Mapping[str, Iterable[str]] | None = None,
+    ) -> Builder[R]:
         """Returns a new builder whose driver caches every node's result in `store`.
 
         A node's `@cache` policy changes how it is cached. Each run computes every
@@ -2866,13 +2895,31 @@ class Builder[R = dict[str, object]]:
         stored results nearest the outputs, and runs and stores the rest. Code
         versions are read at build, so rebuild after editing code. A stored value is
         returned as it is, not copied: a cached node must not mutate its arguments.
+
+        `recompute`, `disable` and `default` each name nodes given that behavior
+        (Q143). The most specific setting wins: a list naming the node, then its
+        `@cache(behavior=...)` (for an extracted field, its producer's
+        `fields=`), then `default_behavior`. A list given `True` sets
+        `default_behavior` for every node no list names: it counts as the
+        default, not as a name, so a node's own `@cache` still wins over it.
+        `ignore` maps a consumer to parameters left out of its key, as its own
+        `@cache(ignore=...)` does (Q50). `TypeError` for a bare `str` or a
+        non-`str` name; `ValueError` for a name in two lists, two lists given
+        `True`, or `True` against another `default_behavior`. The build refuses a
+        name that is no node, or a parameter the consumer does not have, with a
+        `did you mean`.
         """
         if not all(
             callable(getattr(store, m, None)) for m in ("get", "put", "discard")
         ):
             msg = f"a cache store needs get, put and discard methods, not {store!r}"
             raise TypeError(msg)
-        return self._with(store=store)
+        settings = CacheSettings.checked(
+            {"recompute": recompute, "disable": disable, "default": default},
+            default_behavior,
+            ignore,
+        )
+        return self._with(store=store, cache_settings=settings)
 
     def build(self) -> Driver[R]:
         """Scans the modules and returns a `Driver`; `ValueError` on a bad node.
@@ -2895,7 +2942,11 @@ class Builder[R = dict[str, object]]:
         """
         nodes, views, graph, unmatched, left_out, owner = self._scanned(awaits=False)
         # Called here, so a `CacheWarning` points at the caller's `build`.
-        cache = None if self._store is None else Cache.of(self._store, nodes)
+        cache = (
+            None
+            if self._store is None
+            else Cache.of(self._store, nodes, self._cache_settings)
+        )
         return self._driver(graph, views, unmatched, left_out, cache, owner)
 
     def build_async(
@@ -2917,7 +2968,11 @@ class Builder[R = dict[str, object]]:
         checked = _async.checked_sync_nodes(sync_nodes)
         nodes, views, graph, unmatched, left_out, owner = self._scanned(awaits=True)
         # Called here, so a `CacheWarning` points at the caller's `build_async`.
-        cache = None if self._store is None else Cache.of(self._store, nodes)
+        cache = (
+            None
+            if self._store is None
+            else Cache.of(self._store, nodes, self._cache_settings)
+        )
         built = AsyncDriver(
             self._driver(graph, views, unmatched, left_out, cache, owner),
             {node.name: node for node in nodes},
@@ -2957,6 +3012,7 @@ class Builder[R = dict[str, object]]:
         _refuse_unread(self._bound, used)
         relays = _steps.relays(nodes)
         _checks.refuse_unreadable(nodes)
+        refuse_bad_fields(nodes)
         unmatched = scanned.unmatched
         if unmatched:
             # A field of a forward-referenced `TypedDict` is first known resolved.

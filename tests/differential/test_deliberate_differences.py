@@ -1033,7 +1033,7 @@ def test_q50_a_client_is_never_pickled(tmp_path: Path) -> None:
     assert driver.execute(["guarded"], inputs={"n": 1}) == {"guarded": 2}
     assert driver.explain_cache(["guarded"], inputs={"n": 1}) == {
         "guarded": CacheOutcome("hit", None),
-        "lock": CacheOutcome("uncacheable", "policy disable"),
+        "lock": CacheOutcome("uncacheable", "policy disable (decorator)"),
     }
     assert driver.execute(["guarded"], inputs={"n": 1}) == {"guarded": 2}
 

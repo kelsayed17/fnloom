@@ -250,10 +250,10 @@ def test_uncacheable_nodes_say_why(
     reported = {name: outcome for _, name, outcome in _outcomes(hook)}
     assert reported == explained
     assert reported == {
-        "clock": CacheOutcome("uncacheable", "policy disable"),
+        "clock": CacheOutcome("uncacheable", "policy disable (decorator)"),
         "stamped": CacheOutcome("uncacheable", "reads uncacheable 'clock'"),
         "held": CacheOutcome("uncacheable", "thing: Opaque"),
-        "fresh": CacheOutcome("miss", "policy recompute"),
+        "fresh": CacheOutcome("miss", "policy recompute (decorator)"),
     }
 
 
@@ -287,7 +287,7 @@ def test_a_recompute_run_reports_through_the_same_run(
         (stage, name, outcome)
         for name, outcome in (
             ("symbol", MISS),
-            ("price", CacheOutcome("miss", "policy recompute")),
+            ("price", CacheOutcome("miss", "policy recompute (decorator)")),
             ("value", MISS),
         )
         for stage in ("before_node", "after_node")

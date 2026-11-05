@@ -28,6 +28,13 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `.on_output` over `on_output=`. A namespace that is no dotted identifier path is refused when decorating, and a
   name two nodes would have fails the build naming what made each. `apply_to(...).named(name, namespace=)` does the
   same for `@mutate` (Q140).
+- `Builder.with_cache(store, *, recompute=(), disable=(), default=(), default_behavior="default", ignore=None)`: each
+  list names nodes given that behavior, or is `True` for the default. A list naming a node wins over its
+  `@cache(behavior=...)`, which wins over `default_behavior`; `True` counts as `default_behavior`, not as a name, so
+  a node's own `@cache` still wins over it. A name in two lists, two `True` lists, or `True` against another
+  `default_behavior` is a `ValueError`; a name that is no node, or an `ignore` parameter the consumer lacks, fails
+  the build with a `did you mean`. `ignore` maps a consumer to parameters left out of its key. Carried by pickling,
+  `copy`, `rebuild()` and `build_async` (Q143).
 - `fnloom.frame(library="pandas", *, flatten=True, separator=".", join="strict")`, a result builder for
   `with_result_builder` making one pandas or polars frame: a frame output flattened into `<output>.<column>` columns in
   request then column order, a series one column, scalars broadcast, all scalars one row. `join="strict"` refuses
@@ -36,6 +43,12 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `ValueError` naming both. The library is imported by `frame`, never by `import fnloom`. `frame` returns a
   `fnloom.FrameBuilder` (Q144).
   `with_result_builder(pandas.DataFrame)` is unchanged (Q89).
+- `@cache(fields={...})` and `fnloom.FieldCache(behavior="default", format=None)`: a field or column of
+  `@extract_fields` or `@extract_columns` with a policy of its own. `"default"` stores and serves the field apart from
+  its producer, keyed by the producer's key and the field, so a `disable` producer can have a stored field and does
+  not run when it hits; `"recompute"` runs the producer again for the field; `"disable"` makes the field's readers
+  uncacheable. A field the function doesn't extract is a `ValueError` at build, and `fields=` on a function that
+  extracts nothing a `TypeError` (Q147).
 
 ### Changed
 
@@ -49,6 +62,13 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - A step named with `.named(...)` counts toward the numbers of its function's unnamed steps, as in Hamilton:
   `step(_inc).named("first"), step(_inc)` makes `<node>.with_inc_1` for the second step, where it was
   `<node>.with_inc` (Q104, Q140).
+- `explain_cache` (and a hook's cache outcome) names where a policy came from: `"policy recompute"` is now
+  `"policy recompute (decorator)"`, `"policy disable"` is `"policy disable (decorator)"`, and `(driver)` or
+  `(default)` mark a behavior from a `with_cache` list or `default_behavior`. A `default` node that a list or
+  `@cache(behavior="default")` made so has the reason `"policy default (driver)"` or `"policy default (decorator)"`
+  where it had `None`.
+- `@cache(...)` without `behavior` no longer sets one: `CachePolicy.behavior` is `None`, and the driver's
+  `default_behavior` applies, as in Hamilton. With `with_cache`'s default, nothing changes.
 
 ## [0.3.0] - 2026-11-03
 

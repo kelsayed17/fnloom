@@ -161,7 +161,7 @@ A node changes how it is cached with `@cache`, which records the policy and read
 | `@cache()`, or no decorator | on a miss | yes | its key |
 | `@cache(behavior="recompute")` | always | no | the fingerprint of its result |
 | `@cache(behavior="disable")` | always | never | nothing: they cannot be cached either, unless they `ignore` it |
-| A field or column node of `@extract_fields` or `@extract_columns` | whenever it's needed, and its type check with it | never | its key: the producer's, with the field or column, its declared type and its fill |
+| A field or column node of `@extract_fields` or `@extract_columns` | whenever it's needed, and its type check with it | never, unless `@cache(fields=...)` gives it a policy ([Per-field policies](#per-field-policies)) | its key: the producer's, with the field or column, its declared type and its fill |
 
 **`recompute`** is for a node that reads the outside world, as above. Its result is never stored, since the node
 always runs and nothing would read it back. Its result must be fingerprintable ([Fingerprints](#fingerprints)), or
@@ -212,7 +212,7 @@ feed = fnloom.Builder().with_modules(market).with_cache(fnloom.MemoryCache()).bu
 feed.execute(["lot_value"], inputs={"symbol": "ABC", "lots": 2})
 # -> {'lot_value': 20200.0}
 feed.explain_cache(["lot_value"], inputs={"symbol": "ABC", "lots": 2})
-# -> {"client": ("uncacheable", "policy disable"), "last": ("miss", "policy recompute"), "lot_value": ("unknown", "downstream of recompute node 'last'")}
+# -> {"client": ("uncacheable", "policy disable (decorator)"), "last": ("miss", "policy recompute (decorator)"), "lot_value": ("unknown", "downstream of recompute node 'last'")}
 ```
 
 `lot_value` is `unknown` to `explain_cache` because its key depends on `last`'s result, which only a run knows: in a
@@ -260,6 +260,107 @@ outcomes["weighted"]
 results are kept apart. A default run after a recompute run serves the default entries stored before it, for the node
 and everything downstream, consistently: never a recompute result beside downstream entries keyed before it (Q49 in
 [the register](quirk-register.md)).
+
+### Behavior from the driver
+
+`with_cache` can set behaviors too, without touching the functions: `recompute=`, `disable=` and `default=` each take
+node names, and `default_behavior=` sets the behavior of every node nothing else sets (Q143). The most specific
+setting wins:
+
+1. a `with_cache` list naming the node;
+2. the node's own `@cache(behavior=...)` (`@cache` with no `behavior`, as `@cache(version="1")`, sets none);
+3. `default_behavior`, `"default"` unless given.
+
+A list given `True` instead of names is the same as setting `default_behavior` to its behavior. It counts as the
+default, not as a name, so a node's own `@cache` still wins over it: `recompute=True` leaves a
+`@cache(behavior="disable")` client disabled. A name in two lists, two lists given `True`, or `True` against another
+`default_behavior` is a `ValueError` when `with_cache` is called, and a name that is no node fails the build with a
+`did you mean`. `ignore=` takes each consumer's parameters to leave out of its key, as the consumer's own
+`@cache(ignore=...)` does. `explain_cache` names where each policy came from: `(driver)`, `(decorator)` or
+`(default)`.
+
+```python
+# file: regions.py
+from fnloom import cache
+
+
+def sales(region: str) -> float:
+    """Sales of a region."""
+    return 1200.0 if region == "north" else 800.0
+
+
+@cache(behavior="disable")
+def rates() -> dict:
+    """Tax rates from a service, which must never be stored."""
+    return {"north": 0.2, "south": 0.1}
+
+
+def taxes(sales: float, rates: dict, region: str) -> float:
+    """The tax owed."""
+    return sales * rates[region]
+```
+
+```python
+import regions
+
+refreshed = (
+    fnloom.Builder()
+    .with_modules(regions)
+    .with_cache(fnloom.MemoryCache(), recompute=True, default=["sales"])
+    .build()
+)
+refreshed.explain_cache(["taxes"], inputs={"region": "north"})
+# -> {"rates": ("uncacheable", "policy disable (decorator)"), "sales": ("miss", "policy default (driver)"), "taxes": ("uncacheable", "reads uncacheable 'rates'")}
+```
+
+### Per-field policies
+
+A field or column of `@extract_fields` or `@extract_columns` is keyed with its producer and never stored, unless
+`@cache(fields=...)` gives it a policy of its own (Q147). Each entry is a behavior's name, or a
+`fnloom.FieldCache(behavior="default", format=None)`, which also names how a `DiskCache` stores the field:
+
+| A field's policy | Runs | Stored | Its readers are keyed by |
+| --- | --- | --- | --- |
+| `"default"` | on a miss | yes, apart from the producer | its key: the producer's key and the field |
+| `"recompute"` | always, and its producer runs again | no | the fingerprint of its value |
+| `"disable"` | whenever it's needed | never | nothing: they cannot be cached either |
+
+A stored field is served on its own, so the producer can be `disable`, because its whole value can't be pickled,
+while a field of it is stored. When the field hits, the producer does not run. The field is keyed by what the
+producer's key would be, from its code and the values it reads, less any parameter the producer's `ignore` names:
+
+```python
+# file: ledger.py
+import threading
+
+from fnloom import cache, extract_fields
+
+
+@cache(behavior="disable", fields={"totals": "default"})
+@extract_fields({"totals": dict, "lock": threading.Lock})
+def ledger(region: str) -> dict:
+    """The region's totals, and a lock that can't be pickled."""
+    return {"totals": {"sales": 1200.0}, "lock": threading.Lock()}
+```
+
+```python
+import ledger
+
+books = fnloom.Builder().with_modules(ledger).with_cache(fnloom.MemoryCache()).build()
+books.execute(["totals"], inputs={"region": "north"})
+# -> {'totals': {'sales': 1200.0}}
+books.explain_cache(["totals"], inputs={"region": "north"})
+# -> {"ledger": ("uncacheable", "policy disable (decorator)"), "totals": ("hit", "policy default (decorator)")}
+```
+
+A field `fields=` doesn't name keeps the default: keyed, never stored, run whenever it is needed. A name the function
+doesn't extract is a `ValueError` at build, with a `did you mean`, and `fields=` on a function that extracts nothing is
+a `TypeError`. A `with_cache` list naming a field node wins over `fields=`, as it wins over `@cache` on any node.
+
+A field that `@pipe_output` steps is two nodes: the field itself is `<field>.raw`, and the public `<field>` is the
+last step's value. `fields=` applies to the field node, so it works with steps unchanged. A `with_cache` list must name
+`<field>.raw` to give the field a policy: naming the public `<field>` gives that node the behavior, but it still reads
+the field node, which under a `disable` producer has no key, so nothing is stored.
 
 ## Fingerprints
 
@@ -409,8 +510,8 @@ same way, runs nothing, and returns every computed node of the plan, by name, wi
 | `status` | Means | `reason` |
 | --- | --- | --- |
 | `hit` | the store holds the node's key | `None` |
-| `miss` | it does not, so a run runs and stores the node | `None`, or `"policy recompute"` for a `recompute` node, which always runs and is never stored, or `"extracted field: runs whenever needed; never served from the store"` for a field or column node of `@extract_fields` or `@extract_columns` |
-| `uncacheable` | the node has no key: it always runs and is never stored | why, for example the global (`"global 'WEIGHTS' of 'f' is a dict, ..."`), the value path (`"levels[0]: Level"`), the policy (`"policy disable"`), a source (`"reads uncacheable 'x'"`) or a failing fingerprint function (`"cannot fingerprint 'x' for the cache: ..."`) |
+| `miss` | it does not, so a run runs and stores the node | `None`, or `"policy recompute (decorator)"` for a `recompute` node, which always runs and is never stored, or `"extracted field: runs whenever needed; never served from the store"` for a field or column node of `@extract_fields` or `@extract_columns` |
+| `uncacheable` | the node has no key: it always runs and is never stored | why, for example the global (`"global 'WEIGHTS' of 'f' is a dict, ..."`), the value path (`"levels[0]: Level"`), the policy (`"policy disable (decorator)"`), a source (`"reads uncacheable 'x'"`) or a failing fingerprint function (`"cannot fingerprint 'x' for the cache: ..."`) |
 | `unknown` | the key depends on a `recompute` node's result, which only a run knows | for example `"downstream of recompute node 'x'"`, or `"no key"` |
 
 `explain_cache` consults the store for **every** `default`-policy node with a key, including nodes upstream of a hit,
