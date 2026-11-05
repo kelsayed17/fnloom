@@ -8,13 +8,21 @@ type TagValue = str | tuple[str, ...]
 
 @final
 class _Any:
-    """The query value that matches any node carrying the tag."""
+    """The query value that matches any node carrying the tag.
+
+    One object: `copy`, `deepcopy` and `pickle` give back `ANY` itself, so a
+    copied query still matches by identity.
+    """
 
     __slots__ = ()
 
     @override
     def __repr__(self) -> str:
         return "fnloom.ANY"
+
+    @override
+    def __reduce__(self) -> str:
+        return "ANY"
 
 
 ANY: Final = _Any()
@@ -26,12 +34,13 @@ type Query = str | Sequence[str] | _Any
 def checked_value(key: str, value: object) -> TagValue:
     """`value` as a tag value: a `str`, or a non-empty tuple of distinct `str`.
 
-    A `list` or `tuple` is kept in written order. `TypeError` for anything else,
+    A `list` or `tuple` is kept in written order. A `str` subclass, alone or as
+    an item, is kept as a plain `str`, so views and exports hold one type. `TypeError` for anything else,
     an unordered collection included; `ValueError` for an empty sequence or a
     repeated item. Both name the tag `key`.
     """
     if isinstance(value, str):
-        return value
+        return str.__str__(value)
     if not isinstance(value, list | tuple):
         got = type(value).__name__
         msg = f"tag {key!r}: value must be str or a list or tuple of str, got {got}"
@@ -44,7 +53,7 @@ def checked_value(key: str, value: object) -> TagValue:
     if not items:
         msg = f"tag {key!r}: a sequence value must not be empty"
         raise ValueError(msg)
-    texts = [item for item in items if isinstance(item, str)]
+    texts = [str.__str__(item) for item in items if isinstance(item, str)]
     repeated = sorted({item for item in texts if texts.count(item) > 1})
     if repeated:
         msg = f"tag {key!r}: repeated items {', '.join(map(repr, repeated))}"

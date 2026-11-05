@@ -19,7 +19,8 @@ impl NodeId {
 pub enum TagValue {
     /// A single string.
     One(String),
-    /// Several strings, in written order.
+    /// Several strings, in written order: never empty, and no string twice.
+    /// Python's `@tag` enforces both before a value reaches here.
     Many(Vec<String>),
 }
 

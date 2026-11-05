@@ -138,7 +138,8 @@ def _parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="KEY=VALUE",
-        help="keep only the nodes with this tag; repeat to require several. "
+        help="keep only the nodes with this tag; repeat to require several, "
+        "each KEY once (a KEY given twice is refused). "
         "A VALUE matches an equal tag value or a list holding it; "
         "there is no 'present' form",
     )
@@ -164,7 +165,8 @@ def _parser() -> argparse.ArgumentParser:
         action="append",
         default=[],
         metavar="KEY=VALUE",
-        help="keep only the nodes with this tag; repeat to require several. "
+        help="keep only the nodes with this tag; repeat to require several, "
+        "each KEY once (a KEY given twice is refused). "
         "A VALUE matches an equal tag value or a list holding it; there is "
         "no 'present' form. The document keeps its graph_version, and each "
         "node's dependencies may name nodes left out",
