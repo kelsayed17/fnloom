@@ -480,7 +480,9 @@ source text, so it works in a notebook too. It hashes:
 A pydantic model class counts what pydantic takes out of its body too: each field's type as resolved, with every class,
 `NewType`, alias and `Annotated` validator it names (a nested model by its own version), its default, constraints and
 other `Field(...)` settings, its private attributes' defaults, its validators' fields and modes, and its
-`model_config`, each setting by the rules for defaults. A model whose annotations are not resolved yet is refused.
+`model_config`, each setting by the rules for defaults. A model pydantic has not built yet (`defer_build`, or a
+forward reference not resolved) is refused until you call its `model_rebuild()`. A field default that is a library
+object fnloom cannot fingerprint (a `SecretStr`, say) or a model that is not frozen makes the class uncacheable too.
 
 A name read by a string constant counts as read by name, so `globals()["RATE"]` and `getattr(config, "RATE")` see
 `RATE`. Your own code is any module that is neither built in, nor the standard library, nor installed: a module whose
