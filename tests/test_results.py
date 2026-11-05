@@ -398,19 +398,6 @@ def test_the_builder_survives_pickling_copy_rebuild_and_build_async() -> None:
         pickle.dumps(unpicklable.build())
 
 
-# The recipe docs/running.md documents, under "Result builders".
-def _frame_builder(pandas: Any) -> Callable[[dict[str, object]], object]:  # noqa: ANN401  # the pandas module
-    def frame(outputs: dict[str, object]) -> object:
-        """One column per output; Series on different indexes are refused."""
-        indexes = [v.index for v in outputs.values() if isinstance(v, pandas.Series)]
-        if any(not index.equals(indexes[0]) for index in indexes[1:]):
-            msg = f"outputs on different indexes: {', '.join(outputs)}"
-            raise ValueError(msg)
-        return pandas.DataFrame(outputs)
-
-    return frame
-
-
 SERIES = """
 import pandas as pd
 
@@ -432,8 +419,8 @@ def revenue(prices: pd.Series, quantities: pd.Series) -> pd.Series:
 """
 
 
-def test_the_documented_pandas_recipe_builds_a_frame() -> None:
-    """`pandas.DataFrame` builds a frame; the recipe refuses Series it would pad."""
+def test_the_frame_class_and_frame_build_a_frame() -> None:
+    """`pandas.DataFrame` builds a frame; `frame()` refuses Series it would pad."""
     pandas = pytest.importorskip("pandas")
     module = make_module("results_series", SERIES)
     plain = fnloom.Builder().with_modules(module).with_result_builder(pandas.DataFrame)
@@ -441,15 +428,9 @@ def test_the_documented_pandas_recipe_builds_a_frame() -> None:
     assert isinstance(frame, pandas.DataFrame)
     assert list(frame.columns) == ["revenue", "quantities"]
     assert frame["revenue"].tolist() == [1.0, 4.0, 9.0]
-    strict = (
-        fnloom.Builder()
-        .with_modules(module)
-        .with_result_builder(_frame_builder(pandas))
-    )
+    strict = fnloom.Builder().with_modules(module).with_result_builder(fnloom.frame())
     built = strict.build().execute(["revenue", "quantities"])
     assert isinstance(built, pandas.DataFrame)
     assert built.equals(frame)
-    with pytest.raises(
-        ValueError, match="outputs on different indexes: prices, shorter"
-    ):
+    with pytest.raises(ValueError, match="prices has 3 rows, shorter has 2 rows"):
         strict.build().execute(["prices", "shorter"])

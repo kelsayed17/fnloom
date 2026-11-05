@@ -4173,8 +4173,9 @@ def test_q24_one_result_builder_refused_at_the_call() -> None:
 
 
 @pytest.mark.deliberate("Q89")
-def test_q89_no_pandas_builder_and_the_recipe_pads_nothing() -> None:
-    """Hamilton's frame flattens and NaN-pads; fnloom's recipe refuses the padding."""
+@pytest.mark.deliberate("Q144")
+def test_q89_no_pandas_builder_and_frame_pads_nothing() -> None:
+    """Hamilton's frame flattens and NaN-pads; `frame()` flattens and won't pad."""
     pandas = pytest.importorskip("pandas")
     from hamilton import base  # noqa: PLC0415  # only this test needs it
 
@@ -4209,23 +4210,20 @@ def table() -> pd.DataFrame:
     assert list(flattened.columns) == ["table.p", "table.q", "longer"]
 
     assert not hasattr(fnloom, "PandasDataFrameResult")
-    # The recipe in docs/running.md, "Result builders".
-
-    def frame(outputs: dict[str, object]) -> object:
-        indexes = [v.index for v in outputs.values() if isinstance(v, pandas.Series)]
-        if any(not index.equals(indexes[0]) for index in indexes[1:]):
-            msg = f"outputs on different indexes: {', '.join(outputs)}"
-            raise ValueError(msg)
-        return pandas.DataFrame(outputs)
-
-    ours = fnloom.Builder().with_modules(module).with_result_builder(frame).build()
+    builder = fnloom.Builder().with_modules(module)
+    # `frame()` flattens as Hamilton does, but refuses the padding by default (Q144).
+    ours = builder.with_result_builder(fnloom.frame()).build()
     with pytest.raises(
-        ValueError, match="outputs on different indexes: longer, shorter"
+        ValueError, match=r"longer has 3 rows, shorter has 2 rows; pass join='outer'"
     ):
         ours.execute(["longer", "shorter"])
-    # No column is flattened: pandas refuses a frame as one column.
+    assert ours.execute(["table", "longer"]).equals(flattened)
+    # `with_result_builder(pandas.DataFrame)` is unchanged: pandas' own rules, so no
+    # column is flattened (pandas refuses a frame as one column) and Series are padded.
+    plain = builder.with_result_builder(pandas.DataFrame).build()
+    assert plain.execute(["longer", "shorter"]).equals(padded)
     with pytest.raises(ValueError, match="Data must be 1-dimensional"):
-        ours.execute(["table", "longer"])
+        plain.execute(["table", "longer"])
 
 
 Q87_RESULTS = """
