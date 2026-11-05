@@ -206,13 +206,15 @@ def drawing(
     edges: list[tuple[str, str]] = []
     for name in order:
         view = views[name]
-        tags = view.tags
+        shown = view.tags.get(_DISPLAY_NAME)
+        if isinstance(shown, tuple):
+            shown = ", ".join(shown)
         nodes.append(
             DrawnNode(
                 name=name,
                 kind="input" if view.is_input else "function",
                 type=type_text(view.type),
-                title=tags.get(_DISPLAY_NAME) or name,
+                title=shown or name,
                 condition=condition_text(view.config) if view.config else None,
                 marks=frozenset(marks.get(name, ())),
             )

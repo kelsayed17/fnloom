@@ -4,13 +4,14 @@ import annotationlib
 import inspect
 import types
 import typing
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Final, Literal, overload
 
 from fnloom._stores import Format
+from fnloom._tags import TagValue, checked_value
 from fnloom._types import written
 
 if TYPE_CHECKING:
@@ -114,7 +115,7 @@ class Decorations:
     """
 
     rows: Mapping[str, Mapping[str, Binding]] | None
-    tags: Mapping[str, str]
+    tags: Mapping[str, TagValue]
     cache: CachePolicy | None = None
     config: ConfigPolicy | None = None
     extract: Extraction | None = None
@@ -591,17 +592,28 @@ def parameterize_values[F: Callable[..., object]](
     return parameterize(**rows)
 
 
-def tag[F: Callable[..., object]](**tags: str) -> Callable[[F], F]:
-    """Attaches string tags to the node function."""
+def tag[F: Callable[..., object]](
+    **given: str | Sequence[str],
+) -> Callable[[F], F]:
+    """Attaches tags to the node function.
+
+    A value is a `str`, or a `list` or `tuple` of distinct `str`, kept as a
+    tuple in written order (Q36).
+    """
     # Typed as `object`: a caller may pass anything, whatever the hint says.
-    given_tags: dict[str, object] = dict(tags)
-    not_str = [
-        f"tag {key!r}: value must be str, got {type(tag_value).__name__}"
-        for key, tag_value in sorted(given_tags.items())
-        if not isinstance(tag_value, str)
-    ]
-    if not_str:
-        raise TypeError("; ".join(not_str))
+    given_tags: dict[str, object] = dict(given)
+    tags: dict[str, TagValue] = {}
+    problems: list[Exception] = []
+    for key, tag_value in sorted(given_tags.items()):
+        try:
+            tags[key] = checked_value(key, tag_value)
+        except (TypeError, ValueError) as error:
+            problems.append(error)
+    if problems:
+        raised = (
+            TypeError if any(isinstance(e, TypeError) for e in problems) else ValueError
+        )
+        raise raised("; ".join(map(str, problems)))
 
     def apply(fn: F) -> F:
         current = decorations(fn)

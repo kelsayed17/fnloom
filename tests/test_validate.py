@@ -237,7 +237,7 @@ def test_an_alias_and_a_row_named_like_the_function_resolve_to_it() -> None:
 def test_a_view_mapping_without_the_generated_set_still_skips_fields() -> None:
     """A `NodeViews` made from a bare mapping derives which nodes are fields."""
     module, driver = _driver("req_bare")
-    views = cast("NodeViews", driver.nodes)
+    views = driver.nodes
     bare = NodeViews(dict(views.functions), {})
     owned = bare.owners[id(module.produced)]
     assert owned == ("produced",)
