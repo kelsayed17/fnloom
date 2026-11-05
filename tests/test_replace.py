@@ -6,7 +6,7 @@ from typing import TYPE_CHECKING, override
 
 import pytest
 
-from fnloom import Builder, BuildEnd, Hook
+from fnloom import BuildEnd, Builder, Hook
 from helpers import make_module
 
 if TYPE_CHECKING:
