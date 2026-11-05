@@ -35,6 +35,14 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `default_behavior` is a `ValueError`; a name that is no node, or an `ignore` parameter the consumer lacks, fails
   the build with a `did you mean`. `ignore` maps a consumer to parameters left out of its key. Carried by pickling,
   `copy`, `rebuild()` and `build_async` (Q143).
+- `fnloom.frame(library="pandas", *, flatten=True, separator=".", join="strict")`, a result builder for
+  `with_result_builder` making one pandas or polars frame: a frame output flattened into `<output>.<column>` columns in
+  request then column order, a series one column, scalars broadcast, all scalars one row. `join="strict"` refuses
+  outputs on different pandas indexes or of different polars lengths with a `ValueError` naming them; `join="outer"`
+  is Hamilton's `PandasDataFrameResult` frame, without its log; polars refuses it. Two columns of one name are a
+  `ValueError` naming both. The library is imported by `frame`, never by `import fnloom`. `frame` returns a
+  `fnloom.FrameBuilder` (Q144).
+  `with_result_builder(pandas.DataFrame)` is unchanged (Q89).
 - `@cache(fields={...})` and `fnloom.FieldCache(behavior="default", format=None)`: a field or column of
   `@extract_fields` or `@extract_columns` with a policy of its own. `"default"` stores and serves the field apart from
   its producer, keyed by the producer's key and the field, so a `disable` producer can have a stored field and does

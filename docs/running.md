@@ -165,7 +165,9 @@ listed.raw_execute(["total"], inputs={"price": 2.5, "quantity": 4})
 
 ### pandas and polars frames
 
-fnloom ships no DataFrame builder, and needs neither library (Q89). Pass the frame class itself:
+`fnloom.frame()` is a result builder that makes one pandas frame of the outputs, as Hamilton's
+`PandasDataFrameResult` does, but refuses to pad (Q144). fnloom needs neither library: `frame` imports the one you ask
+for when you call it, and `import fnloom` imports neither.
 
 ```python
 # file: sales.py
@@ -184,44 +186,61 @@ def returns() -> pd.Series:
     return pd.Series([1, 0])
 
 
+def regions() -> pd.DataFrame:
+    return pd.DataFrame({"north": [1, 2, 3], "south": [4, 5, 6]})
+
+
+def rate() -> float:
+    return 0.2
+
+
 def revenue(prices: pd.Series, quantities: pd.Series) -> pd.Series:
     return prices * quantities
 ```
 
 ```python
-import pandas
 import sales
 
-frames = fnloom.Builder().with_modules(sales).with_result_builder(pandas.DataFrame)
-frames.build().execute(["revenue", "quantities"]).to_dict("list")
-# -> {'revenue': [1.0, 4.0, 9.0], 'quantities': [1, 2, 3]}
+builder = fnloom.Builder().with_modules(sales)
+frames = builder.with_result_builder(fnloom.frame()).build()
+frames.execute(["revenue", "regions", "rate"]).to_dict("list")
+# -> {'revenue': [1.0, 4.0, 9.0], 'regions.north': [1, 2, 3], 'regions.south': [4, 5, 6], 'rate': [0.2, 0.2, 0.2]}
 ```
 
-`with_result_builder(polars.DataFrame)` is the polars form. Either builds by the library's own rules, not by those of
-Hamilton's `PandasDataFrameResult`:
+`frame(library="pandas", *, flatten=True, separator=".", join="strict")`:
 
-- a DataFrame output is not flattened into `output.column` columns: pandas refuses a frame as one column;
-- no warning about the outputs' index types is logged;
-- outputs that are all scalars need an index in pandas, where Hamilton makes a one-row frame.
-
-pandas itself still outer-joins Series of different lengths or indexes, padding the gaps with NaN and turning integers
-into floats, as Hamilton does. To refuse that instead, check the indexes in a builder of your own:
+- **Columns.** A frame output gives one column per column, named `<output><separator><column>`, in the order you
+  asked for the outputs and then the frame's column order. A lone frame is flattened too, where Hamilton returns it as
+  it is. `flatten=False` keeps a frame's own column names. A series or a list is one column, and a scalar fills its
+  column. Outputs that are all scalars make one row.
+- **`join="strict"`**, the default, refuses outputs on different indexes, where pandas would pad the gaps with NaN
+  and turn integers into floats. The `ValueError` names each output and its rows, or the first row whose labels
+  differ. Nothing is logged, where Hamilton only logs a warning.
+- **`join="outer"`** aligns the outputs on the union of their indexes: Hamilton's frame, without the log.
+- **Two columns of one name**, such as an output `regions.north` beside `regions`, are a `ValueError` naming both.
+  A dict output is aligned on its keys, so strict compares them as an index.
+- **`frame("polars")`** makes a polars frame by the same rules. polars has no index, so outputs of different lengths
+  are refused, and so is `join="outer"`. A pandas series given to it is taken by position, its index dropped.
+- **It travels with the driver**, as any result builder does, and compares and pickles by its settings. It is a
+  `fnloom.FrameBuilder`, for annotations.
 
 ```python
-def frame(outputs: dict[str, object]) -> pandas.DataFrame:
-    """One column per output; Series on different indexes are refused."""
-    indexes = [v.index for v in outputs.values() if isinstance(v, pandas.Series)]
-    if any(not index.equals(indexes[0]) for index in indexes[1:]):
-        raise ValueError(f"outputs on different indexes: {', '.join(outputs)}")
-    return pandas.DataFrame(outputs)
-
-
-strict = fnloom.Builder().with_modules(sales).with_result_builder(frame).build()
-strict.execute(["quantities", "returns"])
-# raises ValueError: outputs on different indexes: quantities, returns
+frames.execute(["quantities", "returns"])
+# raises ValueError: frame(join='strict') needs every output on one index: quantities has 3 rows, returns has 2 rows; pass join='outer' to align them
 ```
 
-polars has no index, and refuses columns of different lengths itself.
+The frame class itself still works, and builds by the library's own rules (Q89):
+
+```python
+import pandas
+
+plain = builder.with_result_builder(pandas.DataFrame).build()
+plain.execute(["quantities", "returns"])["returns"].isna().tolist()  # NaN-padded
+# -> [False, False, True]
+```
+
+`with_result_builder(polars.DataFrame)` is the polars form. Neither flattens a frame output, and pandas needs an index
+for outputs that are all scalars.
 
 ## Validate
 

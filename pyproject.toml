@@ -55,6 +55,8 @@ dev = [
     "pytest-codspeed>=5.0.3",
     # Pydantic models as cache inputs: fnloom never imports it, but fingerprints its frozen models.
     "pydantic>=2.12",
+    # polars frames for `fnloom.frame("polars")`, `@extract_columns` and fingerprints; never a runtime dependency.
+    "polars>=2.1.0",
 ]
 # The documentation site (`uv run --group docs zensical serve` to preview it).
 docs = ["zensical>=0.0.73"]
