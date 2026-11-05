@@ -111,6 +111,10 @@ COLOURS: Mapping[str, str] = {
 _HEX = re.compile(r"#[0-9a-fA-F]{6}")
 # A DOT attribute name: an identifier.
 _DOT_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+# DOT's keywords, in any case, which an attribute name can't be unquoted.
+_DOT_WORDS = frozenset({"node", "edge", "graph", "digraph", "subgraph", "strict"})
+# The widest stroke a style may ask for, in points.
+_WIDEST = 1000
 # A Mermaid style property: a CSS name, which may hold `-` (`stroke-dasharray`).
 _MERMAID_KEY = re.compile(r"[A-Za-z_][A-Za-z0-9_-]*")
 # What a Mermaid `style` statement can't hold: its separators, quotes, braces,
@@ -240,8 +244,13 @@ def _check_width(value: object) -> None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         msg = f"Style stroke_width must be a number, got {type(value).__name__}"
         raise StyleTypeError(msg)
-    if not math.isfinite(value) or value <= 0:
-        msg = f"Style stroke_width must be a finite number above 0, got {value!r}"
+    if (
+        isinstance(value, float) and not math.isfinite(value)
+    ) or not 0 < value <= _WIDEST:
+        msg = (
+            f"Style stroke_width must be a number above 0 and at most {_WIDEST}, "
+            f"got {value!r:.40}"
+        )
         raise StyleValueError(msg)
 
 
@@ -255,7 +264,11 @@ def _passthrough(
         raise StyleTypeError(msg)
     entries: dict[str, str] = {}
     for k, v in given.items():
-        if not isinstance(k, str) or key.fullmatch(k) is None:
+        if (
+            not isinstance(k, str)
+            or key.fullmatch(k) is None
+            or (name == "dot" and k.lower() in _DOT_WORDS)
+        ):
             msg = f"Style {name} key {k!r} is not an attribute name"
             raise StyleValueError(msg)
         if not isinstance(v, str):

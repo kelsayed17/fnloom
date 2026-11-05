@@ -184,8 +184,9 @@ many (171). It has no overlapping node or label and every edge points along `ori
 network simplex, as `dot`'s do, giving the same total edge length as `dot` on the 200-node graphs measured; ordering is
 barycentre and median sweeps from three starting orders, then sifting. On a further stress set, eleven random
 200-node graphs drawn LR and TB, 21 of 22 cases are within 1.5x of `dot` (most 1.1x to 1.4x); the one outside is
-1.58x, against a `dot` TB count lower than its own LR count for the same graph. A 1000-node graph lays out in about
-2.5 seconds: sifting is bounded by the graph's layer widths, never by time, so the output stays deterministic.
+1.58x, against a `dot` TB count lower than its own LR count for the same graph. A sparse 1000-node graph lays out in about
+2.5 seconds, and dense ones take longer (150 nodes with 2222 edges, 7.6 seconds): sifting is bounded by the graph's
+layer widths, never by time, so the output stays deterministic.
 
 ### 9. Per-field cache control (sideways) → Q147
 

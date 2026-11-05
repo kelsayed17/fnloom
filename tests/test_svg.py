@@ -281,3 +281,16 @@ def test_render_with_the_builtin_engine_needs_nothing(
 def test_the_svg_is_the_same_on_every_run() -> None:
     """Built twice, the same text: nothing depends on order of discovery."""
     assert _probe().to_svg() == _probe().to_svg()
+
+
+def test_a_hand_made_drawing_in_any_order() -> None:
+    """Nodes not in topological order are sorted; a cycle is a `ValueError`."""
+    nodes = tuple(
+        DrawnNode(name=name, kind="function", type="int", title=name)
+        for name in ("c", "b", "a")
+    )
+    _check_layout(Drawing(nodes, (("a", "b"), ("b", "c"))), "LR")
+    with pytest.raises(ValueError, match="edges form a cycle through 'a', 'b', 'c'"):
+        Drawing(nodes, (("a", "b"), ("b", "c"), ("c", "a"))).to_svg()
+    with pytest.raises(ValueError, match="joins a node the drawing doesn't have"):
+        Drawing(nodes, (("a", "z"),)).to_svg()

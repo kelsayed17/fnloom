@@ -1,5 +1,6 @@
 """Drawing styles and display options: `Style`, `Drawing.styled`, `show_*` (Q139)."""
 
+import copy
 import dataclasses
 import os
 import pickle
@@ -23,6 +24,7 @@ GOLDEN = Path(__file__).parent / "golden" / "styled_drawing.txt"
 
 SALES = """
 import collections
+import copy
 import dataclasses
 from typing import NamedTuple, TypedDict
 from fnloom import tag
@@ -97,7 +99,7 @@ def test_a_style_checks_its_colours() -> None:
 def test_a_style_checks_every_other_field() -> None:
     """Width, dashes, shape and the passthroughs, each named when wrong."""
     with pytest.raises(
-        ValueError, match="stroke_width must be a finite number above 0"
+        ValueError, match="stroke_width must be a number above 0 and at most 1000"
     ):
         Style(stroke_width=0)
     with pytest.raises(ValueError, match="stroke_width"):
@@ -286,7 +288,7 @@ def test_every_writer_draws_the_vocabulary() -> None:
     line = _dot_line(drawing.to_dot(), "region")
     assert line == (
         '  "region" [label="region\\nstr" style="filled" shape=hexagon '
-        'fillcolor="#112233" color="#000080" fontcolor="#ffffff" penwidth=1.5 a="2" z="1"]'  # noqa: E501  # one line of DOT
+        'fillcolor="#112233" color="#000080" fontcolor="#ffffff" penwidth="1.5" a="2" z="1"]'  # noqa: E501  # one line of DOT
     )
     mermaid = drawing.to_mermaid()
     assert '  n1{{"region<br>str"}}' in mermaid
@@ -501,3 +503,82 @@ def test_the_golden_text_does_not_depend_on_the_hash_seed() -> None:
         for seed in ("0", "1", "2")
     }
     assert texts == {GOLDEN.read_text(encoding="utf-8")}
+
+
+def test_no_style_value_breaks_dot() -> None:
+    """A tiny or huge width, or a DOT keyword as a key, never reaches `dot` broken."""
+    drawing = (
+        _driver()
+        .draw()
+        .styled(node=Style(stroke_width=1e-5), edge=Style(stroke_width=999.5))
+    )
+    assert 'penwidth="1e-05"' in _dot_line(drawing.to_dot(), "sales")
+    assert '  edge [penwidth="999.5"]' in drawing.to_dot()
+    for wide in (1001, 10**400, float("nan")):
+        with pytest.raises(ValueError, match="stroke_width must be a number above 0"):
+            Style(stroke_width=wide)
+    for word in ("node", "Edge", "graph", "digraph", "SUBGRAPH", "strict"):
+        with pytest.raises(ValueError, match="is not an attribute name"):
+            Style(dot={word: "x"})
+    Style(mermaid={"node": "x"})  # only DOT's keywords
+    dot_program = shutil.which("dot")
+    if dot_program is not None:
+        done = subprocess.run(  # noqa: S603  # Graphviz from PATH, our own text
+            [dot_program, "-Tsvg"],
+            input=drawing.to_dot(),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        assert done.returncode == 0, done.stderr
+
+
+def test_a_red_path_edge_keeps_the_edge_style_in_mermaid() -> None:
+    """A numbered `linkStyle` replaces the default, so it repeats the edge style."""
+    drawing = (
+        _driver()
+        .draw_path_between("sales", "totals")
+        .styled(edge=Style(stroke="green", stroke_width=3, dashed=True))
+    )
+    assert (
+        "  linkStyle 3 stroke-width:3px,stroke-dasharray:5 5,stroke:red\n"
+        in drawing.to_mermaid()
+    )
+
+
+def test_a_control_character_in_a_label_stays_out_of_mermaid() -> None:
+    """Each becomes a space, so a label is always one line."""
+    node = DrawnNode(name="n", kind="function", type="int", title="a\rb\tc")
+    assert '  n0["a b c<br>int"]' in Drawing((node,), ()).to_mermaid()
+
+
+def test_copies_keep_the_view() -> None:
+    """Only pickling leaves `view` out; `copy` and `deepcopy` keep it."""
+    drawing = _driver().draw()
+    for copied in (copy.copy(drawing), copy.deepcopy(drawing)):
+        assert copied == drawing
+        assert all(n.view is not None for n in copied.nodes)
+        copied.styled(style=lambda *_: None)
+
+
+def test_an_unresolvable_schema_keeps_inherited_fields() -> None:
+    """When one annotation can't be resolved, every field is listed as written."""
+    module = make_module(
+        "styled_schema_mro",
+        """
+        import dataclasses
+
+        @dataclasses.dataclass
+        class Base:
+            x: "Missing"
+
+        @dataclasses.dataclass
+        class Child(Base):
+            y: int
+
+        def made(seed: int) -> Child:
+            return Child(1, 2)
+        """,
+    )
+    node = _nodes(fnloom.build(module).draw(show_schema=True))["made"]
+    assert node.schema == (("x", "Missing"), ("y", "int"))

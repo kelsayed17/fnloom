@@ -7,7 +7,7 @@ digraph {
   "units" [label="units\nint" style="dashed,filled" fillcolor="#eeeeee" fontcolor="#777777" color="#000080"]
   "sales" [label="sales\nfloat\nowner=ann, bo\nstage=raw" style="filled" shape=ellipse fillcolor="#ffd700" color="#000080" peripheries="2"]
   "totals" [label="totals\ndrawing_golden_sales.Totals\nnet: float\ntax: float" color="#000080"]
-  "report" [label="report\nstr\nstage=final" style="dashed,rounded,filled" color="#000080" penwidth=2]
+  "report" [label="report\nstr\nstage=final" style="dashed,rounded,filled" color="#000080" penwidth="2"]
   "region" -> "sales"
   "units" -> "sales"
   "rate" -> "totals"
@@ -38,7 +38,7 @@ flowchart LR
   n1 --> n5
   n4 --> n5
   linkStyle default stroke:#808080,stroke-dasharray:5 5
-  linkStyle 3,5 stroke:red
+  linkStyle 3,5 stroke-dasharray:5 5,stroke:red
   classDef function fill:#b4d8e4,stroke:#333333
   class n3,n4,n5 function
   classDef input fill:#ffffff,stroke:#333333,stroke-dasharray:5 5

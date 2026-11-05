@@ -104,6 +104,15 @@ class DrawnNode:
     style: Style | None = None
     view: NodeView | None = field(default=None, compare=False, repr=False)
 
+    def __copy__(self) -> DrawnNode:
+        """A copy keeping `view`: only pickling leaves it out."""
+        return dataclasses.replace(self)
+
+    def __deepcopy__(self, memo: dict[int, object]) -> DrawnNode:
+        """A deep copy sharing `view`, a read-only record of the graph."""
+        del memo  # every other field is immutable
+        return dataclasses.replace(self)
+
     @override
     def __reduce__(self) -> tuple[object, ...]:
         """Pickled without `view`, which holds the node's function."""
@@ -243,7 +252,15 @@ class Drawing:
             if edge:
                 lines.append(f"  linkStyle default {edge}")
         if red:
-            lines.append(f"  linkStyle {','.join(red)} stroke:red")
+            # A numbered `linkStyle` replaces the default one, so the edge
+            # style is written again, its stroke red.
+            own = (
+                ""
+                if self.edge_style is None
+                else _mermaid_style(dataclasses.replace(self.edge_style, stroke=None))
+            )
+            path = f"{own},stroke:red" if own else "stroke:red"
+            lines.append(f"  linkStyle {','.join(red)} {path}")
         lines.extend(_mermaid_classes(self.nodes, ids))
         for n in self.nodes:
             own = "" if n.style is None else _mermaid_style(n.style)
@@ -500,9 +517,12 @@ def _hints(cls: type) -> dict[str, object]:
     try:
         hints: dict[str, object] = dict(typing.get_type_hints(cls, include_extras=True))
     except Exception:  # noqa: BLE001  # any unresolvable name: fall back to the text
-        return dict(
-            annotationlib.get_annotations(cls, format=annotationlib.Format.STRING)
-        )
+        written: dict[str, object] = {}
+        for base in reversed(cls.__mro__):  # inherited fields too, a base's first
+            written.update(
+                annotationlib.get_annotations(base, format=annotationlib.Format.STRING)
+            )
+        return written
     return hints
 
 
@@ -642,7 +662,7 @@ def _dot_vocabulary(style: Style, *, fill: str) -> dict[str, str]:
     if style.font_color is not None:
         out["fontcolor"] = _quoted(hex_colour(style.font_color))
     if style.stroke_width is not None:
-        out["penwidth"] = number(style.stroke_width)
+        out["penwidth"] = _quoted(number(style.stroke_width))
     for key, value in (style.dot or {}).items():
         out.pop(key, None)
         out[key] = _quoted(value)
@@ -719,8 +739,12 @@ _MERMAID_SHAPES = {
 
 def _mermaid_label(node: DrawnNode, show_types: bool = True) -> str:  # noqa: FBT001, FBT002  # private
     lines = label_lines(node, show_types=show_types)
-    escaped = ("".join(_MERMAID_ESCAPES.get(c, c) for c in line) for line in lines)
-    return "<br>".join(line.replace("\n", " ") for line in escaped)
+    # A control character, a line break among them, can't stand in a label.
+    escaped = (
+        "".join(" " if ord(c) < 32 else _MERMAID_ESCAPES.get(c, c) for c in line)  # noqa: PLR2004  # the C0 controls
+        for line in lines
+    )
+    return "<br>".join(escaped)
 
 
 def _mermaid_node(node: DrawnNode, show_types: bool) -> str:  # noqa: FBT001  # private

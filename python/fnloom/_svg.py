@@ -11,6 +11,7 @@ ever crosses the gap between two layers, so no edge runs through a node, and
 every edge moves along `orient`. Nothing depends on the hash seed or the machine.
 """
 
+import heapq
 import itertools
 import math
 from bisect import bisect_left, bisect_right, insort
@@ -141,10 +142,45 @@ def _ranks(drawing: Drawing) -> dict[str, int]:
     The total length of the edges is the least any layering gives, found by
     network simplex as Graphviz's `dot` finds it, from a longest-path start.
     """
-    index = {n.name: i for i, n in enumerate(drawing.nodes)}
+    order = _topological(drawing)
+    index = {name: i for i, name in enumerate(order)}
     edges = [(index[a], index[b]) for a, b in drawing.edges]
     rank = _Ranking(len(index), edges).ranks()
-    return {n.name: rank[i] for i, n in enumerate(drawing.nodes)}
+    return {name: rank[i] for i, name in enumerate(order)}
+
+
+def _topological(drawing: Drawing) -> list[str]:
+    """The nodes in an order where every edge points forward.
+
+    A driver's drawing is in one already and keeps it; a hand-made one is
+    sorted, ties in its own order. `ValueError` for an edge to an undrawn node
+    or edges in a cycle.
+    """
+    names = [n.name for n in drawing.nodes]
+    waiting = dict.fromkeys(names, 0)
+    readers: dict[str, list[str]] = {name: [] for name in names}
+    for a, b in drawing.edges:
+        if a not in waiting or b not in waiting:
+            msg = f"edge ({a!r}, {b!r}) joins a node the drawing doesn't have"
+            raise ValueError(msg)
+        waiting[b] += 1
+        readers[a].append(b)
+    position = {name: i for i, name in enumerate(names)}
+    ready = [(position[name], name) for name in names if not waiting[name]]
+    heapq.heapify(ready)
+    order: list[str] = []
+    while ready:
+        _, name = heapq.heappop(ready)
+        order.append(name)
+        for reader in readers[name]:
+            waiting[reader] -= 1
+            if not waiting[reader]:
+                heapq.heappush(ready, (position[reader], reader))
+    if len(order) < len(names):
+        stuck = sorted(name for name in names if waiting[name])
+        msg = f"the drawing's edges form a cycle through {', '.join(map(repr, stuck))}"
+        raise ValueError(msg)
+    return order
 
 
 class _Ranking:
