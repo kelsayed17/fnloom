@@ -362,6 +362,7 @@ def test_public_api_is_exported() -> None:
         "Drawing",
         "DrawnNode",
         "Driver",
+        "FieldCache",
         "Format",
         "Group",
         "Hook",

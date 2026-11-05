@@ -9,7 +9,6 @@ import inspect
 import json
 import logging
 import sys
-import tempfile
 from typing import TYPE_CHECKING, override
 
 import pandas as pd
@@ -27,6 +26,7 @@ from fnloom import MemoryCache
 from helpers import make_module
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
     from pathlib import Path
     from types import ModuleType
 
@@ -104,34 +104,79 @@ def test_q152_cache_recompute_and_disable(
     assert outcomes["c"].status == "uncacheable"
 
 
+TARGETED = """
+@cache(behavior="{producer}", {target})
+@extract_fields({{"totals": dict, "rate": float}})
+def report(region: str) -> dict:
+    print("report")
+    return {{"totals": {{"north": len(region)}}, "rate": 0.2}}
+
+def taxed(totals: dict) -> float:
+    print("taxed")
+    return totals["north"] * 0.2
+"""
+
+
+def _second_run(
+    execute: Callable[..., object],
+    capsys: pytest.CaptureFixture[str],
+    outputs: list[str],
+) -> list[str]:
+    """The functions the second of two equal runs ran, sorted."""
+    execute(outputs, inputs={"region": "north"})
+    capsys.readouterr()
+    execute(outputs, inputs={"region": "north"})
+    return sorted(capsys.readouterr().out.split())
+
+
 @pytest.mark.deliberate("Q147")
-def test_q147_target_picks_one_extracted_output() -> None:
-    """Hamilton's `target_` sets one field's behaviour; fnloom's `@cache` has none."""
-    hamilton_module = make_module(
-        "rows_target_h",
-        HAMILTON_HEADER
-        + """
-@cache(behavior="recompute", target_="x")
-@extract_fields({"x": int, "y": int})
-def p(a: int) -> dict:
-    return {"x": a, "y": a}
-""",
-    )
+@pytest.mark.parametrize(
+    ("producer", "field", "hamilton_ran", "fnloom_ran"),
+    [
+        # Hamilton reruns only the field's getter, on the stored producer: the
+        # producer's code never runs again, so nothing is read afresh.
+        ("default", "recompute", [], ["report"]),
+        # Alike: the field is never versioned, so its reader runs.
+        ("default", "disable", ["taxed"], ["taxed"]),
+        # Hamilton runs a disabled producer to get any field; fnloom serves the
+        # stored field alone.
+        ("disable", "default", ["report"], []),
+    ],
+)
+def test_q147_target_against_fields(  # noqa: PLR0913, PLR0917  # one row of the grid
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    producer: str,
+    field: str,
+    hamilton_ran: list[str],
+    fnloom_ran: list[str],
+) -> None:
+    """Which functions run again under `target_`, and under `fields=`."""
+    if producer == "default":
+        targeted = TARGETED.format(producer=field, target='target_="totals"')
+    else:
+        targeted = TARGETED.format(producer=producer, target='target_="report"')
+    name = f"rows_target_{producer}_{field}"
+    hamilton_module = _module_file(tmp_path, f"{name}_h", HAMILTON_HEADER + targeted)
     hamilton = (
         hamilton_driver.Builder()
         .with_modules(hamilton_module)
-        .with_cache(path=tempfile.mkdtemp())
+        .with_cache(path=tmp_path / "hamilton")
         .build()
     )
-    hamilton.execute(["x", "y"], inputs={"a": 1})
+    outputs = ["taxed"] if field == "disable" else ["totals"]
+    assert _second_run(hamilton.execute, capsys, outputs) == hamilton_ran
     behaviors = hamilton.cache.resolve_behaviors(hamilton.cache.last_run_id)
-    assert {n: behaviors[n].name for n in ("p", "x", "y")} == {
-        "p": "DEFAULT",
-        "x": "RECOMPUTE",
-        "y": "DEFAULT",
-    }
+    if producer == "default":
+        assert behaviors["totals"].name == field.upper()
+        assert behaviors["rate"].name == behaviors["report"].name == "DEFAULT"
+    fields = f'fields={{"totals": "{field}"}}'
+    source = TARGETED.format(producer=producer, target=fields)
+    module = make_module(f"{name}_f", FNLOOM_HEADER + source)
+    driver = fnloom.Builder().with_modules(module).with_cache(MemoryCache()).build()
+    assert _second_run(driver.execute, capsys, outputs) == fnloom_ran
     with pytest.raises(TypeError, match="target_"):
-        fnloom.cache(behavior="recompute", target_="x")  # ty: ignore[unknown-argument]  # refused is the point
+        fnloom.cache(behavior="recompute", target_="x")  # ty: ignore[unknown-argument]  # fnloom names it fields=
 
 
 @pytest.mark.keeps("Q153")
@@ -566,25 +611,131 @@ def c(b: int) -> int:
     assert built.explain_cache(["c"], inputs={"a": 1})["c"].status == "hit"
 
 
-@pytest.mark.deliberate("Q143")
-def test_q143_driver_lists_beat_the_decorator_in_hamilton() -> None:
-    """Hamilton's `with_cache` lists win over `@cache`; fnloom takes no lists yet."""
-    hamilton_module = make_module("rows_lists_h", HAMILTON_HEADER + CACHED)
+LISTED = """
+def plain(a: int) -> int:
+    return a + 1
+
+@cache(behavior="default")
+def kept(a: int) -> int:
+    return a + 2
+
+@cache(behavior="recompute")
+def fresh(a: int) -> int:
+    return a + 3
+
+@cache(behavior="disable")
+def off(a: int) -> int:
+    return a + 4
+
+@cache(format="pickle")
+def stored(a: int) -> int:
+    return a + 5
+"""
+
+LISTED_NODES = ["fresh", "kept", "off", "plain", "stored"]
+
+
+def _hamilton_behaviors(
+    module: ModuleType, path: Path, lists: Mapping[str, object]
+) -> dict[str, str]:
+    """Each node's behavior, as Hamilton resolves it under these lists."""
     hamilton = (
         hamilton_driver.Builder()
-        .with_modules(hamilton_module)
-        .with_cache(path=tempfile.mkdtemp(), disable=["b"], default=["c"])
+        .with_modules(module)
+        .with_cache(path=path, **lists)  # ty: ignore[invalid-argument-type]  # the lists as given
         .build()
     )
-    hamilton.execute(["d"], inputs={"a": 1})
+    hamilton.execute(list(LISTED_NODES), inputs={"a": 1})
     behaviors = hamilton.cache.resolve_behaviors(hamilton.cache.last_run_id)
-    assert (behaviors["b"].name, behaviors["c"].name) == ("DISABLE", "DEFAULT")
+    return {name: behaviors[name].name.lower() for name in LISTED_NODES}
+
+
+def _fnloom_behaviors(
+    module: ModuleType, lists: Mapping[str, object]
+) -> dict[str, str]:
+    """Each node's behavior, read from the policy `explain_cache` names."""
+    driver = (
+        fnloom.Builder()
+        .with_modules(module)
+        .with_cache(MemoryCache(), **lists)  # ty: ignore[invalid-argument-type]  # the lists as given
+        .build()
+    )
+    found: dict[str, str] = {}
+    for name, outcome in driver.explain_cache(LISTED_NODES, inputs={"a": 1}).items():
+        reason = outcome.reason or ""
+        found[name] = next(
+            (b for b in ("recompute", "disable") if f"policy {b}" in reason), "default"
+        )
+    return found
+
+
+def _listed_grid() -> list[dict[str, object]]:
+    """Every list naming each node, alone and beside a `default_behavior`."""
+    grid: list[dict[str, object]] = [{}]
+    for behavior in ("default", "recompute", "disable"):
+        grid.append({"default_behavior": behavior})
+        for name in LISTED_NODES:
+            grid.append({behavior: [name]})
+            grid.append({behavior: [name], "default_behavior": "recompute"})
+    return grid
+
+
+@pytest.mark.keeps("Q143")
+def test_q143_each_list_and_decorator_resolve_alike(tmp_path: Path) -> None:
+    """Each node's behavior, for each list and `@cache(behavior=)`, as in Hamilton.
+
+    A list naming a node wins over its `@cache`, which wins over
+    `default_behavior`; `@cache(format=...)` alone sets no behavior.
+    """
+    hamilton_module = _module_file(tmp_path, "rows_listed_h", HAMILTON_HEADER + LISTED)
+    module = make_module("rows_listed_f", FNLOOM_HEADER + LISTED)
+    for at, lists in enumerate(_listed_grid()):
+        theirs = _hamilton_behaviors(hamilton_module, tmp_path / f"h{at}", lists)
+        assert _fnloom_behaviors(module, lists) == theirs, lists
+
+
+@pytest.mark.deliberate("Q143")
+def test_q143_true_is_a_default_not_a_name(tmp_path: Path) -> None:
+    """Hamilton expands `True` to every name, so it beats `@cache`; fnloom's doesn't.
+
+    So `recompute=True` leaves `@cache(behavior="disable")` disabled, and
+    `default=True` beside `disable=["fresh"]` is no conflict.
+    """
+    hamilton_module = _module_file(tmp_path, "rows_true_h", HAMILTON_HEADER + LISTED)
+    module = make_module("rows_true_f", FNLOOM_HEADER + LISTED)
+    every = {"recompute": True}
+    assert _hamilton_behaviors(hamilton_module, tmp_path / "h", every) == (
+        dict.fromkeys(LISTED_NODES, "recompute")
+    )
+    assert _fnloom_behaviors(module, every) == {
+        "fresh": "recompute",
+        "kept": "default",
+        "off": "disable",
+        "plain": "recompute",
+        "stored": "recompute",
+    }
+    beside = {"default": True, "disable": ["fresh"]}
     with pytest.raises(ValueError, match="Multiple caching behaviors"):
-        hamilton_driver.Builder().with_modules(hamilton_module).with_cache(
-            path=tempfile.mkdtemp(), disable=["b"], recompute=["b"]
-        ).build().execute(["d"], inputs={"a": 1})
-    with pytest.raises(TypeError, match="disable"):
-        fnloom.Builder().with_cache(MemoryCache(), disable=["b"])  # ty: ignore[unknown-argument]  # refused is the point
+        _hamilton_behaviors(hamilton_module, tmp_path / "h2", beside)
+    assert _fnloom_behaviors(module, beside)["fresh"] == "disable"
+
+
+@pytest.mark.deliberate("Q143")
+def test_q143_unknown_names_are_refused(tmp_path: Path) -> None:
+    """Hamilton ignores a name that is no node; fnloom refuses it at build."""
+    hamilton_module = _module_file(tmp_path, "rows_typo_h", HAMILTON_HEADER + LISTED)
+    typo = {"recompute": ["kep"]}
+    assert _hamilton_behaviors(hamilton_module, tmp_path / "h", typo) == (
+        _hamilton_behaviors(hamilton_module, tmp_path / "h2", {})
+    )
+    module = make_module("rows_typo_f", FNLOOM_HEADER + LISTED)
+    with pytest.raises(ValueError, match="did you mean 'kept'"):
+        _fnloom_behaviors(module, typo)
+    twice = {"disable": ["kept"], "recompute": ["kept"]}
+    with pytest.raises(ValueError, match="Multiple caching behaviors"):
+        _hamilton_behaviors(hamilton_module, tmp_path / "h3", twice)
+    with pytest.raises(ValueError, match="'kept' is in recompute and disable"):
+        _fnloom_behaviors(module, twice)
 
 
 @pytest.mark.deliberate("Q159")

@@ -72,22 +72,51 @@ type Binding = Source | Value | Group
 
 
 @dataclass(frozen=True, slots=True)
+class FieldCache:
+    """How one extracted field or column of a `@cache(fields=...)` node is cached.
+
+    A field with a policy is a node of its own to the cache: under `"default"` it
+    is stored and served apart from its producer, keyed by the producer's key and
+    the field, so a `disable` producer can still have a stored field. Under
+    `"recompute"` a run that needs the field runs the producer again, and under
+    `"disable"` the field is never versioned, so what reads it runs too (Q147).
+
+    Attributes:
+        behavior: `"default"`, `"recompute"` or `"disable"`.
+        format: How a `DiskCache` stores the field: a `Format`, a format's name,
+            or None for the store's default.
+    """
+
+    behavior: CacheBehavior = "default"
+    format: Format | str | None = None
+
+    def __post_init__(self) -> None:
+        """Refuses an unknown behavior or a format that is no `Format` or name."""
+        _check_behavior(self.behavior)
+        _check_format(self.format)
+
+
+@dataclass(frozen=True, slots=True)
 class CachePolicy:
     """What `@cache` recorded: how the node uses the result cache.
 
     Attributes:
-        behavior: `"default"`, `"recompute"` or `"disable"`.
+        behavior: `"default"`, `"recompute"` or `"disable"`; None when `@cache`
+            was given no `behavior`, so the driver's `default_behavior` applies.
         ignore: Parameters left out of this node's cache key.
         version: The user's own code version, or None for the automatic one.
         format: How a `DiskCache` stores the result: a `Format`, a format's name,
             or None for the store's default. Only a `default` node is stored, so
             on another behavior it is checked at build and otherwise unused.
+        fields: Each extracted field's or column's own policy, by field name,
+            sorted; empty for none.
     """
 
-    behavior: CacheBehavior
+    behavior: CacheBehavior | None
     ignore: frozenset[str]
     version: str | None
     format: Format | str | None = None
+    fields: tuple[tuple[str, FieldCache], ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -630,22 +659,71 @@ def _check_format(format_: object) -> None:
         raise TypeError(msg)
 
 
+def _check_behavior(behavior: object) -> None:
+    """Refuses a cache behavior that is none of `_BEHAVIORS`."""
+    if behavior not in _BEHAVIORS:
+        allowed = ", ".join(repr(b) for b in _BEHAVIORS)
+        msg = f"cache behavior {behavior!r} is not one of {allowed}"
+        raise ValueError(msg)
+
+
+def _checked_fields(
+    fields: Mapping[str, CacheBehavior | FieldCache] | None,
+) -> tuple[tuple[str, FieldCache], ...]:
+    """`fields` as sorted `(name, FieldCache)` pairs; a behavior's name is one.
+
+    `TypeError` for a non-mapping, a non-`str` name or a value that is neither a
+    behavior's name nor a `FieldCache`; `ValueError` for an unknown behavior.
+    """
+    if fields is None:
+        return ()
+    given: object = fields
+    if not isinstance(given, Mapping):
+        msg = (
+            f"cache fields must be a mapping of field names to policies, not {given!r}"
+        )
+        raise TypeError(msg)
+    checked: list[tuple[str, FieldCache]] = []
+    for name, policy in typing.cast("Mapping[object, object]", given).items():  # ty: ignore[disjoint-cast]  # any mapping a caller passes
+        if not isinstance(name, str) or not name:
+            msg = f"cache fields names must be non-empty str, got {name!r}"
+            raise TypeError(msg)
+        if isinstance(policy, FieldCache):
+            checked.append((name, policy))
+        elif isinstance(policy, str):
+            _check_behavior(policy)
+            checked.append((name, FieldCache(typing.cast("CacheBehavior", policy))))
+        else:
+            msg = (
+                f"cache fields[{name!r}] must be a behavior's name or a "
+                f"fnloom.FieldCache, not {policy!r}"
+            )
+            raise TypeError(msg)
+    return tuple(sorted(checked, key=lambda pair: pair[0]))
+
+
 def cache[F: Callable[..., object]](
     *,
-    behavior: CacheBehavior = "default",
+    behavior: CacheBehavior | None = None,
     ignore: Iterable[str] = (),
     version: str | None = None,
     format: Format | str | None = None,  # noqa: A002  # Hamilton's name for it
+    fields: Mapping[str, CacheBehavior | FieldCache] | None = None,
 ) -> Callable[[F], F]:
-    """Records the node's cache policy; the build reads it, nothing runs here."""
+    """Records the node's cache policy; the build reads it, nothing runs here.
+
+    With no `behavior`, the driver's `default_behavior` applies (`"default"`
+    unless `with_cache` says otherwise). `fields` gives an `@extract_fields` or
+    `@extract_columns` function's fields their own policies (Q147): a behavior's
+    name, or a `FieldCache` with a format too. The build refuses a name the
+    function does not extract, and `fields` on a function that extracts nothing.
+    """
     # Typed as `object`: a caller may pass anything, whatever the hint says.
     given_behavior: object = behavior
     given_version: object = version
     given_format: object = format
-    if given_behavior not in _BEHAVIORS:
-        allowed = ", ".join(repr(b) for b in _BEHAVIORS)
-        msg = f"cache behavior {given_behavior!r} is not one of {allowed}"
-        raise ValueError(msg)
+    if given_behavior is not None:
+        _check_behavior(given_behavior)
     if given_version is not None and (
         not isinstance(given_version, str) or not given_version
     ):
@@ -661,7 +739,13 @@ def cache[F: Callable[..., object]](
         msg = f"cache ignore names must be str, got: {listed}"
         raise TypeError(msg)
     _check_format(given_format)
-    policy = CachePolicy(behavior, frozenset(str(n) for n in names), version, format)
+    policy = CachePolicy(
+        behavior,
+        frozenset(str(n) for n in names),
+        version,
+        format,
+        _checked_fields(fields),
+    )
 
     def apply(fn: F) -> F:
         current = decorations(fn)
