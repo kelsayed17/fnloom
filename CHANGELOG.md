@@ -22,6 +22,12 @@ change the public API; such changes are listed under **Changed** and **Removed**
   export` take a repeatable `--tag key=value`, one per key (a key given twice is a usage error). A `str` subclass
   value or item is kept as a plain `str`, and `fnloom.ANY` survives `copy`, `deepcopy` and `pickle`. The export writes
   a tuple as a JSON list, and `diff` compares it in order (Q36, Q141).
+- `pipe_input(..., namespace=)`, `pipe_output(..., namespace=, on_output=)` and `step(...).named(name, namespace=)`,
+  with Hamilton's names: `...` (the default) keeps `<node>.<label>`, `None` names a step `<label>`, and a dotted path
+  `<path>.<label>`, within a module's namespace. A step's own namespace wins over the decorator's, and a step's own
+  `.on_output` over `on_output=`. A namespace that is no dotted identifier path is refused when decorating, and a
+  name two nodes would have fails the build naming what made each. `apply_to(...).named(name, namespace=)` does the
+  same for `@mutate` (Q140).
 - `fnloom.frame(library="pandas", *, flatten=True, separator=".", join="strict")`, a result builder for
   `with_result_builder` making one pandas or polars frame: a frame output flattened into `<output>.<column>` columns in
   request then column order, a series one column, scalars broadcast, all scalars one row. `join="strict"` refuses
@@ -36,6 +42,13 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - `NodeView.tags` is now `Mapping[str, str | tuple[str, ...]]`: code that reads a tag as a `str` needs an
   `isinstance(value, str)` check (or `tags.get("k")` handled as either) to type-check. `Driver.nodes` is typed
   `NodeViews`, which has `tagged`. A node's `display_name` tag given as a tuple is drawn joined by `, `.
+- On a `@pipe_output` function without extracted fields, `.on_output(...)` (and `@mutate`'s
+  `apply_to(...).on_output(...)`) picks the `@parameterize` rows it names, where it applied to every row; naming no
+  node of the function is a `ValueError` at build, where it was ignored (Q106, Q140). The error for two nodes of one
+  name now names what made each.
+- A step named with `.named(...)` counts toward the numbers of its function's unnamed steps, as in Hamilton:
+  `step(_inc).named("first"), step(_inc)` makes `<node>.with_inc_1` for the second step, where it was
+  `<node>.with_inc` (Q104, Q140).
 
 ## [0.3.0] - 2026-11-03
 

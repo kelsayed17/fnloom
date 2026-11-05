@@ -5731,3 +5731,189 @@ def test_q112_bind_feeds_each_namespace(tmp_path: Path) -> None:
             namespace="eu",
             bind={"gross": fnloom.value(1.0), "rate": fnloom.source("r")},
         ).build()
+
+
+_Q140_HEADER = """
+from {package} import extract_fields, pipe_input, pipe_output, step
+
+def _inc(v: int) -> int:
+    return v + 1
+
+def _dbl(v: int) -> int:
+    return v * 2
+"""
+
+_Q140_TWICE = """
+@pipe_input(step(_inc), namespace=None)
+def f(a: int) -> int:
+    return a
+
+@pipe_input(step(_dbl).named("with_inc", namespace=None))
+def g(a: int) -> int:
+    return a
+"""
+
+_Q140_FIELDS_TWICE = """
+@pipe_output(step(_inc), namespace=None)
+@extract_fields({{"x": int, "y": int}})
+def d(a: int) -> dict:
+    return {{"x": a, "y": a}}
+"""
+
+_Q140_OUTPUT_NAMED = """
+@pipe_output(step(_inc).named("first", namespace="eu"), step(_dbl).named("then"))
+def k(a: int) -> int:
+    return a
+"""
+
+_Q140_BOTH_LEVELS = """
+@pipe_input(step(_inc).named("own", namespace="eu"), step(_dbl), namespace="sales")
+def k(a: int) -> int:
+    return a
+"""
+
+_Q140_FIELDS_BOTH_LEVELS = """
+@pipe_output(step(_inc).on_output("y"), on_output="x")
+@extract_fields({{"x": int, "y": int}})
+def d(a: int) -> dict:
+    return {{"x": a, "y": a}}
+"""
+
+_Q140_UNKNOWN_FIELD = """
+@pipe_output(step(_inc).on_output("zz"))
+def k(a: int) -> int:
+    return a
+"""
+
+
+def _q140_pair(
+    folder: Path, name: str, body: str
+) -> tuple[types.ModuleType | Exception, str]:
+    """`body` for Hamilton, imported or what importing raised, and for fnloom."""
+    hamilton_source = (_Q140_HEADER + body).format(
+        package="hamilton.function_modifiers"
+    )
+    try:
+        module = _module_from_file(folder, f"{name}_h", hamilton_source)
+    except Exception as error:  # noqa: BLE001  # the error is what is compared
+        return error, (_Q140_HEADER + body).format(package="fnloom")
+    return module, (_Q140_HEADER + body).format(package="fnloom")
+
+
+@pytest.mark.deliberate("Q140")
+def test_q140_step_names_made_twice(tmp_path: Path) -> None:
+    """Hamilton names one function of a clash; fnloom names what made each name."""
+    for name, body, match in [
+        (
+            "q140_twice",
+            _Q140_TWICE,
+            r"'with_inc' is made twice: by a step of 'f' and by a step of 'g'",
+        ),
+        (
+            "q140_fields",
+            _Q140_FIELDS_TWICE,
+            r"'with_inc' is made twice: by a step of 'x' and by a step of 'y'",
+        ),
+    ]:
+        module, ours = _q140_pair(tmp_path, name, body)
+        assert isinstance(module, types.ModuleType)
+        with pytest.raises(
+            ValueError, match="Cannot define function with_inc more than once"
+        ):
+            hamilton_driver.Builder().with_modules(module).build()
+        with pytest.raises(ValueError, match=match):
+            fnloom.build(make_module(f"{name}_f", ours))
+
+
+@pytest.mark.deliberate("Q140")
+def test_q140_a_steps_own_namespace(tmp_path: Path) -> None:
+    """Hamilton drops or refuses a step's own namespace; fnloom's wins.
+
+    Hamilton's `@pipe_output` drops it, and either decorator refuses one under a
+    decorator's `namespace=`.
+    """
+    module, ours = _q140_pair(tmp_path, "q140_output_named", _Q140_OUTPUT_NAMED)
+    assert isinstance(module, types.ModuleType)
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    names = {v.name for v in hamilton.list_available_variables()}
+    assert {"k.first", "k.then"} <= names
+    built = fnloom.build(make_module("q140_output_named_f", ours))
+    assert {"eu.first", "k.then"} <= set(built.node_names())
+    assert built.execute(["k"], inputs={"a": 1}) == hamilton.execute(
+        ["k"], inputs={"a": 1}
+    )
+
+    refused, ours = _q140_pair(tmp_path, "q140_both", _Q140_BOTH_LEVELS)
+    assert isinstance(refused, InvalidDecoratorException)
+    assert "not compatible" in str(refused)
+    built = fnloom.build(make_module("q140_both_f", ours))
+    assert {"eu.own", "sales.with_dbl"} <= set(built.node_names())
+    assert built.execute(["k"], inputs={"a": 1}) == {"k": 4}
+
+
+@pytest.mark.deliberate("Q140")
+def test_q140_on_output_misuse(tmp_path: Path) -> None:
+    """`on_output` on both levels, and an unknown field: refused and ignored.
+
+    Hamilton refuses both levels and ignores a step's unknown field; fnloom lets
+    the step's own win and refuses the unknown field.
+    """
+    refused, ours = _q140_pair(tmp_path, "q140_levels", _Q140_FIELDS_BOTH_LEVELS)
+    assert type(refused).__name__ == "SingleTargetError"
+    built = fnloom.build(make_module("q140_levels_f", ours))
+    assert built.execute(["x", "y"], inputs={"a": 1}) == {"x": 1, "y": 2}
+
+    module, ours = _q140_pair(tmp_path, "q140_unknown", _Q140_UNKNOWN_FIELD)
+    assert isinstance(module, types.ModuleType)
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    assert hamilton.execute(["k"], inputs={"a": 1}) == {"k": 1}
+    with pytest.raises(ValueError, match="k: on_output names 'zz'"):
+        fnloom.build(make_module("q140_unknown_f", ours))
+
+
+@pytest.mark.deliberate("Q140")
+def test_q140_namespaces_are_identifier_paths(tmp_path: Path) -> None:
+    """Hamilton takes any string as a step namespace; fnloom a dotted path (Q74)."""
+    body = """
+@pipe_input(step(_inc), namespace="1x")
+def k(a: int) -> int:
+    return a
+"""
+    module, ours = _q140_pair(tmp_path, "q140_path", body)
+    assert isinstance(module, types.ModuleType)
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    assert "1x.with_inc" in {v.name for v in hamilton.list_available_variables()}
+    with pytest.raises(ValueError, match="'1x' is not a dotted identifier path"):
+        make_module("q140_path_f", ours)
+
+
+_Q140_MUTATE = """
+from {package} import apply_to, mutate
+
+def f(a: int) -> int:
+    return a
+
+@mutate(apply_to(f).named("m", namespace="z"))
+def _plus(v: int) -> int:
+    return v + 10
+"""
+
+
+@pytest.mark.deliberate("Q140")
+def test_q140_mutate_keeps_a_targets_namespace(tmp_path: Path) -> None:
+    """Hamilton drops `apply_to(f).named(n, namespace=)`'s namespace; fnloom keeps."""
+    module = _module_from_file(
+        tmp_path,
+        "q140_mutate_h",
+        _Q140_MUTATE.format(package="hamilton.function_modifiers"),
+    )
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    assert "f.m" in {v.name for v in hamilton.list_available_variables()}
+    built = fnloom.build(
+        make_module("q140_mutate_f", _Q140_MUTATE.format(package="fnloom"))
+    )
+    assert "z.m" in built.node_names()
+    assert "f.m" not in built.node_names()
+    assert built.execute(["f"], inputs={"a": 1}) == hamilton.execute(
+        ["f"], inputs={"a": 1}
+    )
