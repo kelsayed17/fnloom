@@ -2,11 +2,11 @@
 
 import copy
 import pickle
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 import pytest
 
-from fnloom import Builder
+from fnloom import Builder, BuildEnd, Hook
 from helpers import make_module
 
 if TYPE_CHECKING:
@@ -281,3 +281,46 @@ def test_pickling_copy_and_rebuild_carry_replace() -> None:
     ):
         assert again.nodes[shared[0]].replaced == "picklable_nodes"
     assert builder.build_async().nodes[shared[0]].replaced == "picklable_nodes"
+
+
+def test_after_build_sees_replacements_and_namespace_config() -> None:
+    """`BuildEnd` has the replaced view, the overlay's variant, the builder's config."""
+    seen: list[BuildEnd] = []
+
+    class Watch(Hook):
+        @override
+        def after_build(self, event: BuildEnd) -> None:
+            seen.append(event)
+
+    sales = make_module("replace_sales_hook", SALES)
+    discounted = make_module("replace_discounted_hook", DISCOUNTED)
+    rates = make_module(
+        "replace_rates_hook",
+        """
+from fnloom import config
+
+@config.when(region="eu")
+def rate__eu() -> float:
+    return 0.2
+
+@config.default
+def rate__other() -> float:
+    return 0.0
+""",
+    )
+    builder = (
+        Builder()
+        .with_config({"mode": "x"})
+        .with_modules(sales)
+        .with_modules(discounted, replace=("total",))
+        .with_modules(rates, namespace="eu", config={"region": "eu"})
+        .with_hooks(Watch())
+    )
+    builder.build()
+    builder.build().rebuild()
+    builder.build_async()
+    assert len(seen) == 4  # noqa: PLR2004  # build, build, rebuild, build_async
+    for event in seen:
+        assert event.nodes["total"].replaced == "replace_sales_hook"
+        assert getattr(event.nodes["eu.rate"].origin, "__name__", None) == "rate__eu"
+        assert dict(event.config) == {"mode": "x"}
