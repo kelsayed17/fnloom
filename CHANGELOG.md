@@ -18,8 +18,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Changed
 
-- `.on_output(...)` on a `@pipe_output` function without extracted fields naming anything but the node itself is a
-  `ValueError` at build; it was ignored (Q106, Q140). The error for two nodes of one name now names what made each.
+- On a `@pipe_output` function without extracted fields, `.on_output(...)` picks the `@parameterize` rows it names,
+  where it applied to every row; naming no node of the function is a `ValueError` at build, where it was ignored (Q106,
+  Q140). The error for two nodes of one name now names what made each.
 
 ## [0.3.0] - 2026-11-03
 

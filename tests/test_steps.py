@@ -852,3 +852,45 @@ def _round(v: int) -> int:
     driver = _driver(source, "mutate_namespace")
     assert driver.nodes["total"].dependencies == ("taxes.rounded",)
     assert driver.execute(["total"], inputs={"a": 1}) == {"total": 2}
+
+
+def test_on_output_picks_parameterize_rows() -> None:
+    """Without fields, `on_output` names rows: the others are left alone (Q140)."""
+    source = """
+from fnloom import parameterize, pipe_output, step, value
+
+def _inc(v: int) -> int:
+    return v + 1
+
+@pipe_output(step(_inc), on_output="p1")
+@parameterize(p1={"k": value(1)}, p2={"k": value(2)})
+def base(k: int) -> int:
+    return k
+"""
+    driver = _driver(source, "rows_on_output")
+    assert {"p1.raw", "p1.with_inc"} <= set(driver.node_names())
+    assert "p2.raw" not in driver.node_names()
+    assert driver.execute(["p1", "p2"]) == {"p1": 2, "p2": 2}
+    with pytest.raises(ValueError, match=r"names 'zz'.*name 'p1', 'p2'"):
+        _driver(source.replace('"p1")', '"zz")'), "rows_on_output_zz")
+
+
+def test_a_step_a_module_namespace_reads_from_outside_is_refused() -> None:
+    """Under `with_modules(namespace=)`, a prefix-free step can't shadow a read."""
+    source = """
+from fnloom import pipe_output, step
+
+def _inc(v: int) -> int:
+    return v + 1
+
+@pipe_output(step(_inc).named("z", namespace=None))
+def f(x: int) -> int:
+    return x
+
+def g(z: int) -> int:
+    return z * 100
+"""
+    module = make_module("shadowed", source)
+    assert fnloom.build(module).execute(["g"], inputs={"x": 1}) == {"g": 200}
+    with pytest.raises(ValueError, match=r"eu\.g reads 'z' from outside namespace"):
+        fnloom.Builder().with_modules(module, namespace="eu").build()

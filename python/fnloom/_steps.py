@@ -422,9 +422,13 @@ def lowered(
     made: set[str] = set()
     problems: list[str] = []
     by_origin: dict[int, set[str]] = {}
+    # The nodes a function without fields makes, by name: a row each (Q140).
+    rows: dict[int, set[str]] = {}
     for node in nodes:
         if (extracting := extractor(node)) is not None:
             by_origin.setdefault(id(node.origin), set()).add(extracting.field)
+        else:
+            rows.setdefault(id(node.origin), set()).add(_bare(node))
     within = _within(nodes, bound or {}, used)
     for node in nodes:
         recorded = decorations(node.origin)
@@ -440,43 +444,84 @@ def lowered(
             own_target = fields is None and extracting is None
             field_target = extracting is not None
             if own_target or field_target:
-                current, piped = _piped(current, steps_out, config, extracting, names)
+                target = _bare(node) if extracting is None else extracting.field
+                current, piped = _piped(current, steps_out, config, target, names)
                 extra += piped
                 if field_target and piped:
                     # A field's final node stands for no function in a request.
                     made.add(current.name)
             if not field_target:
-                problems.extend(_unknown_fields(node, steps_out, fields))
+                known = fields if fields is not None else rows[id(node.origin)]
+                problems.extend(
+                    _unknown_fields(node, steps_out, known, extracts=fields is not None)
+                )
         made.update(n.name for n in extra)
         out.append(current)
         owners.append(f"the {_kind(node)} {node.name!r}")
         out.extend(extra)
         owners.extend(f"a step of {node.name!r}" for _ in extra)
+    problems.extend(_shadowed(out, made, bound or {}))
     if problems:
         raise ValueError("\n".join(sorted(set(problems))))
     _refuse_twice(out, owners)
     return out, frozenset(made)
 
 
-def _unknown_fields(
-    node: NodeDef, steps: Sequence[Step], fields: set[str] | None
+def _shadowed(
+    nodes: Sequence[NodeDef],
+    made: set[str],
+    bound: Mapping[str, Mapping[str, Source | Value]],
 ) -> list[str]:
-    """A line for each `on_output` field `node`'s function doesn't extract.
+    """A line for each node reading outside its namespace a name a step has in it.
 
-    Without fields, the one output a step can name is the node itself, as in
-    Hamilton; any other name is refused, not ignored (Q106, Q140).
+    Names were resolved before the steps were made, so with `namespace=None` or
+    a `str`, a step can take a name a node of its module namespace reads from
+    outside: refused rather than read from the wrong node (Q74, Q140). A name
+    the namespace's `bind=` sends outside on purpose is left alone.
     """
-    named = {f for s in steps for f in s.fields or ()}
-    if fields is not None:
+    found: list[str] = []
+    for node in nodes:
+        if node.namespace is None:
+            continue
+        sent = {
+            b.name
+            for b in bound.get(node.namespace, {}).values()
+            if isinstance(b, Source)
+        }
+        for param in node.params:
+            binding = param.binding
+            if not isinstance(binding, Source) or binding.name in sent:
+                continue
+            inside = qualified(node.namespace, binding.name)
+            if inside in made and inside != binding.name:
+                found.append(
+                    f"{node.name} reads {binding.name!r} from outside namespace "
+                    f"{node.namespace!r}, but a step there is named {inside!r}; "
+                    "name the step otherwise, or read it as a source"
+                )
+    return found
+
+
+def _unknown_fields(
+    node: NodeDef, steps: Sequence[Step], known: set[str], *, extracts: bool
+) -> list[str]:
+    """A line for each `on_output` name that is none of `known`.
+
+    `known` is the fields the function extracts, or, without fields, the nodes
+    it makes: itself, or each `@parameterize` row, as in Hamilton. Any other
+    name is refused, not ignored (Q106, Q140).
+    """
+    unknown = sorted({f for s in steps for f in s.fields or ()} - known)
+    if extracts:
         return [
             f"{node.name}: on_output names {f!r}, which it doesn't extract"
-            for f in sorted(named - fields)
+            for f in unknown
         ]
-    own = _bare(node)
+    listed = ", ".join(repr(n) for n in sorted(known))
     return [
         f"{node.name}: on_output names {f!r}, but it extracts no fields; name "
-        f"{own!r} or leave it out"
-        for f in sorted(named - {own})
+        f"{listed} or leave it out"
+        for f in unknown
     ]
 
 
@@ -571,17 +616,15 @@ def _piped(
     node: NodeDef,
     steps: tuple[Step, ...],
     config: Mapping[str, object],
-    field: object,
+    target: str,
     names: Within | None,
 ) -> tuple[NodeDef, list[NodeDef]]:
-    """`node`'s final node reading its last `@pipe_output` step, and the others."""
+    """`node`'s final node reading its last `@pipe_output` step, and the others.
+
+    `target` is what `on_output` names `node` by: its field, or its own name.
+    """
     name = node.name
-    field_name = getattr(field, "field", None)
-    mine = [
-        s
-        for s in steps
-        if s.fields is None or field_name is None or field_name in s.fields
-    ]
+    mine = [s for s in steps if s.fields is None or target in s.fields]
     if not mine:
         return node, []
     # `.raw` and the node's pass-on are made even when the config keeps no
