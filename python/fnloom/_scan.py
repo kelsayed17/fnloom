@@ -51,6 +51,7 @@ if TYPE_CHECKING:
 
     from fnloom._checks import Check
     from fnloom._extract import _Extractor
+    from fnloom._tags import TagValue
 
 _UNSUPPORTED_KINDS = {
     inspect.Parameter.POSITIONAL_ONLY: "positional-only parameter",
@@ -78,7 +79,7 @@ class NodeDef:
 
     name: str
     params: tuple[Param, ...]
-    tags: Mapping[str, str]
+    tags: Mapping[str, TagValue]
     payload: Callable[..., object]
     origin: Callable[..., object]
     module: str

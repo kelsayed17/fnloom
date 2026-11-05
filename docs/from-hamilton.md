@@ -42,7 +42,8 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `from hamilton.function_modifiers import parameterize, source, value` | `from fnloom import parameterize, source, value` (Q151) |
 | `@parameterize(row={"param": source("node")})` | The same (Q151) |
 | `@parameterize(row={"param": value(v)})` | The same. `v` is passed as is, never copied, as in Hamilton (Q151) |
-| `@tag(owner="data")` | The same, imported from `fnloom`. A value must be a `str`, not a list (Q36) |
+| `@tag(owner="data")`, `@tag(owner=["ann", "bo"])` | The same, imported from `fnloom`. A list is kept as a tuple in written order; an empty one, a repeated item, a non-`str` item or a `set` is refused when decorating, naming the tag (Q36) |
+| `list_available_variables(tag_filter={"owner": "ann"})` | `driver.nodes.tagged(owner="ann")`: the views in order, a `str` matching an equal value or a tuple holding it, a sequence matching any, `fnloom.ANY` matching any node with the tag (Hamilton's `None` filter value), and `fnloom draw --tag owner=ann` / `fnloom export --tag owner=ann` (Q141) |
 | `@cache(behavior="recompute")`, `@cache(behavior="disable")` | The same, imported from `fnloom` ([Caching](#caching)) (Q152) |
 | `@cache(behavior="ignore")` on a producer | `@cache(ignore=("name",))` on the consumer instead (Q50) |
 | `@cache(format=...)` | The same, imported from `fnloom`: a format's name, or a `fnloom.Format` ([Caching](caching.md#stores)) (Q55) |

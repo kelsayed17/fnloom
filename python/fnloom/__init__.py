@@ -51,6 +51,7 @@ from fnloom._stores import (
     Format,
     MemoryCache,
 )
+from fnloom._tags import ANY
 from fnloom._types import ValueCheck, type_matches, value_matches
 from fnloom._view import InputView, NodeView, Param
 from fnloom.driver import (
@@ -65,6 +66,7 @@ from fnloom.driver import (
 __version__ = _version("fnloom")
 
 __all__ = [
+    "ANY",
     "MISSING",
     "AsyncDriver",
     "AsyncPreparedPlan",

@@ -201,7 +201,9 @@ def _node(  # noqa: PLR0913  # the node's parts, and its build's
         "type": type_text(view.type),
         "params": [_param(p) for p in view.params],
         "dependencies": list(view.dependencies),
-        "tags": dict(view.tags),
+        "tags": {
+            k: list(v) if isinstance(v, tuple) else v for k, v in view.tags.items()
+        },
         "doc": view.doc,
         "module": view.module,
         "function": None,

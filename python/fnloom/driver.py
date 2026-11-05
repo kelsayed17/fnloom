@@ -1426,7 +1426,7 @@ class Driver[R = dict[str, object]]:
         return self._graph.node_names()
 
     @property
-    def nodes(self) -> Mapping[str, NodeView]:
+    def nodes(self) -> NodeViews:
         """Every node, inputs included, by name: read-only, iterating in name order."""
         return self._nodes
 
@@ -1936,7 +1936,7 @@ class AsyncDriver[R = dict[str, object]]:
         return self._driver.config
 
     @property
-    def nodes(self) -> Mapping[str, NodeView]:
+    def nodes(self) -> NodeViews:
         """Every node, inputs included, by name; see `Driver.nodes`."""
         return self._driver.nodes
 
@@ -2266,7 +2266,15 @@ def _prepare_again[R](driver: Driver[R], key: _PlanKey) -> PreparedPlan[R]:
 def _graph_of(nodes: list[NodeDef]) -> _core.Graph:
     """Builds the native graph for scanned nodes: their core inputs and payloads."""
     return _core.Graph(
-        [(n.name, core_inputs(n.params), dict(n.tags), n.payload) for n in nodes],
+        [
+            (
+                n.name,
+                core_inputs(n.params),
+                dict(n.tags),
+                n.payload,
+            )
+            for n in nodes
+        ],
         {n.name: dict(n.renames) for n in nodes if n.renames},
     )
 

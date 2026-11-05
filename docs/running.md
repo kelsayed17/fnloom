@@ -568,7 +568,10 @@ view.doc
 ```
 
 `origin` is the function the node came from, `module` is its module's name, and `tags` are the ones you wrote with
-`@tag`. `namespace` is the one its module was given under, or `None`
+`@tag`: a `str`, or a tuple of them in written order. `driver.nodes.tagged(owner="ann")` gives the views whose tags
+match (a `str` matches an equal value or a tuple holding it, a list or tuple matches any of its items, `fnloom.ANY`
+matches any node with the tag), in the mapping's order; a tag no node has matches nothing.
+`namespace` is the one its module was given under, or `None`
 ([Namespaces](writing-nodes.md#namespaces)). An input has no function, so its `origin`, `module`, `doc` and
 `namespace` are `None` and its `params` are empty. Its `type`
 is the annotation of the parameters that read it:

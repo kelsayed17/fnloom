@@ -9,6 +9,13 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Added
 
+- `@tag` takes a `list` or `tuple` of strings as a value, kept as a tuple in written order. An empty sequence, a
+  repeated item, a non-`str` item, or an unordered collection (`set`, `frozenset`, `dict`) is refused when decorating,
+  naming the tag. `Driver.nodes.tagged(**query)` returns the views whose tags match: a `str` matches an equal value or
+  a tuple holding it, a sequence matches any item, `fnloom.ANY` matches a node with the tag. `fnloom draw` and `fnloom
+  export` take a repeatable `--tag key=value`, one per key (a key given twice is a usage error). A `str` subclass
+  value or item is kept as a plain `str`, and `fnloom.ANY` survives `copy`, `deepcopy` and `pickle`. The export writes
+  a tuple as a JSON list, and `diff` compares it in order (Q36, Q141).
 - `@config.matches(predicate, *, name=None)`: a variant kept when `predicate`, called with the config keys its
   parameters name, returns `True`. A defaulted parameter is an optional key, a missing required key never matches,
   and a result that is no `bool` is a `TypeError` at build. It stacks with `config.when*` and falls back to
@@ -24,6 +31,12 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - `with_modules(module, replace=("total",))` replaces the node `total` that earlier modules define, for every reader.
   A name no earlier module, or not this one, defines under the config is a `ValueError` at build. `NodeView.replaced`
   and the export entry's `replaced` name the module replaced (Q74 amended, Q150).
+
+### Changed
+
+- `NodeView.tags` is now `Mapping[str, str | tuple[str, ...]]`: code that reads a tag as a `str` needs an
+  `isinstance(value, str)` check (or `tags.get("k")` handled as either) to type-check. `Driver.nodes` is typed
+  `NodeViews`, which has `tagged`. A node's `display_name` tag given as a tuple is drawn joined by `, `.
 
 ## [0.3.0] - 2026-11-03
 
