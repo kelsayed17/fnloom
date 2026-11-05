@@ -66,9 +66,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
   digits, space and `# . _ ! : + * / ' % -` (not `%%`). `stroke_width` is from 0.01 to 1000. Attributes are written
   in a fixed order. Every `draw*` method takes `show_types`, `show_tags`, `show_schema` (a `TypedDict`, dataclass or
   `NamedTuple` return type's fields) and `hide_inputs` (keeping an input the call names: an output, a node drawn
-  from, a path's end), and `fnloom draw` takes `--no-types`, `--show-tag`, `--show-schema` and `--hide-inputs`. `DrawnNode` gains `tags`, `schema`, `style` and
-  `view` (the `NodeView`, left out of equality, `repr` and pickling), and `Drawing` gains
-  `graph_style`, `edge_style` and `show_types` (Q139).
+  from, a path's end), and `fnloom draw` takes `--no-types`, `--show-tag`, `--show-schema` and `--hide-inputs`.
+  `DrawnNode` gains `tags`, `schema`, `style` and `view` (the `NodeView`, left out of equality, `repr` and pickling),
+  and `Drawing` gains `graph_style`, `edge_style` and `show_types` (Q139).
 - `Drawing.to_svg(*, orient="LR", legend=True)`, an SVG laid out in pure Python, and `render(path, engine="dot" |
   "builtin")`: `"dot"` stays the default, and `"builtin"` writes `to_svg()` with nothing installed. `fnloom draw`
   takes `--engine builtin` (Q146).
