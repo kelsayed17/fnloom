@@ -5,6 +5,7 @@ import ast
 import inspect
 import typing
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, replace
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal
@@ -641,15 +642,20 @@ def _pick(
 
 
 def _groups(
-    functions: Sequence[Found], namespaces: Sequence[str | None]
+    functions: Sequence[Found],
+    namespaces: Sequence[str | None],
+    apart: AbstractSet[tuple[str | None, str, str]] = frozenset(),
 ) -> dict[str, list[Variant]]:
     """The config-decorated functions as variants, by the node they name.
 
-    `namespaces` holds each function's namespace, in order.
+    `namespaces` holds each function's namespace, in order. A variant whose
+    (namespace, module, node) is in `apart`, a module's `replace=` (Q150), is
+    grouped by its module too: it is selected apart from the variants it
+    replaces, which a module given earlier defines.
     """
     groups: dict[str, list[Variant]] = {}
     seen: set[tuple[str | None, int]] = set()
-    for (_, _, fn), namespace in zip(functions, namespaces, strict=True):
+    for (module, _, fn), namespace in zip(functions, namespaces, strict=True):
         policy = decorations(fn).config
         # A function bound under two names, or a module given twice, is one
         # variant in each namespace.
@@ -657,7 +663,10 @@ def _groups(
             continue
         seen.add((namespace, id(fn)))
         variant = _variant(fn, policy, namespace)
-        groups.setdefault(variant.node, []).append(variant)
+        key = variant.node
+        if apart and (namespace, module, variant.node) in apart:
+            key = f"{variant.node}\0{module}"
+        groups.setdefault(key, []).append(variant)
     return groups
 
 
@@ -666,6 +675,7 @@ def resolve_variants(
     config: Mapping[str, object],
     namespaces: Sequence[str | None] = (),
     configs: Mapping[str | None, Mapping[str, object]] | None = None,
+    apart: AbstractSet[tuple[str | None, str, str]] = frozenset(),
 ) -> Selection:
     """Selects one variant per node; see `select`. Also says why a node has none.
 
@@ -674,15 +684,18 @@ def resolve_variants(
     its own, and a function found under two namespaces is a variant in each.
     `configs` holds the config a namespace selects with when it is not
     `config`: the builder's, overlaid with the namespace's own `config=` (Q112).
+    `apart` holds the (namespace, module, node) of each name a module's
+    `replace=` names: its variants are selected apart (Q150).
     """
     under = namespaces or (None,) * len(functions)
-    groups = _groups(functions, under)
+    groups = _groups(functions, under, apart)
     chosen: set[tuple[str | None, int]] = set()
     problems: list[tuple[str, str]] = []
     missing: dict[str, str] = {}
     bad: set[_Unequal] = set()
-    for node in sorted(groups):
-        variants = groups[node]
+    for key in sorted(groups):
+        variants = groups[key]
+        node = variants[0].node
         seen = config if configs is None else configs.get(variants[0].namespace, config)
         picked, problem = _pick(node, variants, seen, bad)
         if problem is not None:

@@ -715,8 +715,13 @@ driver.nodes["doubled"].module
 A name that no module given earlier defines, or that `module` doesn't, is a `ValueError` at build naming it, so a
 typo fails rather than doing nothing. Both are read under the build's config: a name only a `@config` variant gives
 under another config fails too. Under `namespace=`, the names are the namespace's. `replace=` takes one module, and
-refuses an extracted field or a node whose function extracts fields. The export's entry for the node names the module
-replaced as `replaced`, beside its `module`.
+refuses an extracted field or a node whose function extracts fields.
+
+The replacement takes the whole node: the earlier function's `@tag`s, output checks, `@cache` policy and steps go
+with it, and the replacing function's own apply. A `@mutate` whose target is the replaced function would be lost, so
+it fails the build, naming the mutator: mutate the replacing function instead. When both modules give `@config`
+variants of the name, each module selects its own, and then the later one replaces. The export's entry for the node
+names the module replaced as `replaced`, beside its `module`.
 
 ## Namespaces
 
@@ -1303,7 +1308,7 @@ The decorators never change your function, and add no tags (Q60).
 `@config.matches(predicate)` keeps a variant when `predicate` returns `True` (Q148). Its parameters are the config
 keys it reads, as a [`@resolve`](#bindings-and-decorators-from-config) function's are: a parameter with a default is an
 optional key, and a missing required key never matches, so the predicate isn't called. Name it with a leading `_`, or
-it's a node like any public function:
+mark it `@exclude`: a public function a module defines is a node, and the build refuses a predicate that is one:
 
 ```python
 # file: vat.py

@@ -373,6 +373,19 @@ def _edge_mismatches(
     return sorted(found)
 
 
+def _lowered_names(names: Sequence[str], stepped: AbstractSet[str]) -> frozenset[str]:
+    """`names`, and each step node lowered from one of them (Q149).
+
+    A `@pipe_input`, `@pipe_output` or `@mutate` makes nodes named
+    `<node>.<step>`, such as `total.raw`: the edges into them are the node's own.
+    """
+    if not names:
+        return frozenset[str]()
+    prefixes = tuple(f"{name}." for name in names)
+    lowered = {made for made in stepped if made.startswith(prefixes)}
+    return frozenset[str](names) | lowered
+
+
 def _unknown_consumers(views: NodeViews, names: Sequence[str]) -> str | None:
     """Why some names given to `without_edge_type_checks` are no computed node."""
     functions = views.functions
@@ -1131,7 +1144,12 @@ class Driver[R = dict[str, object]]:
     def _hints(self, line: str) -> list[str]:
         """The lines explaining a missing input in `line`: config keys, left out."""
         hints: list[str] = []
-        if (hint := _config_hint(line, self._config)) is not None:
+        keys: dict[str, object] = dict(self._config)
+        if self._builder is not None:
+            # A namespace's own `config=` keys are config keys too (Q112).
+            for overlay in self._builder._overlays.values():  # noqa: SLF001  # this driver's own builder
+                keys.update(dict.fromkeys(overlay))
+        if (hint := _config_hint(line, keys)) is not None:
             hints.append(hint)
         if line.startswith(_MISSING):
             hints += _left_out_hints(line, self._left_out)
@@ -3225,8 +3243,9 @@ class Builder[R = dict[str, object]]:
             and (unknown := _unknown_consumers(views, self._loose_edges)) is not None
         ):
             raise ValueError(unknown)
+        loose = _lowered_names(self._loose_edges, stepped)
         if self._edge_checks and (
-            mismatches := _edge_mismatches(views.functions, self._loose_edges)
+            mismatches := _edge_mismatches(views.functions, loose)
         ):
             raise ValueError("\n".join(mismatches))
         if problems := default_problems(nodes):

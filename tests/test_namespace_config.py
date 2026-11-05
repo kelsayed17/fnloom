@@ -272,6 +272,22 @@ def tax(rate: float) -> float:
     ).build().execute(["eu.tax"]) == {"eu.tax": 0.2}
 
 
+def test_a_missing_input_named_like_an_overlay_key_is_hinted() -> None:
+    """A namespace's `config=` key read as a parameter gets Q56's hint."""
+    module = make_module(
+        "namespace_config_hint",
+        "def label(region: str) -> str:\n    return region\n",
+    )
+    driver = (
+        Builder().with_modules(module, namespace="eu", config={"region": "eu"}).build()
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"'region' is a config key; config is not passed to nodes",
+    ):
+        driver.execute(["eu.label"])
+
+
 def test_an_empty_config_overlays_nothing() -> None:
     """`config={}` is no overlay: not exported, and a later `config=` is accepted."""
     module = _regional()

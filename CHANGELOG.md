@@ -26,7 +26,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
   parameters name, returns `True`. A defaulted parameter is an optional key, a missing required key never matches,
   and a result that is no `bool` is a `TypeError` at build. It stacks with `config.when*` and falls back to
   `@config.default`. The predicate's code version is in the selected variant's cache key and export `version`, and
-  the export shows the condition as `matches(<module.qualname>)` (Q148).
+  the export shows the condition as `matches(<module.qualname>)`. A public module-level predicate, which would be a
+  node, fails the build (Q148).
 - `Builder.without_edge_type_checks(*consumers)` turns edge type checks off for every edge, or only for the edges into
   the nodes named; an unknown name is a `ValueError` at build. Input checks stay on. The export's new `edge_checks`
   field records it, and it is in `graph_version` (Q149).
@@ -36,13 +37,19 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `graph_version` (Q112 amended: `config=` per copy was not planned).
 - `with_modules(module, replace=("total",))` replaces the node `total` that earlier modules define, for every reader.
   A name no earlier module, or not this one, defines under the config is a `ValueError` at build. `NodeView.replaced`
-  and the export entry's `replaced` name the module replaced (Q74 amended, Q150).
+  and the export entry's `replaced` name the module replaced. A `@mutate` on the replaced function fails the build,
+  and `@config` variants on both sides are each selected first (Q74 amended, Q150).
 
 ### Changed
 
 - `NodeView.tags` is now `Mapping[str, str | tuple[str, ...]]`: code that reads a tag as a `str` needs an
   `isinstance(value, str)` check (or `tags.get("k")` handled as either) to type-check. `Driver.nodes` is typed
   `NodeViews`, which has `tagged`. A node's `display_name` tag given as a tuple is drawn joined by `, `.
+
+### Fixed
+
+- A code version no longer depends on `PYTHONHASHSEED` when a function reads a `set` or `frozenset`, as a default
+  or a global: its members are versioned sorted. Such a node's version, and its cache key, change once.
 
 ## [0.3.0] - 2026-11-03
 

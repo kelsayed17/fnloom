@@ -111,3 +111,39 @@ def test_pickling_copy_and_rebuild_carry_the_setting() -> None:
         builder.build_async(),
     ):
         assert again.export()["edge_checks"] == ["total"]
+
+
+STEPPED = """
+from fnloom import mutate, pipe_input, step
+
+def a() -> str:
+    return "7"
+
+def _keep(x: int) -> int:
+    return x
+
+@pipe_input(step(_keep))
+def fed(a: int) -> int:
+    return a
+
+def total(a: int) -> int:
+    return a
+
+@mutate(total)
+def _plus_zero(x: int) -> int:
+    return x
+"""
+
+
+def test_a_name_covers_the_nodes_its_steps_lower_to() -> None:
+    """Loose `total` and `fed` cover their `@mutate` and `@pipe_input` steps."""
+    module = make_module("edge_checks_stepped", STEPPED)
+    with pytest.raises(ValueError, match=r"total\.raw\.a requires int") as raised:
+        Builder().with_modules(module).without_edge_type_checks("fed").build()
+    assert "fed" not in str(raised.value)
+    with pytest.raises(ValueError, match=r"fed\.with_keep\.x requires int"):
+        Builder().with_modules(module).without_edge_type_checks("total").build()
+    driver = (
+        Builder().with_modules(module).without_edge_type_checks("total", "fed").build()
+    )
+    assert driver.execute(["total", "fed"]) == {"total": "7", "fed": "7"}

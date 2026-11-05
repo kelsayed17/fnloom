@@ -188,8 +188,8 @@ does, and it is `None` when some node is unversioned. The document's `namespace_
 
 A value's text is the same in every process: a set's members are sorted, and an address in a default `repr` is
 dropped. A `value()` holding an object known only by its address has no fingerprint, so `graph_version` is `None`.
-The version has the result cache's limits: a global `frozenset` of strings a function reads is versioned in the order
-the hash seed gives, so pass a sorted tuple, or fix `PYTHONHASHSEED`, for a version that holds across processes. Tags
+A code version is the same on every hash seed too: a `set` or `frozenset` a function reads, as a global or a
+default, is versioned by its members sorted. Tags
 and docs don't change what a node computes, so `graph_version` leaves them out; `fnloom diff` still reports them.
 
 ## The CLI

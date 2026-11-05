@@ -349,6 +349,45 @@ def test_a_builder_with_a_predicate_pickles(tmp_path: object) -> None:  # noqa: 
     assert loaded.execute(["matched_rate"]) == {"matched_rate": 0.2}
 
 
+def test_a_public_predicate_is_refused_as_a_node() -> None:
+    """A module-level public predicate would be a node: the build says so."""
+    module = make_module(
+        "matches_public",
+        """
+from fnloom import config, exclude
+
+def is_eu(region: str) -> bool:
+    return region == "eu"
+
+@config.matches(is_eu)
+def rate__eu() -> float:
+    return 0.2
+""",
+    )
+    with pytest.raises(
+        ValueError,
+        match=r"'is_eu' is a config.matches predicate and a node; prefix it with "
+        "`_` or `@exclude` it",
+    ):
+        Builder().with_modules(module).with_config({"region": "eu"}).build()
+    excluded = make_module(
+        "matches_excluded",
+        """
+from fnloom import config, exclude
+
+@exclude
+def is_eu(region: str) -> bool:
+    return region == "eu"
+
+@config.matches(is_eu)
+def rate__eu() -> float:
+    return 0.2
+""",
+    )
+    driver = Builder().with_modules(excluded).with_config({"region": "eu"}).build()
+    assert driver.execute(["rate"]) == {"rate": 0.2}
+
+
 def test_a_predicate_runs_only_when_the_when_conditions_hold() -> None:
     """A variant a `when` already rules out never calls its predicate."""
     module = make_module(

@@ -324,3 +324,68 @@ def rate__other() -> float:
         assert event.nodes["total"].replaced == "replace_sales_hook"
         assert getattr(event.nodes["eu.rate"].origin, "__name__", None) == "rate__eu"
         assert dict(event.config) == {"mode": "x"}
+
+
+def test_variants_on_both_sides_are_selected_apart() -> None:
+    """Each module selects its own variant of a replaced name; then one replaces."""
+    earlier = make_module(
+        "replace_variants_earlier",
+        """
+from fnloom import config
+
+@config.when(plan="one")
+def total__one() -> float:
+    return 1.0
+
+@config.default
+def total__d() -> float:
+    return 0.0
+""",
+    )
+    later = make_module(
+        "replace_variants_later",
+        """
+from fnloom import config
+
+@config.when(region="eu")
+def total__r() -> float:
+    return 9.0
+""",
+    )
+    builder = Builder().with_modules(earlier).with_modules(later, replace=("total",))
+    for cfg in ({"region": "eu"}, {"region": "eu", "plan": "one"}):
+        driver = builder.with_config(cfg).build()
+        assert driver.execute(["total"]) == {"total": 9.0}
+        assert driver.nodes["total"].replaced == "replace_variants_earlier"
+    with pytest.raises(
+        ValueError,
+        match="replace names 'total', which module 'replace_variants_later' "
+        "doesn't define, under this config",
+    ):
+        builder.with_config({"region": "us"}).build()
+
+
+def test_a_mutated_node_is_not_replaced() -> None:
+    """A `@mutate` on the replaced node would be lost: the build refuses, naming it."""
+    mutated = make_module(
+        "replace_mutated",
+        """
+from fnloom import mutate
+
+def total(price: float) -> float:
+    return price
+
+@mutate(total)
+def _taxed(x: float) -> float:
+    return x * 1.2
+""",
+    )
+    discounted = make_module("replace_discounted_mutated", DISCOUNTED)
+    with pytest.raises(
+        ValueError,
+        match=r"replace names 'total', but function 'total' in 'replace_mutated' is "
+        r"mutated by 'replace_mutated\._taxed', and a replacement takes the whole node",
+    ):
+        Builder().with_modules(mutated).with_modules(
+            discounted, replace=("total",)
+        ).build()

@@ -45,7 +45,7 @@ from fnloom._types import (
 from fnloom._view import Param
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping, Sequence
+    from collections.abc import Callable, Iterable, Mapping, Sequence
     from collections.abc import Set as AbstractSet
     from types import ModuleType
 
@@ -1022,6 +1022,7 @@ def scan(  # noqa: PLR0913  # keyword-only options, one per kind of source
     entries: list[_Entry] = [
         (namespace, entry) for namespace, group in groups.items() for entry in group
     ]
+    predicates = _predicates(entry for _, entry in entries)
     selecting = gathered.selecting
     if any(
         not isinstance(e, NodeSpec) and decorations(e[2]).config is not None
@@ -1029,10 +1030,21 @@ def scan(  # noqa: PLR0913  # keyword-only options, one per kind of source
     ):
         selecting = {*selecting, None}
     unmatched: dict[str, str] = {}
+    replacing = _replacing(modules, namespaces, replaces)
     if selecting:
         namespaced = any(namespace is not None for namespace in groups)
+        apart = {
+            (r.namespace, r.module, qualified(r.namespace, name))
+            for r in replacing.values()
+            for name in r.names
+        }
         entries, selection = _selected(
-            entries, gathered.configured, config, namespaced=namespaced, configs=configs
+            entries,
+            gathered.configured,
+            config,
+            namespaced=namespaced,
+            configs=configs,
+            apart=apart,
         )
         unmatched = selection.unmatched
     # Only the functions the config kept are resolved, so an unselected
@@ -1072,14 +1084,46 @@ def scan(  # noqa: PLR0913  # keyword-only options, one per kind of source
         for key in within.bound.keys() & within.names.keys()
     ):
         raise ValueError("; ".join(defined))
-    replacing = _replacing(modules, namespaces, replaces)
     seen = _made(entries, given, names, awaits=awaits, replacing=replacing)
+    if predicates and (both := _predicate_nodes(seen.values(), predicates)):
+        raise ValueError("; ".join(both))
     # A node a plain function or another variant defines is not missing.
     missing = {n: why for n, why in unmatched.items() if n not in seen}
     for name in missing.keys() & gathered.variants.keys():
         # A variant the scan left out is a reason too: say so beside the others.
         missing[name] = "; ".join([missing[name], *gathered.variants[name]])
     return Scanned(list(seen.values()), missing, gathered.left_out)
+
+
+def _predicates(entries: Iterable[Found | NodeSpec]) -> dict[int, str]:
+    """The ids of every `config.matches` predicate the found variants name (Q148)."""
+    found: dict[int, str] = {}
+    for entry in entries:
+        if isinstance(entry, NodeSpec):
+            continue
+        policy = decorations(entry[2]).config
+        if policy is None:
+            continue
+        for predicate in _config.predicates(policy.conditions):
+            found[id(predicate)] = _config.predicate_name(predicate)
+    return found
+
+
+def _predicate_nodes(
+    nodes: Iterable[NodeDef], predicates: Mapping[int, str]
+) -> list[str]:
+    """A line for each node made from a `config.matches` predicate, sorted.
+
+    A public function a module defines is a node, and a predicate is no node.
+    """
+    return sorted(
+        {
+            f"{getattr(node.origin, '__name__', node.name)!r} is a config.matches "
+            "predicate and a node; prefix it with `_` or `@exclude` it"
+            for node in nodes
+            if id(node.origin) in predicates
+        }
+    )
 
 
 def _resolved_entry(
@@ -1111,19 +1155,21 @@ def _injected(
     return made, _templated(fn, made, set())
 
 
-def _selected(
+def _selected(  # noqa: PLR0913  # keyword-only options, one per part of the selection
     entries: list[_Entry],
     configured: Sequence[ModuleType],
     config: Mapping[str, object],
     *,
     namespaced: bool,
     configs: Mapping[str | None, Mapping[str, object]],
+    apart: AbstractSet[tuple[str | None, str, str]] = frozenset(),
 ) -> tuple[list[_Entry], Selection]:
     """`entries` with only the variants `config` selects, and the selection.
 
     `ValueError` first for a config-decorated function a module defines twice.
     With `namespaced`, each namespace selects its own variants (Q74), by its
-    config in `configs` when it has one (Q112).
+    config in `configs` when it has one (Q112). The variants `apart` names, a
+    `replace=`'s, are selected apart from those they replace (Q150).
     """
     if redefined := sorted(line for m in configured for line in redefinitions(m)):
         raise ValueError("; ".join(redefined))
@@ -1133,6 +1179,7 @@ def _selected(
         config,
         [namespace for namespace, _ in functions] if namespaced else (),
         configs or None,
+        apart,
     )
     chosen = {id(e) for e in selection.functions}
     kept = [(n, e) for n, e in entries if isinstance(e, NodeSpec) or id(e) in chosen]
@@ -1213,7 +1260,24 @@ def _bare(name: str, namespace: str | None) -> str:
 
 
 def _refused_replacement(old: NodeDef, new: NodeDef) -> str | None:
-    """Why `new` can't replace `old`, or `None`: neither may be or give fields."""
+    """Why `new` can't replace `old`, or `None`.
+
+    Neither may be or give fields, and `old` may not be a `@mutate` target: the
+    replacement takes the whole node, so the mutator's step would be lost.
+    """
+    if mutations := decorations(old.origin).mutations:
+        mutators = sorted(
+            {
+                f"'{getattr(s.fn, '__module__', '?')}."
+                f"{getattr(s.fn, '__qualname__', '?')}'"
+                for _, s in mutations
+            }
+        )
+        return (
+            f"{_definition(old, set())} in {old.module!r} is mutated by "
+            f"{', '.join(mutators)}, and a replacement takes the whole node: "
+            "mutate the replacing function instead"
+        )
     for node in (old, new):
         if _extract.is_generated(node):
             return f"it is a field of {_definition(node, set())} in {node.module!r}"
