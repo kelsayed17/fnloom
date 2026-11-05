@@ -9,6 +9,13 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Added
 
+- `@tag` takes a `list` or `tuple` of strings as a value, kept as a tuple in written order. An empty sequence, a
+  repeated item, a non-`str` item, or an unordered collection (`set`, `frozenset`, `dict`) is refused when decorating,
+  naming the tag. `Driver.nodes.tagged(**query)` returns the views whose tags match: a `str` matches an equal value or
+  a tuple holding it, a sequence matches any item, `fnloom.ANY` matches a node with the tag. `fnloom draw` and `fnloom
+  export` take a repeatable `--tag key=value`, one per key (a key given twice is a usage error). A `str` subclass
+  value or item is kept as a plain `str`, and `fnloom.ANY` survives `copy`, `deepcopy` and `pickle`. The export writes
+  a tuple as a JSON list, and `diff` compares it in order (Q36, Q141).
 - `fnloom.frame(library="pandas", *, flatten=True, separator=".", join="strict")`, a result builder for
   `with_result_builder` making one pandas or polars frame: a frame output flattened into `<output>.<column>` columns in
   request then column order, a series one column, scalars broadcast, all scalars one row. `join="strict"` refuses
@@ -16,6 +23,12 @@ change the public API; such changes are listed under **Changed** and **Removed**
   is Hamilton's `PandasDataFrameResult` frame, without its log; polars refuses it. Two columns of one name are a
   `ValueError` naming both. The library is imported by `frame`, never by `import fnloom` (Q144).
   `with_result_builder(pandas.DataFrame)` is unchanged (Q89).
+
+### Changed
+
+- `NodeView.tags` is now `Mapping[str, str | tuple[str, ...]]`: code that reads a tag as a `str` needs an
+  `isinstance(value, str)` check (or `tags.get("k")` handled as either) to type-check. `Driver.nodes` is typed
+  `NodeViews`, which has `tagged`. A node's `display_name` tag given as a tuple is drawn joined by `, `.
 
 ## [0.3.0] - 2026-11-03
 
