@@ -288,14 +288,19 @@ price["kind"], price["required"], price["consumers"], price["version"]
 A function node's `version` is its code version, the one the [result cache](caching.md) keys on. It covers the
 function's code, defaults, closures and the globals it reads, helpers and constants included. A function with no code
 version, such as one reading a mutable global, has `version` `None` and an `unversioned` entry saying why. A node with
-output checks has them in its `version` too, as the result cache keys them, so `fnloom diff` sees a check change.
+output checks has them in its `version` too, as the result cache keys them, so `fnloom diff` sees a check change, and
+so does a variant a [`config.matches`](writing-nodes.md#a-predicate-of-config-keys) predicate selects, its condition
+shown as `matches(module.qualname)`. A node that [replaced](writing-nodes.md#replacing-a-node) another module's names
+that module as `replaced`.
 `graph_version` hashes every node's name, kind, type, wiring, conditions and version, so it changes when any of them
-does, and it is `None` when some node is unversioned.
+does, and it is `None` when some node is unversioned. The document's `namespace_config` lists each namespace's own
+`config=`, and `edge_checks` is `"on"`, `"off"` or the nodes whose edges the build skipped; both are in
+`graph_version` too.
 
 A value's text is the same in every process: a set's members are sorted, and an address in a default `repr` is
 dropped. A `value()` holding an object known only by its address has no fingerprint, so `graph_version` is `None`.
-The version has the result cache's limits: a global `frozenset` of strings a function reads is versioned in the order
-the hash seed gives, so pass a sorted tuple, or fix `PYTHONHASHSEED`, for a version that holds across processes. Tags
+A code version is the same on every hash seed too: a `set` or `frozenset` a function reads, as a global or a
+default, is versioned by its members sorted. Tags
 and docs don't change what a node computes, so `graph_version` leaves them out; `fnloom diff` still reports them.
 
 ## The CLI

@@ -56,6 +56,8 @@ class NodeView:
     input, a plain function and a `@config.default`. `namespace` is the one the
     node's module was given under, and `None` for an input, which is never
     namespaced, and for a node of a module given without one (Q74).
+    `replaced` names the module whose node of this name this one replaced, by
+    `with_modules(..., replace=...)`, and is `None` otherwise (Q150).
     """
 
     name: str
@@ -68,6 +70,7 @@ class NodeView:
     doc: str | None
     config: tuple[Condition, ...] = ()
     namespace: str | None = None
+    replaced: str | None = None
 
     @property
     def dependencies(self) -> tuple[str, ...]:
@@ -372,6 +375,7 @@ def node_views(
             node.doc if node.doc is not None or node.documented else _doc(node.origin),
             node.config,
             node.namespace,
+            node.replaced,
         )
         for node in nodes
     }

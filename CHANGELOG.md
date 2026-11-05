@@ -28,6 +28,36 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `.on_output` over `on_output=`. A namespace that is no dotted identifier path is refused when decorating, and a
   name two nodes would have fails the build naming what made each. `apply_to(...).named(name, namespace=)` does the
   same for `@mutate` (Q140).
+- `Builder.with_cache(store, *, recompute=(), disable=(), default=(), default_behavior="default", ignore=None)`: each
+  list names nodes given that behavior, or is `True` for the default. A list naming a node wins over its
+  `@cache(behavior=...)`, which wins over `default_behavior`; `True` counts as `default_behavior`, not as a name, so
+  a node's own `@cache` still wins over it. A name in two lists, two `True` lists, or `True` against another
+  `default_behavior` is a `ValueError`; a name that is no node, or an `ignore` parameter the consumer lacks, fails
+  the build with a `did you mean`. `ignore` maps a consumer to parameters left out of its key. Carried by pickling,
+  `copy`, `rebuild()` and `build_async` (Q143).
+- `@cache(fields={...})` and `fnloom.FieldCache(behavior="default", format=None)`: a field or column of
+  `@extract_fields` or `@extract_columns` with a policy of its own. `"default"` stores and serves the field apart from
+  its producer, keyed by the producer's key and the field, so a `disable` producer can have a stored field and does
+  not run when it hits; `"recompute"` runs the producer again for the field; `"disable"` makes the field's readers
+  uncacheable. A field the function doesn't extract is a `ValueError` at build, and `fields=` on a function that
+  extracts nothing a `TypeError` (Q147).
+- `@config.matches(predicate, *, name=None)`: a variant kept when `predicate`, called with the config keys its
+  parameters name, returns `True`. A defaulted parameter is an optional key, a missing required key never matches,
+  and a result that is no `bool` is a `TypeError` at build. It stacks with `config.when*` and falls back to
+  `@config.default`. The predicate's code version is in the selected variant's cache key and export `version`, and
+  the export shows the condition as `matches(<module.qualname>)`. A public module-level predicate, which would be a
+  node, fails the build (Q148).
+- `Builder.without_edge_type_checks(*consumers)` turns edge type checks off for every edge, or only for the edges into
+  the nodes named; an unknown name is a `ValueError` at build. Input checks stay on. The export's new `edge_checks`
+  field records it, and it is in `graph_version` (Q149).
+- `with_modules(..., namespace="eu", config={...})` gives a namespace a config of its own, overlaid on the builder's
+  for its `@config` variants, `@resolve`s, `config.matches` predicates and steps, as `@subdag(config=)` does.
+  `Driver.config` stays the builder's own; the export's new `namespace_config` field lists each overlay, which is in
+  `graph_version` (Q112 amended: `config=` per copy was not planned).
+- `with_modules(module, replace=("total",))` replaces the node `total` that earlier modules define, for every reader.
+  A name no earlier module, or not this one, defines under the config is a `ValueError` at build. `NodeView.replaced`
+  and the export entry's `replaced` name the module replaced. A `@mutate` on the replaced function fails the build,
+  and `@config` variants on both sides are each selected first (Q74 amended, Q150).
 - `fnloom.Style(fill=, stroke=, font_color=, stroke_width=, dashed=, shape=, dot=, mermaid=)` and
   `Drawing.styled(graph=, node=, edge=, style=)`, returning a new drawing that DOT, Mermaid and SVG all draw alike.
   `style(view, drawn)` is called once per node with its `NodeView`. A colour is `#rrggbb` or a CSS name from
@@ -58,6 +88,21 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - A step named with `.named(...)` counts toward the numbers of its function's unnamed steps, as in Hamilton:
   `step(_inc).named("first"), step(_inc)` makes `<node>.with_inc_1` for the second step, where it was
   `<node>.with_inc` (Q104, Q140).
+- `explain_cache` (and a hook's cache outcome) names where a policy came from: `"policy recompute"` is now
+  `"policy recompute (decorator)"`, `"policy disable"` is `"policy disable (decorator)"`, and `(driver)` or
+  `(default)` mark a behavior from a `with_cache` list or `default_behavior`. A `default` node that a list or
+  `@cache(behavior="default")` made so has the reason `"policy default (driver)"` or `"policy default (decorator)"`
+  where it had `None`.
+- `@cache(...)` without `behavior` no longer sets one: `CachePolicy.behavior` is `None`, and the driver's
+  `default_behavior` applies, as in Hamilton. With `with_cache`'s default, nothing changes.
+
+### Fixed
+
+- A code version no longer depends on `PYTHONHASHSEED` when a function reads a `set` or `frozenset`, as a default
+  or a global: its members are versioned sorted. Such a node's version, and its cache key, change once.
+- A `value()` binding, default or global holding a set inside a subclass of `set`, `frozenset`, `list`, `tuple` or
+  `dict` with attributes or slots of its own, or inside another mapping, is no longer versioned by its members alone,
+  so a change to that state can't hit a stale result: it is fingerprinted whole, or refused.
 
 ## [0.3.0] - 2026-11-03
 

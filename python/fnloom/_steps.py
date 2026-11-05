@@ -15,7 +15,13 @@ from dataclasses import dataclass, replace
 from types import EllipsisType, MappingProxyType
 from typing import TYPE_CHECKING
 
-from fnloom._config import Condition, ConfigPolicy, build_conditions, matches
+from fnloom._config import (
+    Condition,
+    ConfigPolicy,
+    build_conditions,
+    matches,
+    overlaid,
+)
 from fnloom._decorators import _ATTRIBUTE, RESOLVING, Source, Value, decorations
 from fnloom._extract import extractor
 from fnloom._fingerprint import fingerprint
@@ -405,11 +411,14 @@ def relays(nodes: Sequence[NodeDef]) -> frozenset[str]:
     )
 
 
-def lowered(
+def lowered(  # noqa: PLR0913  # the build's parts, the last keyword-only
     nodes: Sequence[NodeDef],
     config: Mapping[str, object],
     bound: Mapping[str, Mapping[str, Source | Value]] | None = None,
     used: dict[str, set[str]] | None = None,
+    overlays: Mapping[str, Mapping[str, object]] | None = None,
+    *,
+    steps_of: dict[str, set[str]] | None = None,
 ) -> tuple[list[NodeDef], frozenset[str]]:
     """`nodes` with each `@pipe_input` and `@pipe_output` lowered to step nodes.
 
@@ -417,8 +426,12 @@ def lowered(
     `ValueError` for an `.on_output` field the function doesn't extract, a fed
     parameter bound to a `value()`, and two nodes of one name. `bound` and
     `used` are each namespace's `bind=` and the bound names read, as `scan`
-    takes them (Q112).
+    takes them (Q112); `overlays` each namespace's `config=`, which a step
+    there is kept by, over `config`. `steps_of`, when given, gathers the names
+    of the step nodes each node was lowered to, by its name (Q149).
     """
+    configs = overlaid(config, overlays)
+    lowered_to: dict[str, set[str]] = {} if steps_of is None else steps_of
     out: list[NodeDef] = []
     # What made each node in `out`, for a name made twice (Q140).
     owners: list[str] = []
@@ -438,8 +451,9 @@ def lowered(
         current = node
         extra: list[NodeDef] = []
         names = None if node.namespace is None else within.get(node.namespace)
+        seen = configs.get(node.namespace, config)
         if recorded.pipe_input is not None and extractor(node) is None:
-            current, extra = _fed(node, recorded.pipe_input, config, names, problems)
+            current, extra = _fed(node, recorded.pipe_input, seen, names, problems)
         steps_out = (*recorded.pipe_output, *(s for _, s in recorded.mutations))
         if steps_out:
             fields = by_origin.get(id(node.origin))
@@ -448,7 +462,7 @@ def lowered(
             field_target = extracting is not None
             if own_target or field_target:
                 target = _bare(node) if extracting is None else extracting.field
-                current, piped = _piped(current, steps_out, config, target, names)
+                current, piped = _piped(current, steps_out, seen, target, names)
                 extra += piped
                 if field_target and piped:
                     # A field's final node stands for no function in a request.
@@ -459,6 +473,7 @@ def lowered(
                     _unknown_fields(node, steps_out, known, extracts=fields is not None)
                 )
         made.update(n.name for n in extra)
+        lowered_to.setdefault(node.name, set()).update(n.name for n in extra)
         out.append(current)
         owners.append(f"the {_kind(node)} {node.name!r}")
         out.extend(extra)

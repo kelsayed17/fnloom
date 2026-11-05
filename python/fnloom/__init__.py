@@ -14,6 +14,7 @@ from fnloom._config import Condition, config
 from fnloom._core import UnfingerprintableError
 from fnloom._decorators import (
     CachePolicy,
+    FieldCache,
     Group,
     Source,
     Value,
@@ -92,6 +93,7 @@ __all__ = [
     "Drawing",
     "DrawnNode",
     "Driver",
+    "FieldCache",
     "Format",
     "Group",
     "Hook",

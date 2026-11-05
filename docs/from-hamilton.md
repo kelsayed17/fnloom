@@ -47,11 +47,11 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `@cache(behavior="recompute")`, `@cache(behavior="disable")` | The same, imported from `fnloom` ([Caching](#caching)) (Q152) |
 | `@cache(behavior="ignore")` on a producer | `@cache(ignore=("name",))` on the consumer instead (Q50) |
 | `@cache(format=...)` | The same, imported from `fnloom`: a format's name, or a `fnloom.Format` ([Caching](caching.md#stores)) (Q55) |
-| `target_=...` | Not there. fnloom adds `version=` to pin a code version (Q147) |
+| `@cache(..., target_="x")` on an `@extract_fields` function | `@cache(fields={"x": "default"})`, or a `fnloom.FieldCache(behavior=, format=)` per field. A stored field is served apart from its producer, so a `disable` producer's field hits without running it; `recompute` on a field runs the producer again, where Hamilton reruns only the field's getter on the stored producer; a field the function doesn't extract fails the build ([Per-field policies](caching.md#per-field-policies), Q147). `version=` pins a code version |
 | `@config.when`, `when_not`, `when_in`, `when_not_in` | The same, imported from `fnloom`, with the same `foo__variant` naming ([Config](writing-nodes.md#config)) (Q153) |
 | `@config.when(name="x")` | The same on `when`, `when_not` and `when_in`. On `when_not_in`, Hamilton reads `name` as a config key, while fnloom reads it as the node name, as on the other forms (Q59) |
 | `@config.default` | Not in Hamilton: the variant used when no other matches (Q154) |
-| `@config(lambda cfg: ...)` | Not there (Q148) |
+| `@config(lambda cfg: ...)` | `@config.matches(predicate)`: the predicate's parameters are the config keys it reads, a missing required key never matches, it must return a `bool`, and an edited predicate changes the variant's cache key and export version ([Config](writing-nodes.md#config), Q148) |
 | `@extract_fields({"a": int})`, `@extract_fields("a", "b")`, `@extract_fields()` | The same, imported from `fnloom` ([Extracting fields](writing-nodes.md#extracting-fields)). A `Mapping[str, T]` return works too (Q61) |
 | `@extract_fields(..., fill_with=v)` | The same, but the producer's mapping is never changed, and `None` is a fill (Q62) |
 | `@extract_columns("a", ("b", "doc"))` | The same, imported from `fnloom` ([Extracting columns](writing-nodes.md#extracting-columns)), with no pandas extension to load. A mapping or any value with `in` and `[]` works too (Q64) |
@@ -92,8 +92,8 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `@hamilton_exclude` | An instance, so only `@hamilton_exclude` works; `@hamilton_exclude()` raises | `@fnloom.exclude` and `@fnloom.exclude()` both work, return the function unchanged, and beat `__all__` (Q73) |
 | `ad_hoc_utils.create_temporary_module(fa, fb)` | Copies the functions into a module it registers in `sys.modules`; refuses `_` names; the original function in `final_vars` is refused | `Builder().with_functions(fa, fb)`: the functions themselves, no module made or registered, the original in `final_vars` means its node ([Graphs without modules](writing-nodes.md#graphs-without-modules), Q72) |
 | A lambda in `create_temporary_module` | Accepted, failing later | Needs a name: `fnloom.node(fn, name="x")`, which also binds parameters with `bind={...}` (Q72) |
-| `allow_module_overrides()` | The later module's function silently replaces the earlier one, for every reader | No override: a name defined twice fails the build. To use one module twice, give it a namespace ([Namespaces](writing-nodes.md#namespaces), Q74) |
-| `@subdag(module, ...)` to reuse a module | The module's nodes are named `<function>.<name>`, under a function you write | `Builder().with_modules(module, namespace="ns")` names them `ns.<name>`; inside, a parameter reads the namespace's node first, then the plain name, and inputs keep their plain names (Q74). `inputs=` becomes `bind=`, which feeds each copy its own inputs ([`@subdag` and `@parameterized_subdag`](#subdag-and-parameterized_subdag), Q112) |
+| `allow_module_overrides()` | The later module's function silently replaces the earlier one, for every reader | `with_modules(module, replace=("total",))` replaces the one node named, for every reader, and `NodeView.replaced` says whose; a name no earlier module or not this one defines fails the build, and any other name defined twice still does ([Replacing a node](writing-nodes.md#replacing-a-node), Q74, Q150) |
+| `@subdag(module, ...)` to reuse a module | The module's nodes are named `<function>.<name>`, under a function you write | `Builder().with_modules(module, namespace="ns")` names them `ns.<name>`; inside, a parameter reads the namespace's node first, then the plain name, and inputs keep their plain names (Q74). `inputs=` becomes `bind=`, which feeds each copy its own inputs, and `config=` stays `config=`, the copy's own config over the driver's ([`@subdag` and `@parameterized_subdag`](#subdag-and-parameterized_subdag), Q112) |
 | `what_is_upstream_of` | `HamiltonNode` objects | Sorted names, including the ones you named (Q28) |
 | Reusing a request | Re-planned on every call | `prepare(...)` returns a plan to run again (Q3) |
 | `validate_execution(final_vars, overrides, inputs)` | Returns `None` or raises one kind of problem; refuses a function in `final_vars`; a missing input names every consumer in the graph | `validate(final_vars, *, inputs, overrides)` returns every problem, one sorted line each, and names only the consumers the request needs; unknown names get a `did you mean` suggestion (Q71) |
@@ -115,7 +115,7 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `with_adapters(lifecycle.PrintLn())` | Prints each node's name and time, and with `verbosity=2` its inputs and result | `fnloom.PrintNodes(verbosity, print_fn=, nodes=, width=)`: the same two levels, but a cache hit says `loaded from cache`, `nodes` is names or a function of the `NodeView` (tags, namespace, config), an unknown name fails the build, and values are cut to `width` ([Printing nodes](hooks.md#printing-nodes), Q142) |
 | A failing node logged at ERROR | Always, with a support banner | Off by default; `with_hooks(fnloom.LogFailures())` logs the node and its inputs, each cut to 50 characters ([Logging failures](hooks.md#logging-failures), Q88) |
 | `GraphConstructionHook`'s `run_after_graph_construction` | Called with the built graph | `Hook.after_build(event)` gets a `BuildEnd` of frozen views, the config and the modules from `build()`, `build_async()` and `rebuild()`, and can refuse the build ([Checking the graph at build](hooks.md#checking-the-graph-at-build), Q145) |
-| `lifecycle.NoEdgeAndInputTypeChecking()` | Turns off the input and edge checks | `without_input_type_checks()`; edges are always checked, at build (Q10) |
+| `lifecycle.NoEdgeAndInputTypeChecking()` | Turns off the input and edge checks, for the whole graph | `without_edge_type_checks()` for every edge, or `without_edge_type_checks("count")` for the edges into one node, an unknown name failing the build; input checks are `without_input_type_checks()`, apart; the setting is in the export (Q10, Q149) |
 | A `StaticValidator`, refusing a node or the graph at build | `run_to_validate_node` and `run_to_validate_graph` | An `after_build` hook that raises refuses the build, with every problem in one error, carried through `rebuild()` ([`StaticValidator`](#staticvalidator), Q117) |
 | `NodeExecutionMethod` (`run_to_execute_node`) | Replaces how a node is called; one per driver | `with_node_wrappers(*wrappers)`: any number, an ordered chain, each `wrapper(node, call, inputs)` ([Node wrappers](running.md#node-wrappers), Q111) |
 | `lifecycle.default.GracefulErrorAdapter` | Keeps running past a failure, skipping what depends on it | Not yet: on the [roadmap](plans/2026-10-28-roadmap-ahead-of-hamilton.md). A failing node fails the run, and `after_node` sees its error and inputs (Q157) |
@@ -193,7 +193,7 @@ value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](
 | | Hamilton 1.90.0 | fnloom |
 | --- | --- | --- |
 | Turning it on | `Builder().with_cache(path=...)` | `Builder().with_cache(fnloom.DiskCache(path))`, or `fnloom.MemoryCache()` (Q158) |
-| Per-node behavior | `@cache(behavior=...)`, or lists of names given to `with_cache` | `@cache(behavior=...)` on the function only (Q143) |
+| Per-node behavior | `@cache(behavior=...)`, or lists of names given to `with_cache`; a list given `True` beats every `@cache`, and a name that is no node is ignored | The same lists and precedence, but `True` counts as `default_behavior`, so a node's own `@cache` still wins; a name that is no node fails the build with a `did you mean`, and `explain_cache` says which setting each policy came from ([Behavior from the driver](caching.md#behavior-from-the-driver), Q143) |
 | `ignore` | `@cache(behavior="ignore")` on the producer hides it from every consumer | `@cache(ignore=("name",))` on a consumer, per parameter; the producer is `disable` (Q50) |
 | A code version | The function's source, hashed on every run | Its code, helpers, constants and libraries, read once at build (Q16, Q48) |
 | A helper or global the node reads | Not seen | Seen; a mutable global makes the node uncacheable unless it gives `@cache(version=...)` (Q48) |
@@ -260,8 +260,10 @@ Two things differ from Hamilton, on purpose. A misspelled parameter in a final f
 Hamilton makes it a namespaced input. A `bind=` key no node reads is a `ValueError`, where Hamilton drops an unused
 `source()`.
 
-`config=` per copy isn't built: give each copy a config key (`eu_mode`, `us_mode`) read by `@config.when`.
-`@parameterized_subdag` isn't either: loop over `with_modules(taxes, namespace=name, bind=...)`, one call per copy.
+`config=` gives a copy its own config, as `@subdag(config=)` does:
+`with_modules(taxes, namespace="eu", config={"region": "eu"})` overlays the driver's config for that namespace's
+`@config` variants, `@resolve`s and `config.matches` predicates, while `driver.config` stays the driver's own (Q112).
+`@parameterized_subdag` isn't built: loop over `with_modules(taxes, namespace=name, bind=...)`, one call per copy.
 
 ### `@does`
 
