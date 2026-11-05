@@ -30,7 +30,7 @@ from typing import TYPE_CHECKING, Any
 
 from fnloom import _core
 from fnloom._core import UnfingerprintableError
-from fnloom._fingerprint import classes_versioned_by_caller, fingerprint
+from fnloom._fingerprint import classes_versioned_by_caller, fingerprint, model_fields
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Container, Iterator, Mapping, Sequence
@@ -107,6 +107,10 @@ _PROTOCOL = frozenset({"__protocol_attrs__", "__non_callable_proto_members__"})
 _DATACLASS = frozenset({"__dataclass_fields__", "__dataclass_params__"})
 # collections.namedtuple: the defaults, which the generated `__new__` holds.
 _NAMEDTUPLE = frozenset({"_field_defaults"})
+# pydantic: what a model class is built from, which `_Walk._model` counts from the
+# fields, private attributes and decorators pydantic moves out of the body, and every
+# `__pydantic_*__`. A frozen model's `__hash__`, when pydantic made it from the config.
+_PYDANTIC = frozenset({"__class_vars__", "__private_attributes__", "__signature__"})
 # enum: lookup tables built from the members, which count one by one.
 _ENUM = frozenset(
     {
@@ -133,6 +137,15 @@ def _generated(cls: type) -> frozenset[str]:
         names |= _NAMEDTUPLE
     if isinstance(cls, enum.EnumType):
         names |= _ENUM
+    if model_fields(cls) is not None:
+        entries = vars(cls)
+        names |= _PYDANTIC | {
+            name for name in entries if name.startswith("__pydantic_")
+        }
+        made = entries.get("__hash__")
+        home = sys.modules.get(getattr(made, "__module__", None) or "")
+        if isinstance(made, types.FunctionType) and home and not is_user_module(home):
+            names |= {"__hash__"}
     return names
 
 
@@ -389,6 +402,11 @@ def _inner(value: object) -> Iterator[object]:
             item = getattr(value, field.name, _UNSET)
             if item is not _UNSET:
                 yield item
+    elif model_fields(type(value)) is not None:
+        # A pydantic model's fields and other state, as its fingerprint reads them.
+        yield from vars(value).values()
+        yield getattr(value, "__pydantic_extra__", None)
+        yield getattr(value, "__pydantic_private__", None)
 
 
 def _is_typeddict(cls: type) -> bool:
@@ -547,6 +565,12 @@ class _Walk:
                 return self._module(value, where, names)
             case types.BuiltinFunctionType() if _unbound(value):
                 return _library(value.__module__ or "builtins", value.__qualname__)
+            case typing.NewType():
+                # An identity function, so its name and supertype are all it holds;
+                # the supertype (a class, or a `NewType` in turn) by these rules.
+                name = f"{value.__module__}.{value.__name__}"
+                supertype = self.value(value.__supertype__, where.within("supertype"))
+                return _hash([b"newtype", name.encode(), supertype])
             case _:
                 return self._object(value, where)
 
@@ -874,15 +898,62 @@ class _Walk:
             parts = [b"class", meta, _hash([b"bases", *bases]), _annotations(cls)]
             if _is_dataclass(cls):
                 parts.append(_field_metadata(cls))
+            model = model_fields(cls) is not None
+            if model:
+                parts.append(self._model(cls))
             skipped = _generated(cls)
             for name, member in sorted(vars(cls).items()):
                 if name in skipped:
                     continue
-                digest = self._member(member, _Where("attribute", name, owner))
+                where = _Where("attribute", name, owner)
+                if model and name == "model_config":
+                    digest = self._settings(member, where)
+                else:
+                    digest = self._member(member, where)
                 parts.append(_hash([name.encode(), digest]))
             return _hash(parts)
 
         return self._memo(cls, compute)
+
+    def _model(self, cls: type) -> bytes:
+        """A pydantic model's fields, private attributes and decorators, in order.
+
+        pydantic takes them out of the body: a field's default and constraints into a
+        `FieldInfo`, a validator's fields and mode into its decorator's info. Each
+        setting counts by the rules for defaults; an annotation is the body's.
+        """
+        owner = cls.__qualname__
+        parts = [b"pydantic-model"]
+        declared = (
+            ("field", vars(cls).get("__pydantic_fields__", {})),
+            ("private attribute", vars(cls).get("__private_attributes__", {})),
+        )
+        for kind, entries in declared:
+            for name, info in entries.items():
+                digest = self._settings(_declaration(info), _Where(kind, name, owner))
+                parts.append(_hash([kind.encode(), name.encode(), digest]))
+        decorators = vars(cls).get("__pydantic_decorators__")
+        for group in dataclasses.fields(decorators) if decorators is not None else ():
+            for name, decorator in sorted(getattr(decorators, group.name).items()):
+                where = _Where("decorator", name, owner)
+                digest = self._settings(_declaration(decorator.info), where)
+                parts.append(_hash([group.name.encode(), name.encode(), digest]))
+        return _hash(parts)
+
+    def _settings(self, settings: Mapping[str, object], where: _Where) -> bytes:
+        """Named settings in sorted order, each by the rules for a default.
+
+        A descriptor (a computed field's property) counts as a class body entry.
+        """
+        parts = [b"settings"]
+        for name, value in sorted(settings.items()):
+            inner = where.within(name)
+            if isinstance(value, _DESCRIPTORS):
+                digest = self._member(value, inner)
+            else:
+                digest = self._default(value, inner)
+            parts.append(_hash([name.encode(), digest]))
+        return _hash(parts)
 
     def _member(self, member: object, where: _Where) -> bytes:
         """A class body entry's part: functions unwrapped from their descriptors."""
@@ -898,6 +969,30 @@ class _Walk:
         none = _hash([b"none"])
         parts = [none if t is None else self.value(t, where) for t in targets]
         return _hash([b"descriptor", type(member).__name__.encode(), *parts])
+
+
+# The descriptors `_Walk._member` unwraps.
+_DESCRIPTORS = (staticmethod, classmethod, property, functools.cached_property)
+
+
+def _declaration(info: object) -> dict[str, object]:
+    """A pydantic declaration's public settings by name, its annotation left out.
+
+    A decorator's info is a dataclass; a `FieldInfo` or private attribute has slots.
+    """
+    if dataclasses.is_dataclass(info):
+        names = [field.name for field in dataclasses.fields(info)]
+    else:
+        names = [
+            name
+            for cls in type(info).__mro__
+            for name in vars(cls).get("__slots__", ())
+        ]
+    return {
+        name: getattr(info, name)
+        for name in names
+        if not name.startswith("_") and name != "annotation" and hasattr(info, name)
+    }
 
 
 def _codes(code: types.CodeType) -> Iterator[types.CodeType]:

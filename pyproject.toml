@@ -53,6 +53,8 @@ dev = [
     "blake3>=1.0",
     # The CodSpeed benchmarks in benchmarks/, which also run as plain tests without the plugin's flag.
     "pytest-codspeed>=5.0.3",
+    # Pydantic models as cache inputs: fnloom never imports it, but fingerprints its frozen models.
+    "pydantic>=2.12",
 ]
 # The documentation site (`uv run --group docs zensical serve` to preview it).
 docs = ["zensical>=0.0.73"]
