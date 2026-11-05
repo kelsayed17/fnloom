@@ -32,6 +32,7 @@ from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
 from fnloom import _core, _extract
 from fnloom._canonical import stable_fingerprint
 from fnloom._codeversion import UncacheableError, class_version, code_version
+from fnloom._config import predicate_name, predicates
 from fnloom._decorators import (
     _BEHAVIORS,
     CacheBehavior,
@@ -50,6 +51,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Mapping, Sequence
 
     from fnloom._checks import Check
+    from fnloom._config import Condition
     from fnloom._hooks import Dispatch
     from fnloom._scan import NodeDef
 
@@ -474,14 +476,55 @@ def _keyed(
     return keys
 
 
+def with_predicates(
+    code: bytes, conditions: Sequence[Condition]
+) -> bytes | UncacheableError:
+    """`code` folded with the code version of each `config.matches` predicate (Q148).
+
+    So an edited predicate misses on the variant it selects. `code` itself when
+    no condition is a predicate; an `UncacheableError` when a predicate has no
+    version, saying which.
+    """
+    found = predicates(conditions)
+    if not found:
+        return code
+    parts = [code, b"matches"]
+    for predicate in found:
+        try:
+            parts.append(code_version(predicate))
+        except UncacheableError as error:
+            return UncacheableError(
+                f"config.matches predicate {predicate_name(predicate)!r}: "
+                f"{error.reason}"
+            )
+        except Exception as error:  # noqa: BLE001  # a failing version: uncacheable
+            return UncacheableError(
+                f"cannot read the code version of config.matches predicate "
+                f"{predicate_name(predicate)!r}: {error!r}"
+            )
+    return _core.hash_parts(parts)
+
+
 def _code(
     node: NodeDef, policy: CachePolicy, versions: dict[int, bytes | UncacheableError]
 ) -> bytes | UncacheableError:
-    """`node`'s code version, its pin, or why it has none; once per function."""
+    """`node`'s code version, its pin, or why it has none; once per function.
+
+    Unpinned, it is folded with each `config.matches` predicate that selected the
+    node (Q148), so a field keyed from it, or from its producer, sees one too.
+    """
     if policy.version is not None:
         return policy.version.encode()
-    if (code := versions.get(id(node.origin))) is not None:
-        return code
+    if (code := versions.get(id(node.origin))) is None:
+        code = _own_code(node)
+        versions[id(node.origin)] = code
+    if isinstance(code, bytes) and node.config:
+        return with_predicates(code, node.config)
+    return code
+
+
+def _own_code(node: NodeDef) -> bytes | UncacheableError:
+    """`node`'s function's code version, or why it has none."""
     try:
         code = code_version(node.origin)
     except UncacheableError as error:
@@ -493,7 +536,6 @@ def _code(
             f"cannot read the code version of {_qualname(node)!r}: {error!r}"
         )
         _warn_build(code.reason)
-    versions[id(node.origin)] = code
     return code
 
 
