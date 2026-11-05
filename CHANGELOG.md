@@ -21,7 +21,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
   request then column order, a series one column, scalars broadcast, all scalars one row. `join="strict"` refuses
   outputs on different pandas indexes or of different polars lengths with a `ValueError` naming them; `join="outer"`
   is Hamilton's `PandasDataFrameResult` frame, without its log; polars refuses it. Two columns of one name are a
-  `ValueError` naming both. The library is imported by `frame`, never by `import fnloom` (Q144).
+  `ValueError` naming both. The library is imported by `frame`, never by `import fnloom`. `frame` returns a
+  `fnloom.FrameBuilder` (Q144).
   `with_result_builder(pandas.DataFrame)` is unchanged (Q89).
 
 ### Changed

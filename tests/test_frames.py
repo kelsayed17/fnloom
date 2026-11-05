@@ -370,3 +370,48 @@ def test_polars_scalars_keep_one_type_and_bad_values_are_named() -> None:
         TypeError, match=r"^frame\('polars'\) can't make the column 't'"
     ):
         build({"t": pytest.importorskip("numpy").array(3), "s": [1, 2]})
+
+
+def test_polars_one_row_refusals_name_the_column() -> None:
+    """All scalars: a value polars refuses still names its column."""
+    with pytest.raises(
+        TypeError, match=r"^frame\('polars'\) can't make the column 't'"
+    ):
+        fnloom.frame("polars")({"t": pytest.importorskip("numpy").array(3)})
+    assert fnloom.frame("polars")({"x": None, "y": 2}).to_dicts() == [
+        {"x": None, "y": 2}
+    ]
+
+
+def test_strict_refuses_an_output_without_a_length() -> None:
+    """A generator has no length to compare: a `TypeError` naming the output."""
+    with pytest.raises(
+        TypeError,
+        match=r"^frame\(join='strict'\) can't compare output 'g', a generator: "
+        r"it has no length; return a list or a series$",
+    ):
+        fnloom.frame()({"g": (i for i in range(2)), "s": pd.Series([1, 2])})
+
+
+def test_pandas_refuses_a_polars_frame() -> None:
+    """A polars frame given to the pandas builder is a `TypeError` naming it."""
+    with pytest.raises(
+        TypeError,
+        match=r"^frame\('pandas'\) can't make columns of output 'table', a DataFrame$",
+    ):
+        fnloom.frame()({"table": pl.DataFrame({"a": [1]}), "s": pd.Series([1])})
+
+
+def test_polars_refuses_a_lazy_frame() -> None:
+    """A `LazyFrame` is refused, naming the output and saying to collect it."""
+    with pytest.raises(
+        TypeError,
+        match=r"^frame\('polars'\) can't make columns of output 'lazy', a LazyFrame: "
+        r"call \.collect\(\) on it first$",
+    ):
+        fnloom.frame("polars")({"lazy": pl.LazyFrame({"a": [1]}), "s": [1]})
+
+
+def test_frame_builder_is_public() -> None:
+    """`fnloom.FrameBuilder` is what `frame` returns, for annotations."""
+    assert isinstance(fnloom.frame(), fnloom.FrameBuilder)

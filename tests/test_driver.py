@@ -364,6 +364,7 @@ def test_public_api_is_exported() -> None:
         "DrawnNode",
         "Driver",
         "Format",
+        "FrameBuilder",
         "Group",
         "Hook",
         "InputView",

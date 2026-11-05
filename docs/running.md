@@ -221,7 +221,8 @@ frames.execute(["revenue", "regions", "rate"]).to_dict("list")
   A dict output is aligned on its keys, so strict compares them as an index.
 - **`frame("polars")`** makes a polars frame by the same rules. polars has no index, so outputs of different lengths
   are refused, and so is `join="outer"`. A pandas series given to it is taken by position, its index dropped.
-- **It travels with the driver**, as any result builder does, and compares and pickles by its settings.
+- **It travels with the driver**, as any result builder does, and compares and pickles by its settings. It is a
+  `fnloom.FrameBuilder`, for annotations.
 
 ```python
 frames.execute(["quantities", "returns"])

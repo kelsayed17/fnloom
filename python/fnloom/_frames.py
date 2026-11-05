@@ -6,7 +6,7 @@ imports it again in a process that unpickled the builder).
 """
 
 import importlib
-from collections.abc import Hashable, Mapping
+from collections.abc import Hashable, Mapping, Sized
 from typing import Any, Final, Literal, override
 
 type Library = Literal["pandas", "polars"]
@@ -158,8 +158,16 @@ class FrameBuilder:
 
     def _pandas(self, pd: Any, outputs: dict[str, object]) -> Any:  # noqa: ANN401  # the pandas module and a frame
         is_list_like = pd.api.types.is_list_like
+        for name, value in outputs.items():
+            if not isinstance(value, pd.DataFrame) and _two_dimensional(value):
+                msg = (
+                    f"frame('pandas') can't make columns of output {name!r}, "
+                    f"a {type(value).__qualname__}"
+                )
+                raise TypeError(msg)
         columns = self._columns(outputs, pd.DataFrame)
-        # As Hamilton does: one row when no output has a length, a frame included.
+        # As Hamilton does: one row only when no output has a length. A frame has
+        # one even with no columns, so this asks the outputs, not the columns.
         if not any(is_list_like(value) for value in outputs.values()):
             return pd.DataFrame([columns])
         if self._join == "strict":
@@ -168,10 +176,14 @@ class FrameBuilder:
 
     def _polars(self, pl: Any, outputs: dict[str, object]) -> Any:  # noqa: ANN401  # the polars module and a frame
         for name, value in outputs.items():
-            if not isinstance(value, pl.DataFrame) and getattr(value, "ndim", 0) > 1:
+            lazy = isinstance(value, pl.LazyFrame)
+            if lazy or (
+                not isinstance(value, pl.DataFrame) and _two_dimensional(value)
+            ):
+                hint = ": call .collect() on it first" if lazy else ""
                 msg = (
                     f"frame('polars') can't make columns of output {name!r}, "
-                    f"a {type(value).__qualname__}"
+                    f"a {type(value).__qualname__}{hint}"
                 )
                 raise TypeError(msg)
         columns = self._columns(outputs, pl.DataFrame)
@@ -182,7 +194,10 @@ class FrameBuilder:
         }
         if not lengths:
             return pl.DataFrame(
-                {str(label): [value] for label, value in columns.items()}
+                [
+                    _polars_column(pl, str(label), value, 1)
+                    for label, value in columns.items()
+                ]
             )
         if len(set(lengths.values())) > 1:
             msg = (
@@ -252,8 +267,20 @@ def _polars_list_like(pl: Any, value: object) -> bool:  # noqa: ANN401  # the po
 
 
 def _strict_pandas(pd: Any, outputs: dict[str, object]) -> None:  # noqa: ANN401  # the pandas module
-    """A `ValueError` unless every list-like output has one index, or one length."""
-    lengths = {name: len(value) for name, value in outputs.items()}  # ty: ignore[invalid-argument-type]  # list-like
+    """A `ValueError` unless every list-like output has one index, or one length.
+
+    A list-like output with no length, such as a generator, is a `TypeError`.
+    """
+    lengths: dict[str, int] = {}
+    for name, value in outputs.items():
+        if not isinstance(value, Sized):
+            msg = (
+                f"frame(join='strict') can't compare output {name!r}, a "
+                f"{type(value).__qualname__}: it has no length; "
+                "return a list or a series"
+            )
+            raise TypeError(msg)
+        lengths[name] = len(value)
     if len(set(lengths.values())) > 1:
         _refuse(_listed(lengths))
     # pandas aligns a mapping on its keys, as it does a series on its index.
@@ -305,3 +332,9 @@ def _refuse(detail: str) -> None:
         f"{detail}; pass join='outer' to align them"
     )
     raise ValueError(msg)
+
+
+def _two_dimensional(value: object) -> bool:
+    """Whether `value` has two or more axes: a frame of any library, or an array."""
+    shape = getattr(value, "shape", ())
+    return isinstance(shape, tuple) and len(shape) > 1

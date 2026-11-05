@@ -31,7 +31,7 @@ from fnloom._decorators import (
 from fnloom._drawing import Drawing, DrawnNode
 from fnloom._extract import extract_columns, extract_fields
 from fnloom._fingerprint import fingerprint, register_fingerprint
-from fnloom._frames import frame
+from fnloom._frames import FrameBuilder, frame
 from fnloom._functions import NodeSpec, node
 from fnloom._hooks import Hook, LogFailures, NodeEnd, NodeStart, RunEnd, RunStart
 from fnloom._resolve import inject, resolve
@@ -83,6 +83,7 @@ __all__ = [
     "DrawnNode",
     "Driver",
     "Format",
+    "FrameBuilder",
     "Group",
     "Hook",
     "InputView",
