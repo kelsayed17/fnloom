@@ -4,7 +4,7 @@
 > superpowers:test-driven-development inside each task and an independent reviewer subagent per PR. Steps use
 > checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** approved 2026-10-29 as drafted, with the recommended answer to each open question: the SVG engine behind its spike, `NodeView.tags` widened, released with whichever of Plans 10 to 12 lands first. PR 0 (a test for every row) was added at the maintainer's request the same day.
+**Status:** approved 2026-10-29 as drafted, with the recommended answer to each open question: the SVG engine behind its spike, `NodeView.tags` widened, released with whichever of Plans 10 to 12 lands first. PR 0 (a test for every row) was added at the maintainer's request the same day. PR 0 is released in 0.3.0 and PRs A to G in 0.4.0: Plan 12 is done.
 
 **Numbering:** Plan 10 (typed absence and sequential fan-out) and Plan 11 (the scheduler, `with_threads`, `run_many`,
 `absent_on`) are taken by the dynamic execution design (#30), which also takes register rows Q118 to Q138. This plan
@@ -385,7 +385,7 @@ Answered 2026-10-29: the recommended option for each.
    (refusing to build a view of a tuple tag)? Recommended: accept the break.
 3. **Release:** ship these in 0.3.0 with Plan 10, or as 0.4.0 after it? Recommended: whichever lands first; no
    dependency either way. **Decided (maintainer, 2026-11-03):** PR 0 shipped in 0.3.0 without Plan 10; PRs A to G
-   ship as 0.4.0, with item 2's `tags` break in its own **Changed** entry.
+   ship as 0.4.0, with item 2's `tags` break in its own **Changed** entry. Released in 0.4.0 (2026-11-05).
 
 ## Appendix: row inventory
 
