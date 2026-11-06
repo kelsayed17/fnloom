@@ -81,7 +81,8 @@ aborts the run, and `post_graph(false)` still runs so observers can close what t
 
 ## Errors
 
-- `BuildError`: `DuplicateName`, or `Cycle` with the path, its first name repeated at the end.
+- `BuildError`: `DuplicateName`; `ConflictingInput`, a spec listing one input twice with different dependencies (listed
+  twice alike, it is one edge); or `Cycle` with the path, its first name repeated at the end.
 - `PlanError`: `UnknownOutputs`, `UnknownInputs`, `UnknownOverrides` or `MissingInputs`, checked in that order, each
   with every offending name sorted; `UnknownNodes` from the lineage queries.
 - `RunError<E>`: `Node` (a payload failed, with any observer errors raised while handling it), `Observers` (the

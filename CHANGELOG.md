@@ -94,7 +94,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `false`) recognises an absent value, and `Observer::skipped(node, branch)` reports a node skipped because a
   `Required` argument is absent. `Admits` passes the absent value, `Optional` omits it, and `Required` skips the
   consumer, which is absent too. `Plan::needs_rules` says whether a plan follows these rules; one that doesn't runs
-  the plain loop unchanged.
+  the plain loop unchanged. `BuildError::ConflictingInput` refuses a spec listing one input twice with different
+  dependencies, which no one dependency describes; listed twice alike, it is one edge, as before.
 
 ### Changed
 

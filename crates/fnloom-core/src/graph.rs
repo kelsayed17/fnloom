@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{BuildError, PlanError};
-use crate::node::{Dependency, Edge, InputSpec, Node, NodeId, NodeKind, NodeSpec};
+use crate::node::{Dependency, Edge, Node, NodeId, NodeKind, NodeSpec};
 
 /// An immutable, acyclic dependency graph whose node ids follow sorted name order.
 #[derive(Debug)]
@@ -23,15 +23,16 @@ impl<P> Graph<P> {
     ///
     /// # Errors
     ///
-    /// `BuildError::DuplicateName` when two specs share a name, `BuildError::Cycle` when the
-    /// dependencies are cyclic (a self-dependency counts).
+    /// `BuildError::DuplicateName` when two specs share a name, `BuildError::ConflictingInput`
+    /// when a spec lists one input twice with different dependencies, `BuildError::Cycle` when
+    /// the dependencies are cyclic (a self-dependency counts).
     pub fn build(specs: Vec<NodeSpec<P>>) -> Result<Self, BuildError> {
         let mut declared = index_by_name(specs)?;
         let ids = assign_ids(&declared);
         let mut nodes = ids
             .iter()
             .map(|(name, &id)| make_node(id, name, declared.remove(name), &ids))
-            .collect::<Vec<_>>();
+            .collect::<Result<Vec<_>, _>>()?;
         if let Some(path) = find_cycle(&nodes) {
             return Err(BuildError::Cycle {
                 path: path
@@ -244,16 +245,19 @@ fn assign_ids<P>(declared: &BTreeMap<String, NodeSpec<P>>) -> BTreeMap<String, N
     names.into_iter().cloned().zip((0..).map(NodeId)).collect()
 }
 
+/// The node `name` with `id`: a function for a declared spec, an input otherwise.
+///
+/// `BuildError::ConflictingInput` when the spec lists one input twice, differently.
 fn make_node<P>(
     id: NodeId,
     name: &str,
     spec: Option<NodeSpec<P>>,
     ids: &BTreeMap<String, NodeId>,
-) -> Node<P> {
-    match spec {
+) -> Result<Node<P>, BuildError> {
+    Ok(match spec {
         Some(spec) => Node {
             id,
-            inputs: resolve_edges(&spec.inputs, ids),
+            inputs: resolve_edges(&spec, ids)?,
             name: spec.name,
             kind: NodeKind::Function(spec.payload),
             tags: spec.tags,
@@ -269,22 +273,39 @@ fn make_node<P>(
             declines: false,
             may_be_absent: false,
         },
-    }
+    })
 }
 
-/// Resolves inputs to edges, keeping the first of any repeated dependency.
-fn resolve_edges(inputs: &[InputSpec], ids: &BTreeMap<String, NodeId>) -> Vec<Edge> {
+/// Resolves `spec`'s inputs to edges, keeping one of an input listed twice alike.
+///
+/// `BuildError::ConflictingInput` for an input listed twice with different dependencies: no
+/// one of them says how the node reads it, so neither is kept.
+fn resolve_edges<P>(
+    spec: &NodeSpec<P>,
+    ids: &BTreeMap<String, NodeId>,
+) -> Result<Vec<Edge>, BuildError> {
     let mut seen = BTreeSet::new();
-    inputs
-        .iter()
-        .filter_map(|input| {
-            let node = *ids.get(&input.name)?;
-            seen.insert(node).then_some(Edge {
+    let mut edges = Vec::with_capacity(spec.inputs.len());
+    for input in &spec.inputs {
+        let Some(&node) = ids.get(&input.name) else {
+            continue;
+        };
+        if seen.insert(node) {
+            edges.push(Edge {
                 node,
                 dependency: input.dependency,
-            })
-        })
-        .collect()
+            });
+        } else if edges
+            .iter()
+            .any(|edge| edge.node == node && edge.dependency != input.dependency)
+        {
+            return Err(BuildError::ConflictingInput {
+                node: spec.name.clone(),
+                input: input.name.clone(),
+            });
+        }
+    }
+    Ok(edges)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -343,6 +364,7 @@ fn cycle_path(stack: &[(NodeId, usize)], back_to: NodeId) -> Vec<NodeId> {
 mod tests {
     use super::*;
 
+    use crate::node::InputSpec;
     use crate::testing::{declining, names, node, spec};
 
     #[test]
@@ -368,6 +390,43 @@ mod tests {
                 name: "x".to_owned()
             }
         );
+    }
+
+    #[test]
+    fn build_rejects_an_input_listed_twice_with_different_dependencies() {
+        let spec = |second| NodeSpec {
+            name: "b".to_owned(),
+            inputs: vec![
+                InputSpec {
+                    name: "a".to_owned(),
+                    dependency: Dependency::Required,
+                },
+                InputSpec {
+                    name: "a".to_owned(),
+                    dependency: second,
+                },
+            ],
+            tags: BTreeMap::new(),
+            payload: (),
+            declines: false,
+        };
+        let err = Graph::build(vec![spec(Dependency::Optional)]).unwrap_err();
+        assert_eq!(
+            err,
+            BuildError::ConflictingInput {
+                node: "b".to_owned(),
+                input: "a".to_owned()
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "node 'b' reads input 'a' twice, with different dependencies; list it once"
+        );
+        // Listed twice alike, it is one edge.
+        let graph = Graph::build(vec![spec(Dependency::Required)]).unwrap();
+        let b = graph.node(graph.id_of("b").unwrap());
+        assert_eq!(b.inputs.len(), 1);
+        assert_eq!(b.inputs[0].dependency, Dependency::Required);
     }
 
     #[test]
