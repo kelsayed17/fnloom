@@ -112,6 +112,11 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - A `value()` binding, default or global holding a set inside a subclass of `set`, `frozenset`, `list`, `tuple` or
   `dict` with attributes or slots of its own, or inside another mapping, is no longer versioned by its members alone,
   so a change to that state can't hit a stale result: it is fingerprinted whole, or refused.
+- A frozen pydantic model holding a `set` or `frozenset` (in a field, a nested model, a container such as
+  `dict[str, frozenset[str]]`, an extra field or a private attribute) is fingerprinted the same on every
+  `PYTHONHASHSEED`: each set's members are sorted, as for a code version. Such a model used to key `DiskCache`
+  differently in each process, so it missed (never a stale hit). Its cache key changes once, even under a fixed
+  `PYTHONHASHSEED`; a model holding no set keeps its key.
 
 ## [0.3.1] - 2026-11-05
 
