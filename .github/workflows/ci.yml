@@ -35,6 +35,10 @@ jobs:
           toolchain: stable
           components: clippy, rustfmt
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
+        with:
+          # Names the cache per interpreter. Without it, 3.14 and 3.14t on one OS share one key,
+          # the fast 3.14 job saves it first, and 3.14t's from-source polars build is never kept.
+          python-version: ${{ matrix.python }}
       - run: uv python install "$PYTHON"
       - run: uv sync --locked --python "$PYTHON"
       - run: bash scripts/check.sh
