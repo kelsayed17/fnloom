@@ -6,6 +6,7 @@ a line on stderr, with exit status 1, or 2 for a usage error.
 """
 
 import argparse
+import dataclasses
 import importlib
 import importlib.util
 import json
@@ -17,6 +18,7 @@ from typing import TYPE_CHECKING, Any, NoReturn, cast
 
 import fnloom
 from fnloom import _export
+from fnloom._drawing import GraphvizMissingError, no_graphviz_message
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -146,6 +148,37 @@ def _parser() -> argparse.ArgumentParser:
     draw.add_argument("--orient", default="LR", choices=("LR", "TB", "RL", "BT"))
     draw.add_argument("--no-legend", action="store_true", help="leave out the legend")
     draw.add_argument(
+        "--no-types",
+        action="store_true",
+        help="leave each node's type out of its label",
+    )
+    draw.add_argument(
+        "--show-tag",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="print this tag's value in each label that has it; repeat for more, "
+        "in the order given",
+    )
+    draw.add_argument(
+        "--show-schema",
+        action="store_true",
+        help="list the fields of a TypedDict, dataclass or NamedTuple return type",
+    )
+    draw.add_argument(
+        "--hide-inputs",
+        action="store_true",
+        help="leave out the inputs the command doesn't name "
+        "(an output, a NODE drawn from, a path's end)",
+    )
+    draw.add_argument(
+        "--engine",
+        default="dot",
+        choices=("dot", "builtin"),
+        help="what makes an image with -o: Graphviz's dot (the default), "
+        "or builtin for an SVG drawn by fnloom itself, needing nothing",
+    )
+    draw.add_argument(
         "--no-validate",
         action="store_true",
         help="with --execution, draw without checking inputs",
@@ -274,6 +307,9 @@ def _check_draw_flags(args: argparse.Namespace) -> None:
     if args.no_validate and not args.execution:
         msg = "--no-validate goes with --execution"
         raise _UsageError(msg)
+    if args.engine != "dot" and args.output is None:
+        msg = "--engine makes an image: give a file with -o"
+        raise _UsageError(msg)
 
 
 def _draw(args: argparse.Namespace) -> int:
@@ -281,28 +317,46 @@ def _draw(args: argparse.Namespace) -> int:
     _tag_query(args.tag)
     request = _Request(args)
     driver = request.driver
+    shown = {
+        "show_types": not args.no_types,
+        "show_tags": tuple(args.show_tag),
+        "show_schema": args.show_schema,
+        "hide_inputs": args.hide_inputs,
+    }
     if args.upstream:
-        drawing = driver.draw_upstream_of(*args.upstream)
+        drawing = driver.draw_upstream_of(*args.upstream, **shown)
     elif args.downstream:
-        drawing = driver.draw_downstream_of(*args.downstream)
+        drawing = driver.draw_downstream_of(*args.downstream, **shown)
     elif args.path:
-        drawing = driver.draw_path_between(*args.path, context=not args.no_context)
+        drawing = driver.draw_path_between(
+            *args.path, context=not args.no_context, **shown
+        )
     elif args.execution:
         drawing = driver.draw_execution(
-            request.outputs, **request.run(), validate=not args.no_validate
+            request.outputs, **request.run(), validate=not args.no_validate, **shown
         )
     else:
-        drawing = driver.draw()
+        drawing = driver.draw(**shown)
     drawing = _tagged_drawing(drawing, driver, args.tag)
     if args.output is not None:
         # No --format: the file's suffix says, as `render` reads it.
         chosen = None if args.format is None else _TEXT_FORMATS.get(args.format)
-        drawing.render(
-            args.output,
-            format=chosen or args.format,
-            orient=args.orient,
-            legend=not args.no_legend,
-        )
+        written = (chosen or args.format or args.output.suffix).lower().lstrip(".")
+        if args.engine == "builtin" and written not in {"svg", "dot", "gv", "mmd"}:
+            msg = f"--engine builtin writes svg only, not {written or 'no format'}"
+            raise _UsageError(msg)
+        try:
+            drawing.render(
+                args.output,
+                format=chosen or args.format,
+                orient=args.orient,
+                legend=not args.no_legend,
+                engine=args.engine,
+            )
+        except GraphvizMissingError as error:
+            raise GraphvizMissingError(
+                no_graphviz_message(written, cli=True)
+            ) from error
         return 0
     text_format = _TEXT_FORMATS.get(args.format or "dot")
     if text_format is None:
@@ -356,9 +410,10 @@ def _tagged_drawing(
     if not items:
         return drawing
     kept = {v.name for v in driver.nodes.tagged(**_tag_query(items))}
-    return fnloom.Drawing(
-        tuple(n for n in drawing.nodes if n.name in kept),
-        tuple(e for e in drawing.edges if e[0] in kept and e[1] in kept),
+    return dataclasses.replace(
+        drawing,
+        nodes=tuple(n for n in drawing.nodes if n.name in kept),
+        edges=tuple(e for e in drawing.edges if e[0] in kept and e[1] in kept),
     )
 
 

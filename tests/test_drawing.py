@@ -2,6 +2,7 @@
 
 import os
 import pickle
+import re
 import shutil
 import subprocess
 import sys
@@ -572,15 +573,45 @@ def test_render_writes_text_formats_without_graphviz(
 def test_render_without_graphviz_says_how_to_get_it(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A FileNotFoundError naming Graphviz, never a silent `None` (Q94)."""
+    """A FileNotFoundError giving the install command and the ways on (Q94, Q146)."""
     monkeypatch.setattr(shutil, "which", lambda _: None)
     drawing = _driver().draw()
-    with pytest.raises(FileNotFoundError, match="needs Graphviz's 'dot' on PATH"):
+    with pytest.raises(FileNotFoundError, match="needs Graphviz's 'dot' on PATH") as e:
         drawing.render(tmp_path / "graph.svg")
+    message = str(e.value)
+    assert "https://graphviz.org/download/" in message
+    assert ".mmd" in message
+    assert ".dot" in message
+    assert "engine='builtin'" in message
     assert not (tmp_path / "graph.svg").exists()
-    assert drawing._repr_svg_() is None  # Jupyter's hook
+    with pytest.raises(FileNotFoundError) as png:
+        drawing.render(tmp_path / "graph.png")
+    assert "engine='builtin'" not in str(png.value)  # the builtin engine makes svg only
+    # Jupyter's hook: a preview is not a file, so it falls back to the builtin.
+    assert drawing._repr_svg_() == drawing.to_svg()
     with pytest.raises(ValueError, match="give a format"):
         drawing.render(tmp_path / "graph")
+
+
+@pytest.mark.parametrize(
+    ("platform", "command"),
+    [
+        ("darwin", "brew install graphviz"),
+        ("linux", "apt-get install graphviz"),
+        ("win32", "winget install graphviz"),
+        ("freebsd14", "see https://graphviz.org/download/"),
+    ],
+)
+def test_the_install_command_follows_the_platform(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str, command: str
+) -> None:
+    """The missing-`dot` error names this platform's install command (Q146)."""
+    monkeypatch.setattr(shutil, "which", lambda _: None)
+    monkeypatch.setattr(sys, "platform", platform)
+    with pytest.raises(
+        FileNotFoundError, match=f"Install it with: {re.escape(command)}"
+    ):
+        _driver().draw().render(tmp_path / "graph.svg")
 
 
 @pytest.mark.skipif(_DOT is None, reason="Graphviz's dot is not on PATH")
@@ -636,7 +667,7 @@ def test_a_failing_dot_is_a_runtime_error(
     with pytest.raises(RuntimeError, match="dot failed: Format: nope not recognized"):
         drawing.render(tmp_path / "graph.nope")
     assert not (tmp_path / "graph.nope").exists()
-    assert drawing._repr_svg_() is None  # Jupyter's hook
+    assert drawing._repr_svg_() == drawing.to_svg()  # Jupyter's hook falls back
 
 
 def test_render_suffixes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

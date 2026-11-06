@@ -204,6 +204,82 @@ def test_each_draw_scope(flow: Path, capsys: pytest.CaptureFixture[str]) -> None
     assert '"x" [' in out
 
 
+def test_draw_takes_the_display_options(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--no-types`, `--show-tag`, `--show-schema`, `--hide-inputs` (Q139)."""
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    path = tmp_path / "sales.py"
+    path.write_text(
+        textwrap.dedent(
+            """
+            from typing import TypedDict
+            from fnloom import tag
+
+            class Totals(TypedDict):
+                net: float
+
+            @tag(owner=["ann", "bo"], stage="raw")
+            def sales(region: str) -> Totals:
+                return {"net": 1.0}
+            """
+        )
+    )
+    status, out, err = _run(
+        capsys,
+        "draw",
+        str(path),
+        "--no-types",
+        "--show-tag",
+        "stage",
+        "--show-tag",
+        "owner",
+        "--show-schema",
+        "--hide-inputs",
+    )
+    assert (status, err) == (0, "")
+    assert '"sales" [label="sales\\nstage=raw\\nowner=ann, bo\\nnet: float"]' in out
+    assert '"region"' not in out
+
+
+def test_draw_without_graphviz_names_the_flags(
+    flow: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The missing-`dot` hint gives `--engine builtin`, not a Python call."""
+    monkeypatch.setenv("PATH", str(tmp_path / "nothing"))
+    status, _, err = _run(capsys, "draw", str(flow), "-o", str(tmp_path / "g.svg"))
+    assert status == 1
+    assert "needs Graphviz's 'dot' on PATH" in err
+    assert "--engine builtin" in err
+    assert "--format mermaid or dot" in err
+    assert "render(" not in err
+
+
+def test_draw_with_the_builtin_engine(
+    flow: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--engine builtin -o graph.svg` needs no Graphviz; without `-o` it's refused."""
+    target = tmp_path / "graph.svg"
+    status, out, _ = _run(
+        capsys, "draw", str(flow), "--engine", "builtin", "-o", str(target)
+    )
+    assert (status, out) == (0, "")
+    assert target.read_text().startswith(
+        '<?xml version="1.0" encoding="UTF-8"?>\n<svg '
+    )
+    status, _, err = _run(capsys, "draw", str(flow), "--engine", "builtin")
+    assert status == 2  # noqa: PLR2004  # a usage error
+    assert "--engine makes an image: give a file with -o" in err
+    status, _, err = _run(
+        capsys, "draw", str(flow), "--engine", "builtin", "-o", str(tmp_path / "g.png")
+    )
+    assert status == 2  # noqa: PLR2004  # a usage error
+    assert "--engine builtin writes svg only, not png" in err
+
+
 def test_writing_to_a_file(
     flow: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:

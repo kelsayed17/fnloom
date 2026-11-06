@@ -178,6 +178,25 @@ graphviz`), plus `render("x.mmd")` and `render("x.dot")` as the dependency-free 
 
 Either way the missing-`dot` message improves. The plan reports which was chosen when the PR opens.
 
+**Outcome (PR B, 2026-11-05): the builtin engine ships, with one miss on the stress set, accepted by the
+maintainer.** On every docs example graph the builtin layout has as many crossings as `dot` (0 to 3), and on the
+benchmark generator's 200-node `layered` graph exactly as many (171). It has no overlapping node or label and every
+edge points along `orient` in every case measured. Layers come from network simplex, as `dot`'s do, giving the same
+total edge length as `dot` on the 200-node graphs measured; ordering is barycentre and median sweeps from three
+starting orders, then sifting. On a further stress set, eleven random 200-node graphs drawn LR and TB, 21 of 22 cases
+are within 1.5x of `dot` (most 1.1x to 1.4x).
+
+**Miss:** random graph seed 2 drawn TB has 348 crossings against `dot`'s 220, **1.58x, over the 1.5x bar.** (Drawn
+LR it is 1.43x, against 244.) This was accepted because `dot` stays the default for files and the builtin engine is
+chosen only by `engine="builtin"` or for a notebook preview without `dot`.
+
+Timing, measured after the review: each step's work is bounded by the graph's size, never by time, so the output stays
+deterministic. Network simplex returns at once when every edge is already tight, and its swaps are bounded by work, so
+it may stop short of the shortest layering on a very large graph. The ordering sweeps and sifting are bounded the
+same way. A 200-node graph takes about 0.5 s; a sparse 1000-node graph 1.6 s; 1500 nodes 2.6 s; 800 nodes with 2395
+edges 4.4 s; the complete DAG on 81 nodes, 85,000 edge slots, 2.4 s. Without `dot`, a notebook preview past 3000
+nodes and edges, or 20,000 nodes and edge slots, is skipped (Jupyter shows the DOT text), so a preview can't hang.
+
 ### 9. Per-field cache control (sideways) → Q147
 
 Hamilton: `@cache(..., target_="a")` applies the behaviour to the named output node of a multi-output function.

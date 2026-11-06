@@ -119,6 +119,108 @@ driver.draw_execution(["total"])
 
 The async driver draws the same drawings.
 
+## What a label shows
+
+Every `draw*` method, on both drivers, takes four display options. `show_types=False` leaves each type out of its
+label. `show_tags` names tags whose values are printed under the type, as `name=value`, in the order named, a list
+value joined by commas. `show_schema=True` adds a `field: type` line for each field of a return type that is a
+`TypedDict`, a dataclass or a `NamedTuple`, in declaration order, read from its annotations. `hide_inputs=True` leaves
+the inputs out, all but those the call names: a requested output, a node drawn from (`draw_upstream_of`,
+`draw_downstream_of`) or an end of `draw_path_between`. This module returns a `TypedDict`:
+
+```python
+# file: orders.py
+from typing import TypedDict
+
+from fnloom import tag
+
+
+class Totals(TypedDict):
+    net: float
+    tax: float
+
+
+@tag(owner=["sales", "finance"], stage="raw")
+def order_total(price: float, quantity: int) -> Totals:
+    """The order's net and tax."""
+    net = price * quantity
+    return {"net": net, "tax": net * 0.2}
+```
+
+```python
+import orders
+
+orders_driver = fnloom.build(orders)
+shown = orders_driver.draw(show_tags=("owner",), show_schema=True, hide_inputs=True)
+[node.name for node in shown.nodes]
+# -> ['order_total']
+shown.to_mermaid().splitlines()[1]
+# -> '  n0["order_total<br>orders.Totals<br>owner=sales, finance<br>net: float<br>tax: float"]'
+orders_driver.draw(show_types=False, hide_inputs=True).to_mermaid().splitlines()[1]
+# -> '  n0["order_total"]'
+```
+
+`fnloom draw` takes them as `--no-types`, `--show-tag NAME` (repeated for more), `--show-schema` and `--hide-inputs`.
+
+## Styling
+
+`drawing.styled(graph=, node=, edge=, style=)` returns a new drawing with styles added, which `to_dot()`,
+`to_mermaid()` and `to_svg()` all draw. Each style is a `fnloom.Style`: `fill`, `stroke` and `font_color` are colours,
+`stroke_width` a number from 0.01 to 1000, `dashed` a `bool`, and `shape` one of `Style.SHAPES` (`"box"`, `"rounded"`, `"ellipse"`,
+`"circle"`, `"diamond"`, `"hexagon"`, `"cylinder"`, `"parallelogram"`). `graph` styles the whole drawing, `node` every
+node and `edge` every edge. `style` is a function called once per node, in drawing order, with its
+[`NodeView`](running.md#inspecting-a-graph) (its tags, config conditions, namespace and parameters) and its
+`DrawnNode`, returning a `Style` or `None`:
+
+```python
+from fnloom import Style
+
+
+def variants(view, drawn):
+    """Gold for a node a config condition chose."""
+    return Style(fill="gold") if view.config else None
+
+
+styled = driver.draw().styled(
+    node=Style(stroke="navy"), edge=Style(stroke="gray", dashed=True), style=variants
+)
+[line for line in styled.to_dot().splitlines() if line.startswith('  "tax" [')]
+# -> ['  "tax" [label="tax\\nfloat\\nregion == \'eu\'" fillcolor="#ffd700" color="#000080"]']
+styled.to_mermaid().splitlines()[-2:]
+# -> ['  style n5 fill:#ffd700,stroke:#000080', '  style n6 stroke:#000080']
+```
+
+Later wins: a node's kind and marks, then `node`, then `style(...)`; an edge's `edge`, then a path's red. Calling
+`styled` again adds to what an earlier call gave, field by field.
+
+A colour is `"#rrggbb"` or a CSS name from the fixed list `Style.COLOURS`, in any case, and every writer draws it as
+the same `#rrggbb`. Anything else is a `ValueError` naming the attribute, and the node when a style function made it,
+so a typo never draws black:
+
+```python
+driver.draw().styled(style=lambda view, drawn: Style(fill="gren"))
+# raises ValueError: style for node 'free_above': Style fill 'gren' is not a colour: give '#rrggbb' or a CSS name in Style.COLOURS, such as 'red'
+```
+
+`dot={...}` and `mermaid={...}` pass attributes only their writer reads: keys are identifiers (a Mermaid key may hold
+`-`, as CSS names do) and values are `str`. A DOT value is quoted and escaped, and otherwise written as given: a
+`URL` or `href` is not checked. Mermaid's `style` statement can't quote, so a Mermaid value may hold only ASCII
+letters, digits, space and `# . _ ! : + * / ' % -`, and not `%%`; anything else is a `ValueError`. A graph's style takes
+`fill`, `dot` and `mermaid`, and an edge's takes `stroke`, `stroke_width`, `dashed`, `dot` and `mermaid`; any other
+field is a `ValueError`. Attributes are written in a fixed order, passthrough keys sorted, so a styled drawing's
+text is the same under every `PYTHONHASHSEED`.
+
+```python
+boxed = driver.draw_upstream_of("subtotal").styled(
+    graph=Style(fill="whitesmoke"), node=Style(shape="box", dot={"peripheries": "2"})
+)
+boxed.to_dot().splitlines()[1]
+# -> '  graph [rankdir=LR bgcolor="#f5f5f5"]'
+```
+
+Each `DrawnNode` keeps its `NodeView` as `view`, so a style function can be run again on a drawing; `view` is left out
+of equality, `repr` and pickling.
+
 ## Mermaid and images
 
 `to_mermaid()` writes the drawing as a Mermaid flowchart, which GitHub and many Markdown tools show as a diagram:
@@ -128,10 +230,20 @@ driver.draw_upstream_of("subtotal").to_mermaid().splitlines()[:3]
 # -> ['flowchart LR', '  n0["price<br>float"]', '  n1["quantity<br>int"]']
 ```
 
+`to_svg()` draws it as an SVG image in pure Python, with nothing to install. Each node sits one layer past every node
+it reads, the layers placed to keep edges short, and nodes are ordered within a layer to cut crossings and sized from
+their text, so no two overlap and every edge points along `orient`. The text is the same on every run.
+
 `render(path)` writes a file in the format its suffix names. A `.dot` or `.mmd` path gets the text, with nothing to
 install; any other format, such as `.svg`, `.png` or `.pdf`, is made by Graphviz's `dot` program, which must be on
-`PATH`. fnloom depends on no Python package for it. Without Graphviz, `render` raises a `FileNotFoundError` saying how
-to install it. In Jupyter, a drawing shows as an image when Graphviz is installed, and as its DOT text otherwise.
+`PATH`. fnloom depends on no Python package for it. Without Graphviz, `render` raises a `FileNotFoundError` giving
+the command that installs it on this platform (`brew install graphviz`, `apt-get install graphviz` or `winget install
+graphviz`) and the formats that need nothing. `render(path, engine="builtin")` writes `to_svg()` instead, needing
+nothing; it makes `.svg` only. A file never changes engine by itself: only `engine` chooses, and `"dot"` is the
+default. In Jupyter, a drawing shows as Graphviz's image when `dot` is installed, and as the builtin SVG otherwise.
+A preview is bounded so it can't hang a notebook: past 3000 nodes and edges, or 20000 nodes and edge slots once
+layered (an edge spanning several layers takes a slot in each), the builtin preview is skipped and Jupyter shows the
+DOT text. `to_svg()` and `render` draw any size.
 
 ```python
 import tempfile
@@ -140,7 +252,11 @@ from pathlib import Path
 with tempfile.TemporaryDirectory() as folder:
     written = driver.draw().render(Path(folder) / "prices.dot")
     text = written.read_text()
+    image = driver.draw().render(Path(folder) / "prices.svg", engine="builtin")
+    svg = image.read_text()
 text == driver.draw().to_dot()
+# -> True
+svg == driver.draw().to_svg()
 # -> True
 ```
 
@@ -238,7 +354,7 @@ it, and is otherwise a `ValueError` naming the key (Q57). Give the key with `--c
 
 | Command | Does |
 | --- | --- |
-| `draw` | the whole graph, or `--upstream NODE...`, `--downstream NODE...`, `--path FROM TO` (`--no-context` for the path alone) or `--execution`; `--format dot` (the default) or `mermaid` to stdout, or any format Graphviz makes to `-o FILE`; `--orient`, `--no-legend`, `--no-validate` |
+| `draw` | the whole graph, or `--upstream NODE...`, `--downstream NODE...`, `--path FROM TO` (`--no-context` for the path alone) or `--execution`; `--format dot` (the default) or `mermaid` to stdout, or any format Graphviz makes to `-o FILE` (`--engine builtin` for an SVG needing nothing); `--orient`, `--no-legend`, `--no-validate`, and the display options `--no-types`, `--show-tag NAME`, `--show-schema`, `--hide-inputs` |
 | `export` | the graph, or the run `--outputs` makes, as JSON, to stdout or `-o FILE` |
 | `validate` | every problem a run of `--outputs` would raise, one per line; status 1 if there is any |
 | `diff OLD NEW` | what changed between two exports, as JSON; status 0 for no change, 1 for a change or a node it can't see into, 2 for a file that is no export. When an export has no `graph_version`, `warnings` says which unversioned nodes hide their changes, and each warning is printed on stderr too |

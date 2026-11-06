@@ -62,6 +62,7 @@ from fnloom._stores import (
     Format,
     MemoryCache,
 )
+from fnloom._style import Style
 from fnloom._tags import ANY
 from fnloom._types import ValueCheck, type_matches, value_matches
 from fnloom._view import InputView, NodeView, Param
@@ -112,6 +113,7 @@ __all__ = [
     "RunStart",
     "Source",
     "Step",
+    "Style",
     "Target",
     "UnfingerprintableError",
     "ValidationError",

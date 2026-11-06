@@ -8,7 +8,9 @@ import importlib.util
 import inspect
 import json
 import logging
+import shutil
 import sys
+import xml.etree.ElementTree as ET
 from typing import TYPE_CHECKING, Any, override
 
 import pandas as pd
@@ -801,18 +803,80 @@ def d(a: int) -> int:
 
 @pytest.mark.deliberate("Q139")
 @pytest.mark.usefixtures("fake_graphviz")
-def test_q139_graphviz_kwargs_style_hamiltons_digraph() -> None:
-    """Hamilton passes `graphviz_kwargs` to the `Digraph`; fnloom's `draw` has none."""
-    module = load_fixture("chain")
+def test_q139_drawing_style() -> None:
+    """Both style each function node and hide inputs; fnloom's style sees a `NodeView`.
+
+    Hamilton calls `custom_style_function` once per function node with a
+    `HamiltonNode` and a class name; fnloom's `style` sees the same nodes (and
+    the inputs, drawn as nodes of their own) with their `NodeView`.
+    `hide_inputs` leaves the same function nodes in both. A bad colour is a
+    `ValueError` in fnloom, where Hamilton passes it to Graphviz as written.
+    """
+    module = load_fixture("diamond")
     hamilton = hamilton_driver.Builder().with_modules(module).build()
+    styled: list[str] = []
+
+    def custom(*, node: object, node_class: str) -> tuple[dict[str, str], None, None]:
+        del node_class
+        styled.append(getattr(node, "name", ""))
+        return {"fillcolor": "redd"}, None, None
+
     digraph = hamilton.display_all_functions(
-        graphviz_kwargs={"graph_attr": {"bgcolor": "red"}}
+        custom_style_function=custom,
+        hide_inputs=True,
+        graphviz_kwargs={"graph_attr": {"bgcolor": "red"}},
     )
     assert digraph is not None
     assert digraph.kwargs["graph_attr"]["bgcolor"] == "red"
+    assert all(attrs["fillcolor"] == "redd" for _, _, attrs in digraph.nodes)
+    hamilton_drawn = sorted(name for name, _, _ in digraph.nodes)
+
     driver = fnloom.build(module)
-    for name in ("graphviz_kwargs", "custom_style_function", "show_schema"):
-        assert name not in inspect.signature(driver.draw).parameters
+    seen: list[str] = []
+
+    def style(view: fnloom.NodeView, drawn: fnloom.DrawnNode) -> fnloom.Style | None:
+        assert view.name == drawn.name
+        if not view.is_input:
+            seen.append(view.name)
+        return fnloom.Style(fill="red")
+
+    drawing = driver.draw(hide_inputs=True).styled(
+        graph=fnloom.Style(fill="red"), style=style
+    )
+    assert sorted(seen) == sorted(styled)
+    assert sorted(n.name for n in drawing.nodes) == hamilton_drawn
+    with pytest.raises(ValueError, match=r"node 'a'.*fill 'redd' is not a colour"):
+        driver.draw().styled(style=lambda *_: fnloom.Style(fill="redd"))
+
+
+@pytest.mark.deliberate("Q146")
+def test_q146_an_svg_without_graphviz(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Without Graphviz Hamilton writes nothing; fnloom's builtin engine writes the SVG.
+
+    Only `engine=` chooses it: the default still needs `dot`, so a file never
+    changes with the machine.
+    """
+    if importlib.util.find_spec("graphviz") is not None:
+        pytest.skip("the graphviz package is installed")
+    module = load_fixture("diamond")
+    hamilton = hamilton_driver.Builder().with_modules(module).build()
+    with caplog.at_level(logging.ERROR):
+        assert hamilton.display_all_functions(str(tmp_path / "h.svg")) is None
+    assert not (tmp_path / "h.svg").exists()
+    monkeypatch.setattr(shutil, "which", lambda _: None)
+    drawing = fnloom.build(module).draw()
+    written = drawing.render(tmp_path / "f.svg", engine="builtin")
+    titles = [
+        t.text
+        for t in ET.parse(written).iter("{http://www.w3.org/2000/svg}title")  # noqa: S314  # our own file
+    ]  # our own file
+    assert {"a", "root", "left", "right", "join"} <= set(titles)
+    with pytest.raises(
+        FileNotFoundError, match=r"brew install graphviz|apt-get|winget"
+    ):
+        drawing.render(tmp_path / "g.svg")
 
 
 @pytest.mark.deliberate("Q95")
