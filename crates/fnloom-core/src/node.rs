@@ -24,13 +24,34 @@ pub enum TagValue {
     Many(Vec<String>),
 }
 
-/// Whether a dependency must be satisfied for its consumer to run.
+/// How a consumer reads one of its inputs: what it needs, and what it does when the
+/// input's value is absent.
+///
+/// An absent value comes from a node that declines (`NodeSpec::declines`). Each consumer
+/// decides by its own dependency: `Admits` receives the absent value, `Optional` omits the
+/// argument, and `Required` skips the consumer, which is then absent too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Dependency {
-    /// The consumer cannot run without this input.
+    /// The consumer cannot run without this input; when it is absent, the consumer is skipped.
     Required,
-    /// The consumer runs with its default when this input is absent.
+    /// The consumer runs with its default when this input is not supplied or absent.
     Optional,
+    /// The consumer receives an absent value as its argument. `optional` says whether it has
+    /// a default, which is what counts when the edge reads an input that is not supplied:
+    /// an input is never absent.
+    Admits {
+        /// Whether the consumer has a default for an input that is not supplied.
+        optional: bool,
+    },
+}
+
+impl Dependency {
+    /// Whether the consumer has a default for an input that is not supplied: `Optional`, or
+    /// `Admits { optional: true }`.
+    #[must_use]
+    pub const fn has_default(self) -> bool {
+        matches!(self, Self::Optional | Self::Admits { optional: true })
+    }
 }
 
 /// A named input (parameter) of a node, as declared by its author.
@@ -53,6 +74,9 @@ pub struct NodeSpec<P> {
     pub tags: BTreeMap<String, TagValue>,
     /// Opaque executable payload owned by the embedder.
     pub payload: P,
+    /// Whether the node may decline: its payload may return a value the embedder's
+    /// `Evaluate::is_absent` recognises as absent.
+    pub declines: bool,
 }
 
 /// How a node gets its value.
@@ -86,6 +110,11 @@ pub struct Node<P> {
     pub inputs: Vec<Edge>,
     /// Free-form key/value tags.
     pub tags: BTreeMap<String, TagValue>,
+    /// Whether the node may decline (`NodeSpec::declines`); never for an input.
+    pub declines: bool,
+    /// Whether the node's value may be absent: it declines, or it is a function with a
+    /// `Required` edge from a node whose value may be absent. Known at build.
+    pub may_be_absent: bool,
 }
 
 impl<P> Node<P> {

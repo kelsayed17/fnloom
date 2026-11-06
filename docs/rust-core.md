@@ -11,8 +11,9 @@ you can use it to drive payloads other than Python functions.
 
 ## The flow
 
-1. **Specs.** Each node is a `NodeSpec<P>`: a name, the names it reads (`InputSpec`, each `Required` or `Optional`),
-   tags, and a payload `P` owned by you.
+1. **Specs.** Each node is a `NodeSpec<P>`: a name, the names it reads (`InputSpec`, each `Required`, `Optional`
+   or `Admits`), tags, a payload `P` owned by you, and `declines`, whether its value may be absent
+   ([Absence](#absence)).
 2. **Build.** `Graph::build(specs)` checks for duplicate names and cycles, makes an input node of every name that is
    read but not declared, and gives each node a `NodeId` in sorted name order. A node's `kind` is
    `NodeKind::Function(payload)` or `NodeKind::Input`, so only function nodes carry a payload.
@@ -42,14 +43,35 @@ payload already taken out of its `NodeKind::Function`, and the arguments as `Arg
 id; an argument's `node` lets an embedder key per-node data by `NodeId::index`, as the Python binding does for its
 interned keyword names. An optional input that was not supplied is simply absent from `args`.
 
+`is_absent(&value)` says whether a value is absent. Its default says none is, so an embedder whose nodes never
+decline leaves it out.
+
+## Absence
+
+A node with `declines: true` may decline to produce a value: its payload returns a value your `is_absent`
+recognises. The core asks only of such a node's value, and of an override of a node that may be absent. Each
+consumer of an absent value decides by its own dependency on it:
+
+- `Admits` receives the absent value as its argument;
+- `Optional` has the argument omitted, as for an optional input that wasn't supplied;
+- `Required` is skipped: it is absent too, its slot holds the absent value that skipped it, and observers see
+  `skipped(node, branch)` instead of its node events.
+
+`Admits { optional }` says whether the consumer has a default, which is what counts when the edge reads an input
+that wasn't supplied, since an input is never absent. The build marks each node `may_be_absent` when it declines or
+reads a node that may be absent by a `Required` edge. A requested output that is absent is returned as its absent
+value. A plan where nothing may be absent (`Plan::needs_rules` is false) runs the plain loop, at no extra cost.
+
 ## Observers
 
-`Observer<V, E>`, with `V` and `E` the evaluator's value and error types, has four hooks, each with a default that
+`Observer<V, E>`, with `V` and `E` the evaluator's value and error types, has five hooks, each with a default that
 does nothing:
 
 - `pre_graph()`, once before anything runs.
 - `pre_node(node, args)`, before a computed node is evaluated, with the very `args` `evaluate` gets.
 - `post_node(node, outcome)`, after it, with `Ok(&value)` or `Err(&error)`.
+- `skipped(node, branch)`, instead of the node events, for a node skipped because a `Required` argument is
+  absent; `branch` is empty.
 - `post_graph(ok)`, once after the run ended.
 
 The node hooks fire only around computed steps, and get the values by reference, so an observer that ignores them
@@ -59,7 +81,8 @@ aborts the run, and `post_graph(false)` still runs so observers can close what t
 
 ## Errors
 
-- `BuildError`: `DuplicateName`, or `Cycle` with the path, its first name repeated at the end.
+- `BuildError`: `DuplicateName`; `ConflictingInput`, a spec listing one input twice with different dependencies (listed
+  twice alike, it is one edge); or `Cycle` with the path, its first name repeated at the end.
 - `PlanError`: `UnknownOutputs`, `UnknownInputs`, `UnknownOverrides` or `MissingInputs`, checked in that order, each
   with every offending name sorted; `UnknownNodes` from the lineage queries.
 - `RunError<E>`: `Node` (a payload failed, with any observer errors raised while handling it), `Observers` (the

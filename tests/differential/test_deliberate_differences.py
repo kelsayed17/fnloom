@@ -5917,3 +5917,49 @@ def test_q140_mutate_keeps_a_targets_namespace(tmp_path: Path) -> None:
     assert built.execute(["f"], inputs={"a": 1}) == hamilton.execute(
         ["f"], inputs={"a": 1}
     )
+
+
+_Q135_HAMILTON = """
+counted = []
+
+
+def listing() -> list | None:
+    return None
+
+
+def count(listing: list | None) -> int:
+    counted.append(listing)
+    return 0 if listing is None else len(listing)
+"""
+
+_Q135_FNLOOM = """
+from fnloom import ABSENT, Absent
+
+counted = []
+
+
+def listing() -> list[str] | Absent:
+    return ABSENT
+
+
+def count(listing: list[str]) -> int:
+    counted.append(listing)
+    return len(listing)
+"""
+
+
+@pytest.mark.deliberate("Q135")
+def test_q135_a_node_may_decline() -> None:
+    """Hamilton runs every consumer of a sentinel; fnloom skips a plain consumer."""
+    hamilton_module = make_module("q135_h", _Q135_HAMILTON)
+    hamilton = hamilton_driver.Builder().with_modules(hamilton_module).build()
+    assert hamilton.execute(["count"]) == {"count": 0}
+    assert hamilton_module.counted == [None]
+
+    module = make_module("q135_f", _Q135_FNLOOM)
+    built = fnloom.build(module)
+    result = built.execute(["count"])
+    assert list(result) == ["count"]
+    assert result["count"] is fnloom.ABSENT
+    assert module.counted == []
+    assert built.nodes["count"].may_be_absent

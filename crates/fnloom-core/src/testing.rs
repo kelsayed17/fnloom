@@ -19,6 +19,15 @@ pub fn valued_spec<P>(name: &str, deps: &[(&str, Dependency)], payload: P) -> No
             .collect(),
         tags: BTreeMap::new(),
         payload,
+        declines: false,
+    }
+}
+
+/// A spec like `valued_spec` whose node may decline: its value may be absent.
+pub fn declining<P>(name: &str, deps: &[(&str, Dependency)], payload: P) -> NodeSpec<P> {
+    NodeSpec {
+        declines: true,
+        ..valued_spec(name, deps, payload)
     }
 }
 

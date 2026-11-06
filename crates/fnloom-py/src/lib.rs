@@ -1,6 +1,7 @@
 //! Python binding for fnloom-core, exposed as the extension module `fnloom._core`.
 #![deny(unsafe_code)]
 
+mod absent;
 mod errors;
 mod fingerprint;
 mod graph;
@@ -42,6 +43,8 @@ fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
             .py()
             .get_type::<fingerprint::UnfingerprintableError>(),
     )?;
+    module.add_class::<absent::Absent>()?;
+    module.add("ABSENT", absent::singleton(module.py())?)?;
     module.add_class::<graph::Graph>()?;
     module.add_class::<plan::Plan>()?;
     module.add_class::<keys::KeyPlan>()?;

@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{BuildError, PlanError};
-use crate::node::{Edge, InputSpec, Node, NodeId, NodeKind, NodeSpec};
+use crate::node::{Dependency, Edge, Node, NodeId, NodeKind, NodeSpec};
 
 /// An immutable, acyclic dependency graph whose node ids follow sorted name order.
 #[derive(Debug)]
@@ -12,6 +12,8 @@ pub struct Graph<P> {
     ids: BTreeMap<String, NodeId>,
     /// For each node, the nodes that read from it, in id order.
     dependents: Vec<Vec<NodeId>>,
+    /// Whether any node may be absent, so a plan of a graph without one skips the question.
+    absence: bool,
 }
 
 impl<P> Graph<P> {
@@ -21,15 +23,17 @@ impl<P> Graph<P> {
     ///
     /// # Errors
     ///
-    /// `BuildError::DuplicateName` when two specs share a name, `BuildError::Cycle` when the
-    /// dependencies are cyclic (a self-dependency counts).
+    /// `BuildError::DuplicateName` when two specs share a name, `BuildError::ConflictingInput`
+    /// when a spec lists one input twice with different dependencies, `BuildError::Cycle` when
+    /// the dependencies are cyclic (a self-dependency counts).
     pub fn build(specs: Vec<NodeSpec<P>>) -> Result<Self, BuildError> {
         let mut declared = index_by_name(specs)?;
         let ids = assign_ids(&declared);
-        let nodes = ids
-            .iter()
-            .map(|(name, &id)| make_node(id, name, declared.remove(name), &ids))
-            .collect::<Vec<_>>();
+        // A loop rather than a `Result` collect, which cannot reserve the exact length.
+        let mut nodes = Vec::with_capacity(ids.len());
+        for (name, &id) in &ids {
+            nodes.push(make_node(id, name, declared.remove(name), &ids)?);
+        }
         if let Some(path) = find_cycle(&nodes) {
             return Err(BuildError::Cycle {
                 path: path
@@ -38,11 +42,13 @@ impl<P> Graph<P> {
                     .collect(),
             });
         }
+        let absence = mark_may_be_absent(&mut nodes);
         let dependents = forward_adjacency(&nodes);
         Ok(Self {
             nodes,
             ids,
             dependents,
+            absence,
         })
     }
 
@@ -104,6 +110,11 @@ impl<P> Graph<P> {
             .into_iter()
             .filter(|id| above.binary_search(id).is_ok())
             .collect())
+    }
+
+    /// Whether any node of the graph may be absent (`Node::may_be_absent`).
+    pub(crate) const fn has_absence(&self) -> bool {
+        self.absence
     }
 
     /// The nodes that read from `id`, in id order.
@@ -179,6 +190,42 @@ fn forward_adjacency<P>(nodes: &[Node<P>]) -> Vec<Vec<NodeId>> {
     dependents
 }
 
+/// Sets `may_be_absent` on every node that declines or reads, by a `Required` edge, a node
+/// that may be absent.
+///
+/// The flag is a reachability from the declining nodes along `Required` edges, so an
+/// iterative worklist finds it in any order, in time linear in the graph. A graph where no
+/// node declines costs one scan. Returns whether any node may be absent.
+fn mark_may_be_absent<P>(nodes: &mut [Node<P>]) -> bool {
+    let mut work: Vec<NodeId> = Vec::new();
+    for node in nodes.iter_mut().filter(|node| node.declines) {
+        node.may_be_absent = true;
+        work.push(node.id);
+    }
+    if work.is_empty() {
+        return false;
+    }
+    // For each node, the consumers reading it by a `Required` edge.
+    let mut required_by = vec![Vec::new(); nodes.len()];
+    for node in nodes.iter() {
+        for edge in &node.inputs {
+            if edge.dependency == Dependency::Required {
+                required_by[edge.node.index()].push(node.id);
+            }
+        }
+    }
+    while let Some(id) = work.pop() {
+        for &consumer in &required_by[id.index()] {
+            let node = &mut nodes[consumer.index()];
+            if !node.may_be_absent {
+                node.may_be_absent = true;
+                work.push(consumer);
+            }
+        }
+    }
+    true
+}
+
 fn index_by_name<P>(specs: Vec<NodeSpec<P>>) -> Result<BTreeMap<String, NodeSpec<P>>, BuildError> {
     let mut declared = BTreeMap::new();
     for spec in specs {
@@ -199,19 +246,24 @@ fn assign_ids<P>(declared: &BTreeMap<String, NodeSpec<P>>) -> BTreeMap<String, N
     names.into_iter().cloned().zip((0..).map(NodeId)).collect()
 }
 
+/// The node `name` with `id`: a function for a declared spec, an input otherwise.
+///
+/// `BuildError::ConflictingInput` when the spec lists one input twice, differently.
 fn make_node<P>(
     id: NodeId,
     name: &str,
     spec: Option<NodeSpec<P>>,
     ids: &BTreeMap<String, NodeId>,
-) -> Node<P> {
-    match spec {
+) -> Result<Node<P>, BuildError> {
+    Ok(match spec {
         Some(spec) => Node {
             id,
-            inputs: resolve_edges(&spec.inputs, ids),
+            inputs: resolve_edges(&spec, ids)?,
             name: spec.name,
             kind: NodeKind::Function(spec.payload),
             tags: spec.tags,
+            declines: spec.declines,
+            may_be_absent: false,
         },
         None => Node {
             id,
@@ -219,23 +271,96 @@ fn make_node<P>(
             kind: NodeKind::Input,
             inputs: Vec::new(),
             tags: BTreeMap::new(),
+            declines: false,
+            may_be_absent: false,
         },
-    }
+    })
 }
 
-/// Resolves inputs to edges, keeping the first of any repeated dependency.
-fn resolve_edges(inputs: &[InputSpec], ids: &BTreeMap<String, NodeId>) -> Vec<Edge> {
-    let mut seen = BTreeSet::new();
-    inputs
-        .iter()
-        .filter_map(|input| {
-            let node = *ids.get(&input.name)?;
-            seen.insert(node).then_some(Edge {
+/// Resolves `spec`'s inputs to edges, keeping one of an input listed twice alike.
+///
+/// `BuildError::ConflictingInput` for an input listed twice with different dependencies: no
+/// one of them says how the node reads it, so neither is kept.
+fn resolve_edges<P>(
+    spec: &NodeSpec<P>,
+    ids: &BTreeMap<String, NodeId>,
+) -> Result<Vec<Edge>, BuildError> {
+    // At least four, the capacity a first push gives, so a node with few inputs allocates
+    // as it always has.
+    let mut edges = Vec::with_capacity(spec.inputs.len().max(4));
+    for input in &spec.inputs {
+        if let Some(&node) = ids.get(&input.name) {
+            edges.push(Edge {
                 node,
                 dependency: input.dependency,
+            });
+        }
+    }
+    let Some(repeats) = repeated_edges(&edges) else {
+        return Ok(edges);
+    };
+    // The first conflicting repeat in input order is the one reported.
+    if let Some(&(_, at)) = repeats
+        .iter()
+        .find(|&&(first, at)| edges[first].dependency != edges[at].dependency)
+    {
+        let node = edges[at].node;
+        let input = spec
+            .inputs
+            .iter()
+            .find(|input| ids.get(&input.name) == Some(&node))
+            .map(|input| input.name.clone())
+            .unwrap_or_default();
+        return Err(BuildError::ConflictingInput {
+            node: spec.name.clone(),
+            input,
+        });
+    }
+    let mut keep = vec![true; edges.len()];
+    for &(_, at) in &repeats {
+        keep[at] = false;
+    }
+    let mut keep = keep.into_iter();
+    edges.retain(|_| keep.next().unwrap_or(true));
+    Ok(edges)
+}
+
+/// Below this many edges, repeats are found by comparing every pair, which needs no
+/// allocation; from it on, by sorting.
+const PAIRWISE_LIMIT: usize = 16;
+
+/// Each edge that repeats an earlier edge's node, as `(first, repeat)`: the index of the
+/// node's first edge and of the repeat, ordered by the repeat. `None` when no node repeats,
+/// the common case, which is found without sorting a short list or allocating.
+fn repeated_edges(edges: &[Edge]) -> Option<Vec<(usize, usize)>> {
+    if edges.len() < 2 {
+        return None;
+    }
+    if edges.len() < PAIRWISE_LIMIT {
+        let repeats: Vec<(usize, usize)> = (1..edges.len())
+            .filter_map(|at| {
+                let first = edges[..at].iter().position(|e| e.node == edges[at].node)?;
+                Some((first, at))
             })
-        })
-        .collect()
+            .collect();
+        return (!repeats.is_empty()).then_some(repeats);
+    }
+    let mut sorted: Vec<(NodeId, usize)> = edges
+        .iter()
+        .enumerate()
+        .map(|(index, edge)| (edge.node, index))
+        .collect();
+    sorted.sort_unstable();
+    if sorted.windows(2).all(|pair| pair[0].0 != pair[1].0) {
+        return None;
+    }
+    let mut repeats = Vec::new();
+    for group in sorted.chunk_by(|a, b| a.0 == b.0) {
+        let first = group[0].1;
+        repeats.extend(group[1..].iter().map(|&(_, at)| (first, at)));
+    }
+    repeats.sort_unstable_by_key(|&(_, at)| at);
+    Some(repeats)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -293,7 +418,9 @@ fn cycle_path(stack: &[(NodeId, usize)], back_to: NodeId) -> Vec<NodeId> {
 #[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
 mod tests {
     use super::*;
-    use crate::testing::{names, node};
+
+    use crate::node::InputSpec;
+    use crate::testing::{declining, names, node, spec};
 
     #[test]
     fn build_synthesises_input_nodes_for_unresolved_parameters() {
@@ -318,6 +445,109 @@ mod tests {
                 name: "x".to_owned()
             }
         );
+    }
+
+    #[test]
+    fn build_rejects_an_input_listed_twice_with_different_dependencies() {
+        let spec = |second| NodeSpec {
+            name: "b".to_owned(),
+            inputs: vec![
+                InputSpec {
+                    name: "a".to_owned(),
+                    dependency: Dependency::Required,
+                },
+                InputSpec {
+                    name: "a".to_owned(),
+                    dependency: second,
+                },
+            ],
+            tags: BTreeMap::new(),
+            payload: (),
+            declines: false,
+        };
+        let err = Graph::build(vec![spec(Dependency::Optional)]).unwrap_err();
+        assert_eq!(
+            err,
+            BuildError::ConflictingInput {
+                node: "b".to_owned(),
+                input: "a".to_owned()
+            }
+        );
+        assert_eq!(
+            err.to_string(),
+            "node 'b' reads 'a' twice, with different dependencies; list it once"
+        );
+        // Listed twice alike, it is one edge.
+        let graph = Graph::build(vec![spec(Dependency::Required)]).unwrap();
+        let b = graph.node(graph.id_of("b").unwrap());
+        assert_eq!(b.inputs.len(), 1);
+        assert_eq!(b.inputs[0].dependency, Dependency::Required);
+    }
+
+    #[test]
+    fn build_finds_repeated_inputs_among_many() {
+        // More inputs than `PAIRWISE_LIMIT`, so repeats are found by sorting.
+        let spec = |repeat: Dependency| {
+            let mut inputs: Vec<InputSpec> = (0..20)
+                .map(|i| InputSpec {
+                    name: format!("x{i:02}"),
+                    dependency: Dependency::Required,
+                })
+                .collect();
+            inputs.insert(
+                5,
+                InputSpec {
+                    name: "x12".to_owned(),
+                    dependency: Dependency::Required,
+                },
+            );
+            inputs.push(InputSpec {
+                name: "x03".to_owned(),
+                dependency: repeat,
+            });
+            inputs.push(InputSpec {
+                name: "x07".to_owned(),
+                dependency: Dependency::Optional,
+            });
+            NodeSpec {
+                name: "total".to_owned(),
+                inputs,
+                tags: BTreeMap::new(),
+                payload: (),
+                declines: false,
+            }
+        };
+        // `x03` conflicts before `x07` does, in input order.
+        let err = Graph::build(vec![spec(Dependency::Optional)]).unwrap_err();
+        assert_eq!(
+            err,
+            BuildError::ConflictingInput {
+                node: "total".to_owned(),
+                input: "x03".to_owned()
+            }
+        );
+        let err = Graph::build(vec![spec(Dependency::Required)]).unwrap_err();
+        assert_eq!(
+            err,
+            BuildError::ConflictingInput {
+                node: "total".to_owned(),
+                input: "x07".to_owned()
+            }
+        );
+        // Repeated alike, each input is one edge, in the order first listed.
+        let mut alike = spec(Dependency::Required);
+        alike.inputs.pop();
+        let graph = Graph::build(vec![alike]).unwrap();
+        let total = graph.node(graph.id_of("total").unwrap());
+        let read: Vec<&str> = total
+            .inputs
+            .iter()
+            .map(|edge| graph.node(edge.node).name.as_str())
+            .collect();
+        let mut expected: Vec<String> = (0..20).map(|i| format!("x{i:02}")).collect();
+        expected.insert(5, "x12".to_owned());
+        expected.remove(13);
+        assert_eq!(read, expected);
     }
 
     #[test]
@@ -359,6 +589,41 @@ mod tests {
             .map(|i| node(&format!("n{i:06}"), &[&format!("n{:06}", i + 1)]))
             .collect();
         assert!(Graph::build(specs).is_ok());
+    }
+
+    #[test]
+    fn may_be_absent_follows_required_edges_only() {
+        let graph = Graph::build(vec![
+            declining("a", &[], ()),
+            spec("b", &[("a", Dependency::Required)]),
+            spec("c", &[("b", Dependency::Optional)]),
+            spec("d", &[("b", Dependency::Admits { optional: false })]),
+        ])
+        .unwrap();
+        let flags: Vec<(&str, bool, bool)> = graph
+            .nodes()
+            .iter()
+            .map(|n| (n.name.as_str(), n.declines, n.may_be_absent))
+            .collect();
+        assert_eq!(
+            flags,
+            [
+                ("a", true, true),
+                ("b", false, true),
+                ("c", false, false),
+                ("d", false, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn may_be_absent_reaches_down_a_deep_chain_without_recursion() {
+        let mut specs: Vec<_> = (0..50_000)
+            .map(|i| node(&format!("n{i:06}"), &[&format!("n{:06}", i + 1)]))
+            .collect();
+        specs.push(declining("n050000", &[], ()));
+        let graph = Graph::build(specs).unwrap();
+        assert!(graph.nodes().iter().all(|n| n.may_be_absent));
     }
 
     mod queries {

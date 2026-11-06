@@ -861,7 +861,7 @@ class Cache:
             raise ValueError("; ".join(problems))
         # Classes may have been edited since the last build: read them again.
         forget_class_versions()
-        sources = {n.name: tuple(s for s, _ in core_inputs(n.params)) for n in nodes}
+        sources = {n.name: tuple(s for s, _, _ in core_inputs(n.params)) for n in nodes}
         resolved = _resolved(nodes, settings)
         return cls(
             store,

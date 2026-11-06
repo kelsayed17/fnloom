@@ -36,7 +36,7 @@ def output_names(
     """
     names, absent = requested(final_vars, views, unmatched)
     if absent:
-        lines = [ABSENT + "; ".join(absent), *_name_lines(names, views, unmatched)]
+        lines = [NO_NODE + "; ".join(absent), *_name_lines(names, views, unmatched)]
         raise ValueError("\n".join(lines))
     return names
 
@@ -55,7 +55,7 @@ def _name_lines(
 
 
 # How the error for functions no node comes from starts.
-ABSENT = "final_vars: "
+NO_NODE = "final_vars: "
 
 
 def requested(

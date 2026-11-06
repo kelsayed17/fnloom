@@ -26,7 +26,17 @@ from typing import (
     override,
 )
 
-from fnloom import _async, _checks, _core, _hooks, _steps, _types, _wrappers
+from fnloom import (
+    _absence,
+    _async,
+    _checks,
+    _core,
+    _hooks,
+    _steps,
+    _types,
+    _wrappers,
+)
+from fnloom._absence import needs_input
 from fnloom._caching import (
     NO_SETTINGS,
     Cache,
@@ -52,7 +62,7 @@ from fnloom._functions import (
 )
 from fnloom._hooks import Hook
 from fnloom._namespaces import checked_namespace
-from fnloom._requests import ABSENT, requested, suggest
+from fnloom._requests import NO_NODE, requested, suggest
 from fnloom._requests import output_names as _requested_names
 from fnloom._scan import LeftOut, NodeDef, core_inputs, resolve, scan
 from fnloom._stores import CacheStore
@@ -353,7 +363,8 @@ def _edge_mismatches(
 
     `functions` are the function nodes' views; a parameter reading anything else
     reads an input, and has no edge to check. The edges into the nodes `loose`
-    names are not checked (Q149).
+    names are not checked (Q149). A producer's `fnloom.Absent` is left out of its
+    type, since an absence reaches only a parameter that admits it (Q135).
     """
     found: list[str] = []
     for view in functions.values():
@@ -363,7 +374,11 @@ def _edge_mismatches(
             if not isinstance(p.binding, Source):
                 continue
             upstream = functions.get(p.binding.name)
-            if upstream is None or _types.type_matches(upstream.type, p.annotation):
+            # `T | Absent` feeds what `T` feeds: an absence never reaches a
+            # parameter that does not admit it (Q135).
+            if upstream is None or _types.type_matches(
+                _absence.without_absent(upstream.type), p.annotation
+            ):
                 continue
             shown = p.name if p.slot is None else f"{p.name}[{p.slot!r}]"
             line = (
@@ -407,10 +422,10 @@ def _input_views(views: NodeViews) -> dict[str, InputView]:
     required: dict[str, bool] = {}
     consumers: dict[str, list[str]] = {}
     for view in views.functions.values():
-        for name, needed in core_inputs(view.params):
+        for name, kind, _ in core_inputs(view.params):
             if name in views.functions:
                 continue
-            required[name] = required.get(name, False) or needed
+            required[name] = required.get(name, False) or needs_input(kind)
             consumers.setdefault(name, []).append(view.name)
     return {
         name: InputView(
@@ -1106,8 +1121,8 @@ class Driver[R = dict[str, object]]:
             view = functions.get(node)
             if action != "compute" or view is None:
                 continue
-            for name, needed in core_inputs(view.params):
-                if needed and name in candidates:
+            for name, kind, _ in core_inputs(view.params):
+                if needs_input(kind) and name in candidates:
                     readers.setdefault(name, []).append(node)
         return {name: sorted(readers[name]) for name in sorted(readers)}
 
@@ -1187,7 +1202,7 @@ class Driver[R = dict[str, object]]:
         key: _PlanKey = (outputs, _names(inputs), _names(overrides))
         _, input_names, override_names = key
         wanted = list(dict.fromkeys(outputs))
-        lines = [ABSENT + culprit for culprit in absent_functions]
+        lines = [NO_NODE + culprit for culprit in absent_functions]
         lines += [
             self._unmatched[n] for n in sorted(set(wanted) & self._unmatched.keys())
         ]
@@ -1242,8 +1257,8 @@ class Driver[R = dict[str, object]]:
             view = functions.get(node)
             if action != "compute" or view is None:
                 continue
-            for name, needed in core_inputs(view.params):
-                if needed:
+            for name, kind, _ in core_inputs(view.params):
+                if needs_input(kind):
                     readers.setdefault(name, []).append(node)
         wanted = set(outputs)
         entries: list[tuple[str, str]] = []
@@ -2391,7 +2406,7 @@ def _undeclared(views: NodeViews, declared: Sequence[str]) -> list[str]:
     needed = {
         name
         for view in functions.values()
-        for name, _ in core_inputs(view.params)
+        for name, _, _ in core_inputs(view.params)
         if name not in functions
     }
     candidates = [*views, *declared]
@@ -2430,7 +2445,11 @@ def _prepare_again[R](driver: Driver[R], key: _PlanKey) -> PreparedPlan[R]:
 
 
 def _graph_of(nodes: list[NodeDef]) -> _core.Graph:
-    """Builds the native graph for scanned nodes: their core inputs and payloads."""
+    """Builds the native graph for scanned nodes: their core inputs and payloads.
+
+    Each node says whether it declines: its return annotation admits
+    `fnloom.Absent` (Q135).
+    """
     return _core.Graph(
         [
             (
@@ -2438,6 +2457,7 @@ def _graph_of(nodes: list[NodeDef]) -> _core.Graph:
                 core_inputs(n.params),
                 dict(n.tags),
                 n.payload,
+                _absence.declines(n),
             )
             for n in nodes
         ],
@@ -3364,6 +3384,7 @@ class Builder[R = dict[str, object]]:
         """
         checked = _async.checked_sync_nodes(sync_nodes)
         nodes, views, graph, unmatched, left_out, owner = self._scanned(awaits=True)
+        _absence.refuse_async(nodes)
         # Called here, so a `CacheWarning` points at the caller's `build_async`.
         cache = (
             None
@@ -3422,9 +3443,11 @@ class Builder[R = dict[str, object]]:
             unmatched = {n: why for n, why in unmatched.items() if n not in names}
             if absent := _unmatched_edges(nodes, unmatched):
                 raise ValueError(absent)
+        absent = _absence.may_be_absent(nodes)
         views = node_views(
             nodes,
             stepped | frozenset(node.name for node in nodes if is_generated(node)),
+            absent,
         )
         if self._output_type_checks:
             nodes = _output_checked(
@@ -3436,6 +3459,7 @@ class Builder[R = dict[str, object]]:
         if self._wrappers:
             nodes = self._chained(nodes, views, relays, awaits=awaits)
         graph = _graph_of(nodes)
+        _absence.refuse_mixed(nodes, absent)
         if (
             self._loose_edges
             and (unknown := _unknown_consumers(views, self._loose_edges)) is not None
@@ -3446,7 +3470,7 @@ class Builder[R = dict[str, object]]:
             mismatches := _edge_mismatches(views.functions, loose)
         ):
             raise ValueError("\n".join(mismatches))
-        if problems := default_problems(nodes):
+        if problems := default_problems(nodes, absent):
             raise ValueError("\n".join(problems))
         if self._declared_inputs and (
             refused := _undeclared(views, self._declared_inputs)

@@ -1,7 +1,9 @@
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Self, final
+from typing import Any, Final, Literal, Never, NoReturn, Self, final, override
 
 __all__ = [
+    "ABSENT",
+    "Absent",
     "Graph",
     "KeyPlan",
     "Keys",
@@ -25,6 +27,20 @@ class UnfingerprintableError(TypeError):
     path: str
     type_name: str
 
+@final
+class Absent:
+    # `ABSENT` is the only instance: calling the class is a `TypeError`.
+    def __new__(cls, never: Never, /) -> NoReturn: ...
+    def __bool__(self) -> NoReturn: ...
+    @override
+    def __reduce__(self) -> str: ...
+    def __copy__(self) -> Self: ...
+    def __deepcopy__(self, memo: object, /) -> Self: ...
+
+ABSENT: Final[Absent]
+
+type Kind = Literal["required", "optional", "admits", "admits_optional"]
+
 # Compiled only with the `test-hooks` feature, which release builds never enable.
 def _panic_for_test() -> None: ...
 
@@ -35,14 +51,16 @@ class Graph:
         nodes: Sequence[
             tuple[
                 str,
-                list[tuple[str, bool]],
+                list[tuple[str, Kind, None]],
                 Mapping[str, str | tuple[str, ...]],
                 Callable[..., Any],
+                bool,
             ]
         ],
         renames: dict[str, dict[str, str]] | None = None,
     ) -> Self: ...
     def node_names(self) -> list[str]: ...
+    def may_be_absent(self) -> list[str]: ...
     def upstream_of(self, names: list[str]) -> list[str]: ...
     def downstream_of(self, names: list[str]) -> list[str]: ...
     def between(self, a: str, b: str) -> list[str]: ...

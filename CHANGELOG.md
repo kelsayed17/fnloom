@@ -7,6 +7,40 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ## [Unreleased]
 
+### Added
+
+- Typed absence (Q135). A node annotated `-> T | fnloom.Absent` may return `fnloom.ABSENT`, a final singleton
+  distinct from `None`. Each parameter reading a node that may be absent decides by its own signature, at build:
+  one admitting `Absent` receives `ABSENT`, one with a default takes its default, and any other skips its node,
+  which is absent too; a requested output that is absent is `ABSENT` in the result. `NodeView.may_be_absent` and
+  `Param.admits_absent` say so before anything runs. Returning `ABSENT` without admitting it is a `TypeError`
+  naming the node. Edge checks read `T | Absent` as `T`. Two parameters of one node reading one source that may
+  be absent must agree on admitting `Absent`, or the build fails naming the node, the source and both. `ABSENT`
+  pickles and copies to itself, and `bool(ABSENT)` is a `TypeError`: compare with `is ABSENT`. A node annotated
+  `-> Absent` alone feeds any parameter, which it never gives a value. `build_async()` refuses a node that declines
+  until the async driver follows these rules, and a node that returns `ABSENT` there without admitting it is the same
+  `TypeError`, from an `async def` node or a sync one.
+- Rust core: absence. `Dependency::Admits { optional }` is a third way to read an input, `NodeSpec.declines` marks a
+  node whose value may be absent, and `Node.may_be_absent` is known at build. `Evaluate::is_absent` (default
+  `false`) recognises an absent value, and `Observer::skipped(node, branch)` reports a node skipped because a
+  `Required` argument is absent. `Admits` passes the absent value, `Optional` omits it, and `Required` skips the
+  consumer, which is absent too. `Plan::needs_rules` says whether a plan follows these rules; one that doesn't runs
+  the plain loop unchanged. `BuildError::ConflictingInput` refuses a spec listing one input twice with different
+  dependencies, which no one dependency describes; listed twice alike, it is one edge, as before.
+
+### Changed
+
+- A parameter with a default that reads a node that may be absent, and doesn't admit `Absent`, is no longer a
+  shadowed default when every parameter of its node reading that node has a default: its default is used when the
+  node declines. One that shares the source with a parameter without a default is still refused, since its node is
+  then skipped instead (Q76, Q135).
+- The native `_core.Graph` takes each node as `(name, [(source, kind, None)], tags, fn, declines)`, where `kind` is
+  `"required"`, `"optional"`, `"admits"` or `"admits_optional"`; it was `(name, [(source, required)], tags,
+  fn)`. `_scan.core_inputs` returns the same triples.
+- Rust core: `NodeSpec` has a new field, `declines`; a spec built with struct syntax sets it, `false` for a node
+  that never declines. `Dependency` has a third variant, `Admits`, and `BuildError` a new one, `ConflictingInput`,
+  so a `match` on either needs an arm for it.
+
 ### Fixed
 
 - A frozen pydantic model holding a `set` or `frozenset` (in a field, a nested model, a container such as

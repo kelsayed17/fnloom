@@ -535,6 +535,9 @@ compile. B1 waits for A1 because both rewrite `run.rs`'s slot table.
 - The return check, on the async path: the binding's `Caller` doesn't run async nodes, so `_Run._store` (and
   `_inline` for a sync node run on the loop) applies it. `_absence.returned(node, value) -> object` raises the same
   `TypeError` as the binding when `value is ABSENT` and the node doesn't decline.
+- A1 left a stopgap to replace: `build_async()` refuses every declining node (`_absence.refuse_async`), and
+  `_Run._inline` and `_Run._settle` refuse every `ABSENT` (`_undeclared_absence`). Remove the refusal, and gate both
+  checks on the node's `declines`, carried on the call, with a test that a declining async node is not refused.
 - [ ] **Step 1: Write the failing tests.** Parametrize every test in `tests/test_absence.py` over `driver_kind in
   ("sync", "async")`, with a `run(driver_kind, ...)` helper in `tests/helpers.py`. Add
   `test_async_skips_fire_no_node_events_and_list_in_run_end`,

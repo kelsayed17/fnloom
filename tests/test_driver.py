@@ -32,7 +32,10 @@ def _double(b: int) -> int:
 def _chain_graph() -> _core.Graph:
     """The native graph of `CHAIN`: `a` (input) -> `b` -> `c`."""
     return _core.Graph(
-        [("b", [("a", True)], {}, _add_one), ("c", [("b", True)], {}, _double)]
+        [
+            ("b", [("a", "required", None)], {}, _add_one, False),
+            ("c", [("b", "required", None)], {}, _double, False),
+        ]
     )
 
 
@@ -190,7 +193,7 @@ def test_prepare_reuses_plan_across_runs() -> None:
         calls.append(a)
         return a + 1
 
-    spy = SpyGraph(_core.Graph([("b", [("a", True)], {}, counting)]))
+    spy = SpyGraph(_core.Graph([("b", [("a", "required", None)], {}, counting, False)]))
     plan = Driver(spy).prepare(["b"], inputs={"a": 0})
     assert plan.run(inputs={"a": 1}) == {"b": 2}
     assert plan.run(inputs={"a": 5}) == {"b": 6}
@@ -349,7 +352,9 @@ def test_ten_thousand_node_chain_executes() -> None:
 def test_public_api_is_exported() -> None:
     """The package exports exactly its public names."""
     assert sorted(fnloom.__all__) == [
+        "ABSENT",
         "ANY",
+        "Absent",
         "AsyncDriver",
         "AsyncPreparedPlan",
         "BuildEnd",

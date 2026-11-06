@@ -5,7 +5,7 @@ use std::collections::{BTreeSet, BinaryHeap};
 
 use crate::error::{MissingInput, PlanError};
 use crate::graph::Graph;
-use crate::node::{Dependency, Node, NodeId, NodeKind};
+use crate::node::{Node, NodeId, NodeKind};
 
 /// What to compute and what the caller supplies.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -49,6 +49,7 @@ pub struct Step {
 pub struct Plan {
     steps: Vec<Step>,
     outputs: Vec<NodeId>,
+    needs_rules: bool,
 }
 
 impl Plan {
@@ -62,6 +63,13 @@ impl Plan {
     #[must_use]
     pub fn outputs(&self) -> &[NodeId] {
         &self.outputs
+    }
+
+    /// Whether a planned node's value may be absent (`Node::may_be_absent`), so that the run
+    /// follows the absence rules. A plan without one runs the plain loop, at no extra cost.
+    #[must_use]
+    pub const fn needs_rules(&self) -> bool {
+        self.needs_rules
     }
 }
 
@@ -89,9 +97,11 @@ impl<P> Graph<P> {
         let resolved = self.resolve_request(request)?;
         let actions = self.plan_actions(&resolved)?;
         let order = self.topological_order(&actions);
+        let needs_rules = self.has_absence() && order.iter().any(|&id| self.node(id).may_be_absent);
         Ok(Plan {
             steps: self.build_steps(&order, &actions, &resolved.outputs),
             outputs: resolved.outputs,
+            needs_rules,
         })
     }
 
@@ -157,7 +167,7 @@ impl<P> Graph<P> {
                     actions[input.index()] = Some(self.action_for(input, resolved));
                     work.push(input);
                 }
-                if edge.dependency == Dependency::Required
+                if !edge.dependency.has_default()
                     && actions[input.index()] == Some(Action::SkipOptionalInput)
                 {
                     missing.insert(input);
@@ -190,9 +200,10 @@ impl<P> Graph<P> {
                 .enumerate()
                 .filter(|&(index, node)| {
                     actions[index] == Some(Action::Compute)
-                        && node.inputs.iter().any(|edge| {
-                            edge.node == input && edge.dependency == Dependency::Required
-                        })
+                        && node
+                            .inputs
+                            .iter()
+                            .any(|edge| edge.node == input && !edge.dependency.has_default())
                 })
                 .map(|(_, node)| node.name.clone())
                 .collect()
@@ -314,6 +325,7 @@ impl<P> Graph<P> {
 #[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
 mod tests {
     use super::*;
+    use crate::node::Dependency;
     use crate::testing::{names, node, request, spec, strings};
 
     /// a, b <- a, c <- a, d <- b, c; `x` is an input of `a`.
