@@ -387,9 +387,11 @@ These can be fingerprinted:
   `Fraction`, `UUID`, the `pathlib` paths and enum members;
 - dataclass instances and named tuples, by type and fields, then any other attribute set on the instance (in its
   `__dict__` or a slot, by `__post_init__` or later), by name;
-- a value of a class from your own code (a dataclass, a named tuple, an enum, or one you registered) also by its
-  class's code version, so editing a method its nodes call misses. A class holding a mutable class attribute cannot
-  be versioned, so its values cannot be fingerprinted;
+- frozen pydantic models (`model_config = ConfigDict(frozen=True)`), by type and fields in order, then the names of
+  the fields set, extra fields and private attributes. A model that is not frozen needs a registration;
+- a value of a class from your own code (a dataclass, a named tuple, an enum, a pydantic model, or one you
+  registered) also by its class's code version, so editing a method its nodes call misses. A class holding a mutable
+  class attribute cannot be versioned, so its values cannot be fingerprinted;
 - numpy arrays, by dtype, shape, strides and content, so a Fortran-ordered array or a strided view differs from its
   C-ordered copy; pandas and polars frames and series, by their columns' names, types and
   values and their name, and a pandas one by its index (with a datetime index's frequency) and `attrs` too (polars
@@ -472,7 +474,15 @@ source text, so it works in a notebook too. It hashes:
   handed the module, say), and by its `__getattr__` for a name it does not define; a function's own attributes it
   reads, by the same rules; a library function, class or module by its name and the version of the installed
   distribution, so upgrading a library misses; an immutable value (an `int`, `float`, `complex`, `bool`, `str`,
-  `bytes`, `None`, an enum member, or a tuple or frozenset of these) by its fingerprint.
+  `bytes`, `None`, an enum member, or a tuple or frozenset of these) by its fingerprint; a `typing.NewType` by its
+  name and its supertype, by these rules.
+
+A pydantic model class counts what pydantic takes out of its body too: each field's type as resolved, with every class,
+`NewType`, alias and `Annotated` validator it names (a nested model by its own version), its default, constraints and
+other `Field(...)` settings, its private attributes' defaults, its validators' fields and modes, and its
+`model_config`, each setting by the rules for defaults. A model pydantic has not built yet (`defer_build`, or a
+forward reference not resolved) is refused until you call its `model_rebuild()`. A field default that is a library
+object fnloom cannot fingerprint (a `SecretStr`, say) or a model that is not frozen makes the class uncacheable too.
 
 A name read by a string constant counts as read by name, so `globals()["RATE"]` and `getattr(config, "RATE")` see
 `RATE`. Your own code is any module that is neither built in, nor the standard library, nor installed: a module whose

@@ -958,3 +958,40 @@ def test_a_name_read_as_a_string_counts(read: str) -> None:
     make_module("cv_cfg", "RATE = 3\n")
     after = _version(template.format(rate=3, read=read))
     assert after != before
+
+
+def test_a_newtype_global_counts_by_its_name_and_supertype() -> None:
+    """A `NewType` is an identity function: its name and supertype version it."""
+    template = """
+        from typing import NewType
+
+        class Base:
+            def size(self):
+                return {v}
+
+        Inner = NewType("{inner}", {supertype})
+        Sym = NewType("Sym", Inner)
+
+        def f(request):
+            return Sym(request)
+        """
+
+    def version(v: int = 1, inner: str = "Inner", supertype: str = "str") -> bytes:
+        source = template.format(v=v, inner=inner, supertype=supertype)
+        return _version(textwrap.dedent(source))
+
+    one = version()
+    assert version() == one
+    assert version(inner="Other") != one
+    assert version(supertype="bytes") != one
+    user = version(supertype="Base")
+    assert user != one
+    assert version(v=2, supertype="Base") != user
+    assert version(supertype="list[int]") != version(supertype="list[str]")
+
+
+def test_a_newtype_with_attributes_of_its_own_is_refused() -> None:
+    """State set on a `NewType` is not its name or supertype, so it may change."""
+    source = "from typing import NewType\nS = NewType('S', int)\nS.extra = 1\n"
+    with pytest.raises(UncacheableError, match="global 'S' of 'f' is a NewType"):
+        _version(source + "def f(x):\n    return S.extra\n")

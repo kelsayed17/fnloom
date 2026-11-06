@@ -4,7 +4,7 @@
 value. `fallback` returns a canonical form, which the walk fingerprints in turn under
 the value's type, or `None`, which refuses the value. numpy, pandas and polars are never
 imported here: their values are recognised by module name and read through the modules
-already loaded.
+already loaded. So are pydantic's models, through `pydantic.main`.
 """
 
 import contextlib
@@ -206,8 +206,21 @@ def _tz_form(zone: object) -> object | None:
     return None
 
 
+def model_fields(cls: type) -> dict[str, Any] | None:
+    """A pydantic model class's fields by name, in order, or `None` for another class.
+
+    pydantic is never imported here: a model's class comes from it, so it is loaded.
+    """
+    main = sys.modules.get("pydantic.main")
+    base = getattr(main, "BaseModel", None)
+    if not isinstance(base, type) or not issubclass(cls, base):
+        return None
+    fields = getattr(cls, "__pydantic_fields__", None)
+    return fields if isinstance(fields, dict) else None
+
+
 def _record(value: object) -> object | None:
-    """A named tuple's or dataclass instance's fields, or `None` for anything else.
+    """A named tuple's, dataclass's or frozen pydantic model's fields, or `None`.
 
     State set beyond the fields (by `__post_init__`, say, or later) follows them, by
     name. A dataclass without fields keeps its state, if any, elsewhere, so it is
@@ -224,10 +237,31 @@ def _record(value: object) -> object | None:
         if any(item is _UNSET for item in items):
             return None
         names = frozenset(field.name for field in fields)
+    elif (model := model_fields(type(value))) is not None:
+        return _model(value, model)
     else:
         return None
     extra = _extra_state(value, names)
     return items if not extra else (*items, extra)
+
+
+def _model(value: Any, fields: dict[str, Any]) -> object | None:  # noqa: ANN401  # a pydantic model
+    """A frozen pydantic model's fields in order, the names set, and its other state.
+
+    The names set (`model_dump(exclude_unset=True)` reads them) as a sorted tuple,
+    since a set of strings iterates in an order the hash seed sets. Extra fields and
+    private attributes follow, by name. A model that is not frozen, or one built
+    without a field (`model_construct`), is refused.
+    """
+    if not type(value).model_config.get("frozen", False):
+        return None
+    state = vars(value)
+    items = tuple(state.get(name, _UNSET) for name in fields)
+    if any(item is _UNSET for item in items):
+        return None
+    set_names = tuple(sorted(value.__pydantic_fields_set__))
+    names = frozenset(fields) | {"__pydantic_fields_set__"}
+    return (*items, set_names, _extra_state(value, names))
 
 
 def _extra_state(value: object, known: frozenset[str]) -> tuple[object, ...]:
