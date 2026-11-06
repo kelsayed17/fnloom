@@ -29,10 +29,11 @@ impl<P> Graph<P> {
     pub fn build(specs: Vec<NodeSpec<P>>) -> Result<Self, BuildError> {
         let mut declared = index_by_name(specs)?;
         let ids = assign_ids(&declared);
-        let mut nodes = ids
-            .iter()
-            .map(|(name, &id)| make_node(id, name, declared.remove(name), &ids))
-            .collect::<Result<Vec<_>, _>>()?;
+        // A loop rather than a `Result` collect, which cannot reserve the exact length.
+        let mut nodes = Vec::with_capacity(ids.len());
+        for (name, &id) in &ids {
+            nodes.push(make_node(id, name, declared.remove(name), &ids)?);
+        }
         if let Some(path) = find_cycle(&nodes) {
             return Err(BuildError::Cycle {
                 path: path
@@ -284,28 +285,82 @@ fn resolve_edges<P>(
     spec: &NodeSpec<P>,
     ids: &BTreeMap<String, NodeId>,
 ) -> Result<Vec<Edge>, BuildError> {
-    let mut seen = BTreeSet::new();
-    let mut edges = Vec::with_capacity(spec.inputs.len());
+    // At least four, the capacity a first push gives, so a node with few inputs allocates
+    // as it always has.
+    let mut edges = Vec::with_capacity(spec.inputs.len().max(4));
     for input in &spec.inputs {
-        let Some(&node) = ids.get(&input.name) else {
-            continue;
-        };
-        if seen.insert(node) {
+        if let Some(&node) = ids.get(&input.name) {
             edges.push(Edge {
                 node,
                 dependency: input.dependency,
             });
-        } else if edges
-            .iter()
-            .any(|edge| edge.node == node && edge.dependency != input.dependency)
-        {
-            return Err(BuildError::ConflictingInput {
-                node: spec.name.clone(),
-                input: input.name.clone(),
-            });
         }
     }
+    let Some(repeats) = repeated_edges(&edges) else {
+        return Ok(edges);
+    };
+    // The first conflicting repeat in input order is the one reported.
+    if let Some(&(_, at)) = repeats
+        .iter()
+        .find(|&&(first, at)| edges[first].dependency != edges[at].dependency)
+    {
+        let node = edges[at].node;
+        let input = spec
+            .inputs
+            .iter()
+            .find(|input| ids.get(&input.name) == Some(&node))
+            .map(|input| input.name.clone())
+            .unwrap_or_default();
+        return Err(BuildError::ConflictingInput {
+            node: spec.name.clone(),
+            input,
+        });
+    }
+    let mut keep = vec![true; edges.len()];
+    for &(_, at) in &repeats {
+        keep[at] = false;
+    }
+    let mut keep = keep.into_iter();
+    edges.retain(|_| keep.next().unwrap_or(true));
     Ok(edges)
+}
+
+/// Below this many edges, repeats are found by comparing every pair, which needs no
+/// allocation; from it on, by sorting.
+const PAIRWISE_LIMIT: usize = 16;
+
+/// Each edge that repeats an earlier edge's node, as `(first, repeat)`: the index of the
+/// node's first edge and of the repeat, ordered by the repeat. `None` when no node repeats,
+/// the common case, which is found without sorting a short list or allocating.
+fn repeated_edges(edges: &[Edge]) -> Option<Vec<(usize, usize)>> {
+    if edges.len() < 2 {
+        return None;
+    }
+    if edges.len() < PAIRWISE_LIMIT {
+        let repeats: Vec<(usize, usize)> = (1..edges.len())
+            .filter_map(|at| {
+                let first = edges[..at].iter().position(|e| e.node == edges[at].node)?;
+                Some((first, at))
+            })
+            .collect();
+        return (!repeats.is_empty()).then_some(repeats);
+    }
+    let mut sorted: Vec<(NodeId, usize)> = edges
+        .iter()
+        .enumerate()
+        .map(|(index, edge)| (edge.node, index))
+        .collect();
+    sorted.sort_unstable();
+    if sorted.windows(2).all(|pair| pair[0].0 != pair[1].0) {
+        return None;
+    }
+    let mut repeats = Vec::new();
+    for group in sorted.chunk_by(|a, b| a.0 == b.0) {
+        let first = group[0].1;
+        repeats.extend(group[1..].iter().map(|&(_, at)| (first, at)));
+    }
+    repeats.sort_unstable_by_key(|&(_, at)| at);
+    Some(repeats)
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -427,6 +482,72 @@ mod tests {
         let b = graph.node(graph.id_of("b").unwrap());
         assert_eq!(b.inputs.len(), 1);
         assert_eq!(b.inputs[0].dependency, Dependency::Required);
+    }
+
+    #[test]
+    fn build_finds_repeated_inputs_among_many() {
+        // More inputs than `PAIRWISE_LIMIT`, so repeats are found by sorting.
+        let spec = |repeat: Dependency| {
+            let mut inputs: Vec<InputSpec> = (0..20)
+                .map(|i| InputSpec {
+                    name: format!("x{i:02}"),
+                    dependency: Dependency::Required,
+                })
+                .collect();
+            inputs.insert(
+                5,
+                InputSpec {
+                    name: "x12".to_owned(),
+                    dependency: Dependency::Required,
+                },
+            );
+            inputs.push(InputSpec {
+                name: "x03".to_owned(),
+                dependency: repeat,
+            });
+            inputs.push(InputSpec {
+                name: "x07".to_owned(),
+                dependency: Dependency::Optional,
+            });
+            NodeSpec {
+                name: "total".to_owned(),
+                inputs,
+                tags: BTreeMap::new(),
+                payload: (),
+                declines: false,
+            }
+        };
+        // `x03` conflicts before `x07` does, in input order.
+        let err = Graph::build(vec![spec(Dependency::Optional)]).unwrap_err();
+        assert_eq!(
+            err,
+            BuildError::ConflictingInput {
+                node: "total".to_owned(),
+                input: "x03".to_owned()
+            }
+        );
+        let err = Graph::build(vec![spec(Dependency::Required)]).unwrap_err();
+        assert_eq!(
+            err,
+            BuildError::ConflictingInput {
+                node: "total".to_owned(),
+                input: "x07".to_owned()
+            }
+        );
+        // Repeated alike, each input is one edge, in the order first listed.
+        let mut alike = spec(Dependency::Required);
+        alike.inputs.pop();
+        let graph = Graph::build(vec![alike]).unwrap();
+        let total = graph.node(graph.id_of("total").unwrap());
+        let read: Vec<&str> = total
+            .inputs
+            .iter()
+            .map(|edge| graph.node(edge.node).name.as_str())
+            .collect();
+        let mut expected: Vec<String> = (0..20).map(|i| format!("x{i:02}")).collect();
+        expected.insert(5, "x12".to_owned());
+        expected.remove(13);
+        assert_eq!(read, expected);
     }
 
     #[test]
