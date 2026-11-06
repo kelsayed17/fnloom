@@ -147,6 +147,7 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | A sync node in an async driver | Runs on the event loop, which stops while it does | Runs in a worker thread (`loop.run_in_executor`), or on the loop with `sync_nodes="inline"` (Q65) |
 | A failing node in an async driver | Its siblings keep running after `execute` raises | They're cancelled; its own exception is raised once, noted with its name (Q66) |
 | `None` for an input declared `x: int` | Passes the check; the node then runs with `None` | `ValueError` before anything runs; annotate `x: int \| None` (Q79) |
+| A node with nothing to return | Returns a sentinel such as `None`, and every consumer runs and must test for it | Returns `fnloom.ABSENT`, annotated `-> T \| fnloom.Absent`: a consumer admitting `Absent` receives it, one with a default takes its default, and any other is skipped, all known at build ([Declining](writing-nodes.md#declining), Q135) |
 | A `tuple[int, str]` input | Every tuple refused, a correct one too | Checked by length and each item (Q80) |
 | An annotation imported only under `TYPE_CHECKING` | `NameError` at build, naming no node | Builds as `unresolved 'Decimal'`; a value checked against it is a `TypeError` saying to import it (Q81) |
 | An `int` for `float`, a numpy scalar for `int` | Refused | Refused too, unless built `with_numeric_widening()`; items of a collection with `with_deep_type_checks()` |

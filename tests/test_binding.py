@@ -6,14 +6,17 @@ import sys
 import weakref
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, override
+from typing import Any, Literal, override
 
 import blake3
 import pytest
 
 from fnloom import _core
 
-type NodeTuple = tuple[str, list[tuple[str, bool]], dict[str, str], Callable[..., Any]]
+type Kind = Literal["required", "optional", "admits", "admits_optional"]
+type NodeTuple = tuple[
+    str, list[tuple[str, Kind, None]], dict[str, str], Callable[..., Any], bool
+]
 
 STUB = Path(__file__).parent.parent / "python" / "fnloom" / "_core.pyi"
 
@@ -35,15 +38,17 @@ def _chain() -> _core.Graph:
     """The graph `a` (input) -> `b` -> `c`."""
     return _core.Graph(
         [
-            ("b", [("a", True)], {}, _add_one),
-            ("c", [("b", True)], {"stage": "last"}, _double),
+            ("b", [("a", "required", None)], {}, _add_one, False),
+            ("c", [("b", "required", None)], {"stage": "last"}, _double, False),
         ]
     )
 
 
 def _failing() -> _core.Graph:
     """The graph `a` (input) -> `boom`, where `boom` divides by zero."""
-    return _core.Graph([("boom", [("a", True)], {}, _divide_by_zero)])
+    return _core.Graph(
+        [("boom", [("a", "required", None)], {}, _divide_by_zero, False)]
+    )
 
 
 class Recorder(_core.ObserverBase):
@@ -108,7 +113,17 @@ def test_keyword_names_reach_the_function_interned() -> None:
         seen.update({name: name is sys.intern(name) for name in kwargs})
         return 0
 
-    graph = _core.Graph([("total", [("alpha", True), ("beta", True)], {}, record)])
+    graph = _core.Graph(
+        [
+            (
+                "total",
+                [("alpha", "required", None), ("beta", "required", None)],
+                {},
+                record,
+                False,
+            )
+        ]
+    )
     graph.prepare(["total"], ["alpha", "beta"], []).run({"alpha": 1, "beta": 2}, {})
     assert seen == {"alpha": True, "beta": True}
 
@@ -126,7 +141,15 @@ def test_a_renamed_input_reaches_the_function_under_its_keyword_interned() -> No
         return 0
 
     graph = _core.Graph(
-        [("total", [("alpha", True), ("beta", True)], {}, record)],
+        [
+            (
+                "total",
+                [("alpha", "required", None), ("beta", "required", None)],
+                {},
+                record,
+                False,
+            )
+        ],
         {"total": {"alpha": "first"}},
     )
     graph.prepare(["total"], ["alpha", "beta"], []).run({"alpha": 1, "beta": 2}, {})
@@ -135,7 +158,7 @@ def test_a_renamed_input_reaches_the_function_under_its_keyword_interned() -> No
 
 def test_a_rename_of_an_unknown_node_raises_value_error_naming_it() -> None:
     """A rename naming no node or input of the graph is refused."""
-    nodes: list[NodeTuple] = [("b", [("a", True)], {}, _add_one)]
+    nodes: list[NodeTuple] = [("b", [("a", "required", None)], {}, _add_one, False)]
     with pytest.raises(ValueError, match="'nowhere'"):
         _core.Graph(nodes, {"nowhere": {"a": "x"}})
     with pytest.raises(ValueError, match="'gone'"):
@@ -149,7 +172,7 @@ def test_a_rename_of_an_unknown_node_raises_value_error_naming_it() -> None:
 
 def test_a_rename_that_is_not_str_to_str_raises_type_error() -> None:
     """Renames are a dict of dicts of `str`; anything else is a `TypeError`."""
-    nodes: list[NodeTuple] = [("b", [("a", True)], {}, _add_one)]
+    nodes: list[NodeTuple] = [("b", [("a", "required", None)], {}, _add_one, False)]
     for bad in ({"b": {"a": 1}}, {"b": ["a"]}, {1: {"a": "x"}}, {"b": {2: "x"}}):
         with pytest.raises(TypeError):
             _core.Graph(nodes, bad)  # ty: ignore[invalid-argument-type]  # refused on purpose
@@ -159,8 +182,14 @@ def test_overrides_and_optional_inputs_have_their_actions() -> None:
     """An override replaces a node; an unsupplied optional input is skipped."""
     graph = _core.Graph(
         [
-            ("b", [("a", True), ("maybe", False)], {}, _add_one),
-            ("c", [("b", True)], {}, _double),
+            (
+                "b",
+                [("a", "required", None), ("maybe", "optional", None)],
+                {},
+                _add_one,
+                False,
+            ),
+            ("c", [("b", "required", None)], {}, _double, False),
         ]
     )
     assert graph.prepare(["c"], [], ["b"]).steps() == [
@@ -213,10 +242,13 @@ def test_missing_run_value_raises_value_error_naming_it() -> None:
 def test_build_errors_raise_value_error_naming_the_culprits() -> None:
     """Duplicate names and cycles are rejected with `ValueError`."""
     with pytest.raises(ValueError, match="duplicate node name 'b'"):
-        _core.Graph([("b", [], {}, _add_one), ("b", [], {}, _add_one)])
+        _core.Graph([("b", [], {}, _add_one, False), ("b", [], {}, _add_one, False)])
     with pytest.raises(ValueError, match="dependency cycle: 'x' -> 'y' -> 'x'"):
         _core.Graph(
-            [("x", [("y", True)], {}, _add_one), ("y", [("x", True)], {}, _add_one)]
+            [
+                ("x", [("y", "required", None)], {}, _add_one, False),
+                ("y", [("x", "required", None)], {}, _add_one, False),
+            ]
         )
 
 
@@ -243,7 +275,7 @@ def _plan_in_a_cycle() -> weakref.ref[Callable[..., Any]]:
     def b(a: int) -> int:
         return a + 1
 
-    graph = _core.Graph([("b", [("a", True)], {}, b)])
+    graph = _core.Graph([("b", [("a", "required", None)], {}, b, False)])
     vars(b)["plan"] = graph.prepare(["b"], ["a"], [])
     return weakref.ref(b)
 
@@ -270,7 +302,9 @@ def test_an_exception_object_raised_on_every_run_is_noted_once() -> None:
     def boom(a: int) -> int:  # noqa: ARG001  # the node fails whatever its input
         raise shared
 
-    plan = _core.Graph([("boom", [("a", True)], {}, boom)]).prepare(["boom"], ["a"], [])
+    plan = _core.Graph([("boom", [("a", "required", None)], {}, boom, False)]).prepare(
+        ["boom"], ["a"], []
+    )
     for _ in range(2):
         with pytest.raises(ValueError, match="raised by every run"):
             plan.run({"a": 1}, {})
@@ -317,7 +351,15 @@ def test_pre_node_gets_the_kwargs_the_payload_gets() -> None:
         return alpha + renamed
 
     graph = _core.Graph(
-        [("total", [("alpha", True), ("beta", True)], {}, total)],
+        [
+            (
+                "total",
+                [("alpha", "required", None), ("beta", "required", None)],
+                {},
+                total,
+                False,
+            )
+        ],
         {"total": {"beta": "renamed"}},
     )
     first, second = Recorder(), Recorder()
@@ -331,7 +373,7 @@ def test_post_node_gets_the_value_or_the_error() -> None:
     """`post_node` gets the node's value, or on failure the very exception raised."""
     sentinel = object()
     recorder = Recorder()
-    graph = _core.Graph([("same", [("a", True)], {}, lambda a: a)])
+    graph = _core.Graph([("same", [("a", "required", None)], {}, lambda a: a, False)])
     plan = graph.prepare(["same"], ["a"], [])
     assert plan.run({"a": sentinel}, {}, [recorder])["same"] is sentinel
     [(node, ok, value, error)] = recorder.outcomes
@@ -346,7 +388,7 @@ def test_post_node_gets_the_value_or_the_error() -> None:
         raise error
 
     failing = Recorder()
-    graph = _core.Graph([("boom", [("a", True)], {}, boom)])
+    graph = _core.Graph([("boom", [("a", "required", None)], {}, boom, False)])
     with pytest.raises(ZeroDivisionError):
         graph.prepare(["boom"], ["a"], []).run({"a": 1}, {}, [failing])
     [(node, ok, value, error)] = failing.outcomes
@@ -361,7 +403,9 @@ def test_a_parameter_left_to_its_default_is_absent() -> None:
         return a + maybe
 
     recorder = Recorder()
-    graph = _core.Graph([("b", [("a", True), ("maybe", False)], {}, add)])
+    graph = _core.Graph(
+        [("b", [("a", "required", None), ("maybe", "optional", None)], {}, add, False)]
+    )
     assert graph.prepare(["b"], ["a"], []).run({"a": 1}, {}, [recorder]) == {"b": 11}
     assert recorder.kwargs == [("b", {"a": 1})]
     supplied = Recorder()
@@ -443,7 +487,7 @@ class PanickingObserver(_core.ObserverBase):
 def test_a_panicking_node_still_runs_the_closing_hooks() -> None:
     """A panicking node fails like a raising one: closing hooks run, the note is set."""
     recorder = Recorder()
-    graph = _core.Graph([("boom", [("a", True)], {}, _panics)])
+    graph = _core.Graph([("boom", [("a", "required", None)], {}, _panics, False)])
     with pytest.raises(BaseException, match="deliberate panic") as info:
         graph.prepare(["boom"], ["a"], []).run({"a": 1}, {}, [recorder])
     assert type(info.value).__name__ == "PanicException"
@@ -478,7 +522,7 @@ def test_ten_thousand_node_chain() -> None:
     size = 10_000
     names = [f"n{i:05d}" for i in range(size)]
     nodes: list[NodeTuple] = [
-        (name, [(previous, True)], {}, _successor(previous))
+        (name, [(previous, "required", None)], {}, _successor(previous), False)
         for previous, name in zip(["x", *names[:-1]], names, strict=True)
     ]
     plan = _core.Graph(nodes).prepare([names[-1]], ["x"], [])
@@ -494,6 +538,10 @@ def test_stub_lists_exactly_the_runtime_names() -> None:
         for node in tree.body
         if isinstance(node, ast.FunctionDef | ast.ClassDef)
         and not node.name.startswith("_")
+    } | {
+        node.target.id
+        for node in tree.body
+        if isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name)
     }
     runtime = {name for name in dir(_core) if not name.startswith("_")}
     assert stubbed == runtime
@@ -633,7 +681,7 @@ def test_walk_keys_store_each_stored_result_as_it_succeeds() -> None:
     def increment(a: int) -> int:
         return a + 1
 
-    graph = _core.Graph([("b", [("a", False)], {}, increment)])
+    graph = _core.Graph([("b", [("a", "optional", None)], {}, increment, False)])
     plan = graph.prepare(["b"], ["a"], [])
     keys = _core.KeyPlan([_node("b", STATIC["b"], ["a"])], ["b"])
     store = _core.MemoryStore(10)
@@ -651,9 +699,15 @@ def test_on_value_sees_each_computed_node_once_in_order() -> None:
 
     graph = _core.Graph(
         [
-            ("b", [("a", True), ("maybe", False)], {}, _add_one),
-            ("c", [("b", True)], {}, _double),
-            ("d", [("c", True)], {}, increment),
+            (
+                "b",
+                [("a", "required", None), ("maybe", "optional", None)],
+                {},
+                _add_one,
+                False,
+            ),
+            ("c", [("b", "required", None)], {}, _double, False),
+            ("d", [("c", "required", None)], {}, increment, False),
         ]
     )
     recorder = Recorder()

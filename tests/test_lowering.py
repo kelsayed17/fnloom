@@ -41,7 +41,7 @@ def f(x: int) -> int:
     (node,) = collect([module])
     assert node.params[0].name == "x"
     assert node.params[0].binding == Source("a")
-    assert core_inputs(node.params) == [("a", True)]
+    assert core_inputs(node.params) == [("a", "required", None)]
     assert fnloom.build(module).execute(["out"], inputs={"a": 1}) == {"out": 2}
 
 
@@ -57,7 +57,7 @@ def f(a: int, k: int) -> int:
 """,
     )
     (node,) = collect([module])
-    assert core_inputs(node.params) == [("a", True)]
+    assert core_inputs(node.params) == [("a", "required", None)]
     assert node.params[1].binding == Value(10)
     assert node.params[1].required
     driver = fnloom.build(module)
@@ -78,7 +78,10 @@ def f(x: int, y: int) -> int:
     )
     (node,) = collect([module])
     assert node.params[1].binding == Source("y")
-    assert core_inputs(node.params) == [("a", True), ("y", True)]
+    assert core_inputs(node.params) == [
+        ("a", "required", None),
+        ("y", "required", None),
+    ]
     assert fnloom.build(module).execute(["out"], inputs={"a": 5, "y": 2}) == {"out": 3}
 
 
@@ -94,7 +97,7 @@ def f(x: list[int], y: list[int]) -> bool:
 """,
     )
     (node,) = collect([module])
-    assert core_inputs(node.params) == [("a", True)]
+    assert core_inputs(node.params) == [("a", "required", None)]
     assert fnloom.build(module).execute(["out"], inputs={"a": [1]}) == {"out": True}
 
 
@@ -113,8 +116,11 @@ def g(x: int = 1, *, z: int) -> int:
 """,
     )
     nodes = {n.name: n for n in collect([module])}
-    assert core_inputs(nodes["out"].params) == [("a", False), ("z", True)]
-    assert core_inputs(nodes["both"].params) == [("b", True)]
+    assert core_inputs(nodes["out"].params) == [
+        ("a", "optional", None),
+        ("z", "required", None),
+    ]
+    assert core_inputs(nodes["both"].params) == [("b", "required", None)]
 
 
 def test_defaulted_parameter_bound_by_source_is_optional_and_omitted_when_unsupplied() -> None:  # noqa: E501  # fmt: skip
@@ -132,7 +138,10 @@ def f(a: int, factor: int | None = 3) -> int:
 """,
     )
     (node,) = collect([module])
-    assert core_inputs(node.params) == [("a", True), ("scale", False)]
+    assert core_inputs(node.params) == [
+        ("a", "required", None),
+        ("scale", "optional", None),
+    ]
     driver = fnloom.build(module)
     assert driver.execute(["out"], inputs={"a": 2}) == {"out": 6}
     assert driver.execute(["out"], inputs={"a": 2, "scale": 5}) == {"out": 10}

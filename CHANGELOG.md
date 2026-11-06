@@ -80,6 +80,15 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - `Drawing.to_svg(*, orient="LR", legend=True)`, an SVG laid out in pure Python, and `render(path, engine="dot" |
   "builtin")`: `"dot"` stays the default, and `"builtin"` writes `to_svg()` with nothing installed. `fnloom draw`
   takes `--engine builtin` (Q146).
+- Typed absence (Q135). A node annotated `-> T | fnloom.Absent` may return `fnloom.ABSENT`, a final singleton
+  distinct from `None`. Each parameter reading a node that may be absent decides by its own signature, at build:
+  one admitting `Absent` receives `ABSENT`, one with a default takes its default, and any other skips its node,
+  which is absent too; a requested output that is absent is `ABSENT` in the result. `NodeView.may_be_absent` and
+  `Param.admits_absent` say so before anything runs. Returning `ABSENT` without admitting it is a `TypeError`
+  naming the node. Edge checks read `T | Absent` as `T`. Two parameters of one node reading one source that may
+  be absent must agree on admitting `Absent`, or the build fails naming the node, the source and both. `ABSENT`
+  pickles and copies to itself, and `bool(ABSENT)` is a `TypeError`: compare with `is ABSENT`.
+  `build_async()` refuses a node that declines until the async driver follows these rules.
 - Rust core: absence. `Dependency::Admits { optional }` is a third way to read an input, `NodeSpec.declines` marks a
   node whose value may be absent, and `Node.may_be_absent` is known at build. `Evaluate::is_absent` (default
   `false`) recognises an absent value, and `Observer::skipped(node, branch)` reports a node skipped because a
@@ -89,6 +98,11 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Changed
 
+- A parameter with a default that reads a node that may be absent, and doesn't admit `Absent`, is no longer a
+  shadowed default: its default is used when the node declines (Q76, Q135).
+- The native `_core.Graph` takes each node as `(name, [(source, kind, None)], tags, fn, declines)`, where `kind` is
+  `"required"`, `"optional"`, `"admits"` or `"admits_optional"`; it was `(name, [(source, required)], tags,
+  fn)`. `_scan.core_inputs` returns the same triples.
 - Rust core: `NodeSpec` has a new field, `declines`; a spec built with struct syntax sets it, `false` for a node
   that never declines. `Dependency` has a third variant, `Admits`, so a `match` on it needs an arm for it.
 - Without Graphviz, a drawing's `_repr_svg_` (Jupyter's preview) is the builtin SVG, where it was `None`. The

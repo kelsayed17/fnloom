@@ -9,6 +9,7 @@ from fnloom._decorators import Source, decorations
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+    from collections.abc import Set as AbstractSet
 
     from fnloom._scan import NodeDef
 
@@ -19,13 +20,19 @@ _TWO = 2
 _SHOWN = 40
 
 
-def default_problems(nodes: Sequence[NodeDef]) -> list[str]:
+def default_problems(
+    nodes: Sequence[NodeDef], absent: AbstractSet[str] = frozenset()
+) -> list[str]:
     """A line for each shadowed default and each input with differing defaults.
 
     A parameter with a default that reads a node's name never uses the default,
     since the node is computed (`shadowed`); an input that two or more consumers
     give different defaults is a different value for each (`differing`).
     `@defaults` on the consumer opts a parameter out of either. Sorted.
+
+    A node of `absent` may be absent, and then a parameter reading it that does
+    not admit `fnloom.Absent` takes its default (Q135): that default is used, so
+    it is not shadowed.
 
     A consumer that opts out of `differing` is left out of the comparison, so
     opting out every consumer but one settles it: the rest then agree.
@@ -41,6 +48,8 @@ def default_problems(nodes: Sequence[NodeDef]) -> list[str]:
                 continue
             read = param.binding.name
             if read in computed:
+                if read in absent and not param.admits_absent:
+                    continue
                 if recorded is None or param.name not in recorded.shadowed:
                     lines.append(_shadowed(node.name, param.name, read))
             elif recorded is None or param.name not in recorded.differing:

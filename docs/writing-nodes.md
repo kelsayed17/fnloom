@@ -174,7 +174,7 @@ driver.execute(["greeting"], inputs={"name": "Ada", "punctuation": "."})
 !!! note
 
     A default only makes an edge optional when the parameter reads an input. If a parameter with a default names
-    another function, it still reads that function's value.
+    another function, it still reads that function's value, unless that function [declines](#declining).
 
 ## Defaults the build refuses
 
@@ -273,6 +273,73 @@ driver.execute(["short_window", "long_window"], inputs={"days": 14})
 - `@defaults` only records names, so it stacks with the other decorators in any order and returns the function itself.
   Applying it twice merges the names.
 - A name that isn't a parameter with a default is a `ValueError` when the decorator is applied, listing every such name.
+
+## Declining
+
+A node may decline to produce a value. Annotate its return to admit `fnloom.Absent`, and return `fnloom.ABSENT`:
+
+```python
+# file: catalog.py
+from fnloom import ABSENT, Absent
+
+
+def listing(item: str) -> list[str] | Absent:
+    """Every item in the catalog, unless the request names one."""
+    return ABSENT if item else ["chair", "desk", "lamp"]
+
+
+def count(listing: list[str]) -> int:
+    """How many items are listed."""
+    return len(listing)
+
+
+def first(listing: list[str] = ["none"]) -> str:
+    """The first item listed."""
+    return listing[0]
+
+
+def summary(listing: list[str] | Absent) -> str:
+    """What was listed, if anything."""
+    return "not listed" if isinstance(listing, Absent) else ", ".join(listing)
+```
+
+Each parameter reading a node that may be absent decides by its own signature:
+
+1. one that admits `Absent` (`summary`) receives `ABSENT` as its value;
+2. one with a default (`first`) is left out, so its default applies, as for an optional input nobody supplies;
+3. any other (`count`) doesn't run, and its node is absent too. A requested output that is absent is `ABSENT` in the
+   result.
+
+```python
+import fnloom
+import catalog
+
+driver = fnloom.build(catalog)
+driver.execute(["count", "first", "summary"], inputs={"item": ""})
+# -> {'count': 3, 'first': 'chair', 'summary': 'chair, desk, lamp'}
+driver.execute(["count", "first", "summary"], inputs={"item": "desk"})
+# -> {'count': fnloom.ABSENT, 'first': 'none', 'summary': 'not listed'}
+driver.nodes["count"].may_be_absent
+# -> True
+driver.nodes["summary"].params[0].admits_absent
+# -> True
+```
+
+The build knows which nodes may be absent: `NodeView.may_be_absent` says so for a node that declines, and for each node
+reading one by the third rule. So a node never receives `ABSENT` unless its parameter says it can, and a defaulted
+parameter reading a node that may be absent isn't a [shadowed default](#defaults-the-build-refuses): its default is
+used when the node declines.
+
+- `ABSENT` is a value of its own, distinct from `None`, which stays an ordinary value. Test for it with
+  `value is ABSENT` or `isinstance(value, Absent)`. It has no truth value: `bool(ABSENT)` is a `TypeError`, so
+  an absence is never read as a falsy value. It pickles and copies to itself.
+- Returning `ABSENT` from a node whose annotation doesn't admit `Absent` is a `TypeError` naming the node.
+- Edge checks read `list[str] | Absent` as `list[str]`, so it feeds each of the three kinds of parameter above.
+- An annotation admits `Absent` at its top level only, seen through `Annotated` and `type` aliases:
+  `list[str | Absent]` is a list that may hold `ABSENT`, not an absence.
+- When two parameters of one node read the same node that may be absent, as a `@parameterize` row can bind them,
+  they must agree on admitting `Absent`. Otherwise the build fails, naming the node, the source and the parameters.
+- `build_async()` refuses a node that declines, for now, naming it: the async driver doesn't follow these rules yet.
 
 ## Annotations
 

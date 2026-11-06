@@ -16,12 +16,16 @@ use crate::plan::Plan;
 /// The core graph as the binding instantiates it: every payload is a Python callable.
 pub type PyCoreGraph = CoreGraph<Py<PyAny>>;
 
-/// One node as Python declares it: `(name, [(param, required)], tags, fn)`.
+/// One node as Python declares it: `(name, [(source, kind, collect)], tags, fn, declines)`.
+///
+/// `kind` is `"required"`, `"optional"`, `"admits"` or `"admits_optional"`; `collect` is
+/// always `None` for now.
 type NodeTuple = (
     String,
-    Vec<(String, bool)>,
+    Vec<(String, String, Option<String>)>,
     BTreeMap<String, PyTagValue>,
     Py<PyAny>,
+    bool,
 );
 
 /// A tag value as Python gives it: a `str`, or a `tuple` of them.
@@ -60,11 +64,16 @@ type RenamesById = Vec<Vec<(NodeId, Py<PyString>)>>;
 
 #[pymethods]
 impl Graph {
-    /// Builds a graph from `(name, [(param, required)], tags, fn)` tuples.
+    /// Builds a graph from `(name, [(source, kind, collect)], tags, fn, declines)` tuples.
+    ///
+    /// Each `kind` is how the node reads that source: `"required"`, `"optional"` (it has
+    /// a default), `"admits"` (it receives `fnloom.ABSENT`) or `"admits_optional"` (that,
+    /// with a default). `collect` must be `None`. `declines` says whether the node may
+    /// return `fnloom.ABSENT`.
     ///
     /// `renames` maps a node to the inputs it is passed under another keyword: input
     /// name to keyword. Raises `ValueError` naming the culprits for a duplicate name or a
-    /// cycle, or naming a rename of a node or input the graph does not have.
+    /// cycle, a rename of a node or input the graph does not have, or an unknown kind.
     #[new]
     #[pyo3(signature = (nodes, renames = None))]
     fn new(
@@ -72,7 +81,10 @@ impl Graph {
         nodes: Vec<NodeTuple>,
         renames: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        let specs = nodes.into_iter().map(node_spec).collect();
+        let specs = nodes
+            .into_iter()
+            .map(node_spec)
+            .collect::<PyResult<Vec<_>>>()?;
         let graph = CoreGraph::build(specs).map_err(value_error)?;
         let keywords = graph
             .nodes()
@@ -101,6 +113,17 @@ impl Graph {
         self.core
             .nodes()
             .iter()
+            .map(|node| node.name.clone())
+            .collect()
+    }
+
+    /// The nodes whose value may be absent: each that declines, and each reading one of
+    /// them by a required edge, transitively; sorted.
+    fn may_be_absent(&self) -> Vec<String> {
+        self.core
+            .nodes()
+            .iter()
+            .filter(|node| node.may_be_absent)
             .map(|node| node.name.clone())
             .collect()
     }
@@ -181,19 +204,22 @@ impl Graph {
     }
 }
 
-fn node_spec((name, params, tags, function): NodeTuple) -> NodeSpec<Py<PyAny>> {
+fn node_spec((name, params, tags, function, declines): NodeTuple) -> PyResult<NodeSpec<Py<PyAny>>> {
     let inputs = params
         .into_iter()
-        .map(|(name, required)| InputSpec {
-            name,
-            dependency: if required {
-                Dependency::Required
-            } else {
-                Dependency::Optional
-            },
+        .map(|(source, kind, collect)| {
+            if let Some(mode) = collect {
+                return Err(PyValueError::new_err(format!(
+                    "node '{name}' collects '{source}' as '{mode}', but no collect mode is known"
+                )));
+            }
+            Ok(InputSpec {
+                dependency: dependency(&name, &source, &kind)?,
+                name: source,
+            })
         })
-        .collect();
-    NodeSpec {
+        .collect::<PyResult<Vec<_>>>()?;
+    Ok(NodeSpec {
         name,
         inputs,
         tags: tags
@@ -201,7 +227,21 @@ fn node_spec((name, params, tags, function): NodeTuple) -> NodeSpec<Py<PyAny>> {
             .map(|(key, value)| (key, value.into()))
             .collect(),
         payload: function,
-        declines: false,
+        declines,
+    })
+}
+
+/// The dependency a kind names; `ValueError` naming the node and source for another kind.
+fn dependency(node: &str, source: &str, kind: &str) -> PyResult<Dependency> {
+    match kind {
+        "required" => Ok(Dependency::Required),
+        "optional" => Ok(Dependency::Optional),
+        "admits" => Ok(Dependency::Admits { optional: false }),
+        "admits_optional" => Ok(Dependency::Admits { optional: true }),
+        _ => Err(PyValueError::new_err(format!(
+            "node '{node}' reads '{source}' as {kind:?}, which is no kind: one of \
+             'required', 'optional', 'admits' or 'admits_optional'"
+        ))),
     }
 }
 

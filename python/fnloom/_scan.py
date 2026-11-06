@@ -12,6 +12,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, NamedTuple
 
 from fnloom import _config, _extract, _resolve
+from fnloom._absence import Kind, dependency, merged
 from fnloom._config import (
     Condition,
     Found,
@@ -97,17 +98,21 @@ class NodeDef:
     replaced: str | None = None
 
 
-def core_inputs(params: tuple[Param, ...]) -> list[tuple[str, bool]]:
-    """The distinct sources `params` read, first-appearance order, with requiredness.
+def core_inputs(params: tuple[Param, ...]) -> list[tuple[str, Kind, None]]:
+    """The distinct sources `params` read, first-appearance order, with their kind.
 
-    A source is required when any parameter bound to it is.
+    A source read by several parameters has one kind, merged by `_absence.merged`:
+    `required` when any of them lacks a default, unless all admit `fnloom.Absent`.
+    The third element is the collect mode, `None` for now.
     """
-    required: dict[str, bool] = {}
+    by_source: dict[str, list[Param]] = {}
     for param in params:
         if isinstance(param.binding, Source):
-            name = param.binding.name
-            required[name] = required.get(name, False) or param.required
-    return list(required.items())
+            by_source.setdefault(param.binding.name, []).append(param)
+    return [
+        (name, dependency(read[0]) if len(read) == 1 else merged(read), None)
+        for name, read in by_source.items()
+    ]
 
 
 def _is_node(module: ModuleType, name: str, value: object) -> bool:

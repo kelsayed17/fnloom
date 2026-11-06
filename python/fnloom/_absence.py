@@ -1,0 +1,216 @@
+"""Typed absence: a node that may decline, and how each consumer reads it (Q135).
+
+A node whose return annotation admits `fnloom.Absent` may return `fnloom.ABSENT`.
+Each parameter reading a node that may be absent decides by its own signature:
+annotated to admit `Absent`, it receives `ABSENT`; with a default, it is left out
+and the default applies; otherwise its node is skipped, and absent too.
+"""
+
+import functools
+import operator
+import types
+import typing
+from typing import TYPE_CHECKING, Literal, Union
+
+from fnloom._core import ABSENT, Absent
+from fnloom._decorators import Source
+from fnloom._types import stripped
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
+    from collections.abc import Set as AbstractSet
+
+    from fnloom._scan import NodeDef
+    from fnloom._view import Param
+
+__all__ = [
+    "ABSENT",
+    "Absent",
+    "Kind",
+    "admits_absent",
+    "declines",
+    "dependency",
+    "may_be_absent",
+    "merged",
+    "needs_input",
+    "refuse_async",
+    "refuse_mixed",
+    "without_absent",
+]
+
+type Kind = Literal["required", "optional", "admits", "admits_optional"]
+
+# The kinds whose consumer needs an input supplied: they have no default.
+_NEEDS_INPUT: frozenset[str] = frozenset({"required", "admits"})
+
+
+def _members(annotation: object) -> list[object]:
+    """`annotation`'s top-level parts: a union's members, through aliases, flattened.
+
+    `Annotated` metadata and PEP 695 aliases are read through, at every level of
+    the union; a generic's arguments are never read. Iterative, so an alias naming
+    a union of aliases is read without recursion; one met twice is read once.
+    """
+    found: list[object] = []
+    seen: list[object] = []
+    work = [annotation]
+    while work:
+        current = stripped(work.pop())
+        if typing.get_origin(current) in {Union, types.UnionType}:
+            for member in reversed(typing.get_args(current)):
+                if member not in seen:
+                    seen.append(member)
+                    work.append(member)
+        else:
+            found.append(current)
+    return found
+
+
+def admits_absent(annotation: object) -> bool:
+    """Whether `annotation` admits `Absent` at its top level.
+
+    True for `Absent` itself, or a union holding it, seen through `Annotated` and
+    PEP 695 aliases. A generic's arguments are not read: `list[int | Absent]`
+    admits a list, not an absence.
+    """
+    if isinstance(annotation, type):
+        # The common case, and no union: a class is `Absent` or not.
+        return annotation is Absent
+    return any(member is Absent for member in _members(annotation))
+
+
+def without_absent(annotation: object) -> object:
+    """`annotation` with `Absent` taken out of its top level, for an edge check.
+
+    `float | Absent` is `float`, and `float | int | Absent` is `float | int`. An
+    annotation that does not admit `Absent`, or is `Absent` alone, is returned as
+    it is.
+    """
+    if not admits_absent(annotation):
+        return annotation
+    rest = [member for member in _members(annotation) if member is not Absent]
+    if not rest:
+        return annotation
+    if len(rest) == 1:
+        return rest[0]
+    return functools.reduce(operator.or_, rest)
+
+
+def declines(node: NodeDef) -> bool:
+    """Whether `node` may return `ABSENT`: its return annotation admits `Absent`."""
+    return admits_absent(node.returns)
+
+
+def dependency(param: Param) -> Kind:
+    """How one parameter reads its source.
+
+    `admits` when its annotation admits `Absent`, or `admits_optional` with a
+    default; otherwise `optional` with a default, and `required` without.
+    """
+    if param.admits_absent:
+        return "admits" if param.required else "admits_optional"
+    return "required" if param.required else "optional"
+
+
+def merged(params: Sequence[Param]) -> Kind:
+    """The one kind of a source read by every parameter of `params`.
+
+    When each of them admits `Absent`, it is `admits`, or `admits_optional` when
+    each also has a default. Otherwise it is `required` when any lacks a default,
+    and `optional` when all have one. Parameters that disagree on admitting
+    `Absent` can only share a source that can't be absent: `refuse_mixed`.
+    """
+    if all(param.admits_absent for param in params):
+        return (
+            "admits" if any(param.required for param in params) else "admits_optional"
+        )
+    return "required" if any(param.required for param in params) else "optional"
+
+
+def needs_input(kind: Kind) -> bool:
+    """Whether a consumer reading an input by `kind` needs it supplied."""
+    return kind in _NEEDS_INPUT
+
+
+def _sources(params: Iterable[Param]) -> dict[str, list[Param]]:
+    """The parameters bound to each source, by source, in first-appearance order."""
+    by_source: dict[str, list[Param]] = {}
+    for param in params:
+        if isinstance(param.binding, Source):
+            by_source.setdefault(param.binding.name, []).append(param)
+    return by_source
+
+
+def may_be_absent(nodes: Sequence[NodeDef]) -> frozenset[str]:
+    """The nodes whose value may be absent: they decline, or read one by `required`.
+
+    The same set the core computes at build (`Graph.may_be_absent`), known here
+    before the graph is, for the views. A reachability, found with a worklist.
+    """
+    declining = [node.name for node in nodes if declines(node)]
+    if not declining:
+        return frozenset[str]()
+    defined = {node.name for node in nodes}
+    required_by: dict[str, list[str]] = {}
+    for node in nodes:
+        for source, params in _sources(node.params).items():
+            if source in defined and merged(params) == "required":
+                required_by.setdefault(source, []).append(node.name)
+    found = set(declining)
+    work = list(declining)
+    while work:
+        for consumer in required_by.get(work.pop(), ()):
+            if consumer not in found:
+                found.add(consumer)
+                work.append(consumer)
+    return frozenset(found)
+
+
+def _shown(params: Iterable[Param]) -> str:
+    """The parameters' names, quoted and joined, a group item with its slot."""
+    return ", ".join(
+        repr(param.name) if param.slot is None else f"'{param.name}[{param.slot!r}]'"
+        for param in params
+    )
+
+
+def refuse_mixed(nodes: Sequence[NodeDef], absent: AbstractSet[str]) -> None:
+    """`ValueError` for each source that may be absent and that parameters disagree on.
+
+    One source read by several parameters of a node has one kind (`merged`); when
+    some admit `Absent` and others don't, no kind gives each what it says, unless
+    the source can't be absent. Every culprit is listed, sorted.
+    """
+    if not absent:
+        return
+    lines: list[str] = []
+    for node in nodes:
+        for source, params in _sources(node.params).items():
+            if source not in absent or len(params) < 2:  # noqa: PLR2004  # a pair can disagree
+                continue
+            admitting = [param for param in params if param.admits_absent]
+            others = [param for param in params if not param.admits_absent]
+            if admitting and others:
+                lines.append(
+                    f"mixed absence handling: {node.name!r} reads {source!r}, which "
+                    "may be absent, through parameters that admit fnloom.Absent "
+                    f"({_shown(admitting)}) and parameters that do not "
+                    f"({_shown(others)}); annotate them alike, or read it once"
+                )
+    if lines:
+        raise ValueError("; ".join(sorted(lines)))
+
+
+def refuse_async(nodes: Sequence[NodeDef]) -> None:
+    """`TypeError` naming, sorted, each node that declines, for `build_async`.
+
+    The async driver's walk doesn't follow the three rules yet, so it would pass
+    `ABSENT` to a parameter that doesn't admit it. Until it does, it refuses.
+    """
+    if declining := sorted(node.name for node in nodes if declines(node)):
+        listed = ", ".join(repr(name) for name in declining)
+        msg = (
+            f"build_async() does not run a node that may decline yet: {listed}; "
+            "build() does"
+        )
+        raise TypeError(msg)

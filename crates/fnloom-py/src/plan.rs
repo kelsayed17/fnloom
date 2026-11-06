@@ -6,11 +6,12 @@ use std::sync::Arc;
 use fnloom_core::node::{Node, NodeId};
 use fnloom_core::plan::{Action, Plan as CorePlan};
 use fnloom_core::run::{Arg, Evaluate, Observer};
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{PyTraverseError, PyVisit};
 
+use crate::absent::{self, Absent};
 use crate::errors::{caught, run_error};
 use crate::graph::Graph;
 use crate::keys::Keys;
@@ -119,6 +120,7 @@ impl Plan {
             &mut Caller {
                 kwargs: &kwargs,
                 shared,
+                absent: absent::singleton(py)?,
             },
             lookup,
             &mut hooks,
@@ -240,6 +242,8 @@ struct Caller<'k, 'py, 'g> {
     /// Whether observers may have left a node's dict in `kwargs`; `false` for a run with
     /// none, which then only ever builds one.
     shared: bool,
+    /// `fnloom.ABSENT`, which results are compared with by identity.
+    absent: &'static Py<Absent>,
 }
 
 impl Evaluate<Py<PyAny>> for Caller<'_, '_, '_> {
@@ -252,7 +256,12 @@ impl Evaluate<Py<PyAny>> for Caller<'_, '_, '_> {
         function: &Py<PyAny>,
         args: &[Arg<'_, Value>],
     ) -> PyResult<Value> {
-        caught(|| self.call(node.id, function, args))
+        caught(|| self.call(node, function, args))
+    }
+
+    /// Whether `value` is `fnloom.ABSENT`, by identity.
+    fn is_absent(&self, value: &Value) -> bool {
+        value.as_ptr() == self.absent.as_ptr()
     }
 }
 
@@ -294,18 +303,33 @@ impl Observer<Value, PyErr> for ValueHook<'_, '_> {
 
 impl Caller<'_, '_, '_> {
     /// Calls `function`, the payload of `consumer`, with `args` as keyword arguments.
+    ///
+    /// A `TypeError` when the function returns `fnloom.ABSENT` but `consumer` does not
+    /// decline: its return annotation does not admit `fnloom.Absent`.
     fn call(
         &self,
-        consumer: NodeId,
+        consumer: &Node<Py<PyAny>>,
         function: &Py<PyAny>,
         args: &[Arg<'_, Value>],
     ) -> PyResult<Value> {
         let kwargs = if self.shared {
-            self.kwargs.for_call(consumer, args)?
+            self.kwargs.for_call(consumer.id, args)?
         } else {
-            self.kwargs.build(consumer, args)?
+            self.kwargs.build(consumer.id, args)?
         };
         let result = function.bind(self.kwargs.py).call((), Some(&kwargs))?;
+        if !consumer.declines && result.as_ptr() == self.absent.as_ptr() {
+            return Err(undeclared_absence(&consumer.name));
+        }
         Ok(Arc::new(result.unbind()))
     }
+}
+
+/// The `TypeError` for `node` returning `fnloom.ABSENT` without declaring it may.
+#[cold]
+fn undeclared_absence(node: &str) -> PyErr {
+    PyTypeError::new_err(format!(
+        "node '{node}' returned fnloom.ABSENT, but its return annotation does not admit \
+         fnloom.Absent"
+    ))
 }

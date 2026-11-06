@@ -11,7 +11,7 @@ from fnloom._checks import (
     check_output_custom,
 )
 from fnloom._config import Condition, config
-from fnloom._core import UnfingerprintableError
+from fnloom._core import ABSENT, Absent, UnfingerprintableError
 from fnloom._decorators import (
     CachePolicy,
     FieldCache,
@@ -78,8 +78,10 @@ from fnloom.driver import (
 __version__ = _version("fnloom")
 
 __all__ = [
+    "ABSENT",
     "ANY",
     "MISSING",
+    "Absent",
     "AsyncDriver",
     "AsyncPreparedPlan",
     "BuildEnd",

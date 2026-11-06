@@ -104,7 +104,7 @@ def calls(nodes: Mapping[str, NodeDef], sync_nodes: SyncNodes) -> dict[str, Call
             kind = sync_nodes
         args = tuple(
             (source, node.renames.get(source, source))
-            for source, _ in core_inputs(node.params)
+            for source, _, _ in core_inputs(node.params)
         )
         found[name] = Call(node.payload, kind, args)
     return found
