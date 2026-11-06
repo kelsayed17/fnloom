@@ -109,7 +109,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `"required"`, `"optional"`, `"admits"` or `"admits_optional"`; it was `(name, [(source, required)], tags,
   fn)`. `_scan.core_inputs` returns the same triples.
 - Rust core: `NodeSpec` has a new field, `declines`; a spec built with struct syntax sets it, `false` for a node
-  that never declines. `Dependency` has a third variant, `Admits`, so a `match` on it needs an arm for it.
+  that never declines. `Dependency` has a third variant, `Admits`, and `BuildError` a new one, `ConflictingInput`,
+  so a `match` on either needs an arm for it.
 - Without Graphviz, a drawing's `_repr_svg_` (Jupyter's preview) is the builtin SVG, where it was `None`. The
   `FileNotFoundError` for a missing `dot` gives the platform's install command (`brew install graphviz`, `apt-get
   install graphviz`, `winget install graphviz`), and names `.mmd`, `.dot` and, for an SVG, `engine="builtin"` as the

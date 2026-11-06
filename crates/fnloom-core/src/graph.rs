@@ -420,7 +420,7 @@ mod tests {
         );
         assert_eq!(
             err.to_string(),
-            "node 'b' reads input 'a' twice, with different dependencies; list it once"
+            "node 'b' reads 'a' twice, with different dependencies; list it once"
         );
         // Listed twice alike, it is one edge.
         let graph = Graph::build(vec![spec(Dependency::Required)]).unwrap();

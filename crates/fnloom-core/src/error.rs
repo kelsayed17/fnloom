@@ -42,7 +42,7 @@ impl fmt::Display for BuildError {
             Self::DuplicateName { name } => write!(f, "duplicate node name '{name}'"),
             Self::ConflictingInput { node, input } => write!(
                 f,
-                "node '{node}' reads input '{input}' twice, with different dependencies; \
+                "node '{node}' reads '{input}' twice, with different dependencies; \
                  list it once"
             ),
             Self::Cycle { path } => write!(f, "dependency cycle: {}", quoted(path, " -> ")),
