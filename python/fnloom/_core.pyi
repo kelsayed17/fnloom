@@ -1,5 +1,5 @@
 from collections.abc import Callable, Mapping, Sequence
-from typing import Any, Final, Literal, NoReturn, Self, final, override
+from typing import Any, Final, Literal, Never, NoReturn, Self, final, override
 
 __all__ = [
     "ABSENT",
@@ -29,6 +29,8 @@ class UnfingerprintableError(TypeError):
 
 @final
 class Absent:
+    # `ABSENT` is the only instance: calling the class is a `TypeError`.
+    def __new__(cls, never: Never, /) -> NoReturn: ...
     def __bool__(self) -> NoReturn: ...
     @override
     def __reduce__(self) -> str: ...

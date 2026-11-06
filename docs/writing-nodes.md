@@ -328,18 +328,23 @@ driver.nodes["summary"].params[0].admits_absent
 The build knows which nodes may be absent: `NodeView.may_be_absent` says so for a node that declines, and for each node
 reading one by the third rule. So a node never receives `ABSENT` unless its parameter says it can, and a defaulted
 parameter reading a node that may be absent isn't a [shadowed default](#defaults-the-build-refuses): its default is
-used when the node declines.
+used when the node declines. That holds when each parameter of its node reading that node has a default; with one
+that has none, the node is skipped instead, so the default is still never used, and still refused.
 
 - `ABSENT` is a value of its own, distinct from `None`, which stays an ordinary value. Test for it with
   `value is ABSENT` or `isinstance(value, Absent)`. It has no truth value: `bool(ABSENT)` is a `TypeError`, so
   an absence is never read as a falsy value. It pickles and copies to itself.
 - Returning `ABSENT` from a node whose annotation doesn't admit `Absent` is a `TypeError` naming the node.
-- Edge checks read `list[str] | Absent` as `list[str]`, so it feeds each of the three kinds of parameter above.
+- Edge checks read `list[str] | Absent` as `list[str]`, so it feeds each of the three kinds of parameter above. A
+  node annotated `-> Absent` alone never gives a value, so it feeds any parameter: one that doesn't admit `Absent`
+  is skipped, or takes its default.
 - An annotation admits `Absent` at its top level only, seen through `Annotated` and `type` aliases:
   `list[str | Absent]` is a list that may hold `ABSENT`, not an absence.
 - When two parameters of one node read the same node that may be absent, as a `@parameterize` row can bind them,
   they must agree on admitting `Absent`. Otherwise the build fails, naming the node, the source and the parameters.
 - `build_async()` refuses a node that declines, for now, naming it: the async driver doesn't follow these rules yet.
+  A node there that returns `ABSENT` without admitting it is the same `TypeError` as with `build()`, whether it is
+  an `async def` or a sync function.
 
 ## Annotations
 

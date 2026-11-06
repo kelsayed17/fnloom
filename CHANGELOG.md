@@ -87,8 +87,10 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `Param.admits_absent` say so before anything runs. Returning `ABSENT` without admitting it is a `TypeError`
   naming the node. Edge checks read `T | Absent` as `T`. Two parameters of one node reading one source that may
   be absent must agree on admitting `Absent`, or the build fails naming the node, the source and both. `ABSENT`
-  pickles and copies to itself, and `bool(ABSENT)` is a `TypeError`: compare with `is ABSENT`.
-  `build_async()` refuses a node that declines until the async driver follows these rules.
+  pickles and copies to itself, and `bool(ABSENT)` is a `TypeError`: compare with `is ABSENT`. A node annotated
+  `-> Absent` alone feeds any parameter, which it never gives a value. `build_async()` refuses a node that declines
+  until the async driver follows these rules, and a node that returns `ABSENT` there without admitting it is the same
+  `TypeError`, from an `async def` node or a sync one.
 - Rust core: absence. `Dependency::Admits { optional }` is a third way to read an input, `NodeSpec.declines` marks a
   node whose value may be absent, and `Node.may_be_absent` is known at build. `Evaluate::is_absent` (default
   `false`) recognises an absent value, and `Observer::skipped(node, branch)` reports a node skipped because a
@@ -100,7 +102,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
 ### Changed
 
 - A parameter with a default that reads a node that may be absent, and doesn't admit `Absent`, is no longer a
-  shadowed default: its default is used when the node declines (Q76, Q135).
+  shadowed default when every parameter of its node reading that node has a default: its default is used when the
+  node declines. One that shares the source with a parameter without a default is still refused, since its node is
+  then skipped instead (Q76, Q135).
 - The native `_core.Graph` takes each node as `(name, [(source, kind, None)], tags, fn, declines)`, where `kind` is
   `"required"`, `"optional"`, `"admits"` or `"admits_optional"`; it was `(name, [(source, required)], tags,
   fn)`. `_scan.core_inputs` returns the same triples.

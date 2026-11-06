@@ -10,7 +10,7 @@ import functools
 import operator
 import types
 import typing
-from typing import TYPE_CHECKING, Literal, Union
+from typing import TYPE_CHECKING, Any, Literal, Union
 
 from fnloom._core import ABSENT, Absent
 from fnloom._decorators import Source
@@ -83,14 +83,15 @@ def without_absent(annotation: object) -> object:
     """`annotation` with `Absent` taken out of its top level, for an edge check.
 
     `float | Absent` is `float`, and `float | int | Absent` is `float | int`. An
-    annotation that does not admit `Absent`, or is `Absent` alone, is returned as
-    it is.
+    annotation that does not admit `Absent` is returned as it is. `Absent` alone
+    leaves nothing, and is `Any`, no constraint: such a node never gives a value,
+    so a consumer that does not admit `Absent` is skipped, never fed.
     """
     if not admits_absent(annotation):
         return annotation
     rest = [member for member in _members(annotation) if member is not Absent]
     if not rest:
-        return annotation
+        return Any
     if len(rest) == 1:
         return rest[0]
     return functools.reduce(operator.or_, rest)

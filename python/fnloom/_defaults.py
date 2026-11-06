@@ -6,11 +6,13 @@ from typing import TYPE_CHECKING
 
 from fnloom._config import _is_bool
 from fnloom._decorators import Source, decorations
+from fnloom._scan import core_inputs
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
     from collections.abc import Set as AbstractSet
 
+    from fnloom._absence import Kind
     from fnloom._scan import NodeDef
 
 # The least number of consumers that can disagree.
@@ -30,9 +32,11 @@ def default_problems(
     give different defaults is a different value for each (`differing`).
     `@defaults` on the consumer opts a parameter out of either. Sorted.
 
-    A node of `absent` may be absent, and then a parameter reading it that does
-    not admit `fnloom.Absent` takes its default (Q135): that default is used, so
-    it is not shadowed.
+    A node of `absent` may be absent, and then a source its consumer reads by
+    `optional` is left out, so the consumer's defaults apply (Q135): they are
+    used, so not shadowed. Read by `required` too, through a parameter with no
+    default, the consumer is skipped instead, and its defaults are still never
+    used.
 
     A consumer that opts out of `differing` is left out of the comparison, so
     opting out every consumer but one settles it: the rest then agree.
@@ -43,13 +47,19 @@ def default_problems(
     readers: dict[str, list[tuple[str, str, Callable[..., object]]]] = {}
     for node in nodes:
         recorded = decorations(node.origin).defaults
+        kinds: dict[str, Kind] | None = None
         for param in node.params:
             if param.required or not isinstance(param.binding, Source):
                 continue
             read = param.binding.name
             if read in computed:
-                if read in absent and not param.admits_absent:
-                    continue
+                if read in absent:
+                    # The merged kind, as the core reads the source: only an
+                    # `optional` read is left out, and its default used.
+                    if kinds is None:
+                        kinds = {s: k for s, k, _ in core_inputs(node.params)}
+                    if kinds[read] == "optional":
+                        continue
                 if recorded is None or param.name not in recorded.shadowed:
                     lines.append(_shadowed(node.name, param.name, read))
             elif recorded is None or param.name not in recorded.differing:
