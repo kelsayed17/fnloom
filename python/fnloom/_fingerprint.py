@@ -250,8 +250,10 @@ def _model(value: Any, fields: dict[str, Any]) -> object | None:  # noqa: ANN401
 
     The names set (`model_dump(exclude_unset=True)` reads them) as a sorted tuple,
     since a set of strings iterates in an order the hash seed sets. Extra fields and
-    private attributes follow, by name. A model that is not frozen, or one built
-    without a field (`model_construct`), is refused.
+    private attributes follow, by name. A field or other state holding a set is
+    fingerprinted with its sets' members sorted, so a model keys a `DiskCache` the
+    same in every process. A model that is not frozen, or one built without a field
+    (`model_construct`), is refused.
     """
     if not type(value).model_config.get("frozen", False):
         return None
@@ -261,10 +263,46 @@ def _model(value: Any, fields: dict[str, Any]) -> object | None:  # noqa: ANN401
         return None
     set_names = tuple(sorted(value.__pydantic_fields_set__))
     names = frozenset(fields) | {"__pydantic_fields_set__"}
-    return (*items, set_names, _extra_state(value, names))
+    extra = tuple(
+        (name, _seed_stable(item)) for name, item in _extra_state(value, names)
+    )
+    return (*(_seed_stable(item) for item in items), set_names, extra)
 
 
-def _extra_state(value: object, known: frozenset[str]) -> tuple[object, ...]:
+class _SeedStable:
+    """A value holding a set, by its fingerprint the same on every hash seed."""
+
+    __slots__ = ("digest",)
+
+    def __init__(self, digest: bytes) -> None:
+        self.digest = digest
+
+    def __fnloom_fingerprint__(self) -> bytes:
+        """The digest, fingerprinted under this class, so no other value has it."""
+        return self.digest
+
+
+def _seed_stable(item: object) -> object:
+    """`item` itself, or for one holding a set, its seed-stable fingerprint.
+
+    The stable fingerprint is the one code versions and `value()` bindings take: each
+    set's members sorted. A value it can't write (holding itself, too deep, or one it
+    refuses) stays as it is, so the plain walk refuses it with its path.
+    """
+    # Imported here: `_canonical` imports this module.
+    from fnloom._canonical import _holds_a_set, stable_fingerprint  # noqa: PLC0415
+
+    if not _holds_a_set(item):
+        return item
+    try:
+        return _SeedStable(stable_fingerprint(item))
+    except Exception:  # noqa: BLE001  # the plain walk says why
+        return item
+
+
+def _extra_state(
+    value: object, known: frozenset[str]
+) -> tuple[tuple[str, object], ...]:
     """`value`'s instance attributes outside `known`, as sorted `(name, value)` pairs.
 
     Both its `__dict__` and any slots set, from every class in its MRO.

@@ -4,6 +4,7 @@ fnloom never imports pydantic; these tests do, up front, as the shared fixture
 forgets the modules a test imports first.
 """
 
+import os
 import subprocess
 import sys
 import textwrap
@@ -13,6 +14,7 @@ import pytest
 
 from fnloom import UnfingerprintableError, fingerprint, register_fingerprint
 from fnloom._codeversion import UncacheableError, class_version, code_version
+from fnloom._fingerprint import _model
 from helpers import make_module
 from test_hooks import Recorder
 from test_hooks_cache import HIT, MISS, Cached, Kind, StoreKind
@@ -431,3 +433,104 @@ def test_a_node_reading_models_and_a_newtype_hits(
     assert [e.cache for e in hook.events if hasattr(e, "cache")] == [HIT, HIT]
     assert cached.explain(["params"], inputs=inputs(name="b")) == {"params": MISS}
     assert cached.explain(["params"], inputs=inputs(scale=3)) == {"params": MISS}
+
+
+SET_MODELS = """
+from pydantic import BaseModel, ConfigDict, PrivateAttr
+
+
+class Tags(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="allow")
+    tags: frozenset[str]
+    loose: set[str] = set()
+    _seen: frozenset[str] = PrivateAttr(default=frozenset())
+
+
+class Nested(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    inner: Tags
+    many: tuple[Tags, ...] = ()
+
+
+class Mapped(BaseModel):
+    model_config = ConfigDict(frozen=True)
+    groups: dict[str, frozenset[str]]
+
+
+def with_seen(model: Tags, seen: frozenset[str]) -> Tags:
+    object.__setattr__(model, "__pydantic_private__", {"_seen": seen})
+    return model
+"""
+
+# Enough strings that their iteration order differs between hash seeds.
+_WORDS = "{'alpha', 'beta', 'gamma', 'delta', 'epsilon', 'zeta', 'eta', 'theta'}"
+
+_SET_VALUES = {
+    "direct": f"m.Tags(tags=frozenset({_WORDS}), loose={_WORDS})",
+    "extra": f"m.Tags(tags=frozenset(), more=frozenset({_WORDS}))",
+    "private": f"m.with_seen(m.Tags(tags=frozenset()), frozenset({_WORDS}))",
+    "nested": f"m.Nested(inner=m.Tags(tags={_WORDS}), many=(m.Tags(tags={_WORDS}),))",
+    "mapped": f"m.Mapped(groups={{'a': frozenset({_WORDS}), 'b': frozenset()}})",
+}
+
+_SET_SCRIPT = """
+import fnloom, set_models as m
+print(fnloom.fingerprint({value}).hex())
+"""
+
+
+def _set_fingerprint_in_subprocess(value: str, seed: str, folder: Path) -> str:
+    """The hex fingerprint of `value`, taken by a fresh interpreter with `seed`."""
+    result = subprocess.run(  # noqa: S603  # runs this interpreter on fixed code
+        [sys.executable, "-c", _SET_SCRIPT.format(value=value)],
+        capture_output=True,
+        check=True,
+        text=True,
+        env={**os.environ, "PYTHONHASHSEED": seed, "PYTHONPATH": str(folder)},
+    )
+    return result.stdout.strip()
+
+
+@pytest.mark.parametrize("value", sorted(_SET_VALUES))
+def test_a_model_holding_a_set_is_the_same_on_every_hash_seed(
+    value: str, tmp_path: Path
+) -> None:
+    """A set in a field, an extra, a private attribute or a nested model is sorted.
+
+    So a `DiskCache` keyed by such a model, as an input or a `value()` binding, hits
+    from another process.
+    """
+    (tmp_path / "set_models.py").write_text(textwrap.dedent(SET_MODELS))
+    found = {
+        _set_fingerprint_in_subprocess(_SET_VALUES[value], seed, tmp_path)
+        for seed in ("0", "1", "2", "12345")
+    }
+    assert len(found) == 1
+    assert len(found.pop()) == 2 * 32
+
+
+def test_a_model_holding_a_set_still_tells_members_apart() -> None:
+    """Sorting keeps the content: another member, or a set for a tuple, differs."""
+    models = make_module("pydantic_set_models", SET_MODELS)
+    one = fingerprint(models.Tags(tags=frozenset({"a", "b"})))
+    assert fingerprint(models.Tags(tags=frozenset({"b", "a"}))) == one
+    assert fingerprint(models.Tags(tags=frozenset({"a", "c"}))) != one
+    assert fingerprint(models.Tags(tags=frozenset({"a"}))) != one
+    assert fingerprint(models.Tags(tags=frozenset({"a", "b"}), loose={"a"})) != one
+    mapped = fingerprint(models.Mapped(groups={"k": frozenset({"a", "b"})}))
+    assert fingerprint(models.Mapped(groups={"k": frozenset({"b", "a"})})) == mapped
+    assert fingerprint(models.Mapped(groups={"j": frozenset({"a", "b"})})) != mapped
+    open_tuple = fingerprint(models.Tags(tags=frozenset(), more=("a", "b")))
+    open_set = fingerprint(models.Tags(tags=frozenset(), more=frozenset({"a", "b"})))
+    assert open_tuple != open_set
+
+
+def test_a_model_without_a_set_keeps_its_form() -> None:
+    """A model holding no set is fingerprinted from its own field values, as before."""
+    models = _models()
+    inner = models.Frozen(x=1)
+    holder = models.Holder(inner=inner, items=(1, 2))
+    form = _model(holder, type(holder).__pydantic_fields__)
+    assert isinstance(form, tuple)
+    assert form[0] is inner
+    assert form[1] == (1, 2)

@@ -388,7 +388,10 @@ These can be fingerprinted:
 - dataclass instances and named tuples, by type and fields, then any other attribute set on the instance (in its
   `__dict__` or a slot, by `__post_init__` or later), by name;
 - frozen pydantic models (`model_config = ConfigDict(frozen=True)`), by type and fields in order, then the names of
-  the fields set, extra fields and private attributes. A model that is not frozen needs a registration;
+  the fields set, extra fields and private attributes. A `set` or `frozenset` anywhere in these (a `frozenset[str]`
+  field, a `dict[str, frozenset[str]]`, a nested model's) counts by its members sorted, so a model keys the cache the
+  same in every process, and a node that reads such a set's order may get a result made under another order. A model
+  that is not frozen needs a registration;
 - a value of a class from your own code (a dataclass, a named tuple, an enum, a pydantic model, or one you
   registered) also by its class's code version, so editing a method its nodes call misses. A class holding a mutable
   class attribute cannot be versioned, so its values cannot be fingerprinted;
@@ -450,7 +453,7 @@ are refused although they look plain:
   `PYTHONHASHSEED` is set. Its fingerprint follows that order, so an input holding one misses in each new process
   with `DiskCache`. Pass a sorted tuple instead, or fix `PYTHONHASHSEED`, to share results across processes. A
   `set` or `frozenset` a node's code reads, as a global or a default, is versioned by its members sorted, the same in
-  every process.
+  every process, and so is one inside a frozen pydantic model.
 - An object of a type fnloom does not know that exposes a buffer (a `bytes` subclass, a `ctypes` value) is hashed
   by its type's name, its buffer and the attributes set on the instance, so state held elsewhere (in memory a
   `ctypes` pointer reaches, say) is not seen.

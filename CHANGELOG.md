@@ -41,6 +41,14 @@ change the public API; such changes are listed under **Changed** and **Removed**
   that never declines. `Dependency` has a third variant, `Admits`, and `BuildError` a new one, `ConflictingInput`,
   so a `match` on either needs an arm for it.
 
+### Fixed
+
+- A frozen pydantic model holding a `set` or `frozenset` (in a field, a nested model, a container such as
+  `dict[str, frozenset[str]]`, an extra field or a private attribute) is fingerprinted the same on every
+  `PYTHONHASHSEED`: each set's members are sorted, as for a code version. Such a model used to key `DiskCache`
+  differently in each process, so it missed (never a stale hit). Its cache key changes once, even under a fixed
+  `PYTHONHASHSEED`; a model holding no set keeps its key.
+
 ## [0.4.0] - 2026-11-05
 
 ### Added
