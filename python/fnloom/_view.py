@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import TYPE_CHECKING, NamedTuple, override
 
+from fnloom._absence import admits_absent
 from fnloom._config import Condition
 from fnloom._decorators import Source, Value
 from fnloom._resolve import original
@@ -42,6 +43,14 @@ class Param:
     annotation: object
     slot: int | str | None = None
 
+    @property
+    def admits_absent(self) -> bool:
+        """Whether the annotation admits `fnloom.Absent` at its top level (Q135).
+
+        Such a parameter receives `fnloom.ABSENT` when the node it reads declines.
+        """
+        return admits_absent(self.annotation)
+
 
 @dataclass(frozen=True)
 class NodeView:
@@ -58,6 +67,10 @@ class NodeView:
     namespaced, and for a node of a module given without one (Q74).
     `replaced` names the module whose node of this name this one replaced, by
     `with_modules(..., replace=...)`, and is `None` otherwise (Q150).
+    `may_be_absent` says whether the node's value may be `fnloom.ABSENT`: its
+    return annotation admits `fnloom.Absent`, or a parameter without a default and
+    not admitting it reads a node that may be absent (Q135). It is `False` for an
+    input, which is never absent.
     """
 
     name: str
@@ -71,6 +84,7 @@ class NodeView:
     config: tuple[Condition, ...] = ()
     namespace: str | None = None
     replaced: str | None = None
+    may_be_absent: bool = False
 
     @property
     def dependencies(self) -> tuple[str, ...]:
@@ -354,13 +368,16 @@ def _doc(fn: Callable[..., object]) -> str | None:
 
 
 def node_views(
-    nodes: Sequence[NodeDef], generated: AbstractSet[str] = frozenset()
+    nodes: Sequence[NodeDef],
+    generated: AbstractSet[str] = frozenset(),
+    absent: AbstractSet[str] = frozenset(),
 ) -> NodeViews:
     """The views of `nodes` and of the inputs they read, read-only, sorted by name.
 
     `nodes` carry resolved annotations. `ValueError` when two of an input's
     consumers declare types that match neither way. `generated` names the nodes
-    made from a function's output, such as extracted fields.
+    made from a function's output, such as extracted fields, and `absent` the
+    nodes whose value may be absent.
     """
     # Positional, every field in order: a view is made per node, so it is kept cheap.
     functions = {
@@ -376,6 +393,7 @@ def node_views(
             node.config,
             node.namespace,
             node.replaced,
+            node.name in absent,
         )
         for node in nodes
     }

@@ -11,6 +11,13 @@ pub enum BuildError {
         /// The repeated name.
         name: String,
     },
+    /// One spec lists an input twice, with different dependencies.
+    ConflictingInput {
+        /// The node whose spec lists it.
+        node: String,
+        /// The input it lists twice.
+        input: String,
+    },
     /// The dependencies form a cycle.
     Cycle {
         /// Node names along the cycle in traversal order; the first name is repeated at the end.
@@ -33,6 +40,11 @@ impl fmt::Display for BuildError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::DuplicateName { name } => write!(f, "duplicate node name '{name}'"),
+            Self::ConflictingInput { node, input } => write!(
+                f,
+                "node '{node}' reads '{input}' twice, with different dependencies; \
+                 list it once"
+            ),
             Self::Cycle { path } => write!(f, "dependency cycle: {}", quoted(path, " -> ")),
         }
     }

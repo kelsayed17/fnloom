@@ -40,6 +40,7 @@ fn node(name: &str, reads: &[&str], constant: i64) -> NodeSpec<i64> {
             .collect(),
         tags: BTreeMap::new(),
         payload: constant,
+        declines: false,
     }
 }
 

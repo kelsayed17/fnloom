@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, override
 
 from fnloom import _extract
 from fnloom._caching import HIT_PLAN_CACHE_SIZE
+from fnloom._core import ABSENT
 from fnloom._scan import core_inputs
 
 if TYPE_CHECKING:
@@ -104,7 +105,7 @@ def calls(nodes: Mapping[str, NodeDef], sync_nodes: SyncNodes) -> dict[str, Call
             kind = sync_nodes
         args = tuple(
             (source, node.renames.get(source, source))
-            for source, _ in core_inputs(node.params)
+            for source, _, _ in core_inputs(node.params)
         )
         found[name] = Call(node.payload, kind, args)
     return found
@@ -313,6 +314,20 @@ def _awaitable_refusal(node: str, value: object) -> TypeError:
     return TypeError(msg)
 
 
+def _undeclared_absence(node: str) -> TypeError:
+    """The error for a node that returned `fnloom.ABSENT` without declaring it may.
+
+    The sync driver's binding raises the same. Every node here is one whose return
+    annotation does not admit `fnloom.Absent`, since `build_async()` refuses a
+    node that declines (`_absence.refuse_async`), so any `ABSENT` is refused.
+    """
+    msg = (
+        f"node {node!r} returned fnloom.ABSENT, but its return annotation does "
+        "not admit fnloom.Absent"
+    )
+    return TypeError(msg)
+
+
 def _cancellation(name: str, future: asyncio.Future[object]) -> BaseException:
     """What a node's future, cancelled other than by its run, is raised as.
 
@@ -469,6 +484,9 @@ class _Run:
         if inspect.isawaitable(value):
             self._fail(name, _awaitable_refusal(name, value))
             return False
+        if value is ABSENT:
+            self._fail(name, _undeclared_absence(name))
+            return False
         return self._store(name, value)
 
     def _started(
@@ -516,6 +534,9 @@ class _Run:
         value = future.result()
         if kind == "thread" and inspect.isawaitable(value):
             self._fail(name, _awaitable_refusal(name, value))
+            return False
+        if value is ABSENT:
+            self._fail(name, _undeclared_absence(name))
             return False
         return self._store(name, value)
 

@@ -1,5 +1,6 @@
 //! Instruction-count benchmarks of the core: `Graph::build`, `Graph::prepare` and `Plan::run`,
-//! each on chain, fan-in and layered graphs of 1,000 and 10,000 nodes.
+//! each on chain, fan-in and layered graphs of 1,000 and 10,000 nodes, and `Plan::run` on a
+//! 200-node chain whose first node declines (`skip_chain_200`).
 //!
 //! Wall-clock time is too noisy on shared CI runners to gate on, so the regression gate
 //! compares instruction counts measured under callgrind (see `scripts/bench_gate.py`).
@@ -69,6 +70,37 @@ mod suite {
         }
     }
 
+    /// The value `Declines` gives a declining node, and recognises as absent.
+    const ABSENT: i64 = -1;
+
+    /// `Sum`, except that a node whose payload is `true` declines, returning `ABSENT`.
+    ///
+    /// Its payload and value types differ from `Sum`'s, so the run path's generic helpers are
+    /// instantiated apart for each, and this workload leaves the code `Sum`'s benchmarks
+    /// measure as it was.
+    struct Declines;
+
+    impl Evaluate<bool> for Declines {
+        type Value = i64;
+        type Error = Infallible;
+
+        fn evaluate(
+            &mut self,
+            _node: &Node<bool>,
+            declines: &bool,
+            args: &[Arg<'_, i64>],
+        ) -> Result<i64, Infallible> {
+            if *declines {
+                return Ok(ABSENT);
+            }
+            Ok(args.iter().fold(0, |sum, arg| sum.wrapping_add(arg.value)))
+        }
+
+        fn is_absent(&self, value: &i64) -> bool {
+            *value == ABSENT
+        }
+    }
+
     fn node(name: String, reads: Vec<String>) -> NodeSpec<()> {
         NodeSpec {
             name,
@@ -81,6 +113,7 @@ mod suite {
                 .collect(),
             tags: BTreeMap::new(),
             payload: (),
+            declines: false,
         }
     }
 
@@ -197,6 +230,30 @@ mod suite {
         (graph, plan)
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "a workload that does not plan is a bug in this file, and aborting is right"
+    )]
+    fn skip_chain(n: usize) -> (Graph<bool>, Plan, BTreeMap<String, i64>) {
+        let specs: Vec<NodeSpec<bool>> = chain(n)
+            .into_iter()
+            .enumerate()
+            .map(|(i, spec)| NodeSpec {
+                name: spec.name,
+                inputs: spec.inputs,
+                tags: spec.tags,
+                payload: i == 0,
+                declines: i == 0,
+            })
+            .collect();
+        let graph = Graph::build(specs).expect("generated specs form a valid graph");
+        let plan = graph
+            .prepare(&request(Shape::Chain, n))
+            .expect("the request names nodes of the generated graph");
+        let inputs = input_names(Shape::Chain, n).into_iter().zip(0..).collect();
+        (graph, plan, inputs)
+    }
+
     #[library_benchmark]
     #[bench::chain_1000(args = (Shape::Chain, 1_000), setup = planned)]
     #[bench::chain_10000(args = (Shape::Chain, 10_000), setup = planned)]
@@ -215,7 +272,22 @@ mod suite {
         (graph, plan, values)
     }
 
-    library_benchmark_group!(name = engine; benchmarks = build, prepare, run);
+    // A chain whose first node declines, so every other node is skipped: the cost of the
+    // absence-aware loop.
+    #[library_benchmark]
+    #[bench::skip_chain_200(args = (200,), setup = skip_chain)]
+    fn run_skips((graph, plan, inputs): (Graph<bool>, Plan, BTreeMap<String, i64>)) -> impl Sized {
+        let values = plan.run(
+            &graph,
+            &mut Declines,
+            black_box(&inputs),
+            &BTreeMap::new(),
+            &mut [],
+        );
+        (graph, plan, values)
+    }
+
+    library_benchmark_group!(name = engine; benchmarks = build, prepare, run, run_skips);
 }
 
 #[cfg(target_os = "linux")]
