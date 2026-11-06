@@ -153,7 +153,8 @@ control.
 changes a result: execution is name-tie-broken (Q26), and errors are sorted.
 
 **Hamilton:** no equivalent. Hamilton's `find_functions` keeps a module's plain functions, so an instance, whose
-members are bound methods, yields nothing (§11). **Rows:** Q161 (what is collected), Q73 amended (class-body `__all__`, `@exclude` on methods).
+members are bound methods, yields nothing (§11). **Rows:** Q161 (what is collected), Q73 amended (class-body
+`__all__`, `@exclude` on methods).
 
 ### 4.3 Binding `self`
 
