@@ -599,6 +599,8 @@ Wall-clock time is too noisy on shared CI runners to gate on, so CI gates the Ru
 instructions `Graph::build`, `Graph::prepare` and `Plan::run` execute under callgrind, on chain, fan-in and layered
 graphs of 1,000 and 10,000 nodes (`crates/fnloom-core/benches/core.rs`). A rise of more than 2% over the committed
 `crates/fnloom-core/benches/baseline.json` fails the `instruction-counts` job, which runs `scripts/bench_gate.py`.
+A row with no baseline yet is reported, not gated: `run_skips.skip_chain_200`, a 200-node chain whose first node
+declines so every other node is skipped, measures the absence-aware loop that only such plans run.
 
 Counts depend on the CPU architecture, the toolchain and the C library, so the baseline is generated in the job's own
 environment: the `rust:1.99.1` image on aarch64 Linux. A change that costs instructions on purpose regenerates it with

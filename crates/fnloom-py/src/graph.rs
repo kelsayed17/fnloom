@@ -201,6 +201,7 @@ fn node_spec((name, params, tags, function): NodeTuple) -> NodeSpec<Py<PyAny>> {
             .map(|(key, value)| (key, value.into()))
             .collect(),
         payload: function,
+        declines: false,
     }
 }
 

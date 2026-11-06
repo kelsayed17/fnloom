@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{BuildError, PlanError};
-use crate::node::{Edge, InputSpec, Node, NodeId, NodeKind, NodeSpec};
+use crate::node::{Dependency, Edge, InputSpec, Node, NodeId, NodeKind, NodeSpec};
 
 /// An immutable, acyclic dependency graph whose node ids follow sorted name order.
 #[derive(Debug)]
@@ -12,6 +12,8 @@ pub struct Graph<P> {
     ids: BTreeMap<String, NodeId>,
     /// For each node, the nodes that read from it, in id order.
     dependents: Vec<Vec<NodeId>>,
+    /// Whether any node may be absent, so a plan of a graph without one skips the question.
+    absence: bool,
 }
 
 impl<P> Graph<P> {
@@ -26,7 +28,7 @@ impl<P> Graph<P> {
     pub fn build(specs: Vec<NodeSpec<P>>) -> Result<Self, BuildError> {
         let mut declared = index_by_name(specs)?;
         let ids = assign_ids(&declared);
-        let nodes = ids
+        let mut nodes = ids
             .iter()
             .map(|(name, &id)| make_node(id, name, declared.remove(name), &ids))
             .collect::<Vec<_>>();
@@ -38,11 +40,13 @@ impl<P> Graph<P> {
                     .collect(),
             });
         }
+        let absence = mark_may_be_absent(&mut nodes);
         let dependents = forward_adjacency(&nodes);
         Ok(Self {
             nodes,
             ids,
             dependents,
+            absence,
         })
     }
 
@@ -104,6 +108,11 @@ impl<P> Graph<P> {
             .into_iter()
             .filter(|id| above.binary_search(id).is_ok())
             .collect())
+    }
+
+    /// Whether any node of the graph may be absent (`Node::may_be_absent`).
+    pub(crate) const fn has_absence(&self) -> bool {
+        self.absence
     }
 
     /// The nodes that read from `id`, in id order.
@@ -179,6 +188,42 @@ fn forward_adjacency<P>(nodes: &[Node<P>]) -> Vec<Vec<NodeId>> {
     dependents
 }
 
+/// Sets `may_be_absent` on every node that declines or reads, by a `Required` edge, a node
+/// that may be absent.
+///
+/// The flag is a reachability from the declining nodes along `Required` edges, so an
+/// iterative worklist finds it in any order, in time linear in the graph. A graph where no
+/// node declines costs one scan. Returns whether any node may be absent.
+fn mark_may_be_absent<P>(nodes: &mut [Node<P>]) -> bool {
+    let mut work: Vec<NodeId> = Vec::new();
+    for node in nodes.iter_mut().filter(|node| node.declines) {
+        node.may_be_absent = true;
+        work.push(node.id);
+    }
+    if work.is_empty() {
+        return false;
+    }
+    // For each node, the consumers reading it by a `Required` edge.
+    let mut required_by = vec![Vec::new(); nodes.len()];
+    for node in nodes.iter() {
+        for edge in &node.inputs {
+            if edge.dependency == Dependency::Required {
+                required_by[edge.node.index()].push(node.id);
+            }
+        }
+    }
+    while let Some(id) = work.pop() {
+        for &consumer in &required_by[id.index()] {
+            let node = &mut nodes[consumer.index()];
+            if !node.may_be_absent {
+                node.may_be_absent = true;
+                work.push(consumer);
+            }
+        }
+    }
+    true
+}
+
 fn index_by_name<P>(specs: Vec<NodeSpec<P>>) -> Result<BTreeMap<String, NodeSpec<P>>, BuildError> {
     let mut declared = BTreeMap::new();
     for spec in specs {
@@ -212,6 +257,8 @@ fn make_node<P>(
             name: spec.name,
             kind: NodeKind::Function(spec.payload),
             tags: spec.tags,
+            declines: spec.declines,
+            may_be_absent: false,
         },
         None => Node {
             id,
@@ -219,6 +266,8 @@ fn make_node<P>(
             kind: NodeKind::Input,
             inputs: Vec::new(),
             tags: BTreeMap::new(),
+            declines: false,
+            may_be_absent: false,
         },
     }
 }
@@ -293,7 +342,8 @@ fn cycle_path(stack: &[(NodeId, usize)], back_to: NodeId) -> Vec<NodeId> {
 #[expect(clippy::unwrap_used, reason = "tests assert by unwrapping")]
 mod tests {
     use super::*;
-    use crate::testing::{names, node};
+
+    use crate::testing::{declining, names, node, spec};
 
     #[test]
     fn build_synthesises_input_nodes_for_unresolved_parameters() {
@@ -359,6 +409,41 @@ mod tests {
             .map(|i| node(&format!("n{i:06}"), &[&format!("n{:06}", i + 1)]))
             .collect();
         assert!(Graph::build(specs).is_ok());
+    }
+
+    #[test]
+    fn may_be_absent_follows_required_edges_only() {
+        let graph = Graph::build(vec![
+            declining("a", &[], ()),
+            spec("b", &[("a", Dependency::Required)]),
+            spec("c", &[("b", Dependency::Optional)]),
+            spec("d", &[("b", Dependency::Admits { optional: false })]),
+        ])
+        .unwrap();
+        let flags: Vec<(&str, bool, bool)> = graph
+            .nodes()
+            .iter()
+            .map(|n| (n.name.as_str(), n.declines, n.may_be_absent))
+            .collect();
+        assert_eq!(
+            flags,
+            [
+                ("a", true, true),
+                ("b", false, true),
+                ("c", false, false),
+                ("d", false, false),
+            ]
+        );
+    }
+
+    #[test]
+    fn may_be_absent_reaches_down_a_deep_chain_without_recursion() {
+        let mut specs: Vec<_> = (0..50_000)
+            .map(|i| node(&format!("n{i:06}"), &[&format!("n{:06}", i + 1)]))
+            .collect();
+        specs.push(declining("n050000", &[], ()));
+        let graph = Graph::build(specs).unwrap();
+        assert!(graph.nodes().iter().all(|n| n.may_be_absent));
     }
 
     mod queries {

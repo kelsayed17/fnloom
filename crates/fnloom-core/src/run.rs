@@ -6,7 +6,7 @@ use std::fmt;
 
 use crate::error::quoted;
 use crate::graph::Graph;
-use crate::node::{Node, NodeId};
+use crate::node::{Dependency, Node, NodeId};
 use crate::plan::{Action, Plan, Step};
 
 /// A run's outputs by node id, in `Plan::outputs` order, as `Plan::run_by_id` returns them.
@@ -31,6 +31,16 @@ pub trait Evaluate<P> {
         payload: &P,
         args: &[Arg<'_, Self::Value>],
     ) -> Result<Self::Value, Self::Error>;
+
+    /// Whether `value` is absent: a node declined to produce one.
+    ///
+    /// Asked only of a value a node that declines (`Node::declines`) returned, and of an
+    /// override of a node that may be absent (`Node::may_be_absent`); an input is never
+    /// absent. The default says no value is, so an embedder whose nodes never decline needs
+    /// nothing here.
+    fn is_absent(&self, _value: &Self::Value) -> bool {
+        false
+    }
 }
 
 /// One argument passed to a node: the input it comes from and that input's value.
@@ -79,6 +89,16 @@ pub trait Observer<V, E> {
         Ok(())
     }
 
+    /// Called instead of the node events when a computed node is skipped, because a
+    /// `Required` argument is absent: the node is then absent too. `branch` is empty.
+    ///
+    /// # Errors
+    ///
+    /// An error aborts the run after every observer has seen the event.
+    fn skipped(&mut self, _node: &str, _branch: &[usize]) -> Result<(), E> {
+        Ok(())
+    }
+
     /// Called once after the run ended; `ok` says whether it succeeded.
     ///
     /// # Errors
@@ -104,7 +124,8 @@ pub enum RunError<E> {
     },
     /// One or more observers failed on an event.
     Observers {
-        /// The first failing event: `pre_graph`, `pre_node`, `post_node` or `post_graph`.
+        /// The first failing event: `pre_graph`, `pre_node`, `post_node`, `skipped` or
+        /// `post_graph`.
         event: &'static str,
         /// Every error raised, in observer order, then any from the closing `post_graph(false)`.
         errors: Vec<E>,
@@ -258,7 +279,13 @@ impl Plan {
         let mut hooks = Hooks { observers };
         let outcome = hooks
             .check("pre_graph", |observer| observer.pre_graph())
-            .and_then(|()| self.execute(graph, eval, slots, &mut hooks));
+            .and_then(|()| {
+                if self.needs_rules() {
+                    self.execute_by_rules(graph, eval, slots, &mut hooks)
+                } else {
+                    self.execute(graph, eval, slots, &mut hooks)
+                }
+            });
         match outcome {
             Ok(values) => hooks
                 .check("post_graph", |observer| observer.post_graph(true))
@@ -298,6 +325,14 @@ impl Plan {
         }
     }
 
+    // The plain loop and its `compute` are inlined into `run_by_id`, and the absence-aware
+    // loop is kept out of it: the instruction-count gate measures the plain loop, which the
+    // compiler otherwise stops inlining once `run_by_id` holds both.
+    #[expect(
+        clippy::inline_always,
+        reason = "the instruction-count gate measures the plain loop, which must not gain a call"
+    )]
+    #[inline(always)]
     fn execute<P, V: Evaluate<P>>(
         &self,
         graph: &Graph<P>,
@@ -327,6 +362,146 @@ impl Plan {
             )
             .collect()
     }
+
+    /// `execute` for a plan where a value may be absent (`Plan::needs_rules`).
+    ///
+    /// Each slot carries whether its value is absent. A consumer reading an absent value
+    /// gets it by an `Admits` edge, has the argument omitted by an `Optional` one, and is
+    /// skipped by a `Required` one: it fires `skipped` and no node event, and its slot holds
+    /// the absent value that caused the skip, so an absent output is returned as that value.
+    #[inline(never)]
+    fn execute_by_rules<P, V: Evaluate<P>>(
+        &self,
+        graph: &Graph<P>,
+        eval: &mut V,
+        seeded: Vec<Option<V::Value>>,
+        hooks: &mut Hooks<'_, '_, V::Value, V::Error>,
+    ) -> Result<Outputs<V::Value>, RunError<V::Error>> {
+        let mut slots: Vec<Option<Slot<V::Value>>> = seeded
+            .into_iter()
+            .map(|value| {
+                value.map(|value| Slot {
+                    value,
+                    absent: false,
+                })
+            })
+            .collect();
+        for step in self.steps() {
+            let node = graph.node(step.node);
+            match step.action {
+                Action::UseOverride if node.may_be_absent => {
+                    if let Some(slot) = slots.get_mut(step.node.index()).and_then(Option::as_mut) {
+                        slot.absent = eval.is_absent(&slot.value);
+                    }
+                }
+                Action::Compute => {
+                    let Some(payload) = node.payload() else {
+                        return Err(planned_to_compute(node));
+                    };
+                    let slot = match gather_by_rules(graph, step, &slots)? {
+                        Gathered::Args(args) => {
+                            let value = call(eval, hooks, node, payload, &args)?;
+                            let absent = node.declines && eval.is_absent(&value);
+                            Slot { value, absent }
+                        }
+                        Gathered::Skip(value) => {
+                            hooks.check("skipped", |observer| observer.skipped(&node.name, &[]))?;
+                            Slot {
+                                value,
+                                absent: true,
+                            }
+                        }
+                    };
+                    store(&mut slots, step.node, Some(slot));
+                }
+                _ => {}
+            }
+            for &dead in &step.release {
+                store(&mut slots, dead, None);
+            }
+        }
+        self.outputs()
+            .iter()
+            .map(
+                |&id| match slots.get_mut(id.index()).and_then(Option::take) {
+                    Some(slot) => Ok((id, slot.value)),
+                    None => Err(broken(format!(
+                        "output '{}' has no value at the end",
+                        graph.node(id).name
+                    ))),
+                },
+            )
+            .collect()
+    }
+}
+
+/// A slot of the absence-aware loop: a value, and whether it is absent.
+struct Slot<V> {
+    value: V,
+    absent: bool,
+}
+
+/// A step's arguments under the absence rules, or the absent value that skips it.
+enum Gathered<'g, V> {
+    /// Every argument the node receives, sorted by input id.
+    Args(Vec<Arg<'g, V>>),
+    /// A `Required` argument is absent: the node is skipped, and holds this value.
+    Skip(V),
+}
+
+/// The arguments of a step by the absence rules, values cloned from the slot table.
+fn gather_by_rules<'g, P, T: Clone, E>(
+    graph: &'g Graph<P>,
+    step: &Step,
+    slots: &[Option<Slot<T>>],
+) -> Result<Gathered<'g, T>, RunError<E>> {
+    let consumer = graph.node(step.node);
+    // The consumer's edges sorted by input id, made on its first absent argument.
+    let mut edges: Option<Vec<(NodeId, Dependency)>> = None;
+    let mut args = Vec::with_capacity(step.args.len());
+    for &id in &step.args {
+        let name = graph.node(id).name.as_str();
+        let Some(slot) = slots.get(id.index()).and_then(Option::as_ref) else {
+            // A planned argument is always produced earlier and not yet released.
+            return Err(broken(format!(
+                "argument '{name}' of node '{}' has no value",
+                consumer.name
+            )));
+        };
+        if slot.absent {
+            let sorted = edges.get_or_insert_with(|| {
+                let mut sorted: Vec<_> = consumer
+                    .inputs
+                    .iter()
+                    .map(|edge| (edge.node, edge.dependency))
+                    .collect();
+                sorted.sort_unstable_by_key(|&(node, _)| node);
+                sorted
+            });
+            let dependency = sorted
+                .binary_search_by_key(&id, |&(node, _)| node)
+                .ok()
+                .and_then(|found| sorted.get(found))
+                .map_or(Dependency::Required, |&(_, dependency)| dependency);
+            match dependency {
+                Dependency::Admits { .. } => {}
+                Dependency::Optional => continue,
+                Dependency::Required => return Ok(Gathered::Skip(slot.value.clone())),
+            }
+        }
+        args.push(Arg {
+            node: id,
+            name,
+            value: slot.value.clone(),
+        });
+    }
+    Ok(Gathered::Args(args))
+}
+
+/// The `RunError::BrokenPlan` for an input node a plan computes.
+#[cold]
+fn planned_to_compute<P, E>(node: &Node<P>) -> RunError<E> {
+    broken(format!("input node '{}' planned to compute", node.name))
 }
 
 /// A `RunError::BrokenPlan` with no observer errors yet; the closing hook adds any.
@@ -344,6 +519,11 @@ fn store<T>(slots: &mut [Option<T>], id: NodeId, value: Option<T>) {
 }
 
 /// Evaluates one `Compute` step between its `pre_node` and `post_node` events.
+#[expect(
+    clippy::inline_always,
+    reason = "the instruction-count gate measures the plain loop, which must not gain a call"
+)]
+#[inline(always)]
 fn compute<P, V: Evaluate<P>>(
     graph: &Graph<P>,
     eval: &mut V,
@@ -359,18 +539,37 @@ fn compute<P, V: Evaluate<P>>(
         )));
     };
     let args = gather(graph, step, slots)?;
+    call(eval, hooks, node, payload, &args)
+}
+
+/// Evaluates `node` on `args` between its `pre_node` and `post_node` events.
+///
+/// Always inlined, so the plain loop's `compute` costs what it did before the absence-aware
+/// loop shared this with it.
+#[expect(
+    clippy::inline_always,
+    reason = "the instruction-count gate measures the plain loop, which must not gain a call"
+)]
+#[inline(always)]
+fn call<P, V: Evaluate<P>>(
+    eval: &mut V,
+    hooks: &mut Hooks<'_, '_, V::Value, V::Error>,
+    node: &Node<P>,
+    payload: &P,
+    args: &[Arg<'_, V::Value>],
+) -> Result<V::Value, RunError<V::Error>> {
     if hooks.observers.is_empty() {
         // No event to deliver, so the node's arguments and outcome need not be lent out.
         return eval
-            .evaluate(node, payload, &args)
+            .evaluate(node, payload, args)
             .map_err(|source| RunError::Node {
                 node: node.name.clone(),
                 source,
                 observer_errors: Vec::new(),
             });
     }
-    hooks.check("pre_node", |observer| observer.pre_node(&node.name, &args))?;
-    match eval.evaluate(node, payload, &args) {
+    hooks.check("pre_node", |observer| observer.pre_node(&node.name, args))?;
+    match eval.evaluate(node, payload, args) {
         Ok(value) => hooks
             .check("post_node", |observer| {
                 observer.post_node(&node.name, Ok(&value))
@@ -421,7 +620,9 @@ mod tests {
     use std::rc::Rc;
 
     use super::*;
-    use crate::testing::{node, request, valued};
+
+    use crate::plan::Action;
+    use crate::testing::{declining, node, request, valued, valued_spec};
 
     fn map<V: Clone>(pairs: &[(&str, V)]) -> BTreeMap<String, V> {
         pairs
@@ -510,6 +711,9 @@ mod tests {
         }
         fn post_graph(&mut self, ok: bool) -> Result<(), String> {
             self.event(&format!("post_graph:{ok}"))
+        }
+        fn skipped(&mut self, node: &str, branch: &[usize]) -> Result<(), String> {
+            self.event(&format!("skipped:{node}:{branch:?}"))
         }
     }
 
@@ -1049,5 +1253,281 @@ mod tests {
             )
             .unwrap();
         assert_eq!(out["n00000"], i64::from(last));
+    }
+
+    mod absence {
+        //! Nodes that may decline, and the three rules their consumers follow.
+
+        use super::*;
+
+        /// The value a declining node returns, and that `Marker::is_absent` recognises.
+        const ABSENT: i64 = -1;
+
+        /// Value = payload + sum of args, except that a payload of `ABSENT` declines.
+        /// Records every call with its arguments, and counts `is_absent` questions.
+        #[derive(Default)]
+        struct Marker {
+            calls: Vec<(String, Vec<(String, i64)>)>,
+            asked: Cell<usize>,
+        }
+
+        impl Evaluate<i64> for Marker {
+            type Value = i64;
+            type Error = String;
+
+            fn evaluate(
+                &mut self,
+                node: &Node<i64>,
+                payload: &i64,
+                args: &[Arg<'_, i64>],
+            ) -> Result<i64, String> {
+                self.calls.push((
+                    node.name.clone(),
+                    args.iter().map(|a| (a.name.to_owned(), a.value)).collect(),
+                ));
+                if *payload == ABSENT {
+                    return Ok(ABSENT);
+                }
+                Ok(payload + args.iter().map(|a| a.value).sum::<i64>())
+            }
+
+            fn is_absent(&self, value: &i64) -> bool {
+                self.asked.set(self.asked.get() + 1);
+                *value == ABSENT
+            }
+        }
+
+        impl Marker {
+            fn called(&self) -> Vec<&str> {
+                self.calls.iter().map(|(name, _)| name.as_str()).collect()
+            }
+        }
+
+        /// `a` declines; `req` requires it, `opt` has a default for it, `adm` admits it.
+        fn consumers() -> Graph<i64> {
+            Graph::build(vec![
+                declining("a", &[], ABSENT),
+                valued_spec("req", &[("a", Dependency::Required)], 10),
+                valued_spec(
+                    "opt",
+                    &[("a", Dependency::Optional), ("x", Dependency::Required)],
+                    20,
+                ),
+                valued_spec("adm", &[("a", Dependency::Admits { optional: false })], 30),
+            ])
+            .unwrap()
+        }
+
+        fn run_marker(
+            graph: &Graph<i64>,
+            outputs: &[&str],
+            overrides: &[(&str, i64)],
+            eval: &mut Marker,
+        ) -> Result<BTreeMap<String, i64>, RunError<String>> {
+            let names: Vec<&str> = overrides.iter().map(|(n, _)| *n).collect();
+            let plan = graph.prepare(&request(outputs, &["x"], &names)).unwrap();
+            plan.run(graph, eval, &map(&[("x", 5)]), &map(overrides), &mut [])
+        }
+
+        /// A run's outcome, its evaluator and its observer log.
+        type Logged = (
+            Result<BTreeMap<String, i64>, RunError<String>>,
+            Marker,
+            Vec<String>,
+        );
+
+        fn run_logged(graph: &Graph<i64>, output: &str, fail_on: &[&'static str]) -> Logged {
+            let plan = graph.prepare(&request(&[output], &[], &[])).unwrap();
+            let log = Log::default();
+            let mut recorder = Recorder::new("r", &log, fail_on);
+            let mut eval = Marker::default();
+            let out = plan.run(
+                graph,
+                &mut eval,
+                &BTreeMap::new(),
+                &BTreeMap::new(),
+                &mut [&mut recorder],
+            );
+            (out, eval, log_of(&log))
+        }
+
+        #[test]
+        fn a_declined_value_skips_required_consumers_and_reaches_admitting_ones() {
+            let g = consumers();
+            let mut eval = Marker::default();
+            let out = run_marker(&g, &["req", "adm"], &[], &mut eval).unwrap();
+            assert_eq!(eval.called(), ["a", "adm"]);
+            assert_eq!(eval.calls[1].1, [("a".to_owned(), ABSENT)]);
+            // The skipped node holds the absent value that caused the skip.
+            assert_eq!(out, map(&[("adm", 30 + ABSENT), ("req", ABSENT)]));
+        }
+
+        #[test]
+        fn an_optional_edge_from_an_absent_node_is_omitted() {
+            let g = consumers();
+            let mut eval = Marker::default();
+            let out = run_marker(&g, &["opt"], &[], &mut eval).unwrap();
+            assert_eq!(eval.called(), ["a", "opt"]);
+            assert_eq!(eval.calls[1].1, [("x".to_owned(), 5)]);
+            assert_eq!(out, map(&[("opt", 25)]));
+        }
+
+        #[test]
+        fn a_present_value_from_a_declining_node_reaches_every_consumer() {
+            let g = Graph::build(vec![
+                declining("a", &[], 7),
+                valued_spec("req", &[("a", Dependency::Required)], 10),
+                valued_spec("opt", &[("a", Dependency::Optional)], 20),
+            ])
+            .unwrap();
+            let plan = g.prepare(&request(&["req", "opt"], &[], &[])).unwrap();
+            let mut eval = Marker::default();
+            let out = plan
+                .run(&g, &mut eval, &BTreeMap::new(), &BTreeMap::new(), &mut [])
+                .unwrap();
+            assert_eq!(out, map(&[("opt", 27), ("req", 17)]));
+        }
+
+        #[test]
+        fn a_skipped_node_fires_skipped_and_no_node_events() {
+            let g = Graph::build(vec![
+                declining("a", &[], ABSENT),
+                valued_spec("b", &[("a", Dependency::Required)], 10),
+            ])
+            .unwrap();
+            let (out, _, log) = run_logged(&g, "b", &[]);
+            assert_eq!(out.unwrap(), map(&[("b", ABSENT)]));
+            assert_eq!(
+                log,
+                [
+                    "r:pre_graph",
+                    "r:pre_node:a",
+                    "r:post_node:a:true",
+                    "r:skipped:b:[]",
+                    "r:post_graph:true",
+                ]
+            );
+        }
+
+        #[test]
+        fn a_failing_skipped_event_aborts_the_run() {
+            let g = Graph::build(vec![
+                declining("a", &[], ABSENT),
+                valued_spec("b", &[("a", Dependency::Required)], 10),
+                valued_spec("c", &[("b", Dependency::Required)], 10),
+            ])
+            .unwrap();
+            let (out, _, log) = run_logged(&g, "c", &["skipped:b:[]"]);
+            assert_eq!(
+                out.unwrap_err(),
+                RunError::Observers {
+                    event: "skipped",
+                    errors: vec!["r:skipped:b:[]".to_owned()],
+                }
+            );
+            assert_eq!(log.last().unwrap(), "r:post_graph:false");
+            assert!(!log.iter().any(|e| e.contains(":c")));
+        }
+
+        #[test]
+        fn an_absent_output_is_returned_with_its_value() {
+            let g = consumers();
+            let out = run_marker(&g, &["a"], &[], &mut Marker::default()).unwrap();
+            assert_eq!(out, map(&[("a", ABSENT)]));
+        }
+
+        #[test]
+        fn an_absent_override_skips_consumers() {
+            let g = consumers();
+            let mut eval = Marker::default();
+            let out = run_marker(&g, &["req", "adm"], &[("a", ABSENT)], &mut eval).unwrap();
+            assert_eq!(eval.called(), ["adm"]);
+            assert_eq!(out, map(&[("adm", 30 + ABSENT), ("req", ABSENT)]));
+            // A present override reaches every consumer.
+            let out = run_marker(&g, &["req"], &[("a", 1)], &mut Marker::default()).unwrap();
+            assert_eq!(out, map(&[("req", 11)]));
+        }
+
+        #[test]
+        fn is_absent_is_asked_only_of_declining_nodes() {
+            let mut specs: Vec<_> = (0..200)
+                .map(|i| valued(&format!("n{i:03}"), &[&format!("n{:03}", i + 1)], 1))
+                .collect();
+            specs.push(valued("n200", &[], 0));
+            let g = Graph::build(specs).unwrap();
+            let plan = g.prepare(&request(&["n000"], &[], &[])).unwrap();
+            let mut eval = Marker::default();
+            plan.run(&g, &mut eval, &BTreeMap::new(), &BTreeMap::new(), &mut [])
+                .unwrap();
+            assert_eq!(eval.calls.len(), 201);
+            assert_eq!(eval.asked.get(), 0);
+
+            // With one declining node, only it is asked, not the consumers it reaches.
+            let g = Graph::build(vec![
+                declining("a", &[], 3),
+                valued_spec("b", &[("a", Dependency::Required)], 1),
+                valued_spec("c", &[("b", Dependency::Required)], 1),
+            ])
+            .unwrap();
+            let (out, eval, _) = run_logged(&g, "c", &[]);
+            assert_eq!(out.unwrap(), map(&[("c", 5)]));
+            assert_eq!(eval.asked.get(), 1);
+        }
+
+        #[test]
+        fn a_ten_thousand_node_skip_chain_runs_without_recursion() {
+            let last = 10_000;
+            let mut specs: Vec<_> = (0..last)
+                .map(|i| valued(&format!("n{i:05}"), &[&format!("n{:05}", i + 1)], 1))
+                .collect();
+            specs.push(declining(&format!("n{last:05}"), &[], ABSENT));
+            let g = Graph::build(specs).unwrap();
+            let (out, eval, log) = run_logged(&g, "n00000", &[]);
+            assert_eq!(out.unwrap(), map(&[("n00000", ABSENT)]));
+            assert_eq!(eval.called().len(), 1);
+            let skipped = log.iter().filter(|e| e.starts_with("r:skipped:")).count();
+            assert_eq!(skipped, 10_000);
+        }
+
+        #[test]
+        fn an_admits_edge_to_an_unsupplied_input_is_missing_unless_defaulted() {
+            let g = Graph::build(vec![
+                valued_spec("need", &[("i", Dependency::Admits { optional: false })], 1),
+                valued_spec("opt", &[("i", Dependency::Admits { optional: true })], 1),
+            ])
+            .unwrap();
+            let err = g.prepare(&request(&["need"], &[], &[])).unwrap_err();
+            assert_eq!(err.to_string(), "missing inputs: 'i' (needed by 'need')");
+            let plan = g.prepare(&request(&["opt"], &[], &[])).unwrap();
+            let actions: Vec<Action> = plan.steps().iter().map(|s| s.action).collect();
+            assert_eq!(actions, [Action::SkipOptionalInput, Action::Compute]);
+            assert_eq!(plan.steps()[1].args, [] as [NodeId; 0]);
+            let out = plan
+                .run(
+                    &g,
+                    &mut Marker::default(),
+                    &BTreeMap::new(),
+                    &BTreeMap::new(),
+                    &mut [],
+                )
+                .unwrap();
+            assert_eq!(out, map(&[("opt", 1)]));
+        }
+
+        #[test]
+        fn a_plan_with_nothing_absent_runs_the_plain_loop() {
+            let plan = diamond().prepare(&request(&["d"], &["x"], &[])).unwrap();
+            assert!(!plan.needs_rules());
+            let g = consumers();
+            // `opt` reads the declining `a`, which is planned.
+            let plan = g.prepare(&request(&["opt"], &["x"], &[])).unwrap();
+            assert!(plan.needs_rules());
+            // An override of `opt` cuts `a` away, and `opt` itself is never absent.
+            let plan = g.prepare(&request(&["opt"], &[], &["opt"])).unwrap();
+            assert!(!plan.needs_rules());
+            // An override of `a` itself may be absent.
+            let plan = g.prepare(&request(&["req"], &[], &["a"])).unwrap();
+            assert!(plan.needs_rules());
+        }
     }
 }

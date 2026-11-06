@@ -80,9 +80,17 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - `Drawing.to_svg(*, orient="LR", legend=True)`, an SVG laid out in pure Python, and `render(path, engine="dot" |
   "builtin")`: `"dot"` stays the default, and `"builtin"` writes `to_svg()` with nothing installed. `fnloom draw`
   takes `--engine builtin` (Q146).
+- Rust core: absence. `Dependency::Admits { optional }` is a third way to read an input, `NodeSpec.declines` marks a
+  node whose value may be absent, and `Node.may_be_absent` is known at build. `Evaluate::is_absent` (default
+  `false`) recognises an absent value, and `Observer::skipped(node, branch)` reports a node skipped because a
+  `Required` argument is absent. `Admits` passes the absent value, `Optional` omits it, and `Required` skips the
+  consumer, which is absent too. `Plan::needs_rules` says whether a plan follows these rules; one that doesn't runs
+  the plain loop unchanged.
 
 ### Changed
 
+- Rust core: `NodeSpec` has a new field, `declines`; a spec built with struct syntax sets it, `false` for a node
+  that never declines. `Dependency` has a third variant, `Admits`, so a `match` on it needs an arm for it.
 - Without Graphviz, a drawing's `_repr_svg_` (Jupyter's preview) is the builtin SVG, where it was `None`. The
   `FileNotFoundError` for a missing `dot` gives the platform's install command (`brew install graphviz`, `apt-get
   install graphviz`, `winget install graphviz`), and names `.mmd`, `.dot` and, for an SVG, `engine="builtin"` as the
