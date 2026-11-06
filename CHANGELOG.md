@@ -9,77 +9,6 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Added
 
-- `fnloom.PrintNodes(verbosity=1, *, print_fn=print, nodes=None, width=50)`, a hook that prints a line per node: its
-  time, `loaded from cache` for a hit, the error for a failure, and at `verbosity=2` the sorted inputs and the result,
-  cut to `width`. `nodes` is names (an unknown one fails the build) or a function of the `NodeView` (Q142).
-- `Hook.after_build(event: BuildEnd)`, with `fnloom.BuildEnd(nodes, config, modules)`: called once per hook from
-  `build()`, `build_async()` and `rebuild()`. Every hook sees the event, a raise refuses the build, and several are
-  one `ExceptionGroup`. This is Hamilton's `GraphConstructionHook` and `StaticValidator` (Q145, Q117).
-- `@tag` takes a `list` or `tuple` of strings as a value, kept as a tuple in written order. An empty sequence, a
-  repeated item, a non-`str` item, or an unordered collection (`set`, `frozenset`, `dict`) is refused when decorating,
-  naming the tag. `Driver.nodes.tagged(**query)` returns the views whose tags match: a `str` matches an equal value or
-  a tuple holding it, a sequence matches any item, `fnloom.ANY` matches a node with the tag. `fnloom draw` and `fnloom
-  export` take a repeatable `--tag key=value`, one per key (a key given twice is a usage error). A `str` subclass
-  value or item is kept as a plain `str`, and `fnloom.ANY` survives `copy`, `deepcopy` and `pickle`. The export writes
-  a tuple as a JSON list, and `diff` compares it in order (Q36, Q141).
-- `pipe_input(..., namespace=)`, `pipe_output(..., namespace=, on_output=)` and `step(...).named(name, namespace=)`,
-  with Hamilton's names: `...` (the default) keeps `<node>.<label>`, `None` names a step `<label>`, and a dotted path
-  `<path>.<label>`, within a module's namespace. A step's own namespace wins over the decorator's, and a step's own
-  `.on_output` over `on_output=`. A namespace that is no dotted identifier path is refused when decorating, and a
-  name two nodes would have fails the build naming what made each. `apply_to(...).named(name, namespace=)` does the
-  same for `@mutate` (Q140).
-- `Builder.with_cache(store, *, recompute=(), disable=(), default=(), default_behavior="default", ignore=None)`: each
-  list names nodes given that behavior, or is `True` for the default. A list naming a node wins over its
-  `@cache(behavior=...)`, which wins over `default_behavior`; `True` counts as `default_behavior`, not as a name, so
-  a node's own `@cache` still wins over it. A name in two lists, two `True` lists, or `True` against another
-  `default_behavior` is a `ValueError`; a name that is no node, or an `ignore` parameter the consumer lacks, fails
-  the build with a `did you mean`. `ignore` maps a consumer to parameters left out of its key. Carried by pickling,
-  `copy`, `rebuild()` and `build_async` (Q143).
-- `fnloom.frame(library="pandas", *, flatten=True, separator=".", join="strict")`, a result builder for
-  `with_result_builder` making one pandas or polars frame: a frame output flattened into `<output>.<column>` columns in
-  request then column order, a series one column, scalars broadcast, all scalars one row. `join="strict"` refuses
-  outputs on different pandas indexes or of different polars lengths with a `ValueError` naming them; `join="outer"`
-  is Hamilton's `PandasDataFrameResult` frame, without its log; polars refuses it. Two columns of one name are a
-  `ValueError` naming both. The library is imported by `frame`, never by `import fnloom`. `frame` returns a
-  `fnloom.FrameBuilder` (Q144).
-  `with_result_builder(pandas.DataFrame)` is unchanged (Q89).
-- `@cache(fields={...})` and `fnloom.FieldCache(behavior="default", format=None)`: a field or column of
-  `@extract_fields` or `@extract_columns` with a policy of its own. `"default"` stores and serves the field apart from
-  its producer, keyed by the producer's key and the field, so a `disable` producer can have a stored field and does
-  not run when it hits; `"recompute"` runs the producer again for the field; `"disable"` makes the field's readers
-  uncacheable. A field the function doesn't extract is a `ValueError` at build, and `fields=` on a function that
-  extracts nothing a `TypeError` (Q147).
-- `@config.matches(predicate, *, name=None)`: a variant kept when `predicate`, called with the config keys its
-  parameters name, returns `True`. A defaulted parameter is an optional key, a missing required key never matches,
-  and a result that is no `bool` is a `TypeError` at build. It stacks with `config.when*` and falls back to
-  `@config.default`. The predicate's code version is in the selected variant's cache key and export `version`, and
-  the export shows the condition as `matches(<module.qualname>)`. A public module-level predicate, which would be a
-  node, fails the build (Q148).
-- `Builder.without_edge_type_checks(*consumers)` turns edge type checks off for every edge, or only for the edges into
-  the nodes named; an unknown name is a `ValueError` at build. Input checks stay on. The export's new `edge_checks`
-  field records it, and it is in `graph_version` (Q149).
-- `with_modules(..., namespace="eu", config={...})` gives a namespace a config of its own, overlaid on the builder's
-  for its `@config` variants, `@resolve`s, `config.matches` predicates and steps, as `@subdag(config=)` does.
-  `Driver.config` stays the builder's own; the export's new `namespace_config` field lists each overlay, which is in
-  `graph_version` (Q112 amended: `config=` per copy was not planned).
-- `with_modules(module, replace=("total",))` replaces the node `total` that earlier modules define, for every reader.
-  A name no earlier module, or not this one, defines under the config is a `ValueError` at build. `NodeView.replaced`
-  and the export entry's `replaced` name the module replaced. A `@mutate` on the replaced function fails the build,
-  and `@config` variants on both sides are each selected first (Q74 amended, Q150).
-- `fnloom.Style(fill=, stroke=, font_color=, stroke_width=, dashed=, shape=, dot=, mermaid=)` and
-  `Drawing.styled(graph=, node=, edge=, style=)`, returning a new drawing that DOT, Mermaid and SVG all draw alike.
-  `style(view, drawn)` is called once per node with its `NodeView`. A colour is `#rrggbb` or a CSS name from
-  `Style.COLOURS`; anything else is a `ValueError` naming the attribute, and the node when a style function made it.
-  Passthrough keys are identifiers and values `str`: quoted and escaped in DOT, and in Mermaid only ASCII letters,
-  digits, space and `# . _ ! : + * / ' % -` (not `%%`). `stroke_width` is from 0.01 to 1000. Attributes are written
-  in a fixed order. Every `draw*` method takes `show_types`, `show_tags`, `show_schema` (a `TypedDict`, dataclass or
-  `NamedTuple` return type's fields) and `hide_inputs` (keeping an input the call names: an output, a node drawn
-  from, a path's end), and `fnloom draw` takes `--no-types`, `--show-tag`, `--show-schema` and `--hide-inputs`.
-  `DrawnNode` gains `tags`, `schema`, `style` and `view` (the `NodeView`, left out of equality, `repr` and pickling),
-  and `Drawing` gains `graph_style`, `edge_style` and `show_types` (Q139).
-- `Drawing.to_svg(*, orient="LR", legend=True)`, an SVG laid out in pure Python, and `render(path, engine="dot" |
-  "builtin")`: `"dot"` stays the default, and `"builtin"` writes `to_svg()` with nothing installed. `fnloom draw`
-  takes `--engine builtin` (Q146).
 - Typed absence (Q135). A node annotated `-> T | fnloom.Absent` may return `fnloom.ABSENT`, a final singleton
   distinct from `None`. Each parameter reading a node that may be absent decides by its own signature, at build:
   one admitting `Absent` receives `ABSENT`, one with a default takes its default, and any other skips its node,
@@ -111,13 +40,88 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - Rust core: `NodeSpec` has a new field, `declines`; a spec built with struct syntax sets it, `false` for a node
   that never declines. `Dependency` has a third variant, `Admits`, and `BuildError` a new one, `ConflictingInput`,
   so a `match` on either needs an arm for it.
-- Without Graphviz, a drawing's `_repr_svg_` (Jupyter's preview) is the builtin SVG, where it was `None`. The
-  `FileNotFoundError` for a missing `dot` gives the platform's install command (`brew install graphviz`, `apt-get
-  install graphviz`, `winget install graphviz`), and names `.mmd`, `.dot` and, for an SVG, `engine="builtin"` as the
-  ways that need nothing (Q146).
-- `NodeView.tags` is now `Mapping[str, str | tuple[str, ...]]`: code that reads a tag as a `str` needs an
-  `isinstance(value, str)` check (or `tags.get("k")` handled as either) to type-check. `Driver.nodes` is typed
-  `NodeViews`, which has `tagged`. A node's `display_name` tag given as a tuple is drawn joined by `, `.
+
+## [0.4.0] - 2026-11-05
+
+### Added
+
+- `fnloom.Style(fill=, stroke=, font_color=, stroke_width=, dashed=, shape=, dot=, mermaid=)` and
+  `Drawing.styled(graph=, node=, edge=, style=)`, returning a new drawing that DOT, Mermaid and SVG all draw alike.
+  `style(view, drawn)` is called once per node with its `NodeView`. A colour is `#rrggbb` or a CSS name from
+  `Style.COLOURS`; anything else is a `ValueError` naming the attribute, and the node when a style function made it.
+  Passthrough keys are identifiers and values `str`: quoted and escaped in DOT, and in Mermaid only ASCII letters,
+  digits, space and `# . _ ! : + * / ' % -` (not `%%`). `stroke_width` is from 0.01 to 1000. Attributes are written
+  in a fixed order. Every `draw*` method takes `show_types`, `show_tags`, `show_schema` (a `TypedDict`, dataclass or
+  `NamedTuple` return type's fields) and `hide_inputs` (keeping an input the call names: an output, a node drawn
+  from, a path's end), and `fnloom draw` takes `--no-types`, `--show-tag`, `--show-schema` and `--hide-inputs`.
+  `DrawnNode` gains `tags`, `schema`, `style` and `view` (the `NodeView`, left out of equality, `repr` and pickling),
+  and `Drawing` gains `graph_style`, `edge_style` and `show_types` (Q139).
+- `pipe_input(..., namespace=)`, `pipe_output(..., namespace=, on_output=)` and `step(...).named(name, namespace=)`,
+  with Hamilton's names: `...` (the default) keeps `<node>.<label>`, `None` names a step `<label>`, and a dotted path
+  `<path>.<label>`, within a module's namespace. A step's own namespace wins over the decorator's, and a step's own
+  `.on_output` over `on_output=`. A namespace that is no dotted identifier path is refused when decorating, and a
+  name two nodes would have fails the build naming what made each. `apply_to(...).named(name, namespace=)` does the
+  same for `@mutate` (Q140).
+- `@tag` takes a `list` or `tuple` of strings as a value, kept as a tuple in written order. An empty sequence, a
+  repeated item, a non-`str` item, or an unordered collection (`set`, `frozenset`, `dict`) is refused when decorating,
+  naming the tag. `Driver.nodes.tagged(**query)` returns the views whose tags match: a `str` matches an equal value or
+  a tuple holding it, a sequence matches any item, `fnloom.ANY` matches a node with the tag. `fnloom draw` and `fnloom
+  export` take a repeatable `--tag key=value`, one per key (a key given twice is a usage error). A `str` subclass
+  value or item is kept as a plain `str`, and `fnloom.ANY` survives `copy`, `deepcopy` and `pickle`. The export writes
+  a tuple as a JSON list, and `diff` compares it in order (Q36, Q141).
+- `fnloom.PrintNodes(verbosity=1, *, print_fn=print, nodes=None, width=50)`, a hook that prints a line per node: its
+  time, `loaded from cache` for a hit, the error for a failure, and at `verbosity=2` the sorted inputs and the result,
+  cut to `width`. `nodes` is names (an unknown one fails the build) or a function of the `NodeView` (Q142).
+- `Builder.with_cache(store, *, recompute=(), disable=(), default=(), default_behavior="default", ignore=None)`: each
+  list names nodes given that behavior, or is `True` for the default. A list naming a node wins over its
+  `@cache(behavior=...)`, which wins over `default_behavior`; `True` counts as `default_behavior`, not as a name, so
+  a node's own `@cache` still wins over it. A name in two lists, two `True` lists, or `True` against another
+  `default_behavior` is a `ValueError`; a name that is no node, or an `ignore` parameter the consumer lacks, fails
+  the build with a `did you mean`. `ignore` maps a consumer to parameters left out of its key. Carried by pickling,
+  `copy`, `rebuild()` and `build_async` (Q143).
+- `fnloom.frame(library="pandas", *, flatten=True, separator=".", join="strict")`, a result builder for
+  `with_result_builder` making one pandas or polars frame: a frame output flattened into `<output>.<column>` columns in
+  request then column order, a series one column, scalars broadcast, all scalars one row. `join="strict"` refuses
+  outputs on different pandas indexes or of different polars lengths with a `ValueError` naming them; `join="outer"`
+  is Hamilton's `PandasDataFrameResult` frame, without its log; polars refuses it. Two columns of one name are a
+  `ValueError` naming both. The library is imported by `frame`, never by `import fnloom`. `frame` returns a
+  `fnloom.FrameBuilder` (Q144).
+  `with_result_builder(pandas.DataFrame)` is unchanged (Q89).
+- `Hook.after_build(event: BuildEnd)`, with `fnloom.BuildEnd(nodes, config, modules)`: called once per hook from
+  `build()`, `build_async()` and `rebuild()`. Every hook sees the event, a raise refuses the build, and several are
+  one `ExceptionGroup`. This is Hamilton's `GraphConstructionHook` and `StaticValidator` (Q145, Q117).
+- `Drawing.to_svg(*, orient="LR", legend=True)`, an SVG laid out in pure Python, and `render(path, engine="dot" |
+  "builtin")`: `"dot"` stays the default, and `"builtin"` writes `to_svg()` with nothing installed. `fnloom draw`
+  takes `--engine builtin` (Q146).
+- `@cache(fields={...})` and `fnloom.FieldCache(behavior="default", format=None)`: a field or column of
+  `@extract_fields` or `@extract_columns` with a policy of its own. `"default"` stores and serves the field apart from
+  its producer, keyed by the producer's key and the field, so a `disable` producer can have a stored field and does
+  not run when it hits; `"recompute"` runs the producer again for the field; `"disable"` makes the field's readers
+  uncacheable. A field the function doesn't extract is a `ValueError` at build, and `fields=` on a function that
+  extracts nothing a `TypeError` (Q147).
+- `@config.matches(predicate, *, name=None)`: a variant kept when `predicate`, called with the config keys its
+  parameters name, returns `True`. A defaulted parameter is an optional key, a missing required key never matches,
+  and a result that is no `bool` is a `TypeError` at build. It stacks with `config.when*` and falls back to
+  `@config.default`. The predicate's code version is in the selected variant's cache key and export `version`, and
+  the export shows the condition as `matches(<module.qualname>)`. A public module-level predicate, which would be a
+  node, fails the build (Q148).
+- `Builder.without_edge_type_checks(*consumers)` turns edge type checks off for every edge, or only for the edges into
+  the nodes named; an unknown name is a `ValueError` at build. Input checks stay on. The export's new `edge_checks`
+  field records it, and it is in `graph_version` (Q149).
+- `with_modules(..., namespace="eu", config={...})` gives a namespace a config of its own, overlaid on the builder's
+  for its `@config` variants, `@resolve`s, `config.matches` predicates and steps, as `@subdag(config=)` does.
+  `Driver.config` stays the builder's own; the export's new `namespace_config` field lists each overlay, which is in
+  `graph_version` (Q112 amended: `config=` per copy was not planned).
+- `with_modules(module, replace=("total",))` replaces the node `total` that earlier modules define, for every reader.
+  A name no earlier module, or not this one, defines under the config is a `ValueError` at build. `NodeView.replaced`
+  and the export entry's `replaced` name the module replaced. A `@mutate` on the replaced function fails the build,
+  and `@config` variants on both sides are each selected first (Q74 amended, Q150).
+
+### Changed
+
+- **Breaking:** `NodeView.tags` is now `Mapping[str, str | tuple[str, ...]]`: code that reads a tag as a `str` needs
+  an `isinstance(value, str)` check (or `tags.get("k")` handled as either) to type-check. `Driver.nodes` is typed
+  `NodeViews`, which has `tagged` (Q36, Q141). A node's `display_name` tag given as a tuple is drawn joined by `, `.
 - On a `@pipe_output` function without extracted fields, `.on_output(...)` (and `@mutate`'s
   `apply_to(...).on_output(...)`) picks the `@parameterize` rows it names, where it applied to every row; naming no
   node of the function is a `ValueError` at build, where it was ignored (Q106, Q140). The error for two nodes of one
@@ -129,9 +133,13 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `"policy recompute (decorator)"`, `"policy disable"` is `"policy disable (decorator)"`, and `(driver)` or
   `(default)` mark a behavior from a `with_cache` list or `default_behavior`. A `default` node that a list or
   `@cache(behavior="default")` made so has the reason `"policy default (driver)"` or `"policy default (decorator)"`
-  where it had `None`.
+  where it had `None` (Q143).
 - `@cache(...)` without `behavior` no longer sets one: `CachePolicy.behavior` is `None`, and the driver's
-  `default_behavior` applies, as in Hamilton. With `with_cache`'s default, nothing changes.
+  `default_behavior` applies, as in Hamilton. With `with_cache`'s default, nothing changes (Q143).
+- Without Graphviz, a drawing's `_repr_svg_` (Jupyter's preview) is the builtin SVG, where it was `None`. The
+  `FileNotFoundError` for a missing `dot` gives the platform's install command (`brew install graphviz`, `apt-get
+  install graphviz`, `winget install graphviz`), and names `.mmd`, `.dot` and, for an SVG, `engine="builtin"` as the
+  ways that need nothing (Q146).
 
 ### Fixed
 
@@ -508,7 +516,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - The type stub `fnloom/_core.pyi` matches the extension: `Graph`, `KeyPlan` and `ObserverBase` construct through `__new__`,
   and `Plan.run`'s `observers` defaults to `()` in its runtime signature too.
 
-[Unreleased]: https://github.com/kelsayed17/fnloom/compare/v0.3.1...HEAD
+[Unreleased]: https://github.com/kelsayed17/fnloom/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/kelsayed17/fnloom/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/kelsayed17/fnloom/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/kelsayed17/fnloom/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kelsayed17/fnloom/compare/v0.1.1...v0.2.0
