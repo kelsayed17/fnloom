@@ -1,9 +1,10 @@
 # Roadmap: ahead of Hamilton everywhere
 
-**Status:** in progress, 2026-11-05. Plans 1–4, the Plan 4 follow-up and Plan 3 are released in 0.2.0. Plans 5 to 9
-(#24 to #28) and Plan 12's PR 0 (#33) are released in 0.3.0, and Plan 12's PRs A to G (#43, #44, #46 to #49, #53)
-in 0.4.0. Plan 10 is next and ships as 0.5.0; Plan 11 follows it, then Plan 13. Plans 10 and 11 are designed and
-approved, not built.
+**Status:** in progress, 2026-11-07. Plans 1, 2 and 4 are released in 0.1.0, and the Plan 4 follow-up and Plan 3 in
+0.2.0. Plans 5 to 9 (#24 to #28) and Plan 12's PR 0 (#33) are released in 0.3.0, and Plan 12's PRs A to G
+(#43, #44, #46 to #49, #53) in 0.4.0. Plan 10 is under way and ships as 0.5.0: its PR A1, typed absence in the core and the
+front end, is merged (#56) and unreleased. Plan 11 follows it, then Plan 13. Plan 11 is designed and approved, not
+built.
 
 **Goal:** for every capability Hamilton 1.90.0 offers, fnloom has an equivalent that is at least as good, or a
 written decision explaining why it doesn't. "At least as good" means: same intent; behaviour proven differentially
@@ -146,7 +147,7 @@ behind); **n/a** (fnloom has no such feature yet; the plan builds it without the
 | About 100 µs per `execute` re-planning; build of 0.3–30 ms | fixed (execute) | Q3; build cost gets a benchmark row |
 | A failed run logs a full traceback at ERROR, then a Slack banner, then raises; a malformed function is reported twice | fixed | Q15; one raise |
 | A failing node's inputs are logged by Hamilton, not by fnloom | fixed (Plan 6, opt-in) | `after_node` gets the failing node, its inputs and its error; `fnloom.LogFailures` logs them, each value's `repr` cut to 50 characters. fnloom still logs nothing by default (Q88) |
-| A node can't skip (no early return); "don't compute" must be encoded as data | same | Designed for Plan 10 ([dynamic execution design](../design/2026-10-28-dynamic-execution-design.md) §7): a node annotated `-> T \| Absent` may return `fnloom.ABSENT`; each consumer takes it, uses its default, or is skipped, decided at build by its signature; absences are cached |
+| A node can't skip (no early return); "don't compute" must be encoded as data | same | Plan 10 ([dynamic execution design](../design/2026-10-28-dynamic-execution-design.md) §7): a node annotated `-> T \| Absent` may return `fnloom.ABSENT`; each consumer takes it, uses its default, or is skipped, decided at build by its signature; absences are cached. Built in PR A1 (#56, unreleased), all but the caching |
 | Validation errors (`DataValidationError`) are not `ValueError`, and `importance="warn"` is the default | fixed (Plan 8) | `fnloom.ValidationError` subclasses `ValueError`, with a readable message; fail is the default (Q100) |
 | A Driver used from several threads works but is untested (#54); one cache "last run" is shared across threads | fixed (Plan 5) | A documented guarantee ([Threads](../running.md#threads)) with a stress test of 16 threads sharing one cached driver, on the default and free-threaded builds (`tests/test_threads.py`); no cache state is shared between runs |
 | A module edit after `reload` is not seen by an existing driver | fixed (Plan 5) | `Driver.rebuild()` and `AsyncDriver.rebuild()` build again with every setting and see the edit; an existing driver keeps its code, as Hamilton's does, and the cache versions code (Q83, Q48) |
@@ -229,11 +230,12 @@ tests against Hamilton for every kept behaviour; benchmarks for anything on the 
    and its consumer rules, `Parallelizable` and `Collect` with nesting and per-branch caching. 0.3.0 shipped
    without it (maintainer, 2026-11-03). [Plan 10's implementation plan](2026-11-05-plan-10-absence-and-fan-out.md)
    is built after Plan 12's PRs A to G, and ships as 0.5.0, the release after Plan 12's 0.4.0 (maintainer,
-   2026-11-03).
+   2026-11-03). In progress: PR A1, `ABSENT` and its consumer rules in the core and the front end, is merged (#56);
+   PRs A2 to Z are pending.
 10. **Plan 11: the parallel executor and partial results.** The same design, milestones C to E: the core
     `Scheduler`, `with_threads(...)` for free-threaded 3.14t, `run_many`, the async driver on the scheduler, and
-    `absent_on` for partial results. The rest of "Beyond Hamilton" (streaming, incremental execution, sweeps) is left
-    room for in its §8.
+    `absent_on` for partial results. Not started. The rest of "Beyond Hamilton" (streaming, incremental execution,
+    sweeps) is left room for in its §8.
 11. **Plan 12: every comparison row better.** Done: [Plan 12](2026-10-29-plan-12-api-parity-plus.md), a test for
     every row of [Coming from Hamilton](../from-hamilton.md)'s comparison tables, then the four rows where fnloom is
     behind and the seven where it is only different, each made strictly better (Q139 on). Independent of Plans 10

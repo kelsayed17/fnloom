@@ -4,7 +4,7 @@
 > superpowers:test-driven-development inside each task and an independent reviewer subagent per PR. Steps use
 > checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** approved 2026-10-29 as drafted, with the recommended answer to each open question: the SVG engine behind its spike, `NodeView.tags` widened, released with whichever of Plans 10 to 12 lands first. PR 0 (a test for every row) was added at the maintainer's request the same day. PR 0 is released in 0.3.0 and PRs A to G in 0.4.0: Plan 12 is done.
+**Status:** done. Approved 2026-10-29 as drafted, with the recommended answer to each open question: the SVG engine behind its spike, `NodeView.tags` widened, released with whichever of Plans 10 to 12 lands first. PR 0 (a test for every row) was added at the maintainer's request the same day. PR 0 is released in 0.3.0 and PRs A to G in 0.4.0: Plan 12 is done.
 
 **Numbering:** Plan 10 (typed absence and sequential fan-out) and Plan 11 (the scheduler, `with_threads`, `run_many`,
 `absent_on`) are taken by the dynamic execution design (#30), which also takes register rows Q118 to Q138. This plan
