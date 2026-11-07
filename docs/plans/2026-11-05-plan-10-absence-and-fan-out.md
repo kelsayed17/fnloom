@@ -4,7 +4,8 @@
 > superpowers:executing-plans to implement this plan PR by PR, task by task, with superpowers:test-driven-development
 > inside each task and an independent reviewer subagent per PR. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** drafted 2026-11-05 for the maintainer's approval. Nothing here is built.
+**Status:** in progress. Drafted 2026-11-05. PR A1 (typed absence in the core and the front end, tasks 1 and 2) is
+merged in #56 and not yet released; PRs A2 to Z are pending.
 
 **Goal:** milestones A and B of the [dynamic execution design](../design/2026-10-28-dynamic-execution-design.md).
 

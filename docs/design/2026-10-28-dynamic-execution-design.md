@@ -1,6 +1,7 @@
 # fnloom — dynamic execution, design
 
-**Status:** approved by the maintainer 2026-10-29, with the open questions of §13 decided. Nothing here is built.
+**Status:** approved by the maintainer 2026-10-29, with the open questions of §13 decided. Plan 10's PR A1 (typed
+absence in the core and the front end) is merged in #56; the rest is pending.
 It designs Plans 10 and 11 of the [roadmap](../plans/2026-10-28-roadmap-ahead-of-hamilton.md): dynamic fan-out and
 fan-in, a parallel executor, and a typed absent outcome, and it says which parts of the roadmap's "Beyond Hamilton" it
 delivers and which it only leaves room for. Facts about Hamilton were read in the `apache-hamilton 1.90.0` wheel and

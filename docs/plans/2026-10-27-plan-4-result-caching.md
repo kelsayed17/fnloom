@@ -1,5 +1,8 @@
 # fnloom Plan 4: result caching
 
+**Status:** done. Merged in #11 and released in 0.1.0; its follow-up (`@cache(format=...)` and the native
+`MemoryCache` walk, #20) is released in 0.2.0.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
