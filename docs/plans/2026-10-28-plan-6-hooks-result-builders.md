@@ -3,7 +3,7 @@
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or
 > superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** done, 2026-10-28, on `claude/plan-6`, merge pending. [As built](#as-built) records where the build went
+**Status:** done, 2026-10-28, merged in #25 and released in 0.3.0. [As built](#as-built) records where the build went
 beyond the plan or narrowed it.
 
 **Goal:** close the roadmap's step 5. That means:
