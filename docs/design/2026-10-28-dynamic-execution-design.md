@@ -417,8 +417,9 @@ output that is absent is `ABSENT` in the result dict.
   gives one entry per branch, `ABSENT` where it declined, so positions line up with the items.
 - An input may not be `ABSENT` (leave it out instead); an override may be, for a node that may be absent, which is how
   a test forces the skip.
-- **Caching.** A declared absence is a result: it is stored under the node's key, as a marker both formats encode,
-  and a hit replays it, so its consumers skip again without running it. As a version, a declared `ABSENT` has a
+- **Caching.** A declared absence is a result: it is stored under the node's key (by `DiskCache` as an `absent`
+  flag in the entry's header with no payload, in every format, so no format's value can pass for it), and a hit
+  replays it, so its consumers skip again without running it. As a version, a declared `ABSENT` has a
   fingerprint of its own. Under rule 2, the omitted parameter is versioned by the caching design's "not supplied"
   marker, which is right: the call is the same as with the input left out. An absence from an error is different
   (§7.5).
@@ -683,3 +684,5 @@ Plan 12's PRs A to G merge. Per the maintainer's 2026-11-03 decision above, Plan
 - **2026-11-05:** the [implementation plan](../plans/2026-11-05-plan-10-absence-and-fan-out.md) for Plan 10 is
   written. It records where it fixes a shape this design left to the builder. Per the maintainer's 2026-11-03
   decision (§12.3), Plan 10 ships as 0.5.0, the release after Plan 12's 0.4.0.
+- **2026-11-09:** §7.3's stored absence is a header flag with no payload, as Plan 10 PR A3 built it, not a marker
+  each format encodes.

@@ -50,6 +50,7 @@ from fnloom._types import written
 if TYPE_CHECKING:
     from collections.abc import Callable, Generator, Mapping, Sequence
 
+    from fnloom._absence import Kind
     from fnloom._checks import Check
     from fnloom._config import Condition
     from fnloom._hooks import Dispatch
@@ -371,8 +372,13 @@ class CacheOutcome(NamedTuple):
             `"extracted field: runs whenever needed; never served from the store"`:
             it is keyed but never stored, so its check runs whenever it runs.
             `"unknown"`: the key depends on the result of a `recompute` node,
-            which only a run knows.
-        reason: Why a node is uncacheable or unknown, or is a `recompute` miss;
+            which only a run knows. `"skipped"`: the store holds no entry for
+            the node, and a run would skip it, neither running nor storing it,
+            since a source it requires is absent: a stored declared absence,
+            an override of `ABSENT`, or another skipped node. Only
+            `explain_cache` reports it.
+        reason: Why a node is uncacheable, unknown or skipped (`"reads absent
+            'listing'"`, naming the first such source), or is a `recompute` miss;
             `None` for a plain hit or miss. A reason from a policy names where
             the behavior came from (Q143): `(driver)`, a `with_cache` list naming
             the node; `(decorator)`, its `@cache` or its producer's `fields=`;
@@ -382,7 +388,7 @@ class CacheOutcome(NamedTuple):
             behavior, and `None` when the default did.
     """
 
-    status: Literal["hit", "miss", "uncacheable", "unknown"]
+    status: Literal["hit", "miss", "uncacheable", "unknown", "skipped"]
     reason: str | None
 
 
@@ -835,12 +841,15 @@ class Cache:
         store: Where results are kept.
         keys: Each node's `NodeKey`, by name.
         sources: The distinct nodes and inputs each node reads, by name.
+        kinds: How each node reads each of its sources (`"required"`,
+            `"optional"`, ...), by node name, then source name.
         formats: The `Format` of each node that names one, by name.
     """
 
     store: CacheStore
     keys: Mapping[str, NodeKey]
     sources: Mapping[str, tuple[str, ...]]
+    kinds: Mapping[str, Mapping[str, Kind]]
     formats: Mapping[str, Format]
 
     @classmethod
@@ -861,12 +870,15 @@ class Cache:
             raise ValueError("; ".join(problems))
         # Classes may have been edited since the last build: read them again.
         forget_class_versions()
-        sources = {n.name: tuple(s for s, _, _ in core_inputs(n.params)) for n in nodes}
+        kinds = {
+            n.name: {s: kind for s, kind, _ in core_inputs(n.params)} for n in nodes
+        }
         resolved = _resolved(nodes, settings)
         return cls(
             store,
             _keyed(nodes, resolved),
-            sources,
+            {name: tuple(read) for name, read in kinds.items()},
+            kinds,
             _formats(store, nodes, resolved),
         )
 
@@ -988,6 +1000,7 @@ class CacheRun:
                     [source for _, source, _ in k.params if source is not None],
                     looked_up,
                     list(cache.sources[name]),
+                    _optional(cache, name, k),
                 )
                 for name, k, looked_up in zip(computed, keys, stored, strict=True)
             ],
@@ -1002,6 +1015,13 @@ class CacheRun:
         self._behaviors = {name: k.behavior for name, k in self._node_keys.items()}
         self._stored = dict(zip(computed, stored, strict=True))
         self._sources = {name: cache.sources[name] for name in computed}
+        # What each computed node requires: an absent one skips it (rule 3).
+        self._required = {
+            name: tuple(
+                s for s, kind in cache.kinds[name].items() if kind == "required"
+            )
+            for name in computed
+        }
         # Every input and override a key reads gets a version, so a version that
         # is missing only ever means an optional input not supplied.
         read = {source for k in keys for _, source, _ in k.params if source is not None}
@@ -1374,13 +1394,15 @@ class CacheRun:
         # No result, so no version: every key reading one is `None`.
         versions.update(dict.fromkeys(self._first))
         keys = self._key_plan.keys(versions)
-        return dict(sorted(self._outcomes(keys, reasons, warned).items()))
+        absent = {name for name, value in overrides.items() if value is _core.ABSENT}
+        return dict(sorted(self._outcomes(keys, reasons, warned, absent).items()))
 
     def _outcomes(
         self,
         keys: Mapping[str, bytes | None],
         reasons: Mapping[str, str],
         warned: set[str] | None,
+        absent: set[str] | None = None,
     ) -> dict[str, CacheOutcome]:
         """Each computed node's outcome, by name, in plan order.
 
@@ -1388,6 +1410,10 @@ class CacheRun:
         and what reads a `recompute` node run first is `unknown`. Without, a run's,
         once its walk found the hits: such a node is a miss, the caller marking
         the hits, and a `recompute` node run first is read like an input.
+
+        `absent`, for `explain`, holds the overrides of `ABSENT`; it receives
+        each node whose entry holds `ABSENT`, and each node a run would skip,
+        which is no hit and requires one of them.
         """
         outcomes: dict[str, CacheOutcome] = {}
         # Plan order, so each node's sources have their outcomes already.
@@ -1401,16 +1427,23 @@ class CacheRun:
                     "miss", f"runs again for recompute field {field!r}"
                 )
             else:
-                found = (
-                    warned is not None
-                    and self._stored[name]
-                    and self._get(key, name, warned) is not MISSING
+                value = (
+                    self._get(key, name, warned)
+                    if warned is not None and self._stored[name]
+                    else MISSING
                 )
-                outcome = k.outcome(found=found)
+                if value is _core.ABSENT and absent is not None:
+                    absent.add(name)
+                outcome = k.outcome(found=value is not MISSING)
             # A `recompute` node always runs, so it is a miss whether or not its
             # key is known, unless it has none to be stored under.
             if k.behavior == "recompute" and outcome.status == "unknown":
                 outcome = k.outcome(found=False)
+            if absent is not None and outcome.status != "hit":
+                skip = next((s for s in self._required[name] if s in absent), None)
+                if skip is not None:
+                    absent.add(name)
+                    outcome = CacheOutcome("skipped", f"reads absent {skip!r}")
             outcomes[name] = outcome
         return outcomes
 
@@ -1537,6 +1570,18 @@ class CacheRun:
                 warned, name, f"cannot load node {name!r} from the cache: {error!r}"
             )
             return MISSING
+
+
+def _optional(cache: Cache, name: str, key: NodeKey) -> list[str]:
+    """The sources node `name`'s key reads by an `optional` edge.
+
+    A field keyed through its `disable` producer's sources reads them as the
+    producer does, so the producer's `optional` edges count too.
+    """
+    kinds = dict(cache.kinds[name])
+    if key.via is not None:
+        kinds.update(cache.kinds[key.via])
+    return [source for source, kind in kinds.items() if kind == "optional"]
 
 
 def _planned(key: NodeKey, actions: Mapping[str, str]) -> NodeKey:
