@@ -60,7 +60,11 @@ class Param:
         and `"all"` for `Collect[T | Absent]`, which receives every branch's, in
         branch order.
         """
-        mode = collect_mode(self.annotation)
+        annotation = self.annotation
+        if isinstance(annotation, type):
+            # The common case, read per parameter at build: a class collects nothing.
+            return None
+        mode = collect_mode(annotation)
         return None if mode is None else mode[0]
 
 

@@ -135,7 +135,9 @@ def refuse(nodes: Sequence[NodeDef], *, awaits: bool) -> None:
     for node in nodes:
         item = expanded_type(node.returns)
         if item is None:
-            if inspect.isgeneratorfunction(node.origin):
+            # Read off the code's flags, as the scan does: far cheaper per node.
+            code = getattr(node.origin, "__code__", None)
+            if code is not None and code.co_flags & inspect.CO_GENERATOR:
                 tail = (
                     "calling it returns a generator, not the node's value"
                     if awaits
