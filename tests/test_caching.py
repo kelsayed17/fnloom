@@ -1055,6 +1055,16 @@ def first(listing: list[str] = ["default"]) -> str:
     return listing[0]
 """
 
+# Admits `ABSENT` and has a default: given `ABSENT`, it receives it.
+_KEPT = """
+from fnloom import ABSENT, Absent, defaults
+
+@defaults(shadowed=("listing",))
+def kept(listing: list[str] | Absent = ["d"]) -> str:
+    print("kept")
+    return "absent" if listing is ABSENT else listing[0]
+"""
+
 _LISTING = """
 from fnloom import ABSENT, Absent
 
@@ -1193,6 +1203,22 @@ def test_an_absent_override_read_as_a_value_is_keyed_by_its_fingerprint(
     assert _called(capsys) == ["shown", "shown"]
     assert driver.execute(["shown"], overrides={"listing": ABSENT}) == {"shown": "none"}
     assert _called(capsys) == []
+    # With a default too (`admits_optional`), `ABSENT` is still passed, not left out:
+    # keyed by its fingerprint, so it misses against `listing` not supplied.
+    store = MemoryCache()
+    consumer = make_module("cached_admits_optional", _KEPT)
+    with_listing = (
+        Builder()
+        .with_cache(store)
+        .with_modules(consumer, make_module("cached_admits_listing", _LISTING))
+        .build()
+    )
+    alone = _cached(consumer, store)
+    assert with_listing.execute(["kept"], overrides={"listing": ABSENT}) == {
+        "kept": "absent"
+    }
+    assert alone.execute(["kept"]) == {"kept": "d"}
+    assert _called(capsys) == ["kept", "kept"]
 
 
 def test_key_plan_hashes_an_absent_optional_read_as_not_supplied() -> None:
@@ -1381,5 +1407,19 @@ def test_explain_cache_reports_an_uncacheable_reader_of_an_absence_as_skipped() 
     driver.execute(["count"], inputs={"wanted": False})
     assert driver.explain_cache(["count"], inputs={"wanted": False}) == {
         "count": CacheOutcome("skipped", "reads absent 'listing'"),
+        "listing": CacheOutcome("hit", None),
+    }
+
+
+def test_explain_cache_keeps_a_hit_over_a_stored_absence_it_requires() -> None:
+    """A run's walk loads `count` and never reaches `listing`, so `count` is a hit."""
+    store = CountingCache()
+    driver = _cached(make_module("cached_hit_over_absence", _DECLINING), store)
+    driver.execute(["count"], inputs={"wanted": True})
+    entries = store._entries.items()  # noqa: SLF001  # the entries themselves
+    listing_key = next(key for key, value in entries if isinstance(value, list))
+    store.put(listing_key, ABSENT)
+    assert driver.explain_cache(["count"], inputs={"wanted": True}) == {
+        "count": CacheOutcome("hit", None),
         "listing": CacheOutcome("hit", None),
     }

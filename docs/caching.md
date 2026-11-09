@@ -610,6 +610,7 @@ to lock or corrupt, and a lookup is one file read.
   no payload, in every format ([Declared absences](#declared-absences)). An entry written by another Python,
   serializer or library version is a quiet miss, and the file is left for the next write to replace: a read never
   deletes another interpreter's entry; a write still replaces it. One directory per interpreter is the better layout.
+  The exception is fnloom 0.4.0 and older, which find an absence entry damaged, and remove it with a `CacheWarning`.
 - An entry that cannot be read back (truncated, corrupt, or naming a class that moved) is a miss: it is removed, with
   a `CacheWarning`, and the node runs.
 - Writes go to a temporary file in the same directory that then replaces the entry, so a reader sees a whole entry
