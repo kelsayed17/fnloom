@@ -581,6 +581,72 @@ shop.explain_cache(["count"], inputs={"item": "desk"})
   for it and the `json` format needs no way to write it. `ABSENT` inside a value (a list holding it, say) pickles by
   name and loads back as the singleton; the `json` format refuses such a value, as any it can't load back exactly.
 
+## Blocks
+
+A node inside a block ([Fan-out and fan-in](writing-nodes.md#fan-out-and-fan-in)) has one key per item. Its key is
+its ordinary key, with the item's fingerprint as the version of the expand it reads. The branch index is not in it.
+So an item that moved, or that another run also had, hits, and an appended item computes one new branch.
+
+```python
+# file: regions_sales.py
+from fnloom import Collect, Parallelizable
+
+
+def region(regions: list[str]) -> Parallelizable[str]:
+    """Each region asked for."""
+    yield from regions
+
+
+def sales(region: str) -> float:
+    """The region's sales, from a slow endpoint."""
+    print("sales", region)
+    return float(len(region))
+
+
+def report(sales: Collect[float]) -> list[float]:
+    """Every region's sales, in the order asked."""
+    return list(sales)
+```
+
+```python
+import fnloom
+import regions_sales
+
+books = (
+    fnloom.Builder()
+    .with_modules(regions_sales)
+    .with_cache(fnloom.MemoryCache())
+    .build()
+)
+books.execute(["report"], inputs={"regions": ["eu", "asia"]})
+# -> {'report': [2.0, 4.0]}
+books.execute(["report"], inputs={"regions": ["asia", "eu", "us"]})
+# -> {'report': [4.0, 2.0, 2.0]}
+books.explain_cache(["report"], inputs={"regions": ["asia", "eu", "us"]})
+# -> {"region": ("hit", "branches: 3 hit, 0 miss, 0 uncacheable"), "report": ("hit", None), "sales": ("unknown", "keyed per item of 'region'")}
+```
+
+The second run calls `sales` once, for `"us"`, and prints `sales us`.
+
+- **The expand is stored as the `list` of its items,** under its ordinary key, so a hit replays them without running
+  it. Storing them means holding every item until the expand is exhausted. A large or endless generator can't afford
+  that, so mark it `@cache(behavior="disable")` or `"recompute"`: it stays lazy, stores nothing, and runs every time.
+- **A collect hits only when every branch's key is the same, in the same order.** Its version of what it collects
+  hashes the branches' keys in branch order, absent ones included. Reordered items hit every branch and run the
+  collect again, in the new order (Q129).
+- **An item with no fingerprint** is versioned by its expand's key and its index. That holds only when the expand's
+  items are stored, or were replayed, in this run, since then that key covers exactly what it yielded. Otherwise its
+  branch is uncacheable, and so is what chains from it: it runs, nothing is stored for it, and no later run hits it by
+  index.
+- **Within a branch, a hit at the block's exit skips its upstream** in that branch: the cache is asked from the nodes
+  the collects read, back. Branch hits fire `before_node` and `after_node` with `cache` a hit and their `branch`, as
+  an outer hit does (Q85).
+- **Policies apply per branch.** A `recompute` or `disable` block node runs in every branch, and what reads it in the
+  branch is uncacheable, since its result is known only once the branch ran.
+- **`explain_cache` runs nothing.** It reports a block node `unknown`, keyed per item, and counts an outer expand's
+  branches from its stored items, in its reason. With none stored, the reason says
+  `the expand node runs, so its branches are known only at run`.
+
 ## Stores
 
 A store is any object with three methods, the `fnloom.CacheStore` protocol: `get(key)` returns the value or

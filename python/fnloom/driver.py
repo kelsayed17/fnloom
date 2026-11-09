@@ -117,6 +117,10 @@ class _Runnable(Protocol):
 class _GraphLike(Protocol):
     """The part of `_core.Graph` the driver uses."""
 
+    def blocks(self) -> dict[str, list[str]]:
+        """Each block node's block path: its expands, outermost first."""
+        ...
+
     def node_names(self) -> list[str]:
         """Returns every node name, sorted."""
         ...
@@ -3625,16 +3629,10 @@ class Builder[R = dict[str, object]]:
 
         With no expand, there are no blocks, and absence is found here. With one,
         the core finds both, since a collect passes absence on only from an absent
-        expand (§7.4 of the dynamic execution design); a cached driver refuses
-        it, as branches are not keyed yet.
+        expand (§7.4 of the dynamic execution design).
         """
-        expanding = sorted(n.name for n in nodes if _blocks.expands(n.returns))
-        if not expanding:
+        if not any(_blocks.expands(n.returns) for n in nodes):
             return {}, _absence.may_be_absent(nodes)
-        if self._store is not None:
-            listed = ", ".join(f"{name!r}" for name in expanding)
-            msg = f"with_cache() does not cache blocks yet; {listed} expands"
-            raise ValueError(msg)
         found = _graph_of(nodes)
         return found.blocks(), frozenset(found.may_be_absent())
 

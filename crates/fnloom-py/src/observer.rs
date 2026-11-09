@@ -82,6 +82,17 @@ impl ObserverBase {
     )]
     const fn post_expand(&self, node: &str, branch: &Bound<'_, PyTuple>, items: usize) {}
 
+    /// Called instead of `pre_node` and `post_node` for a node downstream of an expand
+    /// whose value the cache held, with that value; `branch` is the branch it hit in,
+    /// `()` outside blocks. Sent only to an observer whose class overrides it.
+    #[pyo3(signature = (node, *, branch, value))]
+    #[expect(unused_variables, reason = "the base hook ignores its arguments")]
+    #[expect(
+        clippy::unused_self,
+        reason = "Python calls the hooks as instance methods"
+    )]
+    const fn hit_in(&self, node: &str, branch: &Bound<'_, PyTuple>, value: &Bound<'_, PyAny>) {}
+
     /// Called instead of `pre_node` and `post_node` for a computed node that is skipped,
     /// because an argument it needs is absent: the node is then absent too. `branch` is
     /// the block branch it was skipped in, `()` outside blocks.
@@ -116,6 +127,8 @@ pub struct PyObserver<'py, 's> {
     nodes: bool,
     /// Whether the observer's class overrides `post_expand`, which is sent only then.
     expands: bool,
+    /// Whether the observer's class overrides `hit_in`, which is sent only then.
+    hits: bool,
 }
 
 impl<'py, 's> PyObserver<'py, 's> {
@@ -123,11 +136,13 @@ impl<'py, 's> PyObserver<'py, 's> {
     pub fn new(observer: Bound<'py, ObserverBase>, kwargs: &'s Kwargs<'py, 's>) -> Self {
         let nodes = overrides(&observer, "pre_node") || overrides(&observer, "post_node");
         let expands = overrides(&observer, "post_expand");
+        let hits = overrides(&observer, "hit_in");
         Self {
             observer,
             kwargs,
             nodes,
             expands,
+            hits,
         }
     }
 
@@ -263,6 +278,17 @@ impl Observer<Value, PyErr> for PyObserver<'_, '_> {
         kwargs.set_item(intern!(py, "branch"), PyTuple::new(py, branch)?)?;
         kwargs.set_item(intern!(py, "items"), items)?;
         self.call(intern!(py, "post_expand"), (node,), Some(&kwargs))
+    }
+
+    fn hit_in(&mut self, node: &str, branch: &[usize], value: &Value) -> PyResult<()> {
+        if !self.hits {
+            return Ok(());
+        }
+        let py = self.observer.py();
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "branch"), PyTuple::new(py, branch)?)?;
+        kwargs.set_item(intern!(py, "value"), value.bind(py))?;
+        self.call(intern!(py, "hit_in"), (node,), Some(&kwargs))
     }
 
     fn skipped(&mut self, node: &str, branch: &[usize]) -> PyResult<()> {

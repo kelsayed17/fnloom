@@ -152,14 +152,6 @@ def test_build_async_refuses_blocks() -> None:
     )
 
 
-def test_with_cache_refuses_blocks_until_they_are_cached() -> None:
-    """A cached driver can't key a branch yet, so it refuses a graph with blocks."""
-    module = make_module("blocks_cache", PICKED)
-    builder = fnloom.Builder().with_modules(module).with_cache(fnloom.MemoryCache())
-    with pytest.raises(ValueError, match="does not cache blocks yet; 'picked' expands"):
-        builder.build()
-
-
 STR_ITEMS = """
 from fnloom import Collect, Parallelizable
 
