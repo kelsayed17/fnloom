@@ -20,5 +20,6 @@
   "core::engine::run_blocks.fan_out_1": 5632,
   "core::engine::run_blocks.fan_out_100": 94006,
   "core::engine::run_blocks.fan_out_10000": 8668795,
+  "core::engine::run_blocks.wide_1000": 2455041,
   "core::engine::run_skips.skip_chain_200": 102876
 }
