@@ -115,10 +115,23 @@ class MemoryStore:
 class ObserverBase:
     def __new__(cls, *_args: object, **_kwargs: object) -> Self: ...
     def pre_graph(self) -> None: ...
-    # A block node's `pre_node` and `post_node` also get `branch=`, its branch path.
-    def pre_node(self, node: str, kwargs: dict[str, object]) -> None: ...
+    # A block node's `pre_node` and `post_node` also get `branch=`, its branch path;
+    # a node outside every block is called without it.
+    def pre_node(
+        self,
+        node: str,
+        kwargs: dict[str, object],
+        *,
+        branch: tuple[int, ...] = ...,
+    ) -> None: ...
     def post_node(
-        self, node: str, *, ok: bool, value: object, error: BaseException | None
+        self,
+        node: str,
+        *,
+        ok: bool,
+        value: object,
+        error: BaseException | None,
+        branch: tuple[int, ...] = ...,
     ) -> None: ...
     def skipped(self, node: str, *, branch: tuple[int, ...]) -> None: ...
     def post_expand(

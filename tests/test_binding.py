@@ -79,14 +79,22 @@ class Recorder(_core.ObserverBase):
         self._record("pre_graph")
 
     @override
-    def pre_node(self, node: str, kwargs: dict[str, object]) -> None:
+    def pre_node(
+        self, node: str, kwargs: dict[str, object], *, branch: tuple[int, ...] = ()
+    ) -> None:
         """Records the event and a copy of the node's keyword arguments."""
         self.kwargs.append((node, dict(kwargs)))
         self._record("pre_node", node)
 
     @override
     def post_node(
-        self, node: str, *, ok: bool, value: object, error: BaseException | None
+        self,
+        node: str,
+        *,
+        ok: bool,
+        value: object,
+        error: BaseException | None,
+        branch: tuple[int, ...] = (),
     ) -> None:
         """Records the event and the node's value or error."""
         self.outcomes.append((node, ok, value, error))
@@ -505,7 +513,9 @@ class PanickingObserver(_core.ObserverBase):
     """Panics in Rust from its `pre_node` hook."""
 
     @override
-    def pre_node(self, node: str, kwargs: dict[str, object]) -> None:
+    def pre_node(
+        self, node: str, kwargs: dict[str, object], *, branch: tuple[int, ...] = ()
+    ) -> None:
         """Panics."""
         _core._panic_for_test()  # noqa: SLF001 - the test-hooks entry point is private by design
 
@@ -784,7 +794,13 @@ class _PostOnly(_core.ObserverBase):
 
     @override
     def post_node(
-        self, node: str, *, ok: bool, value: object, error: BaseException | None
+        self,
+        node: str,
+        *,
+        ok: bool,
+        value: object,
+        error: BaseException | None,
+        branch: tuple[int, ...] = (),
     ) -> None:
         self.ended.append(node)
 
