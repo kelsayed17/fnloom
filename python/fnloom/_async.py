@@ -20,6 +20,11 @@ without hooks runs exactly the walk below. Its events go through the run's
 before a node's task, thread or inline call starts, `after_node` once its value or
 error is in. An error a hook raises fails the run as a node's own would.
 
+A node that may decline (Q135) is read by the sync driver's rules, through
+`_absence.applied`: a consumer whose `required` argument is `ABSENT` is skipped,
+kept as `ABSENT`, firing no node event and storing nothing, and its dependents
+count it done. Only a node reading a source that may be absent checks anything.
+
 Nothing about a run is kept on the schedule, which is shared by every run of its
 plan: each run has its own `_Run`, so runs on one loop, or on loops in several
 threads, never share a value (Review Focus 5). Nothing recurses over the graph's
@@ -36,6 +41,7 @@ from collections import deque
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast, override
 
 from fnloom import _extract
+from fnloom._absence import Kind, applied, declines, may_be_absent
 from fnloom._caching import HIT_PLAN_CACHE_SIZE
 from fnloom._core import ABSENT
 from fnloom._scan import core_inputs
@@ -73,12 +79,17 @@ class Call(NamedTuple):
     """How the walk calls one computed node.
 
     `args` are the node's core inputs, each with the keyword it is passed under: its
-    name, or the parameter a `@parameterize` row renames it to.
+    name, or the parameter a `@parameterize` row renames it to. `declines` says
+    whether it may return `fnloom.ABSENT`, and `watched` are the args whose source
+    may be absent, each with the kind it is read by, for `_absence.applied` (Q135):
+    empty, so nothing is checked, for a node reading none.
     """
 
     payload: Callable[..., object]
     kind: _Kind
     args: tuple[tuple[str, str], ...]
+    declines: bool = False
+    watched: tuple[tuple[str, str, Kind], ...] = ()
 
 
 def awaits(node: NodeDef) -> bool:
@@ -94,6 +105,7 @@ def awaits(node: NodeDef) -> bool:
 
 def calls(nodes: Mapping[str, NodeDef], sync_nodes: SyncNodes) -> dict[str, Call]:
     """How the walk calls each node of a graph, by name."""
+    absent = may_be_absent(list(nodes.values()))
     found: dict[str, Call] = {}
     for name, node in nodes.items():
         kind: _Kind
@@ -103,11 +115,16 @@ def calls(nodes: Mapping[str, NodeDef], sync_nodes: SyncNodes) -> dict[str, Call
             kind = "await"
         else:
             kind = sync_nodes
+        reads = core_inputs(node.params)
         args = tuple(
-            (source, node.renames.get(source, source))
-            for source, _, _ in core_inputs(node.params)
+            (source, node.renames.get(source, source)) for source, _, _ in reads
         )
-        found[name] = Call(node.payload, kind, args)
+        watched = tuple(
+            (source, keyword, read)
+            for (source, read, _), (_, keyword) in zip(reads, args, strict=True)
+            if source in absent
+        )
+        found[name] = Call(node.payload, kind, args, declines(node), watched)
     return found
 
 
@@ -317,9 +334,8 @@ def _awaitable_refusal(node: str, value: object) -> TypeError:
 def _undeclared_absence(node: str) -> TypeError:
     """The error for a node that returned `fnloom.ABSENT` without declaring it may.
 
-    The sync driver's binding raises the same. Every node here is one whose return
-    annotation does not admit `fnloom.Absent`, since `build_async()` refuses a
-    node that declines (`_absence.refuse_async`), so any `ABSENT` is refused.
+    The sync driver's binding raises the same: this is its return check, for the
+    nodes the async walk calls itself (Q135).
     """
     msg = (
         f"node {node!r} returned fnloom.ABSENT, but its return annotation does "
@@ -450,8 +466,11 @@ class _Run:
         calls = self._schedule.calls
         while ready and self._failure is None:
             name = ready.popleft()
-            payload, kind, args = calls[name]
+            payload, kind, args, _, watched = calls[name]
             kwargs = {keyword: values[source] for source, keyword in args}
+            if watched and not applied(kwargs, values, watched):
+                self._skip(name)
+                continue
             if kind == "inline":
                 if not self._inline(name, payload, kwargs):
                     return
@@ -484,7 +503,7 @@ class _Run:
         if inspect.isawaitable(value):
             self._fail(name, _awaitable_refusal(name, value))
             return False
-        if value is ABSENT:
+        if value is ABSENT and not self._schedule.calls[name].declines:
             self._fail(name, _undeclared_absence(name))
             return False
         return self._store(name, value)
@@ -535,7 +554,7 @@ class _Run:
         if kind == "thread" and inspect.isawaitable(value):
             self._fail(name, _awaitable_refusal(name, value))
             return False
-        if value is ABSENT:
+        if value is ABSENT and not self._schedule.calls[name].declines:
             self._fail(name, _undeclared_absence(name))
             return False
         return self._store(name, value)
@@ -555,6 +574,20 @@ class _Run:
             except BaseException as error:  # noqa: BLE001  # raised once the run stops
                 self._fail(name, error, note=False)
                 return False
+        self._kept(name, value)
+        return True
+
+    def _skip(self, name: str) -> None:
+        """Keeps skipped node `name` as `ABSENT`: it runs nothing, and stores nothing.
+
+        A `required` argument of it is `ABSENT`, so it is absent too, as the core
+        skips it (Q135); each node it was the last wait of is readied, as for a
+        value.
+        """
+        self._kept(name, ABSENT)
+
+    def _kept(self, name: str, value: object) -> None:
+        """Keeps `name`'s value; readies each node it was the last wait of."""
         self._values[name] = value
         self._remaining -= 1
         pending = self._pending
@@ -564,7 +597,6 @@ class _Run:
                 self._ready.append(after)
         if not self._remaining and not self._finished.done():
             self._finished.set_result(None)
-        return True
 
     def _fail(self, name: str, error: BaseException, *, note: bool = True) -> None:
         """Keeps the first failure, noted; cancels everything still running.
@@ -636,8 +668,11 @@ class _HookedRun(_Run):
         calls = self._schedule.calls
         while ready and self._failure is None:
             name = ready.popleft()
-            payload, kind, args = calls[name]
+            payload, kind, args, _, watched = calls[name]
             kwargs = {keyword: values[source] for source, keyword in args}
+            if watched and not applied(kwargs, values, watched):
+                self._skip(name)
+                continue
             if not self._begin(name, kwargs):
                 return
             if kind == "inline":
@@ -678,6 +713,12 @@ class _HookedRun(_Run):
             self._fail(name, error, note=False)
             return False
         return super()._store(name, value)
+
+    @override
+    def _skip(self, name: str) -> None:
+        """Reports the skip for `RunEnd.skipped`, then keeps the node `ABSENT`."""
+        self._dispatch.skipped(name, ())
+        super()._skip(name)
 
     @override
     def _fail(self, name: str, error: BaseException, *, note: bool = True) -> None:

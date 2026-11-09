@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 type DriverKind = Literal["sync", "async"]
 
 # The drivers a test parametrized over `driver_kind` runs on.
-DRIVER_KINDS: tuple[DriverKind, ...] = ("sync",)
+DRIVER_KINDS: tuple[DriverKind, ...] = ("sync", "async")
 
 
 def make_module(name: str, source: str) -> types.ModuleType:

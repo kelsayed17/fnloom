@@ -351,9 +351,8 @@ that has none, the node is skipped instead, so the default is still never used, 
   value. A `@pipe_output` or `@mutate` step reads its target as any parameter does, and a node wrapper sees `ABSENT`
   returned by `call()`, and may return it or a value.
 - A drawing draws a node that may be absent dashed, marked `may be absent` in its legend.
-- `build_async()` refuses a node that declines, for now, naming it: the async driver doesn't follow these rules yet.
-  A node there that returns `ABSENT` without admitting it is the same `TypeError` as with `build()`, whether it is
-  an `async def` or a sync function.
+- `build_async()` follows every rule here, for an `async def` node and a sync one alike, and a node there that
+  returns `ABSENT` without admitting it is the same `TypeError` as with `build()`.
 
 ## Annotations
 

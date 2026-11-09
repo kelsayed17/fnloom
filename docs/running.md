@@ -807,8 +807,9 @@ asyncio.run(
 # -> {'converted': 15.0, 'rate': 1.5}
 ```
 
-Everything else is the sync driver's: inputs, overrides, the type checks and their errors, lineage, `nodes` and
-`config`. `prepare` is synchronous too, and returns a plan whose `run` is a coroutine:
+Everything else is the sync driver's: inputs, overrides, the type checks and their errors, lineage, `nodes`,
+`config`, and [declining](writing-nodes.md#declining), whose consumers are skipped, given `ABSENT` or left to their
+defaults as with `build()`. `prepare` is synchronous too, and returns a plan whose `run` is a coroutine:
 
 ```python
 async_plan = async_driver.prepare(

@@ -28,13 +28,13 @@ __all__ = [
     "Absent",
     "Kind",
     "admits_absent",
+    "applied",
     "declines",
     "dependency",
     "holds_absent",
     "may_be_absent",
     "merged",
     "needs_input",
-    "refuse_async",
     "refuse_given",
     "refuse_mixed",
     "without_absent",
@@ -207,19 +207,27 @@ def refuse_mixed(nodes: Sequence[NodeDef], absent: AbstractSet[str]) -> None:
         raise ValueError("; ".join(sorted(lines)))
 
 
-def refuse_async(nodes: Sequence[NodeDef]) -> None:
-    """`TypeError` naming, sorted, each node that declines, for `build_async`.
+def applied(
+    kwargs: dict[str, object],
+    values: Mapping[str, object],
+    watched: Sequence[tuple[str, str, Kind]],
+) -> bool:
+    """Applies the three rules to a call's `kwargs`; `False` when the node is skipped.
 
-    The async driver's walk doesn't follow the three rules yet, so it would pass
-    `ABSENT` to a parameter that doesn't admit it. Until it does, it refuses.
+    `watched` are the node's sources that may be absent, each with the keyword
+    it is passed under and the kind it is read by, as the async driver's walk
+    reads them from `values`. A source that is `ABSENT` is kept for `admits` and
+    `admits_optional`, left out for `optional`, so the default applies, and
+    skips the node for `required`, as the core's run does (Q135).
     """
-    if declining := sorted(node.name for node in nodes if declines(node)):
-        listed = ", ".join(repr(name) for name in declining)
-        msg = (
-            f"build_async() does not run a node that may decline yet: {listed}; "
-            "build() does"
-        )
-        raise TypeError(msg)
+    for source, keyword, kind in watched:
+        if values[source] is not ABSENT:
+            continue
+        if kind == "required":
+            return False
+        if kind == "optional":
+            del kwargs[keyword]
+    return True
 
 
 def holds_absent(values: Mapping[str, object]) -> bool:

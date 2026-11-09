@@ -11,7 +11,7 @@ import subprocess
 import sys
 import typing
 from pathlib import Path
-from typing import Annotated, override
+from typing import Annotated, Any, override
 
 import pytest
 
@@ -63,30 +63,44 @@ def doubled(count: int) -> int:
 """
 
 
-def _consumers(name: str) -> tuple[fnloom.Driver, list[str]]:
-    module = make_module(name, _CONSUMERS)
+def _consumers(
+    name: str, driver_kind: DriverKind = "sync"
+) -> tuple[fnloom.Driver[Any] | fnloom.AsyncDriver[Any], list[str]]:
+    module = make_module(f"{name}_{driver_kind}", _CONSUMERS)
     calls = typing.cast("list[str]", module.calls)
-    return fnloom.build(module), calls
+    return _driven(driver_kind, module), calls
 
 
-def test_a_plain_consumer_of_a_declined_node_is_skipped() -> None:
+def _driven(
+    driver_kind: DriverKind, module: types.ModuleType
+) -> fnloom.Driver[Any] | fnloom.AsyncDriver[Any]:
+    """`module`'s driver of `driver_kind`."""
+    return built(driver_kind, fnloom.Builder().with_modules(module))
+
+
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_a_plain_consumer_of_a_declined_node_is_skipped(
+    driver_kind: DriverKind,
+) -> None:
     """`count` and `doubled` after it never run, and both come back `ABSENT`."""
-    built, calls = _consumers("absence_skipped")
-    result = built.execute(["doubled", "count"], inputs={"wanted": False})
+    built, calls = _consumers("absence_skipped", driver_kind)
+    result = run(built, ["doubled", "count"], inputs={"wanted": False})
     assert result == {"doubled": ABSENT, "count": ABSENT}
     assert result["count"] is ABSENT
     assert calls == []
 
 
-def test_a_present_value_reaches_every_consumer() -> None:
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_a_present_value_reaches_every_consumer(driver_kind: DriverKind) -> None:
     """A declining node that does produce a value is read like any other."""
-    built, calls = _consumers("absence_present")
-    result = built.execute(["doubled", "shown", "first"], inputs={"wanted": True})
+    built, calls = _consumers("absence_present", driver_kind)
+    result = run(built, ["doubled", "shown", "first"], inputs={"wanted": True})
     assert result == {"doubled": 4, "shown": "a,b", "first": "a"}
     assert sorted(calls) == ["count", "doubled", "first", "shown"]
 
 
-def test_a_consumer_admitting_absent_receives_it() -> None:
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_a_consumer_admitting_absent_receives_it(driver_kind: DriverKind) -> None:
     """A parameter annotated `list[str] | Absent` is passed `ABSENT` itself."""
     module = make_module(
         "absence_admits",
@@ -105,19 +119,23 @@ def shown(listing: list[str] | Absent) -> str:
     return "none"
 """,
     )
-    assert fnloom.build(module).execute(["shown"]) == {"shown": "none"}
+    assert run(_driven(driver_kind, module), ["shown"]) == {"shown": "none"}
     assert len(module.seen) == 1
     assert module.seen[0] is ABSENT
 
 
-def test_a_defaulted_consumer_gets_its_default() -> None:
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_a_defaulted_consumer_gets_its_default(driver_kind: DriverKind) -> None:
     """The argument is left out, so the function's own default applies."""
-    built, calls = _consumers("absence_default")
-    assert built.execute(["first"], inputs={"wanted": False}) == {"first": "default"}
+    built, calls = _consumers("absence_default", driver_kind)
+    assert run(built, ["first"], inputs={"wanted": False}) == {"first": "default"}
     assert calls == ["first"]
 
 
-def test_returning_absent_without_admitting_it_is_a_type_error() -> None:
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_returning_absent_without_admitting_it_is_a_type_error(
+    driver_kind: DriverKind,
+) -> None:
     """The return check runs on every computed node, always."""
     module = make_module(
         "absence_unadmitted",
@@ -129,9 +147,9 @@ def listing() -> list[str]:
     return ABSENT
 """,
     )
-    built = fnloom.build(module)
+    built = _driven(driver_kind, module)
     with pytest.raises(TypeError) as raised:
-        built.execute(["listing"])
+        run(built, ["listing"])
     assert str(raised.value) == (
         "node 'listing' returned fnloom.ABSENT, but its return annotation does "
         "not admit fnloom.Absent"
@@ -193,13 +211,15 @@ def piped(start: int) -> int:
 """
 
 
-def _agreed(built: fnloom.Driver) -> list[str]:
+def _agreed(driver: fnloom.Driver[Any] | fnloom.AsyncDriver[Any]) -> list[str]:
     """The core's set, checked against the views' `may_be_absent`."""
-    graph = built._graph  # noqa: SLF001  # the native graph on purpose
+    if isinstance(driver, fnloom.AsyncDriver):
+        driver = driver._driver  # noqa: SLF001  # the sync driver it wraps
+    graph = driver._graph  # noqa: SLF001  # the native graph on purpose
     assert isinstance(graph, _core.Graph)
     found = graph.may_be_absent()
     assert found == sorted(
-        name for name, view in built.nodes.items() if view.may_be_absent
+        name for name, view in driver.nodes.items() if view.may_be_absent
     )
     return found
 
@@ -210,9 +230,12 @@ def test_the_core_and_the_views_agree_on_what_may_be_absent() -> None:
     assert _agreed(built) == ["count", "doubled", "listing"]
 
 
-def test_the_core_and_the_views_agree_through_decorators() -> None:
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_the_core_and_the_views_agree_through_decorators(
+    driver_kind: DriverKind,
+) -> None:
     """A `@parameterize` row, a `group(...)`, a `@mutate` target and a pipe step."""
-    built = fnloom.build(make_module("absence_agree_shapes", _SHAPES))
+    built = _driven(driver_kind, make_module("absence_agree_shapes", _SHAPES))
     assert _agreed(built) == [
         "counted",
         "counted.raw",
@@ -225,14 +248,14 @@ def test_the_core_and_the_views_agree_through_decorators() -> None:
     ]
     wanted = ["row_len", "fixed_len", "grouped", "counted", "piped"]
     supplied = {"extra": ["q"], "start": 1}
-    assert built.execute(wanted, inputs={"wanted": False, **supplied}) == {
+    assert run(built, wanted, inputs={"wanted": False, **supplied}) == {
         "row_len": ABSENT,
         "fixed_len": 1,
         "grouped": ABSENT,
         "counted": ABSENT,
         "piped": ABSENT,
     }
-    assert built.execute(wanted, inputs={"wanted": True, **supplied}) == {
+    assert run(built, wanted, inputs={"wanted": True, **supplied}) == {
         "row_len": 2,
         "fixed_len": 1,
         "grouped": 3,
@@ -289,7 +312,8 @@ def test_absent_is_a_singleton_with_no_truth_value() -> None:
         type("Sub", (Absent,), {})  # ty: ignore[subclass-of-final-class]  # refused on purpose
 
 
-def test_t_or_absent_feeds_t_on_an_edge() -> None:
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_t_or_absent_feeds_t_on_an_edge(driver_kind: DriverKind) -> None:
     """Edge checks read `float | Absent` as `float`, for each kind of consumer."""
     module = make_module(
         "absence_edges",
@@ -313,8 +337,8 @@ def defaulted(price: float = 0.0) -> float:
     return price
 """,
     )
-    built = fnloom.build(module)
-    assert built.execute(["plain", "admitting", "defaulted"]) == {
+    built = _driven(driver_kind, module)
+    assert run(built, ["plain", "admitting", "defaulted"]) == {
         "plain": ABSENT,
         "admitting": True,
         "defaulted": 0.0,
@@ -334,7 +358,7 @@ def label(price: str) -> str:
 """,
     )
     with pytest.raises(ValueError, match=r"label\.price requires str"):
-        fnloom.build(refused)
+        _driven(driver_kind, refused)
 
 
 def test_a_default_beside_admitting_absent_is_still_shadowed() -> None:
@@ -357,7 +381,10 @@ def admitting(price: float | Absent = 0.0) -> float:
         fnloom.build(module)
 
 
-def test_a_node_that_is_absent_alone_feeds_any_parameter() -> None:
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_a_node_that_is_absent_alone_feeds_any_parameter(
+    driver_kind: DriverKind,
+) -> None:
     """`-> Absent` never gives a value: the edge check passes, and `use` is skipped."""
     module = make_module(
         "absence_alone",
@@ -381,9 +408,9 @@ def seen(never: int | Absent) -> bool:
     return never is ABSENT
 """,
     )
-    built = fnloom.build(module)
+    built = _driven(driver_kind, module)
     assert built.nodes["use"].may_be_absent
-    assert built.execute(["use", "fallback", "seen"]) == {
+    assert run(built, ["use", "fallback", "seen"]) == {
         "use": ABSENT,
         "fallback": 7,
         "seen": True,
@@ -418,14 +445,15 @@ def test_a_default_beside_a_required_read_of_one_source_is_shadowed() -> None:
     )
 
 
-def test_defaults_on_every_read_of_one_source_are_used() -> None:
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_defaults_on_every_read_of_one_source_are_used(driver_kind: DriverKind) -> None:
     """Both parameters have defaults: the source is left out, and both apply."""
     module = make_module(
         "absence_merged_optional", _MERGED_DEFAULTS.format(a_default=' = ["aa"]')
     )
-    built = fnloom.build(module)
-    assert built.execute(["both"], inputs={"wanted": False}) == {"both": "aazz"}
-    assert built.execute(["both"], inputs={"wanted": True}) == {"both": "xx"}
+    built = _driven(driver_kind, module)
+    assert run(built, ["both"], inputs={"wanted": False}) == {"both": "aazz"}
+    assert run(built, ["both"], inputs={"wanted": True}) == {"both": "xx"}
 
 
 def _param(name: str, annotation: object, *, default: bool) -> Param:
@@ -475,7 +503,10 @@ def test_core_inputs_merges_kinds_per_source(
     assert core_inputs((*params, other)) == [("listing", kind, None)]
 
 
-def test_an_admitting_and_a_plain_parameter_build_when_the_source_is_present() -> None:
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_an_admitting_and_a_plain_parameter_build_when_the_source_is_present(
+    driver_kind: DriverKind,
+) -> None:
     """The merge's last row builds only because `listing` can't be absent."""
     module = make_module(
         "absence_merge_input",
@@ -488,9 +519,9 @@ def merged(a: list[str] | Absent = [], b: list[str] = []) -> int:
     return len(a) + len(b)
 """,
     )
-    built = fnloom.build(module)
-    assert built.execute(["both"], inputs={"listing": ["x"]}) == {"both": 2}
-    assert built.execute(["both"]) == {"both": 0}
+    built = _driven(driver_kind, module)
+    assert run(built, ["both"], inputs={"listing": ["x"]}) == {"both": 2}
+    assert run(built, ["both"]) == {"both": 0}
 
 
 _MIXED = """
@@ -509,11 +540,14 @@ def merged(a: list[str] | Absent, b: list[str] = []) -> int:
 """
 
 
-def test_mixed_absence_handling_of_one_source_is_refused() -> None:
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_mixed_absence_handling_of_one_source_is_refused(
+    driver_kind: DriverKind,
+) -> None:
     """Review Focus 4: `a` admits `Absent` and `b` has a default, on one source."""
     refused = make_module("absence_mixed", _MIXED.format(returns=" | Absent"))
     with pytest.raises(ValueError, match="mixed absence handling") as raised:
-        fnloom.build(refused)
+        _driven(driver_kind, refused)
     message = str(raised.value)
     for name in ("'both'", "'listing'", "'a'", "'b'"):
         assert name in message
@@ -522,8 +556,10 @@ def test_mixed_absence_handling_of_one_source_is_refused() -> None:
         "through parameters that admit fnloom.Absent ('a') and parameters that "
         "do not ('b'); annotate them alike, or read it once"
     )
-    built = fnloom.build(make_module("absence_mixed_ok", _MIXED.format(returns="")))
-    assert built.execute(["both"]) == {"both": 1}
+    built = _driven(
+        driver_kind, make_module("absence_mixed_ok", _MIXED.format(returns=""))
+    )
+    assert run(built, ["both"]) == {"both": 1}
 
 
 def test_mixed_absence_handling_through_a_group_is_refused() -> None:
@@ -630,15 +666,184 @@ def test_build_async_refuses_returning_absent_without_admitting_it(
     assert raised.value.__notes__ == ["in node 'x'"]
 
 
-def test_build_async_refuses_a_declining_node_for_now() -> None:
-    """The async walk doesn't follow the rules yet, so it refuses, naming each node."""
-    module = make_module("absence_async", _CONSUMERS)
-    with pytest.raises(TypeError) as raised:
-        fnloom.Builder().with_modules(module).build_async()
-    assert str(raised.value) == (
-        "build_async() does not run a node that may decline yet: 'listing'; "
-        "build() does"
+_DECLINING_ASYNC = """
+from fnloom import ABSENT, Absent
+
+calls = []
+
+
+{prefix}def listing(wanted: bool) -> list[str] | Absent:
+    return ["a"] if wanted else ABSENT
+
+
+{prefix}def count(listing: list[str]) -> int:
+    calls.append("count")
+    return len(listing)
+
+
+{prefix}def shown(listing: list[str] | Absent) -> bool:
+    return listing is ABSENT
+
+
+{prefix}def first(listing: list[str] = ["default"]) -> str:
+    return listing[0]
+
+
+{prefix}def report(count: int, first: str) -> str:
+    calls.append("report")
+    return f"{{count}} {{first}}"
+"""
+
+
+@pytest.mark.parametrize(
+    ("prefix", "sync_nodes"),
+    [("async ", "thread"), ("", "thread"), ("", "inline")],
+    ids=["async-def", "sync-in-a-thread", "sync-inline"],
+)
+def test_a_declining_async_node_is_not_refused(
+    prefix: str, sync_nodes: typing.Literal["thread", "inline"]
+) -> None:
+    """`build_async()` builds a node that declines, and its run follows the rules."""
+    module = make_module(
+        f"absence_async_declining_{prefix.strip() or 'sync'}_{sync_nodes}",
+        _DECLINING_ASYNC.format(prefix=prefix),
     )
+    driver = fnloom.Builder().with_modules(module).build_async(sync_nodes=sync_nodes)
+    outputs = ["report", "shown", "first", "listing"]
+    assert asyncio.run(driver.execute(outputs, inputs={"wanted": False})) == {
+        "report": ABSENT,
+        "shown": True,
+        "first": "default",
+        "listing": ABSENT,
+    }
+    assert module.calls == []
+    assert asyncio.run(driver.execute(outputs, inputs={"wanted": True})) == {
+        "report": "1 a",
+        "shown": False,
+        "first": "a",
+        "listing": ["a"],
+    }
+
+
+class _Events(fnloom.Hook):
+    """Every node event and `RunEnd`, in order."""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+        self.ends: list[fnloom.RunEnd] = []
+
+    @override
+    def before_node(self, event: fnloom.NodeStart) -> None:
+        self.events.append(f"before {event.node.name}")
+
+    @override
+    def after_node(self, event: fnloom.NodeEnd) -> None:
+        self.events.append(f"after {event.node.name}")
+
+    @override
+    def after_run(self, event: fnloom.RunEnd) -> None:
+        self.ends.append(event)
+
+
+@pytest.mark.parametrize(
+    ("prefix", "sync_nodes", "cached"),
+    [
+        ("async ", "thread", False),
+        ("", "thread", False),
+        ("", "inline", False),
+        ("async ", "thread", True),
+    ],
+    ids=["async-def", "sync-in-a-thread", "sync-inline", "cached"],
+)
+def test_async_skips_fire_no_node_events_and_list_in_run_end(
+    prefix: str, sync_nodes: typing.Literal["thread", "inline"], *, cached: bool
+) -> None:
+    """A skipped node is stored absent, counts for its dependents, and reports once."""
+    events = _Events()
+    module = make_module(
+        f"absence_async_events_{prefix.strip() or 'sync'}_{sync_nodes}_{cached}",
+        _DECLINING_ASYNC.format(prefix=prefix),
+    )
+    builder = fnloom.Builder().with_modules(module).with_hooks(events)
+    if cached:
+        builder = builder.with_cache(fnloom.MemoryCache())
+    driver = builder.build_async(sync_nodes=sync_nodes)
+    result = asyncio.run(driver.execute(["report", "shown"], inputs={"wanted": False}))
+    assert result == {"report": ABSENT, "shown": True}
+    assert sorted(events.events) == [
+        "after first",
+        "after listing",
+        "after shown",
+        "before first",
+        "before listing",
+        "before shown",
+    ]
+    assert events.events.index("after listing") < events.events.index("before shown")
+    assert events.ends[0].skipped == (("count", ()), ("report", ()))
+    assert events.ends[0].ok
+
+
+@pytest.mark.parametrize(
+    ("prefix", "sync_nodes"),
+    [("async ", "thread"), ("", "thread"), ("", "inline")],
+    ids=["async-def", "sync-in-a-thread", "sync-inline"],
+)
+def test_async_return_check_on_async_and_inline_sync_nodes(
+    prefix: str, sync_nodes: typing.Literal["thread", "inline"]
+) -> None:
+    """Only a node that doesn't decline is refused `ABSENT`, named and noted."""
+    module = make_module(
+        f"absence_async_return_{prefix.strip() or 'sync'}_{sync_nodes}",
+        f"""
+from fnloom import ABSENT, Absent
+
+
+{prefix}def declining() -> int | Absent:
+    return ABSENT
+
+
+{prefix}def plain() -> int:
+    return ABSENT
+""",
+    )
+    driver = fnloom.Builder().with_modules(module).build_async(sync_nodes=sync_nodes)
+    assert asyncio.run(driver.execute(["declining"])) == {"declining": ABSENT}
+    with pytest.raises(TypeError) as raised:
+        asyncio.run(driver.execute(["declining", "plain"]))
+    assert str(raised.value) == (
+        "node 'plain' returned fnloom.ABSENT, but its return annotation does "
+        "not admit fnloom.Absent"
+    )
+    assert raised.value.__notes__ == ["in node 'plain'"]
+
+
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_async_admits_input_left_out_is_missing_unless_defaulted(
+    driver_kind: DriverKind,
+) -> None:
+    """An input is never absent: `x: int | Absent` needs it, `= 3` doesn't."""
+    module = make_module(
+        f"absence_admits_input_{driver_kind}",
+        """
+from fnloom import ABSENT, Absent
+
+
+def needs(x: int | Absent) -> int:
+    return x
+
+
+def falls_back(y: int | Absent = 3) -> int:
+    return y
+""",
+    )
+    driver = _driven(driver_kind, module)
+    assert run(driver, ["falls_back"]) == {"falls_back": 3}
+    assert run(driver, ["needs", "falls_back"], inputs={"x": 1, "y": 2}) == {
+        "needs": 1,
+        "falls_back": 2,
+    }
+    with pytest.raises(ValueError, match=r"missing inputs: 'x' \(needed by 'needs'\)"):
+        run(driver, ["needs"])
 
 
 def test_public_names() -> None:
@@ -947,7 +1152,10 @@ def test_a_pipe_output_step_reads_absence_by_its_signature(
     }
 
 
-def test_a_wrapper_sees_absent_from_call_and_may_replace_it() -> None:
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_a_wrapper_sees_absent_from_call_and_may_replace_it(
+    driver_kind: DriverKind,
+) -> None:
     """`call()` returns `ABSENT`; a wrapper may give a value, or `ABSENT` back."""
     seen: list[tuple[str, object]] = []
 
@@ -965,8 +1173,8 @@ def test_a_wrapper_sees_absent_from_call_and_may_replace_it() -> None:
 
     module = _edges("absence_wrapper_fills")
     builder = fnloom.Builder().with_modules(module).with_node_wrappers(filling)
-    driver = builder.build()
-    assert driver.execute(["count"], inputs={"wanted": False}) == {"count": 1}
+    driver = built(driver_kind, builder)
+    assert run(driver, ["count"], inputs={"wanted": False}) == {"count": 1}
     assert seen == [("listing", ABSENT), ("count", 1)]
 
     def absenting(
@@ -978,14 +1186,14 @@ def test_a_wrapper_sees_absent_from_call_and_may_replace_it() -> None:
         value = call()
         return ABSENT if node.name == "count" else value
 
-    refused = (
+    refused = built(
+        driver_kind,
         fnloom.Builder()
         .with_modules(_edges("absence_wrapper_refused"))
-        .with_node_wrappers(absenting)
-        .build()
+        .with_node_wrappers(absenting),
     )
     with pytest.raises(TypeError) as raised:
-        refused.execute(["count"], inputs={"wanted": True})
+        run(refused, ["count"], inputs={"wanted": True})
     assert str(raised.value) == (
         "node 'count' returned fnloom.ABSENT, but its return annotation does "
         "not admit fnloom.Absent"
@@ -1013,13 +1221,14 @@ def test_frame_refuses_an_absent_output(driver_kind: DriverKind) -> None:
     assert list(made["count"]) == [2]
 
 
-def test_print_nodes_prints_nothing_for_a_skipped_node() -> None:
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_print_nodes_prints_nothing_for_a_skipped_node(driver_kind: DriverKind) -> None:
     """Only `listing` runs, so only it is printed, its result `fnloom.ABSENT`."""
     lines: list[str] = []
     printing = fnloom.PrintNodes(2, print_fn=lines.append)
     module = _edges("absence_print_nodes")
-    driver = fnloom.Builder().with_modules(module).with_hooks(printing).build()
-    driver.execute(["report"], inputs={"wanted": False})
+    builder = fnloom.Builder().with_modules(module).with_hooks(printing)
+    run(built(driver_kind, builder), ["report"], inputs={"wanted": False})
     assert [line.split(" ran in ")[0] for line in lines] == [
         "node 'listing'",
         "  inputs: wanted=False",

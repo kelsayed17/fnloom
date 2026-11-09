@@ -3402,7 +3402,6 @@ class Builder[R = dict[str, object]]:
         """
         checked = _async.checked_sync_nodes(sync_nodes)
         nodes, views, graph, unmatched, left_out, owner = self._scanned(awaits=True)
-        _absence.refuse_async(nodes)
         # Called here, so a `CacheWarning` points at the caller's `build_async`.
         cache = (
             None
