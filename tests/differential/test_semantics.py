@@ -44,7 +44,7 @@ from fnloom import _types
 from helpers import make_module
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Coroutine, Sequence
+    from collections.abc import Callable, Coroutine, Mapping, Sequence
     from pathlib import Path
     from types import ModuleType
 
@@ -394,7 +394,7 @@ def test_builtin_checks_pass_and_fail_the_same_values(
 def test_exports_of_a_run_list_the_same_nodes(
     fixture: str,
     outputs: list[str],
-    inputs: dict[str, object],
+    inputs: Mapping[str, object],
     overrides: dict[str, object],
 ) -> None:
     """The run's nodes and the inputs it reads, as `export_execution`'s (Q95)."""
@@ -458,7 +458,7 @@ def test_drawings_show_the_same_nodes(
 def test_execution_drawings_show_the_same_nodes(
     fixture: str,
     outputs: list[str],
-    inputs: dict[str, object],
+    inputs: Mapping[str, object],
     overrides: dict[str, object],
 ) -> None:
     """The computed nodes, the inputs read and the overrides, as Hamilton's (Q92)."""
@@ -1721,9 +1721,9 @@ def summary(details: Collect[int]) -> list[int]:
 def both_blocks(
     source: str,
     outputs: list[str],
-    inputs: dict[str, object],
+    inputs: Mapping[str, object],
     executor: Executor = "synchronous",
-    overrides: dict[str, object] | None = None,
+    overrides: Mapping[str, object] | None = None,
 ) -> tuple[Outcome, Outcome]:
     """Hamilton's outcome and fnloom's, for one block program."""
     name = f"blocks_{executor}_{len(sys.modules)}"

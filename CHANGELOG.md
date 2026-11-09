@@ -96,6 +96,11 @@ change the public API; such changes are listed under **Changed** and **Removed**
   unrelated blocks or both a block node and its collect (Q124), `@extract_fields` or `@extract_columns` on an expand,
   and `Parallelizable[T | Absent]`. `build_async()` refuses a graph with an expand, until Plan 11 (Q132), and so
   does `with_cache()`, until blocks are cached.
+- Overrides and outputs around blocks (Q125, Q126). An override of an expand supplies its items, any iterable, read
+  lazily, and one of a collect cuts its block. A block node requested as an output is a `ValueError` naming the
+  nodes that collect it, or the `Collect[...]` annotation that would; an override of one is a `ValueError` saying
+  to override the expand with the items instead. `validate` lists both, with the request's other problems. Lineage
+  and `inputs()` read through blocks unchanged.
 
 ### Changed
 

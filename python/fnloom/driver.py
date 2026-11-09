@@ -1209,6 +1209,8 @@ class Driver[R = dict[str, object]]:
                 if names and _unknown(kind, names, ()) == message:
                     return [_unknown(kind, names, list(self._nodes))]
                 return [message]
+        if message.startswith(_IN_BLOCKS):
+            return self._block_lines(key[0], key[2]) or [message]
         return [message, *self._hints(message)]
 
     def _hints(self, line: str) -> list[str]:
@@ -1265,13 +1267,69 @@ class Driver[R = dict[str, object]]:
         lines += [
             _unknown(kind, names, nodes) for kind, names in unknown.items() if names
         ]
+        planned = [n for n in wanted if n in self._nodes]
+        overridden = override_names.difference(unknown["overrides"])
+        # A block node has one value per item: no output, no override (Q125, Q126).
+        if blocked := self._block_lines(planned, overridden):
+            lines += blocked
+            planned = [n for n in planned if self._nodes[n].block is None]
+            overridden = frozenset(
+                n for n in overridden if self._nodes[n].block is None
+            )
         return _Shape(
             key=key,
             lines=lines,
-            planned=[n for n in wanted if n in self._nodes],
+            planned=planned,
             supplied=input_names.difference(unknown["inputs"]),
-            overridden=override_names.difference(unknown["overrides"]),
+            overridden=overridden,
         )
+
+    def _block_lines(
+        self, outputs: Iterable[str], overrides: Iterable[str]
+    ) -> list[str]:
+        """A line for each requested output and each override inside a block, sorted.
+
+        Each names the node's innermost expand; an output's also names the nodes
+        that collect it, or how to collect it (Q125, Q126).
+        """
+        functions = self._nodes.functions
+        lines: list[str] = []
+        for name in sorted(set(outputs)):
+            view = functions.get(name)
+            if view is None or view.block is None:
+                continue
+            collects = sorted(
+                repr(consumer.name)
+                for consumer in functions.values()
+                if any(
+                    p.collect is not None
+                    and isinstance(p.binding, Source)
+                    and p.binding.name == name
+                    for p in consumer.params
+                )
+            )
+            element = inspect.formatannotation(
+                _absence.without_absent(view.type), view.module
+            )
+            tail = (
+                f"request a node that collects it: {', '.join(collects)}"
+                if collects
+                else f"collect it with a parameter annotated Collect[{element}]"
+            )
+            lines.append(
+                f"{name!r} is computed once per item of {view.block!r}, so it is not "
+                f"an output; {tail}"
+            )
+        for name in sorted(set(overrides)):
+            view = functions.get(name)
+            if view is None or view.block is None:
+                continue
+            lines.append(
+                f"{name!r} can't be overridden: it has one value per item of "
+                f"{view.block!r}; override {view.block!r} with the items, or a node "
+                "outside the block"
+            )
+        return lines
 
     def _unknown_names(self, kind: str, key: _PlanKey) -> list[str]:
         """The names of request `key` of `kind` the graph lacks, sorted.
@@ -1333,8 +1391,9 @@ class Driver[R = dict[str, object]]:
         its own. They cover functions in `final_vars` no node comes from (Q30);
         unknown outputs, inputs and overrides; missing inputs, naming only the
         consumers this request plans; the types of the input and override values
-        (unless the driver was built without input type checks); and outputs no
-        `@config.when*` variant gave.
+        (unless the driver was built without input type checks); outputs no
+        `@config.when*` variant gave; and outputs and overrides inside a block,
+        which have one value per item (Q125, Q126).
 
         Only `validate` suggests a name for a missing input: the closest supplied
         name that is no node of the graph. `execute` raises that unknown input
@@ -2359,6 +2418,8 @@ def _prepare_async_again[R](
 
 # How the core's missing-input error starts.
 _MISSING = "missing inputs: "
+# How the core's refusals of a block node as an output or override start.
+_IN_BLOCKS = ("outputs inside blocks", "overrides of nodes inside blocks")
 # How the errors for an input a request lacks start: one missing, or an override
 # refused under strict overrides (Q75), which is Hamilton's missing input.
 _UNSUPPLIED = (_MISSING, "override of input ")

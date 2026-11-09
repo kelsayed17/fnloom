@@ -6219,3 +6219,48 @@ def test_q137_no_executor_settings() -> None:
         "enable_dynamic_execution",
     ):
         assert not hasattr(fnloom.Builder, name)
+
+
+# Overrides and outputs around blocks (Plan 10, task 9).
+
+
+@pytest.mark.deliberate("Q125")
+def test_q125_a_block_node_override_is_refused() -> None:
+    """Hamilton's collect silently drops a block-node override; fnloom refuses it."""
+    inputs = {"n": 2, "rate": 10}
+    hamilton, ours = both_blocks(PICKED, ["summary"], inputs, overrides={"details": 7})
+    assert hamilton == Outcome({"summary": []}, None)
+    assert ours == Outcome(None, "ValueError")
+    built = fnloom.build(block_module("q125_f", PICKED, "fnloom"))
+    with pytest.raises(ValueError, match="can't be overridden") as info:
+        built.execute(["summary"], inputs=inputs, overrides={"details": 7})
+    assert str(info.value) == (
+        "'details' can't be overridden: it has one value per item of 'picked'; "
+        "override 'picked' with the items, or a node outside the block"
+    )
+    # Both supply an expand override's items.
+    hamilton, ours = both_blocks(
+        PICKED, ["summary"], inputs, overrides={"picked": [5, 6]}
+    )
+    assert hamilton == Outcome({"summary": [50, 60]}, None)
+    assert ours == hamilton
+
+
+@pytest.mark.deliberate("Q126")
+def test_q126_a_block_node_output_is_refused() -> None:
+    """Hamilton gives a wrong value, or a `KeyError`; fnloom names the collect."""
+    inputs = {"n": 2, "rate": 10}
+    hamilton, ours = both_blocks(PICKED, ["details"], inputs)
+    assert hamilton.values is not None
+    assert hamilton.values["details"] != [0, 10]
+    assert ours == Outcome(None, "ValueError")
+    hamilton, ours = both_blocks(PICKED, ["details", "summary"], inputs)
+    assert hamilton == Outcome(None, "KeyError")
+    assert ours == Outcome(None, "ValueError")
+    built = fnloom.build(block_module("q126_f", PICKED, "fnloom"))
+    with pytest.raises(ValueError, match="not an output") as info:
+        built.execute(["details"], inputs=inputs)
+    assert str(info.value) == (
+        "'details' is computed once per item of 'picked', so it is not an output; "
+        "request a node that collects it: 'summary'"
+    )

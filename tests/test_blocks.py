@@ -1,6 +1,6 @@
 """Fan-out and fan-in: `Parallelizable`, `Collect`, and the blocks between them."""
 
-from typing import Any, cast
+from typing import Any, cast, override
 
 import pytest
 
@@ -288,3 +288,126 @@ def test_a_collect_mode_the_core_does_not_know_is_refused() -> None:
     node: Any = ("b", [("a", "required", "some")], {}, int, False, None)
     with pytest.raises(ValueError, match="which is no collect mode"):
         _core.Graph([node])
+
+
+# Overrides, outputs, lineage and validate around blocks (task 9).
+
+
+def test_an_expand_override_with_a_generator_is_consumed_lazily() -> None:
+    """An override supplies the items; a generator is read one branch at a time."""
+    built = fnloom.build(make_module("blocks_lazy_override", PICKED))
+    seen: list[str] = []
+
+    def items() -> object:
+        for item in (5, 6):
+            seen.append(f"yield {item}")
+            yield item
+
+    class Order(fnloom.Hook):
+        @override
+        def before_node(self, event: fnloom.NodeStart) -> None:
+            seen.append(event.node.name)
+
+    hooked = (
+        fnloom.Builder()
+        .with_modules(make_module("blocks_lazy_hooked", PICKED))
+        .with_hooks(Order())
+        .build()
+    )
+    result = hooked.execute(
+        ["summary"], inputs={"rate": 10}, overrides={"picked": items()}
+    )
+    assert result == {"summary": [50, 60]}
+    assert seen == ["yield 5", "details", "yield 6", "details", "summary"]
+    assert built.execute(
+        ["summary"], inputs={"rate": 2}, overrides={"picked": [1, 2]}
+    ) == {"summary": [2, 4]}
+
+
+def test_a_collect_override_cuts_the_block() -> None:
+    """Overriding a collect runs nothing upstream of it."""
+    module = make_module("blocks_cut", PICKED)
+    built = fnloom.build(module)
+    assert built.execute(["summary"], overrides={"summary": [9]}) == {"summary": [9]}
+
+
+def test_a_function_in_final_vars_that_is_a_block_node_is_refused() -> None:
+    """A block node's function stands for it in a request, and is refused (Q30)."""
+    module = make_module("blocks_function_output", PICKED)
+    built = fnloom.build(module)
+    with pytest.raises(ValueError, match="not an output") as info:
+        built.execute([module.details], inputs={"n": 1, "rate": 1})
+    assert str(info.value) == (
+        "'details' is computed once per item of 'picked', so it is not an output; "
+        "request a node that collects it: 'summary'"
+    )
+
+
+def test_an_uncollected_block_output_says_how_to_collect_it() -> None:
+    """With no collect, the refusal names the `Collect` annotation to write."""
+    module = make_module(
+        "blocks_uncollected",
+        """
+        from fnloom import Parallelizable
+
+        class Detail:
+            pass
+
+        def picked() -> Parallelizable[int]:
+            yield 1
+
+        def details(picked: int) -> Detail:
+            return Detail()
+        """,
+    )
+    with pytest.raises(ValueError, match="not an output") as info:
+        fnloom.build(module).execute(["details"])
+    assert str(info.value) == (
+        "'details' is computed once per item of 'picked', so it is not an output; "
+        "collect it with a parameter annotated Collect[Detail]"
+    )
+
+
+def test_lineage_and_inputs_treat_expand_and_collect_as_ordinary() -> None:
+    """Lineage and `inputs()` read through blocks, with the shapes they always had."""
+    built = fnloom.build(make_module("blocks_lineage", PICKED))
+    upstream = built.what_is_upstream_of("summary")
+    assert upstream == ["details", "n", "picked", "rate", "summary"]
+    assert built.what_is_downstream_of("picked") == ["details", "picked", "summary"]
+    assert built.what_is_the_path_between("picked", "summary") == [
+        "picked",
+        "details",
+        "summary",
+    ]
+    assert sorted(built.inputs()) == ["n", "rate"]
+    assert built.inputs()["rate"].consumers == ("details",)
+
+
+def test_validate_lists_block_problems() -> None:
+    """`validate` lists a block output and a block override with every other line."""
+    built = fnloom.build(make_module("blocks_validate", PICKED))
+    assert built.validate(
+        ["details", "summary"], inputs={"n": 1}, overrides={"details": 3}
+    ) == [
+        (
+            "'details' can't be overridden: it has one value per item of 'picked'; "
+            "override 'picked' with the items, or a node outside the block"
+        ),
+        (
+            "'details' is computed once per item of 'picked', so it is not an output; "
+            "request a node that collects it: 'summary'"
+        ),
+        "missing inputs: 'rate' (needed by 'details')",
+    ]
+    with pytest.raises(ValueError, match="not an output") as info:
+        built.execute(["details"], inputs={"n": 1, "rate": 1}, overrides={"details": 3})
+    assert str(info.value).splitlines() == [
+        (
+            "'details' is computed once per item of 'picked', so it is not an output; "
+            "request a node that collects it: 'summary'"
+        ),
+        (
+            "'details' can't be overridden: it has one value per item of 'picked'; "
+            "override 'picked' with the items, or a node outside the block"
+        ),
+    ]
