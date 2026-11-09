@@ -81,6 +81,35 @@ change the public API; such changes are listed under **Changed** and **Removed**
   call being the same. `explain_cache` reports a node a run would skip as `CacheOutcome("skipped", "reads absent
   'x'")`, a new `status`, instead of a `miss` forever. fnloom 0.4.0 and older, reading the same `DiskCache`
   directory, find an absence entry damaged: they remove it, with a `CacheWarning`.
+- Fan-out and fan-in, with no flag (Q118 to Q124, Q127, Q136 to Q138). `fnloom.Parallelizable[T]` marks an expand:
+  a node returning or yielding items of type `T`, read lazily, each running the expand's block, the nodes reading
+  it, once, in item order. A parameter annotated `fnloom.Collect[T]` receives a block node's value from every item,
+  as a `list` in item order; `Collect[T | Absent]` keeps the absent ones as `ABSENT`. Blocks nest, a block may be
+  collected any number of times, and a node may collect one block and expand another. An empty expand gives `[]`,
+  and an expand requested as an output gives the `list` of its items. Each item is checked by the input rules as a
+  `T` (off with `without_input_type_checks()`), a misfit being a `TypeError` naming the expand and the index, and
+  an item can't be `ABSENT`. Edges are checked as `T` into the block and as each block node's type into the
+  collect. For a checker, `Parallelizable[T]` is `Iterable[T]` and `Collect[T]` is `list[T]`. `NodeView.block`
+  names a node's innermost expand, `NodeView.kind` is `"input"`, `"function"`, `"expand"` or `"collect"`, and
+  `Param.collect` is `"present"`, `"all"` or `None`. A generator function is a node when annotated
+  `-> Parallelizable[...]`. The build refuses a collect outside a block or of an expand, a node reading two
+  unrelated blocks or both a block node and its collect (Q124), `@extract_fields` or `@extract_columns` on an expand,
+  and `Parallelizable[T | Absent]`. `build_async()` refuses a graph with an expand, until Plan 11 (Q132), and so
+  does `with_cache()`, until blocks are cached.
+- Overrides and outputs around blocks (Q125, Q126). An override of an expand supplies its items, any iterable, read
+  lazily, and one of a collect cuts its block. A block node requested as an output is a `ValueError` naming the
+  nodes that collect it, or the `Collect[...]` annotation that would; an override of one is a `ValueError` saying
+  to override the expand with the items instead. `validate` lists both, with the request's other problems. Lineage
+  and `inputs()` read through blocks unchanged.
+- Hooks and wrappers per branch (Q128, Q130; amends Q84, Q111). A block node fires `before_node` and `after_node`
+  once per item, with `NodeStart.branch` and `NodeEnd.branch` giving its branch path (`()` outside blocks), and
+  `RunStart.nodes` lists it once. `Hook.after_expand(ExpandEnd)`, a sixth method, hears each expand's item count
+  once its items are exhausted. `fnloom.current_branch()` gives the branch inside a node, its checks and its
+  wrappers, which run once per item. `PrintNodes` times each branch apart and prints it, as
+  `node 'details' (branch (3,)) ran in 1.2 ms`. A failing branch raises the node's own exception, noted
+  `while computing 'details' for branch (2,) of 'picked'`, after closing the expand's generator; nothing of the
+  branches before it is returned. `_core.ObserverBase` gains `post_expand(node, *, branch, items)`, and its
+  `pre_node` and `post_node` get `branch=` for a block node.
 
 ### Changed
 
@@ -90,7 +119,10 @@ change the public API; such changes are listed under **Changed** and **Removed**
   then skipped instead (Q76, Q135).
 - The native `_core.Graph` takes each node as `(name, [(source, kind, None)], tags, fn, declines)`, where `kind` is
   `"required"`, `"optional"`, `"admits"` or `"admits_optional"`; it was `(name, [(source, required)], tags,
-  fn)`. `_scan.core_inputs` returns the same triples.
+  fn)`. `_scan.core_inputs` returns the same triples. A sixth element, the item iterator factory of an expand or
+  `None`, follows `declines`, and the third of each input is its collect mode, `"present"`, `"all"` or `None`.
+  `_core.Graph.blocks()` gives each block node's block path, `_core.Plan.blocks()` each block's steps, and
+  `_core.Plan.steps()` lists a block's steps after its expand's.
 - `CacheOutcome.status` is widened: its `Literal` gains `"skipped"`, so an exhaustive `match` on it needs an arm.
 - The native `_core.KeyPlan` takes each node entry with a sixth element, the sources the node reads by an
   `optional` edge. Its marker for an optional input not supplied is now named `NOT_SUPPLIED` in the binding; its

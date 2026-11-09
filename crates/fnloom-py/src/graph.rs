@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use fnloom_core::graph::Graph as CoreGraph;
-use fnloom_core::node::{Dependency, InputSpec, NodeId, NodeSpec, TagValue};
+use fnloom_core::node::{Collect, Dependency, InputSpec, NodeId, NodeSpec, TagValue};
 use fnloom_core::plan::Request;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
@@ -16,16 +16,19 @@ use crate::plan::Plan;
 /// The core graph as the binding instantiates it: every payload is a Python callable.
 pub type PyCoreGraph = CoreGraph<Py<PyAny>>;
 
-/// One node as Python declares it: `(name, [(source, kind, collect)], tags, fn, declines)`.
+/// One node as Python declares it: `(name, [(source, kind, collect)], tags, fn, declines,
+/// items)`.
 ///
 /// `kind` is `"required"`, `"optional"`, `"admits"` or `"admits_optional"`; `collect` is
-/// always `None` for now.
+/// `"present"`, `"all"` or `None`. `items` is `None` for a node that does not expand, and
+/// for an expand the callable making its item iterator, `items(iterable, record)`.
 type NodeTuple = (
     String,
     Vec<(String, String, Option<String>)>,
     BTreeMap<String, PyTagValue>,
     Py<PyAny>,
     bool,
+    Option<Py<PyAny>>,
 );
 
 /// A tag value as Python gives it: a `str`, or a `tuple` of them.
@@ -57,6 +60,8 @@ pub struct Graph {
     /// By consumer id, the inputs it receives under another keyword, sorted by input id:
     /// a `@parameterize` row binding a parameter to a source of another name.
     renames: RenamesById,
+    /// By node id, an expand's item iterator factory; `None` for any other node.
+    items: Vec<Option<Py<PyAny>>>,
 }
 
 /// Renamed inputs by consumer id, each consumer's sorted by input id.
@@ -64,12 +69,14 @@ type RenamesById = Vec<Vec<(NodeId, Py<PyString>)>>;
 
 #[pymethods]
 impl Graph {
-    /// Builds a graph from `(name, [(source, kind, collect)], tags, fn, declines)` tuples.
+    /// Builds a graph from `(name, [(source, kind, collect)], tags, fn, declines, items)`
+    /// tuples.
     ///
     /// Each `kind` is how the node reads that source: `"required"`, `"optional"` (it has
     /// a default), `"admits"` (it receives `fnloom.ABSENT`) or `"admits_optional"` (that,
-    /// with a default). `collect` must be `None`. `declines` says whether the node may
-    /// return `fnloom.ABSENT`.
+    /// with a default). `collect` is `"present"` or `"all"` for a parameter collecting a
+    /// block, else `None`. `declines` says whether the node may return `fnloom.ABSENT`;
+    /// `items`, when not `None`, makes the node an expand whose value it iterates.
     ///
     /// `renames` maps a node to the inputs it is passed under another keyword: input
     /// name to keyword. Raises `ValueError` naming the culprits for a duplicate name or a
@@ -81,11 +88,23 @@ impl Graph {
         nodes: Vec<NodeTuple>,
         renames: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<Self> {
-        let specs = nodes
-            .into_iter()
-            .map(node_spec)
-            .collect::<PyResult<Vec<_>>>()?;
+        let mut factories = Vec::new();
+        let mut specs = Vec::with_capacity(nodes.len());
+        for (name, params, tags, function, declines, items) in nodes {
+            let expands = items.is_some();
+            if let Some(items) = items {
+                factories.push((name.clone(), items));
+            }
+            specs.push(node_spec(name, params, tags, function, declines, expands)?);
+        }
         let graph = CoreGraph::build(specs).map_err(value_error)?;
+        let mut items: Vec<Option<Py<PyAny>>> = Vec::new();
+        items.resize_with(graph.nodes().len(), || None);
+        for (name, factory) in factories {
+            if let Some(slot) = graph.id_of(&name).and_then(|id| items.get_mut(id.index())) {
+                *slot = Some(factory);
+            }
+        }
         let keywords = graph
             .nodes()
             .iter()
@@ -96,6 +115,7 @@ impl Graph {
             core: graph,
             keywords,
             renames,
+            items,
         })
     }
 
@@ -104,6 +124,9 @@ impl Graph {
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         for function in self.core.nodes().iter().filter_map(|node| node.payload()) {
             visit.call(function)?;
+        }
+        for factory in self.items.iter().flatten() {
+            visit.call(factory)?;
         }
         Ok(())
     }
@@ -125,6 +148,22 @@ impl Graph {
             .iter()
             .filter(|node| node.may_be_absent)
             .map(|node| node.name.clone())
+            .collect()
+    }
+
+    /// Each node inside a block, with its block path: the expands enclosing it, outermost
+    /// first.
+    fn blocks(&self) -> BTreeMap<String, Vec<String>> {
+        self.core
+            .nodes()
+            .iter()
+            .filter(|node| node.block.is_some())
+            .map(|node| {
+                (
+                    node.name.clone(),
+                    self.names_of(self.core.block_path(node.id)),
+                )
+            })
             .collect()
     }
 
@@ -197,6 +236,11 @@ impl Graph {
         renames.get(found).map(|(_, keyword)| keyword)
     }
 
+    /// The item iterator factory of expand `id`; `None` for any other node.
+    pub fn items(&self, id: NodeId) -> Option<&Py<PyAny>> {
+        self.items.get(id.index()).and_then(Option::as_ref)
+    }
+
     fn names_of(&self, ids: &[NodeId]) -> Vec<String> {
         ids.iter()
             .map(|&id| self.core.node(id).name.clone())
@@ -204,18 +248,31 @@ impl Graph {
     }
 }
 
-fn node_spec((name, params, tags, function, declines): NodeTuple) -> PyResult<NodeSpec<Py<PyAny>>> {
+fn node_spec(
+    name: String,
+    params: Vec<(String, String, Option<String>)>,
+    tags: BTreeMap<String, PyTagValue>,
+    function: Py<PyAny>,
+    declines: bool,
+    expands: bool,
+) -> PyResult<NodeSpec<Py<PyAny>>> {
     let inputs = params
         .into_iter()
         .map(|(source, kind, collect)| {
-            if let Some(mode) = collect {
-                return Err(PyValueError::new_err(format!(
-                    "node '{name}' collects '{source}' as '{mode}', but no collect mode is known"
-                )));
-            }
+            let collect = match collect.as_deref() {
+                None => None,
+                Some("present") => Some(Collect::Present),
+                Some("all") => Some(Collect::All),
+                Some(mode) => {
+                    return Err(PyValueError::new_err(format!(
+                        "node '{name}' collects '{source}' as {mode:?}, which is no collect \
+                         mode: 'present' or 'all'"
+                    )));
+                }
+            };
             Ok(InputSpec {
                 dependency: dependency(&name, &source, &kind)?,
-                collect: None,
+                collect,
                 name: source,
             })
         })
@@ -229,7 +286,7 @@ fn node_spec((name, params, tags, function, declines): NodeTuple) -> PyResult<No
             .collect(),
         payload: function,
         declines,
-        expands: false,
+        expands,
     })
 }
 

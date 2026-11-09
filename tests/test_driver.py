@@ -33,8 +33,8 @@ def _chain_graph() -> _core.Graph:
     """The native graph of `CHAIN`: `a` (input) -> `b` -> `c`."""
     return _core.Graph(
         [
-            ("b", [("a", "required", None)], {}, _add_one, False),
-            ("c", [("b", "required", None)], {}, _double, False),
+            ("b", [("a", "required", None)], {}, _add_one, False, None),
+            ("c", [("b", "required", None)], {}, _double, False, None),
         ]
     )
 
@@ -193,7 +193,9 @@ def test_prepare_reuses_plan_across_runs() -> None:
         calls.append(a)
         return a + 1
 
-    spy = SpyGraph(_core.Graph([("b", [("a", "required", None)], {}, counting, False)]))
+    spy = SpyGraph(
+        _core.Graph([("b", [("a", "required", None)], {}, counting, False, None)])
+    )
     plan = Driver(spy).prepare(["b"], inputs={"a": 0})
     assert plan.run(inputs={"a": 1}) == {"b": 2}
     assert plan.run(inputs={"a": 5}) == {"b": 6}
@@ -364,11 +366,13 @@ def test_public_api_is_exported() -> None:
         "CacheStore",
         "CacheWarning",
         "CheckResult",
+        "Collect",
         "Condition",
         "DiskCache",
         "Drawing",
         "DrawnNode",
         "Driver",
+        "ExpandEnd",
         "FieldCache",
         "Format",
         "FrameBuilder",
@@ -382,6 +386,7 @@ def test_public_api_is_exported() -> None:
         "NodeSpec",
         "NodeStart",
         "NodeView",
+        "Parallelizable",
         "Param",
         "PreparedPlan",
         "PrintNodes",
@@ -402,6 +407,7 @@ def test_public_api_is_exported() -> None:
         "check_output",
         "check_output_custom",
         "config",
+        "current_branch",
         "defaults",
         "exclude",
         "extract_columns",

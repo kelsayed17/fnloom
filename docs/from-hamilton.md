@@ -119,7 +119,8 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | A `StaticValidator`, refusing a node or the graph at build | `run_to_validate_node` and `run_to_validate_graph` | An `after_build` hook that raises refuses the build, with every problem in one error, carried through `rebuild()` ([`StaticValidator`](#staticvalidator), Q117) |
 | `NodeExecutionMethod` (`run_to_execute_node`) | Replaces how a node is called; one per driver | `with_node_wrappers(*wrappers)`: any number, an ordered chain, each `wrapper(node, call, inputs)` ([Node wrappers](running.md#node-wrappers), Q111) |
 | `lifecycle.default.GracefulErrorAdapter` | Keeps running past a failure, skipping what depends on it | Not yet: on the [roadmap](plans/2026-10-28-roadmap-ahead-of-hamilton.md). A failing node fails the run, and `after_node` sees its error and inputs (Q157) |
-| `TaskExecutionHook` and the other task hooks | Hooks on dynamic execution's tasks | None: fnloom has no dynamic execution yet (Q157) |
+| `Parallelizable[T]` and `Collect[T]` from `hamilton.htypes` | Need `enable_dynamic_execution(allow_experimental_mode=True)` and an executor; nesting and two collects of one block fail | The same names from `fnloom`, with no flag or executor setting: blocks nest, may be collected any number of times, run one item after another, and check each item as an input ([Fan-out and fan-in](writing-nodes.md#fan-out-and-fan-in), Q118 to Q127, Q137) |
+| `TaskExecutionHook` and the other task hooks | Hooks on dynamic execution's tasks | None: `NodeStart.branch` and `NodeEnd.branch` name a block node's branch, and `Hook.after_expand` gets each expand's item count ([The events](hooks.md#the-events), Q130) |
 | `display_all_functions()`, `display_upstream_of(*names)`, `display_downstream_of(*names)` | A `graphviz.Digraph`, or `None` and a logged traceback without the graphviz package; node order follows `PYTHONHASHSEED` | `draw()`, `draw_upstream_of(*names)`, `draw_downstream_of(*names)`: a `fnloom.Drawing`, whose `to_dot()`, `to_mermaid()` and `to_svg()` need nothing installed and give the same text every run ([Drawing](drawing.md), Q90, Q94, Q146) |
 | `visualize_path_between(a, b, strict_path_visualization=True)` | The path, and its nodes' parents unless strict | `draw_path_between(a, b, context=False)`; with `context=True`, the parents are drawn and marked `context` (Q90) |
 | `visualize_execution(final_vars, inputs=, overrides=, bypass_validation=True)` | The run's nodes; an input requested as an output is unmarked | `draw_execution(final_vars, inputs=, overrides=, validate=False)`; that input is marked `output` (Q92) |
@@ -459,7 +460,8 @@ result caching, the async driver, hooks, result builders, output checks, custom 
 CLI, `@check_output` validators, step injection, `@inject`, `@resolve` and node wrappers are done. These Hamilton
 features come next, roughly in this order:
 
-1. **Dynamic execution**, which has its own design.
+1. **Parallel blocks**: `Parallelizable` and `Collect` run their items one after another for now, and not on the
+   async driver.
 2. **`GracefulErrorAdapter`**. Node wrappers can change how a node is called, but a run still stops at the first
    failure.
 

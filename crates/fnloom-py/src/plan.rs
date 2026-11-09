@@ -1,14 +1,17 @@
 //! The Python `Plan`, and the evaluator that calls each node's Python function.
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use fnloom_core::node::{Node, NodeId};
-use fnloom_core::plan::{Action, Plan as CorePlan};
-use fnloom_core::run::{Arg, Evaluate, Observer};
-use pyo3::exceptions::{PyRuntimeError, PyTypeError};
+use fnloom_core::plan::{Action, Plan as CorePlan, Step};
+use fnloom_core::run::{Arg, Blocks, Evaluate, Item, Observer};
+use pyo3::exceptions::{PyRuntimeError, PyStopIteration, PyTypeError};
+use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyString};
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 use pyo3::{PyTraverseError, PyVisit};
 
 use crate::absent::{self, Absent};
@@ -121,6 +124,8 @@ impl Plan {
                 kwargs: &kwargs,
                 shared,
                 absent: absent::singleton(py)?,
+                outputs: self.plan.outputs(),
+                expanding: None,
             },
             lookup,
             &mut hooks,
@@ -138,12 +143,44 @@ impl Plan {
     }
 
     /// The steps in execution order, as `(node, action)` pairs.
+    ///
+    /// Each block's steps follow its expand's step, in the order one branch runs them, so
+    /// every node the plan computes is listed once, nested blocks too.
     fn steps(&self) -> Vec<(String, &'static str)> {
         let graph = self.graph.get().core();
+        let mut listed = Vec::with_capacity(self.plan.steps().len());
+        // An explicit stack of the step lists still being read, so nesting never recurses.
+        let mut open: Vec<std::slice::Iter<'_, Step>> = vec![self.plan.steps().iter()];
+        while let Some(steps) = open.last_mut() {
+            let Some(step) = steps.next() else {
+                open.pop();
+                continue;
+            };
+            listed.push((graph.node(step.node).name.clone(), action_name(step.action)));
+            if let Some(block) = self.plan.block_of(step.node) {
+                open.push(self.plan.blocks()[block.index()].steps.iter());
+            }
+        }
+        listed
+    }
+
+    /// Each expand whose block the plan runs, with that block's own steps as `(node,
+    /// action)` pairs, in the order one branch runs them; a nested block's steps are
+    /// listed under its own expand.
+    fn blocks(&self) -> BTreeMap<String, Vec<(String, &'static str)>> {
+        let graph = self.graph.get().core();
         self.plan
-            .steps()
+            .blocks()
             .iter()
-            .map(|step| (graph.node(step.node).name.clone(), action_name(step.action)))
+            .map(|sub| {
+                (
+                    graph.node(sub.expand).name.clone(),
+                    sub.steps
+                        .iter()
+                        .map(|step| (graph.node(step.node).name.clone(), action_name(step.action)))
+                        .collect(),
+                )
+            })
             .collect()
     }
 }
@@ -244,6 +281,10 @@ struct Caller<'k, 'py, 'g> {
     shared: bool,
     /// `fnloom.ABSENT`, which results are compared with by identity.
     absent: &'static Py<Absent>,
+    /// The plan's outputs, sorted by id: an expand among them records its items.
+    outputs: &'k [NodeId],
+    /// The expand last called in a branch, with that branch: its items are read in it.
+    expanding: Option<(NodeId, Vec<usize>)>,
 }
 
 impl Evaluate<Py<PyAny>> for Caller<'_, '_, '_> {
@@ -262,6 +303,115 @@ impl Evaluate<Py<PyAny>> for Caller<'_, '_, '_> {
     /// Whether `value` is `fnloom.ABSENT`, by identity.
     fn is_absent(&self, value: &Value) -> bool {
         value.as_ptr() == self.absent.as_ptr()
+    }
+
+    fn blocks(&mut self) -> Option<&mut dyn Blocks<Py<PyAny>, Value, PyErr>> {
+        Some(self)
+    }
+
+    /// Calls a block node with `fnloom.current_branch()` set to `branch` for the call,
+    /// in the caller's context; a node outside every block is called as `evaluate` does.
+    fn evaluate_in(
+        &mut self,
+        node: &Node<Py<PyAny>>,
+        function: &Py<PyAny>,
+        args: &[Arg<'_, Value>],
+        branch: &[usize],
+    ) -> PyResult<Value> {
+        if branch.is_empty() {
+            return self.evaluate(node, function, args);
+        }
+        if node.is_expand() {
+            self.expanding = Some((node.id, branch.to_vec()));
+        }
+        let py = self.kwargs.py;
+        let current = branch_variable(py)?.bind(py);
+        let token = current.call_method1(intern!(py, "set"), (PyTuple::new(py, branch)?,))?;
+        let outcome = caught(|| self.call(node, function, args));
+        let reset = current.call_method1(intern!(py, "reset"), (token,));
+        let value = outcome?;
+        reset.map(|_| value)
+    }
+}
+
+/// `fnloom._blocks.BRANCH`, the context variable `fnloom.current_branch()` reads.
+fn branch_variable(py: Python<'_>) -> PyResult<&'static Py<PyAny>> {
+    static BRANCH: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    BRANCH.get_or_try_init(py, || {
+        Ok(py
+            .import(intern!(py, "fnloom._blocks"))?
+            .getattr(intern!(py, "BRANCH"))?
+            .unbind())
+    })
+}
+
+/// Blocks through Python: an expand's items come from the iterator its node's factory
+/// makes (`fnloom._blocks.Items`), and a collect argument is a `list`.
+impl Blocks<Py<PyAny>, Value, PyErr> for Caller<'_, '_, '_> {
+    fn iterate(&mut self, node: &Node<Py<PyAny>>, iterable: &Value) -> PyResult<Value> {
+        let py = self.kwargs.py;
+        let Some(factory) = self.kwargs.graph.items(node.id) else {
+            return Err(PyRuntimeError::new_err(format!(
+                "broken plan: expand '{}' has no item iterator",
+                node.name
+            )));
+        };
+        let record = self.outputs.binary_search(&node.id).is_ok();
+        // A generator's body runs as its items are read, so in the expand's branch.
+        let branch = match self.expanding.take() {
+            Some((id, branch)) if id == node.id => PyTuple::new(py, branch)?,
+            _ => PyTuple::empty(py),
+        };
+        caught(|| {
+            factory
+                .bind(py)
+                .call1((iterable.bind(py), record, branch))
+                .map(|items| Arc::new(items.unbind()))
+        })
+    }
+
+    fn next_item(&mut self, node: &Node<Py<PyAny>>, iterator: &Value) -> PyResult<Item<Value>> {
+        let py = self.kwargs.py;
+        match caught(|| iterator.bind(py).call_method0(intern!(py, "__next__"))) {
+            Ok(item) => Ok(Item::Next(Arc::new(item.unbind()))),
+            Err(error) if error.is_instance_of::<PyStopIteration>(py) => {
+                let value = error.value(py).getattr(intern!(py, "value"))?;
+                if !value.is(self.absent.bind(py)) {
+                    return Ok(Item::Done);
+                }
+                if !node.declines {
+                    return Err(undeclared_absence(&node.name));
+                }
+                Ok(Item::Declined(Arc::new(value.unbind())))
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    fn finish_items(
+        &mut self,
+        _node: &Node<Py<PyAny>>,
+        iterator: &Value,
+        exhausted: bool,
+    ) -> PyResult<Value> {
+        let py = self.kwargs.py;
+        caught(|| {
+            iterator
+                .bind(py)
+                .call_method1(intern!(py, "finish"), (exhausted,))
+                .map(|value| Arc::new(value.unbind()))
+        })
+    }
+
+    fn gather(
+        &mut self,
+        _consumer: &Node<Py<PyAny>>,
+        _source: NodeId,
+        values: Vec<Value>,
+    ) -> PyResult<Value> {
+        let py = self.kwargs.py;
+        let list = PyList::new(py, values.iter().map(|value| value.bind(py)))?;
+        Ok(Arc::new(list.into_any().unbind()))
     }
 }
 

@@ -24,7 +24,7 @@ def total(subtotal: float, shipping: float) -> float:
 
 ## Writing a hook
 
-Subclass `fnloom.Hook` and override any of its five methods. Each gets one event:
+Subclass `fnloom.Hook` and override any of its six methods. Each gets one event:
 
 | Method | Called | Event |
 | --- | --- | --- |
@@ -32,6 +32,7 @@ Subclass `fnloom.Hook` and override any of its five methods. Each gets one event
 | `before_run` | once the request is known good, before its values are checked | `RunStart` |
 | `before_node` | before a node's function is called | `NodeStart` |
 | `after_node` | after it returned or raised | `NodeEnd` |
+| `after_expand` | once an expand's items are exhausted ([Fan-out and fan-in](writing-nodes.md#fan-out-and-fan-in)) | `ExpandEnd` |
 | `after_run` | once the run ended, whether or not it succeeded | `RunEnd` |
 
 Give hooks to `Builder.with_hooks`:
@@ -116,10 +117,18 @@ event by position, so a new field never breaks a hook.
       left to its default is absent, and so is one bound to a `value()`. A `group(...)` parameter is the list or dict
       the function gets.
     - `cache`: the node's [cache outcome](caching.md#explaining-a-run); `None` on a driver with no cache.
+    - `branch`: the branch a [block](writing-nodes.md#fan-out-and-fan-in) node runs in, one item index per block,
+      outermost first; `()` outside every block. A block node fires its events once per item.
 - **`NodeEnd`**: `NodeStart`'s fields, plus:
     - `ok`: whether the node returned.
     - `result`: what it returned; `None` unless `ok`.
     - `error`: the very exception it raised; `None` if `ok`.
+- **`ExpandEnd`**: what `after_expand` gets once an expand's items are exhausted, so a progress hook knows the
+  total. An expand that declines, or whose run fails first, has none.
+    - `run_id`
+    - `node`: the expand's `NodeView`.
+    - `branch`: the branch the expand ran in; `()` outside every block.
+    - `items`: how many items it gave.
 - **`RunEnd`**: `RunStart`'s fields, plus:
     - `ok`: whether the run succeeded.
     - `error`: what stopped it, as `execute` raises it unless an `after_run` hook raises too; `None` if `ok`.
@@ -252,8 +261,9 @@ line, each value cut to `width` characters (50 by default) as [`LogFailures`](#l
 [`NodeView`](running.md#inspecting-a-graph), which can select by tag or namespace and is asked once per node. A
 name that is no computed node of the graph (an input included) is a `ValueError` when the driver is built, with a
 `did you mean`. `print_fn` takes one string; the default is `print`, and one that is not callable is a `TypeError`.
-A `verbosity` other than the int 1 or 2, or a `width` under 10, is a `ValueError`. Times are kept per run and node,
-so the async driver and concurrent runs print correctly.
+A `verbosity` other than the int 1 or 2, or a `width` under 10, is a `ValueError`. Times are kept per run, node and
+branch, so the async driver and concurrent runs print correctly, and a block node's line names its branch:
+`node 'label' (branch (1,)) ran in 0.1 ms`.
 
 ```python
 lines: list[str] = []
