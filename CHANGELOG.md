@@ -27,6 +27,16 @@ change the public API; such changes are listed under **Changed** and **Removed**
   consumer, which is absent too. `Plan::needs_rules` says whether a plan follows these rules; one that doesn't runs
   the plain loop unchanged. `BuildError::ConflictingInput` refuses a spec listing one input twice with different
   dependencies, which no one dependency describes; listed twice alike, it is one edge, as before.
+- Rust core: blocks, at build. `NodeSpec.expands` makes a node an expand (`NodeKind::Expand(payload)`, whose
+  payload `Node::payload` returns as a function's), and `InputSpec.collect: Option<Collect>` makes a parameter
+  collect a block, keeping the present branches (`Collect::Present`) or every branch (`Collect::All`). A block holds
+  every node reading its expand along a path that crosses no collect of it; `Node.block` names a node's innermost
+  expand and `Graph::block_path` all of them, outermost first. Blocks nest, any number of collects may read one
+  block (Q123), and a node may collect one block and expand another (Q136). The build refuses a collect of a node in
+  no block (`BuildError::CollectOutsideBlock`) or of an expand (`CollectOfExpand`), a node reading blocks of two
+  unrelated expands (`UnrelatedBlocks`), and a node collecting a block it is inside, by also reading it directly
+  (Q124) or because the block reads its own collect back through nodes outside it (`CollectsOwnBlock`, with the
+  path). A collect passes on absence only from an absent expand, and an expand's items are never absent.
 
 ### Changed
 
@@ -40,6 +50,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - Rust core: `NodeSpec` has a new field, `declines`; a spec built with struct syntax sets it, `false` for a node
   that never declines. `Dependency` has a third variant, `Admits`, and `BuildError` a new one, `ConflictingInput`,
   so a `match` on either needs an arm for it.
+- Rust core: `NodeSpec` has a new field, `expands`, and `InputSpec` and `Edge` one, `collect`; `Node` has `block`.
+  A spec built with struct syntax sets them, `false` and `None` for a graph without blocks. `NodeKind` has a third
+  variant, `Expand`, and `BuildError` four more, so a `match` on either needs arms for them.
 
 ### Fixed
 

@@ -215,6 +215,7 @@ fn node_spec((name, params, tags, function, declines): NodeTuple) -> PyResult<No
             }
             Ok(InputSpec {
                 dependency: dependency(&name, &source, &kind)?,
+                collect: None,
                 name: source,
             })
         })
@@ -228,6 +229,7 @@ fn node_spec((name, params, tags, function, declines): NodeTuple) -> PyResult<No
             .collect(),
         payload: function,
         declines,
+        expands: false,
     })
 }
 

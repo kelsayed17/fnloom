@@ -109,11 +109,13 @@ mod suite {
                 .map(|name| InputSpec {
                     name,
                     dependency: Dependency::Required,
+                    collect: None,
                 })
                 .collect(),
             tags: BTreeMap::new(),
             payload: (),
             declines: false,
+            expands: false,
         }
     }
 
@@ -244,6 +246,7 @@ mod suite {
                 tags: spec.tags,
                 payload: i == 0,
                 declines: i == 0,
+                expands: false,
             })
             .collect();
         let graph = Graph::build(specs).expect("generated specs form a valid graph");

@@ -36,11 +36,13 @@ fn node(name: &str, reads: &[&str], constant: i64) -> NodeSpec<i64> {
             .map(|&read| InputSpec {
                 name: read.to_owned(),
                 dependency: Dependency::Required,
+                collect: None,
             })
             .collect(),
         tags: BTreeMap::new(),
         payload: constant,
         declines: false,
+        expands: false,
     }
 }
 

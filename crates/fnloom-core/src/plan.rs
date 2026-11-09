@@ -226,7 +226,7 @@ impl<P> Graph<P> {
             return Action::UseOverride;
         }
         match self.node(id).kind {
-            NodeKind::Function(_) => Action::Compute,
+            NodeKind::Function(_) | NodeKind::Expand(_) => Action::Compute,
             NodeKind::Input if resolved.supplied[id.index()] => Action::UseInput,
             NodeKind::Input => Action::SkipOptionalInput,
         }

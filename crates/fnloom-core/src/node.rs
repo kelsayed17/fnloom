@@ -54,6 +54,18 @@ impl Dependency {
     }
 }
 
+/// How a parameter collects a block: which branches' values it gathers.
+///
+/// A collect edge reads a node inside a block and receives one value gathered from every
+/// branch of that block, in branch order (`Blocks::gather`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Collect {
+    /// The values of the branches where the node is present; absent ones are dropped.
+    Present,
+    /// Every branch's value, absent ones included, so positions line up with the items.
+    All,
+}
+
 /// A named input (parameter) of a node, as declared by its author.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InputSpec {
@@ -61,6 +73,9 @@ pub struct InputSpec {
     pub name: String,
     /// Whether the parameter is required.
     pub dependency: Dependency,
+    /// Whether the parameter collects the block of the node it reads, and how; `None` for an
+    /// ordinary read.
+    pub collect: Option<Collect>,
 }
 
 /// A node as declared, before ids are assigned and edges resolved.
@@ -77,6 +92,9 @@ pub struct NodeSpec<P> {
     /// Whether the node may decline: its payload may return a value the embedder's
     /// `Evaluate::is_absent` recognises as absent.
     pub declines: bool,
+    /// Whether the node is an expand: its value is iterated, and each item runs the node's
+    /// block once (`NodeKind::Expand`).
+    pub expands: bool,
 }
 
 /// How a node gets its value.
@@ -86,6 +104,9 @@ pub enum NodeKind<P> {
     Function(P),
     /// Supplied by the caller at run time.
     Input,
+    /// Computed by this payload like a function, then iterated: each item runs the node's
+    /// block, the nodes that read it without a collect, once.
+    Expand(P),
 }
 
 /// A resolved dependency edge from a node to one of its inputs.
@@ -95,6 +116,8 @@ pub struct Edge {
     pub node: NodeId,
     /// Whether the edge is required.
     pub dependency: Dependency,
+    /// Whether the edge collects the block of `node`, and how; `None` for an ordinary read.
+    pub collect: Option<Collect>,
 }
 
 /// A node of a built graph.
@@ -115,6 +138,9 @@ pub struct Node<P> {
     /// Whether the node's value may be absent: it declines, or it is a function with a
     /// `Required` edge from a node whose value may be absent. Known at build.
     pub may_be_absent: bool,
+    /// The innermost expand whose block holds this node; `None` outside every block. An
+    /// expand's own block is not its `block`: that is the block it sits in.
+    pub block: Option<NodeId>,
 }
 
 impl<P> Node<P> {
@@ -124,11 +150,17 @@ impl<P> Node<P> {
         matches!(self.kind, NodeKind::Input)
     }
 
-    /// The payload of a function node; `None` for an input.
+    /// Whether this node is an expand (`NodeKind::Expand`).
+    #[must_use]
+    pub const fn is_expand(&self) -> bool {
+        matches!(self.kind, NodeKind::Expand(_))
+    }
+
+    /// The payload of a function or expand node; `None` for an input.
     #[must_use]
     pub const fn payload(&self) -> Option<&P> {
         match &self.kind {
-            NodeKind::Function(payload) => Some(payload),
+            NodeKind::Function(payload) | NodeKind::Expand(payload) => Some(payload),
             NodeKind::Input => None,
         }
     }

@@ -4,6 +4,7 @@
 // lint table cannot also override one level in its own manifest.
 #![forbid(unsafe_code)]
 
+mod block;
 pub mod error;
 pub mod graph;
 pub mod node;

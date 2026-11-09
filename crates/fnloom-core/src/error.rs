@@ -23,6 +23,44 @@ pub enum BuildError {
         /// Node names along the cycle in traversal order; the first name is repeated at the end.
         path: Vec<String>,
     },
+    /// A collect reads a node that is in no block.
+    CollectOutsideBlock {
+        /// The node whose parameter collects.
+        consumer: String,
+        /// The node it collects, which no expand reaches.
+        source: String,
+    },
+    /// A collect reads an expand itself, which is not in its own block.
+    CollectOfExpand {
+        /// The node whose parameter collects.
+        consumer: String,
+        /// The expand it collects.
+        expand: String,
+    },
+    /// A node collects a block it is itself inside, so a branch would collect its own block.
+    ///
+    /// Either the node also reads the block without a collect, or the block reads the
+    /// collect back through nodes outside it, which would make the block wait for itself.
+    CollectsOwnBlock {
+        /// The node whose parameter collects.
+        consumer: String,
+        /// The block node it collects.
+        source: String,
+        /// The expand of the block it collects.
+        expand: String,
+        /// From the expand to the consumer without crossing a collect; when the block reads
+        /// its collect back through outer nodes, from the expand round to the expand again.
+        path: Vec<String>,
+    },
+    /// A node reads blocks of two unrelated expands, whose branches do not pair up.
+    UnrelatedBlocks {
+        /// The node reading both.
+        consumer: String,
+        /// One expand, the first by name.
+        first: String,
+        /// The other expand.
+        second: String,
+    },
 }
 
 /// `names` quoted the way Python quotes them, `'name'`, joined by `separator`.
@@ -46,6 +84,53 @@ impl fmt::Display for BuildError {
                  list it once"
             ),
             Self::Cycle { path } => write!(f, "dependency cycle: {}", quoted(path, " -> ")),
+            Self::CollectOutsideBlock { consumer, source } => write!(
+                f,
+                "'{consumer}' collects '{source}', which is in no block; collect a node that \
+                 reads an expand"
+            ),
+            Self::CollectOfExpand { consumer, expand } => write!(
+                f,
+                "'{consumer}' collects the expand '{expand}', which is not in its own block; \
+                 collect a node of its block instead"
+            ),
+            Self::CollectsOwnBlock {
+                consumer,
+                source,
+                expand,
+                path,
+            } => {
+                let shown = quoted(path, " -> ");
+                if path.last() == Some(expand) {
+                    write!(
+                        f,
+                        "the block of '{expand}' reads its own collect '{consumer}' through \
+                         nodes outside it: {shown}"
+                    )
+                } else if path.len() >= 2 && path[path.len() - 2] == *source {
+                    write!(
+                        f,
+                        "'{consumer}' reads '{source}' both through Collect and directly, so it \
+                         would be inside the block of '{expand}' it collects: {shown}"
+                    )
+                } else {
+                    write!(
+                        f,
+                        "'{consumer}' collects '{source}' but also reads the block of \
+                         '{expand}' directly, so it would be inside the block it collects: \
+                         {shown}"
+                    )
+                }
+            }
+            Self::UnrelatedBlocks {
+                consumer,
+                first,
+                second,
+            } => write!(
+                f,
+                "'{consumer}' reads blocks of '{first}' and '{second}', which are unrelated; \
+                 collect both in one node to pair them"
+            ),
         }
     }
 }
