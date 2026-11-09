@@ -5963,3 +5963,63 @@ def test_q135_a_node_may_decline() -> None:
     assert result["count"] is fnloom.ABSENT
     assert module.counted == []
     assert built.nodes["count"].may_be_absent
+
+
+_ABSENT_EDGES = """
+from fnloom import ABSENT, Absent
+
+
+def listing() -> list[str] | Absent:
+    return ABSENT
+
+
+def count(listing: list[str]) -> int:
+    return len(listing)
+
+
+def report(count: int) -> str:
+    return str(count)
+"""
+
+
+@pytest.mark.deliberate("Q19")
+def test_q19_an_absent_output_reaches_the_result_builder() -> None:
+    """Hamilton has no absence; fnloom's builder gets `ABSENT` as a value (Q135)."""
+    seen: list[dict[str, object]] = []
+
+    def build(outputs: dict[str, object]) -> int:
+        seen.append(outputs)
+        return len(outputs)
+
+    module = make_module("q19_absent", _ABSENT_EDGES)
+    built = fnloom.Builder().with_modules(module).with_result_builder(build).build()
+    assert built.execute(["count", "listing"]) == 2  # noqa: PLR2004  # two outputs
+    assert len(seen) == 1
+    assert seen[0]["count"] is fnloom.ABSENT
+    assert seen[0]["listing"] is fnloom.ABSENT
+
+
+@pytest.mark.deliberate("Q84")
+def test_q84_run_end_lists_the_skipped_nodes() -> None:
+    """Hamilton has no skip; fnloom's `RunEnd.skipped` lists them in order (Q135)."""
+    ended: list[fnloom.RunEnd] = []
+
+    class Ends(fnloom.Hook):
+        @override
+        def after_run(self, event: fnloom.RunEnd) -> None:
+            ended.append(event)
+
+    module = make_module("q84_skipped", _ABSENT_EDGES)
+    built = fnloom.Builder().with_modules(module).with_hooks(Ends()).build()
+    built.execute(["report"])
+    assert ended[0].skipped == (("count", ()), ("report", ()))
+
+
+@pytest.mark.deliberate("Q95")
+def test_q95_a_graph_that_may_be_absent_exports_format_2() -> None:
+    """Hamilton has no absence to export; fnloom's `/2` says which nodes may be."""
+    built = fnloom.build(make_module("q95_absent", _ABSENT_EDGES))
+    document = built.export()
+    assert document["format"] == "fnloom.export/2"
+    flags = {node["name"]: node["may_be_absent"] for node in document["nodes"]}
+    assert flags == {"listing": True, "count": True, "report": True}

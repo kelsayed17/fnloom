@@ -26,6 +26,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from fnloom import _async, _types
+from fnloom._core import ABSENT
 from fnloom._decorators import _ATTRIBUTE, decorations
 from fnloom._extract import extractor
 from fnloom._scan import by_parameter
@@ -868,7 +869,8 @@ def wrapped(
 ) -> list[NodeDef]:
     """`nodes`, each checked one's payload running its checks after it returns.
 
-    A node with no checks is kept as it is. With `awaits`, for the async driver,
+    A node with no checks is kept as it is. A node returning `fnloom.ABSENT` runs
+    no check: there is no value (Q135). With `awaits`, for the async driver,
     a sync node's awaitable result is passed on unchecked, so the driver refuses
     it with its own guided error.
     """
@@ -896,14 +898,16 @@ def _checking(node: NodeDef, *, awaits: bool, owner: object) -> Callable[..., ob
 
         async def call_async(**kwargs: object) -> object:
             value = await awaited(**kwargs)
-            verdict(name, checks, value, arguments(kwargs), owner)
+            if value is not ABSENT:
+                verdict(name, checks, value, arguments(kwargs), owner)
             return value
 
         return call_async
 
     def call(**kwargs: object) -> object:
         value = payload(**kwargs)
-        if awaits and inspect.isawaitable(value):
+        if value is ABSENT or (awaits and inspect.isawaitable(value)):
+            # `ABSENT` has no value to check: its checks don't run (Q135).
             return value
         verdict(name, checks, value, arguments(kwargs), owner)
         return value

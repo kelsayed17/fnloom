@@ -19,6 +19,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, final, override
 
 from fnloom import _types
+from fnloom._absence import without_absent
 from fnloom._decorators import (
     _ATTRIBUTE,
     Decorations,
@@ -404,7 +405,7 @@ def field_names(fn: Callable[..., object], extraction: Extraction) -> tuple[str,
             returns = typing.evaluate_forward_ref(returns)
         except Exception:  # noqa: BLE001  # an annotation that fails to evaluate gives no names
             return ()
-    returns = _types.stripped(returns)
+    returns = _types.stripped(without_absent(returns))
     if not typing.is_typeddict(returns):
         return ()
     return tuple(sorted(_typed_dict_keys(returns)))
@@ -429,9 +430,10 @@ def _shape(label: str, items: tuple[Item, ...], returns: object) -> str | None:
     """What is wrong with extracting `items` from a `returns` value, or `None`.
 
     Reads only the return's form and a `TypedDict`'s keys, so it holds for an
-    annotation not yet evaluated, as long as its outer type is.
+    annotation not yet evaluated, as long as its outer type is. A producer that
+    may decline, `R | Absent`, is read as `R` (Q135).
     """
-    returns = _types.stripped(returns)
+    returns = _types.stripped(without_absent(returns))
     shown = inspect.formatannotation(returns)
     if typing.is_typeddict(returns):
         keys = _typed_dict_keys(returns)
@@ -600,7 +602,7 @@ def _field_types(producer: NodeDef, extraction: Extraction) -> list[tuple[str, o
     label = repr(producer.name)
     if (problem := _shape(label, extraction.items, producer.returns)) is not None:
         raise ValueError(problem)
-    returns = _types.stripped(producer.returns)
+    returns = _types.stripped(without_absent(producer.returns))
     if typing.is_typeddict(returns):
         # A field type that does not resolve is `Unresolved` (Q81).
         given = _types.resolved_hints(returns, extras=False)
@@ -653,14 +655,14 @@ def lower(
     each carries its own doc.
     """
     if extraction.kind == "columns":
-        declared = column_type(producer.returns) if resolved else Any
+        declared = column_type(without_absent(producer.returns)) if resolved else Any
         return _lowered_columns(producer, extraction, declared, rules, value_checks)
     if resolved:
         typed = _field_types(producer, extraction)
     else:
         items = extraction.items
         if not items and typing.is_typeddict(
-            returns := _types.stripped(producer.returns)
+            returns := _types.stripped(without_absent(producer.returns))
         ):
             # Every field of a `TypedDict` already defined: its keys, not yet typed.
             items = tuple(
@@ -669,7 +671,7 @@ def lower(
         typed = [
             (name, Any if declared is None else declared) for name, declared, _ in items
         ]
-    param = Param(producer.name, Source(producer.name), True, producer.returns)  # noqa: FBT003  # `required`, in field order
+    param = _producer_param(producer)
     return [
         producer,
         *(
@@ -701,7 +703,7 @@ def _lowered_columns(
     value_checks: tuple[_types.ValueCheck, ...] = (),
 ) -> list[NodeDef]:
     """`producer`, then a node per column, each typed `declared`, with its doc."""
-    param = Param(producer.name, Source(producer.name), True, producer.returns)  # noqa: FBT003  # `required`, in field order
+    param = _producer_param(producer)
     return [
         producer,
         *(
@@ -724,6 +726,20 @@ def _lowered_columns(
             for name, _, doc in extraction.items
         ),
     ]
+
+
+def _producer_param(producer: NodeDef) -> Param:
+    """The one parameter of a field or column node: `producer`'s value, required.
+
+    Typed as `producer` returns, `Absent` taken out, so when `producer` declines,
+    the field node is skipped, and absent too (Q135).
+    """
+    return Param(
+        producer.name,
+        Source(producer.name),
+        True,  # noqa: FBT003  # `required`, in field order
+        without_absent(producer.returns),
+    )
 
 
 def is_generated(node: NodeDef) -> bool:

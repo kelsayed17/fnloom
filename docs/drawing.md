@@ -85,6 +85,9 @@ path = driver.draw_path_between("subtotal", "total")
 # -> {'free_above': ['context'], 'price': ['context'], 'quantity': ['context'], 'subtotal': ['path'], 'shipping': ['path'], 'tax': ['path'], 'total': ['path']}
 ```
 
+A node that [may be absent](writing-nodes.md#declining) is marked `may be absent` in every drawing, and drawn with a
+dashed outline, named in the legend.
+
 `context=False` draws the path alone. A name the graph doesn't have is a `ValueError` naming every such name, and two
 nodes with no path between them are a `ValueError` too:
 
@@ -279,7 +282,8 @@ text = json.dumps(document, sort_keys=True)
 
 Each node gives its kind (`"function"` or `"input"`), its whole type, each parameter and what it reads, its tags, doc,
 function, config conditions, source, marks and output checks. An input says whether it is required and which nodes read
-it:
+it. When a node drawn [may be absent](writing-nodes.md#declining), the format is `fnloom.export/2` instead, and every
+node also says `may_be_absent`; any other document is `fnloom.export/1`, unchanged. `fnloom diff` reads both:
 
 ```python
 tax = document["nodes"][4]

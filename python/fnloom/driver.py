@@ -17,6 +17,7 @@ from dataclasses import replace
 from types import MappingProxyType, ModuleType
 from typing import (
     Any,
+    Final,
     Literal,
     NamedTuple,
     NoReturn,
@@ -36,7 +37,7 @@ from fnloom import (
     _types,
     _wrappers,
 )
-from fnloom._absence import needs_input
+from fnloom._absence import needs_input, refuse_given
 from fnloom._caching import (
     NO_SETTINGS,
     Cache,
@@ -45,6 +46,7 @@ from fnloom._caching import (
     CacheSettings,
     refuse_bad_fields,
 )
+from fnloom._core import ABSENT
 from fnloom._decorators import CacheBehavior, Source, Value
 from fnloom._defaults import default_problems
 from fnloom._drawing import Drawing, Mark, display, drawing, with_context
@@ -186,6 +188,22 @@ _STR_ONLY = frozenset({str})
 _NO_VALUES: dict[str, object] = {}
 
 
+# `ABSENT`'s identity, which `_holds_absent` looks for among a run's values.
+_ABSENT_ID: Final = id(ABSENT)
+
+
+def _holds_absent(inputs: dict[str, Any], overrides: dict[str, Any]) -> bool:
+    """Whether an input or override is `ABSENT`, by identity, never `==` or truth.
+
+    Run on every run, so the ids are compared in C: `ABSENT in values.values()`
+    would call each value's own `__eq__`. An empty dict costs one truth test.
+    """
+    return bool(
+        (inputs and _ABSENT_ID in map(id, inputs.values()))
+        or (overrides and _ABSENT_ID in map(id, overrides.values()))
+    )
+
+
 def _names(values: Mapping[str, object] | None) -> frozenset[str]:
     return _NO_NAMES if values is None else frozenset(values)
 
@@ -243,6 +261,9 @@ def _mismatches(checks: Sequence[_Check], values: Mapping[str, object]) -> list[
         # A plain class answers for `None` too: `isinstance(None, int)` is False,
         # and only `object`, `NoneType` and a union with it take it (Q79).
         if cls is not None and isinstance(value, cls):
+            continue
+        if value is ABSENT:
+            # An override `refuse_given` let through: its node may be absent.
             continue
         # Refused by class: the check answers the same, or a custom check admits.
         try:
@@ -311,7 +332,9 @@ def _returning(
     checked, by a coroutine function the async driver awaits as it would the
     node's own. With `awaits`, a sync node's awaitable result is not checked:
     the async driver refuses it, saying to make the node an `async def`, and
-    closes it, so it never warns as never awaited.
+    closes it, so it never warns as never awaited. `fnloom.ABSENT` is passed on
+    unchecked: there is no value, and the return check refuses it for a node
+    that does not decline (Q135).
     """
     name, declared, payload = node.name, node.returns, node.payload
     classes, matches = _types.admitting(
@@ -320,8 +343,9 @@ def _returning(
 
     def checked(value: object) -> object:
         # Refused by class, or no plain class: the check, custom ones included.
+        # `ABSENT` has no value to check: the return check decides on it (Q135).
         try:
-            if matches(value):
+            if value is ABSENT or matches(value):
                 return value
         except _types.UnresolvedError as error:
             msg = f"{name}: {error}"
@@ -470,6 +494,8 @@ class PreparedPlan[R = dict[str, object]]:
         self._input_names = input_names
         self._override_names = override_names
         self._input_checks, self._override_checks = checks
+        # The overridden nodes that may be absent, whose override may be `ABSENT`.
+        self._absent_overrides: frozenset[str] = _NO_NAMES
         # The driver's result builder, which only a subclass applies.
         self._build: _ResultBuilder[R] | None = None
         # The driver that prepared this plan, which pickling rebuilds it through.
@@ -559,6 +585,8 @@ class PreparedPlan[R = dict[str, object]]:
             or given_overrides.keys() != self._override_names
         ):
             self._refuse_names(given_inputs, given_overrides)
+        if _holds_absent(given_inputs, given_overrides):
+            refuse_given(given_inputs, given_overrides, self._absent_overrides)
         if self._input_checks or self._override_checks:
             mismatches = _mismatches(self._input_checks, given_inputs)
             mismatches += _mismatches(self._override_checks, given_overrides)
@@ -720,6 +748,12 @@ class _HookedPlan[R](PreparedPlan[R]):
         ):
             self._refuse_names(given_inputs, given_overrides)
         mismatches: list[str] | BaseException = []
+        if _holds_absent(given_inputs, given_overrides):
+            try:
+                refuse_given(given_inputs, given_overrides, self._absent_overrides)
+            except TypeError as refused:
+                # Raised by `_refuse_values`, after `before_run`, as a mismatch is.
+                return given_inputs, given_overrides, refused
         if self._input_checks or self._override_checks:
             try:
                 mismatches = _mismatches(self._input_checks, given_inputs)
@@ -1078,6 +1112,11 @@ class Driver[R = dict[str, object]]:
             prepared = PreparedPlan(
                 runnable, outputs, input_names, override_names, checks
             )
+        prepared._absent_overrides = frozenset(  # noqa: SLF001  # the driver's own plan
+            name
+            for name in override_names
+            if name in self._nodes and self._nodes[name].may_be_absent
+        )
         prepared._driver = self  # noqa: SLF001  # the driver's own plan
         return prepared
 
@@ -3384,7 +3423,6 @@ class Builder[R = dict[str, object]]:
         """
         checked = _async.checked_sync_nodes(sync_nodes)
         nodes, views, graph, unmatched, left_out, owner = self._scanned(awaits=True)
-        _absence.refuse_async(nodes)
         # Called here, so a `CacheWarning` points at the caller's `build_async`.
         cache = (
             None
