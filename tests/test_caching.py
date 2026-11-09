@@ -1,6 +1,7 @@
 """Tests for cached runs: keys, hit frontiers, policies, and failing stores."""
 
 import os
+import pickle
 import random
 import threading
 import warnings
@@ -9,15 +10,22 @@ from typing import TYPE_CHECKING, override
 import pytest
 
 from fnloom import (
+    ABSENT,
     MISSING,
     Builder,
     CacheOutcome,
     CacheStore,
     CacheWarning,
     DiskCache,
+    Hook,
     MemoryCache,
+    _core,
     build,
+    fingerprint,
 )
+from fnloom._canonical import stable_fingerprint
+from fnloom._core import hash_parts
+from fnloom._stores import JSON
 from helpers import make_module
 
 if TYPE_CHECKING:
@@ -28,6 +36,8 @@ if TYPE_CHECKING:
 
 THREADS = 8
 RUNS_PER_THREAD = 200
+# `fingerprint(ABSENT)`: fixed, since fingerprints key results across processes.
+_ABSENT_FINGERPRINT = "66fe99629b9688c2cc062b7b3dbd987ff13bde20adeb0d19f5ce9bd7b2b60396"
 
 CHAIN = """
 def a(x: int) -> int:
@@ -1010,3 +1020,366 @@ def test_a_container_subclass_binding_sees_its_attributes(
             continue
         assert outcome.status == "miss", mode
         assert driver.execute(["moded"]) == {"moded": mode}
+
+
+# Declared absences (Plan 10 task 4): `listing` declines unless `wanted`; `count`
+# requires it, `shown` admits it, and `first` falls back to its default.
+_DECLINING = """
+from fnloom import ABSENT, Absent
+
+def listing(wanted: bool) -> list[str] | Absent:
+    print("listing")
+    return ["a", "b"] if wanted else ABSENT
+
+def count(listing: list[str]) -> int:
+    print("count")
+    return len(listing)
+
+def doubled(count: int) -> int:
+    print("doubled")
+    return 2 * count
+
+def shown(listing: list[str] | Absent) -> str:
+    print("shown")
+    return "none" if listing is ABSENT else ",".join(listing)
+
+def first(listing: list[str] = ["default"]) -> str:
+    print("first")
+    return listing[0]
+"""
+
+# `first` alone, so the same function can read `listing` as a node or as an input.
+_FIRST = """
+def first(listing: list[str] = ["default"]) -> str:
+    print("first")
+    return listing[0]
+"""
+
+_LISTING = """
+from fnloom import ABSENT, Absent
+
+def listing(wanted: bool) -> list[str] | Absent:
+    return ["a", "b"] if wanted else ABSENT
+"""
+
+
+class DictStore:
+    """A user store over a plain dict, which keeps what it is given."""
+
+    def __init__(self) -> None:
+        """Starts empty."""
+        self.entries: dict[bytes, object] = {}
+
+    def get(self, key: bytes) -> object:
+        """The entry, or `MISSING`."""
+        return self.entries.get(key, MISSING)
+
+    def put(self, key: bytes, value: object) -> None:
+        """Keeps `value` itself."""
+        self.entries[key] = value
+
+    def discard(self, key: bytes) -> None:
+        """Drops the entry, if any."""
+        self.entries.pop(key, None)
+
+
+_STORE_KINDS = ["memory", "disk-pickle", "disk-json", "user"]
+
+
+def _store_of(tmp_path: Path, kind: str) -> CacheStore:
+    """A fresh store of `kind`: memory, disk with a default pair, or a user store."""
+    if kind == "memory":
+        return MemoryCache()
+    if kind == "user":
+        return DictStore()
+    if kind == "disk-json":
+        return DiskCache(
+            tmp_path, dumps=JSON.dumps, loads=JSON.loads, serializer=JSON.name
+        )
+    return DiskCache(tmp_path)
+
+
+@pytest.mark.parametrize("kind", _STORE_KINDS)
+def test_a_declared_absence_is_stored_and_replayed(
+    tmp_path: Path, kind: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The second run calls nothing: `listing` hits as `ABSENT`, so `count` skips."""
+    driver = _cached(
+        make_module("cached_declining", _DECLINING), _store_of(tmp_path, kind)
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        first = driver.execute(["listing", "count"], inputs={"wanted": False})
+        assert _called(capsys) == ["listing"]
+        second = driver.execute(["listing", "count"], inputs={"wanted": False})
+    assert _called(capsys) == []
+    assert first == second == {"count": ABSENT, "listing": ABSENT}
+    assert second["listing"] is ABSENT
+    assert second["count"] is ABSENT
+
+
+@pytest.mark.parametrize("kind", _STORE_KINDS)
+def test_absent_comes_back_as_the_singleton_from_every_store(
+    tmp_path: Path, kind: str
+) -> None:
+    """Review Focus 5: `is ABSENT` from each store, through a driver and directly."""
+    driver = _cached(
+        make_module("cached_singleton", _DECLINING), _store_of(tmp_path, kind)
+    )
+    driver.execute(["shown"], inputs={"wanted": False})
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        result = driver.execute(["listing", "shown"], inputs={"wanted": False})
+    assert result["listing"] is ABSENT
+    assert result["shown"] == "none"
+    store = _store_of(tmp_path / "direct", kind)
+    store.put(b"\x01" * 32, ABSENT)
+    assert store.get(b"\x01" * 32) is ABSENT
+
+
+def test_absent_inside_a_pickled_value_comes_back_as_the_singleton(
+    tmp_path: Path,
+) -> None:
+    """A value holding `ABSENT` pickles it by name, through a disk store or not."""
+    loaded = pickle.loads(pickle.dumps([ABSENT]))  # noqa: S301  # our own bytes
+    assert loaded[0] is ABSENT
+    store = DiskCache(tmp_path)
+    store.put(b"\x02" * 32, [ABSENT, None])
+    value = store.get(b"\x02" * 32)
+    assert isinstance(value, list)
+    assert value[0] is ABSENT
+    assert value[1] is None
+
+
+def test_absent_fingerprint_is_fixed_and_not_none() -> None:
+    """`ABSENT` has one digest, the same in every process, and it is not `None`'s."""
+    version = fingerprint(ABSENT)
+    assert version == fingerprint(ABSENT)
+    assert version.hex() == _ABSENT_FINGERPRINT
+    assert version != fingerprint(None)
+    assert fingerprint([ABSENT]) != fingerprint([None])
+    assert stable_fingerprint(ABSENT) == version
+
+
+def test_an_absent_override_read_optionally_keys_as_not_supplied(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`first` with `listing=ABSENT` overridden keys as `first` with no `listing`."""
+    store = MemoryCache()
+    consumer = make_module("cached_optional_consumer", _FIRST)
+    with_listing = (
+        Builder()
+        .with_cache(store)
+        .with_modules(consumer, make_module("cached_optional_listing", _LISTING))
+        .build()
+    )
+    alone = _cached(consumer, store)
+    assert with_listing.execute(["first"], overrides={"listing": ABSENT}) == {
+        "first": "default"
+    }
+    assert _called(capsys) == ["first"]
+    assert alone.execute(["first"]) == {"first": "default"}
+    assert _called(capsys) == []
+    assert alone.explain_cache(["first"])["first"].status == "hit"
+
+
+def test_an_absent_override_read_as_a_value_is_keyed_by_its_fingerprint(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`shown` admits `ABSENT`: overriding with it misses against no override at all."""
+    driver = _cached(make_module("cached_admits", _DECLINING), MemoryCache())
+    assert driver.execute(["shown"], overrides={"listing": ABSENT}) == {"shown": "none"}
+    assert driver.execute(["shown"], overrides={"listing": ["x"]}) == {"shown": "x"}
+    assert _called(capsys) == ["shown", "shown"]
+    assert driver.execute(["shown"], overrides={"listing": ABSENT}) == {"shown": "none"}
+    assert _called(capsys) == []
+
+
+def test_key_plan_hashes_an_absent_optional_read_as_not_supplied() -> None:
+    """Only an `optional` read's `ABSENT` version is the not-supplied marker."""
+    static = hash_parts([b"static"])
+    absent = fingerprint(ABSENT)
+    plan = _core.KeyPlan(
+        [
+            ("optional", static, ["x"], True, ["x"], ["x"]),
+            ("admits", static, ["x"], True, ["x"], []),
+        ]
+    )
+    missing = plan.keys({})
+    given = plan.keys({"x": absent})
+    assert given["optional"] == missing["optional"]
+    assert given["admits"] != missing["admits"]
+    assert plan.keys({"x": fingerprint(None)})["optional"] != missing["optional"]
+
+
+def test_a_skipped_node_is_never_stored(capsys: pytest.CaptureFixture[str]) -> None:
+    """Only `listing` is stored: `count` and `doubled` never ran, so are not."""
+    store = CountingCache()
+    driver = _cached(make_module("cached_skipped", _DECLINING), store)
+    driver.execute(["doubled"], inputs={"wanted": False})
+    assert _called(capsys) == ["listing"]
+    assert len(store.puts) == 1
+    assert list(store._entries.values()) == [ABSENT]  # noqa: SLF001  # the entries themselves
+
+
+def test_explain_cache_reports_the_skips_of_a_stored_absence() -> None:
+    """Once `listing` is stored as `ABSENT`, what requires it is a skip, not a miss."""
+    driver = _cached(make_module("cached_explained", _DECLINING), MemoryCache())
+    request = ["doubled", "shown", "first"]
+    before = driver.explain_cache(request, inputs={"wanted": False})
+    assert {name: o.status for name, o in before.items()} == dict.fromkeys(
+        ["count", "doubled", "first", "listing", "shown"], "miss"
+    )
+    driver.execute(request, inputs={"wanted": False})
+    after = driver.explain_cache(request, inputs={"wanted": False})
+    assert after == {
+        "count": CacheOutcome("skipped", "reads absent 'listing'"),
+        "doubled": CacheOutcome("skipped", "reads absent 'count'"),
+        "first": CacheOutcome("hit", None),
+        "listing": CacheOutcome("hit", None),
+        "shown": CacheOutcome("hit", None),
+    }
+    overridden = driver.explain_cache(request, overrides={"listing": ABSENT})
+    assert overridden["count"] == CacheOutcome("skipped", "reads absent 'listing'")
+
+
+def test_a_declared_absence_replays_on_a_hooked_run(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """With a hook, the store is written and read from Python: the same replay."""
+    store = MemoryCache()
+    hooked = (
+        Builder()
+        .with_cache(store)
+        .with_modules(make_module("cached_hooked", _DECLINING))
+        .with_hooks(Hook())
+        .build()
+    )
+    assert hooked.execute(["count"], inputs={"wanted": False}) == {"count": ABSENT}
+    assert _called(capsys) == ["listing"]
+    assert hooked.execute(["count"], inputs={"wanted": False}) == {"count": ABSENT}
+    assert _called(capsys) == []
+
+
+# A field stored apart from its `disable` producer, which reads `region` optionally.
+_REGIONAL = """
+from fnloom import cache, extract_fields
+
+@cache(behavior="disable", fields={"totals": "default"})
+@extract_fields({"totals": dict, "rate": float})
+def report(region: str = "north") -> dict:
+    print("report")
+    return {"totals": {region: 1}, "rate": 0.2}
+"""
+
+_REGION = """
+from fnloom import ABSENT, Absent
+
+def region(named: bool) -> str | Absent:
+    return "south" if named else ABSENT
+"""
+
+
+def test_a_field_of_a_disabled_producer_keys_an_absent_override_as_not_supplied(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The field reads its producer's sources, so the producer's optional edges."""
+    store = MemoryCache()
+    regional = make_module("cached_regional", _REGIONAL)
+    with_region = (
+        Builder()
+        .with_cache(store)
+        .with_modules(regional, make_module("cached_region", _REGION))
+        .build()
+    )
+    alone = _cached(regional, store)
+    expected = {"totals": {"north": 1}}
+    assert with_region.execute(["totals"], overrides={"region": ABSENT}) == expected
+    assert _called(capsys) == ["report"]
+    assert alone.execute(["totals"]) == expected
+    assert _called(capsys) == []
+
+
+def test_a_skipped_node_is_never_stored_on_the_native_walk(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A plain `MemoryCache` is written by the binding: only `listing` there too."""
+    store = MemoryCache()
+    driver = _cached(make_module("cached_native_skip", _DECLINING), store)
+    driver.execute(["doubled"], inputs={"wanted": False})
+    assert _called(capsys) == ["listing"]
+    assert list(store._entries.values()) == [ABSENT]  # noqa: SLF001  # the entries themselves
+
+
+_RECOMPUTED = """
+from fnloom import ABSENT, Absent, cache
+
+@cache(behavior="recompute")
+def listing(wanted: bool) -> list[str] | Absent:
+    print("listing")
+    return ["a"] if wanted else ABSENT
+
+def first(listing: list[str] = ["default"]) -> str:
+    print("first")
+    return listing[0]
+
+def count(listing: list[str]) -> int:
+    print("count")
+    return len(listing)
+
+def label(count: int) -> str:
+    print("label")
+    return str(count)
+"""
+
+
+def test_a_recompute_absence_keys_an_optional_reader_as_not_supplied(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """`listing` runs first each time; `first` then hits as with no `listing` at all."""
+    store = MemoryCache()
+    driver = _cached(make_module("cached_recomputed", _RECOMPUTED), store)
+    assert driver.execute(["first", "label"], inputs={"wanted": False}) == {
+        "first": "default",
+        "label": ABSENT,
+    }
+    assert _called(capsys) == ["listing", "first"]
+    assert driver.execute(["first", "label"], inputs={"wanted": False}) == {
+        "first": "default",
+        "label": ABSENT,
+    }
+    assert _called(capsys) == ["listing"]
+    skipped = driver.explain_cache(["label"], overrides={"listing": ABSENT})
+    assert skipped == {
+        "count": CacheOutcome("skipped", "reads absent 'listing'"),
+        "label": CacheOutcome("skipped", "reads absent 'count'"),
+    }
+
+
+_UNCACHEABLE_READER = """
+from fnloom import ABSENT, Absent
+
+SEEN = []
+
+def listing(wanted: bool) -> list[str] | Absent:
+    return ["a"] if wanted else ABSENT
+
+def count(listing: list[str]) -> int:
+    SEEN.append(listing)
+    return len(listing)
+"""
+
+
+def test_explain_cache_reports_an_uncacheable_reader_of_an_absence_as_skipped() -> None:
+    """A run skips it whatever its key, so `skipped` outweighs `uncacheable`."""
+    driver = _cached(
+        make_module("cached_uncacheable", _UNCACHEABLE_READER), MemoryCache()
+    )
+    assert driver.explain_cache(["count"], inputs={"wanted": False})[
+        "count"
+    ].status == ("uncacheable")
+    driver.execute(["count"], inputs={"wanted": False})
+    assert driver.explain_cache(["count"], inputs={"wanted": False}) == {
+        "count": CacheOutcome("skipped", "reads absent 'listing'"),
+        "listing": CacheOutcome("hit", None),
+    }

@@ -527,6 +527,7 @@ same way, runs nothing, and returns every computed node of the plan, by name, wi
 | `miss` | it does not, so a run runs and stores the node | `None`, or `"policy recompute (decorator)"` for a `recompute` node, which always runs and is never stored, or `"extracted field: runs whenever needed; never served from the store"` for a field or column node of `@extract_fields` or `@extract_columns` |
 | `uncacheable` | the node has no key: it always runs and is never stored | why, for example the global (`"global 'WEIGHTS' of 'f' is a dict, ..."`), the value path (`"levels[0]: Level"`), the policy (`"policy disable (decorator)"`), a source (`"reads uncacheable 'x'"`) or a failing fingerprint function (`"cannot fingerprint 'x' for the cache: ..."`) |
 | `unknown` | the key depends on a `recompute` node's result, which only a run knows | for example `"downstream of recompute node 'x'"`, or `"no key"` |
+| `skipped` | the store doesn't hold the node, and a run skips it, so neither runs nor stores it: a source it requires is absent ([Declared absences](#declared-absences)) | the first such source, `"reads absent 'x'"` |
 
 `explain_cache` consults the store for **every** `default`-policy node with a key, including nodes upstream of a hit,
 which a run would neither load nor run. With a `DiskCache`, that reads every such entry from disk.
@@ -534,6 +535,51 @@ which a run would neither load nor run. With a `DiskCache`, that reads every suc
 A run tells [hooks](hooks.md#with-a-cache) the same outcomes, with the same reasons, as each node it loads or runs
 reports. A run knows what its `recompute` nodes returned, so a node downstream of one is a `hit` or a `miss` there,
 never `unknown`; a node only the hits need is neither loaded nor run, so it reports nothing.
+
+## Declared absences
+
+A node that declines ([Declining](writing-nodes.md#declining)) is cached like any other: `fnloom.ABSENT` is its
+result, stored under its key, and a hit replays it, so each node that requires it is skipped again without running.
+
+```python
+# file: stock.py
+from fnloom import ABSENT, Absent
+
+
+def listing(item: str) -> list[str] | Absent:
+    """Every item, unless the request names one."""
+    return ABSENT if item else ["chair", "desk", "lamp"]
+
+
+def count(listing: list[str]) -> int:
+    """How many items there are."""
+    return len(listing)
+```
+
+```python
+import fnloom
+import stock
+
+shop = fnloom.Builder().with_modules(stock).with_cache(fnloom.MemoryCache()).build()
+shop.execute(["count"], inputs={"item": "desk"})
+# -> {'count': fnloom.ABSENT}
+shop.explain_cache(["count"], inputs={"item": "desk"})
+# -> {"count": ("skipped", "reads absent 'listing'"), "listing": ("hit", None)}
+```
+
+- **A skipped node is never stored.** It never ran, and its absence follows from its source's: a run loads `listing`
+  and skips `count` again. `explain_cache` reports such a node `skipped`, as above, once its source is a stored
+  absence or an override of `ABSENT`.
+- **`ABSENT` has a fingerprint of its own,** fixed and distinct from `None`'s, so it can version an override, or a
+  `recompute` node's result, like any value. `fnloom.fingerprint([ABSENT])` works too.
+- **A parameter with a default given `ABSENT` by an override, or by a `recompute` node, is versioned as "not
+  supplied".** It is left out of the call and takes its default, so the call, and the key, are the same as with an
+  optional input left out. A parameter admitting `Absent` is versioned by `ABSENT`'s fingerprint. A computed node that
+  declines is read by its own key, as any computed node is, whatever it returned.
+- **Every store returns the singleton.** `MemoryCache` and a store of your own keep the `ABSENT` object itself.
+  `DiskCache` writes a flag in the entry's header with no payload, in every format, so no value of a format can pass
+  for it and the `json` format needs no way to write it. `ABSENT` inside a value (a list holding it, say) pickles by
+  name and loads back as the singleton; the `json` format refuses such a value, as any it can't load back exactly.
 
 ## Stores
 
@@ -560,9 +606,10 @@ keeps one file per key, at `<path>/v1/<first two hex digits of the key>/<key in 
 to lock or corrupt, and a lookup is one file read.
 
 - Each entry starts with a header naming the format version, the serializer, the Python version, and the version of
-  the library that defines the value's type. An entry written by another Python, serializer or library version is a
-  quiet miss, and the file is left for the next write to replace: a read never deletes another interpreter's entry;
-  a write still replaces it. One directory per interpreter is the better layout.
+  the library that defines the value's type. An entry holding `fnloom.ABSENT` has an `absent` flag in its header and
+  no payload, in every format ([Declared absences](#declared-absences)). An entry written by another Python,
+  serializer or library version is a quiet miss, and the file is left for the next write to replace: a read never
+  deletes another interpreter's entry; a write still replaces it. One directory per interpreter is the better layout.
 - An entry that cannot be read back (truncated, corrupt, or naming a class that moved) is a miss: it is removed, with
   a `CacheWarning`, and the node runs.
 - Writes go to a temporary file in the same directory that then replaces the entry, so a reader sees a whole entry

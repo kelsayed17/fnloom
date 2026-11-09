@@ -27,6 +27,14 @@ change the public API; such changes are listed under **Changed** and **Removed**
   consumer, which is absent too. `Plan::needs_rules` says whether a plan follows these rules; one that doesn't runs
   the plain loop unchanged. `BuildError::ConflictingInput` refuses a spec listing one input twice with different
   dependencies, which no one dependency describes; listed twice alike, it is one edge, as before.
+- Caching declared absences. A node returning `fnloom.ABSENT` is stored under its key in every store, and a hit
+  replays it, so each node requiring it is skipped again without running; a skipped node is never stored.
+  `DiskCache` writes `ABSENT` as an `absent` flag in the entry's header with no payload, in every format, so the
+  `json` format no longer warns and recomputes, and no format's value can pass for it; every store gives back the
+  singleton. `fnloom.fingerprint(ABSENT)` is a fixed digest, distinct from `None`'s. A parameter with a default
+  reading an `ABSENT` override, or a `recompute` node's `ABSENT`, is keyed as an optional input not supplied, the
+  call being the same. `explain_cache` reports a node a run would skip as `CacheOutcome("skipped", "reads absent
+  'x'")`, a new `status`, instead of a `miss` forever.
 
 ### Changed
 
@@ -37,6 +45,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - The native `_core.Graph` takes each node as `(name, [(source, kind, None)], tags, fn, declines)`, where `kind` is
   `"required"`, `"optional"`, `"admits"` or `"admits_optional"`; it was `(name, [(source, required)], tags,
   fn)`. `_scan.core_inputs` returns the same triples.
+- The native `_core.KeyPlan` takes each node entry with a sixth element, the sources the node reads by an
+  `optional` edge. Its marker for an optional input not supplied is now named `NOT_SUPPLIED` in the binding; its
+  bytes, and so every cache key, are unchanged.
 - Rust core: `NodeSpec` has a new field, `declines`; a spec built with struct syntax sets it, `false` for a node
   that never declines. `Dependency` has a third variant, `Admits`, and `BuildError` a new one, `ConflictingInput`,
   so a `match` on either needs an arm for it.

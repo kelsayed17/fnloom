@@ -602,7 +602,14 @@ class DiskCache:
 
     @staticmethod
     def _encode(value: object, format: Format) -> bytes:  # noqa: A002  # as in `get`
-        """An entry's bytes for `value`, written with `format`."""
+        """An entry's bytes for `value`, written with `format`.
+
+        `ABSENT` is a flag in the header with no payload, in every format: no
+        format's value can then pass for it, and none has to encode it.
+        """
+        if value is _core.ABSENT:
+            header = json.dumps(_header(format, {}, absent=True)).encode()
+            return _pack(header, b"")
         payload = format.dumps(value)
         header = json.dumps(_header(format, _libraries(value))).encode()
         return _pack(header, payload)
@@ -614,22 +621,45 @@ class DiskCache:
         header = json.loads(encoded)
         if (
             not isinstance(header, dict)
-            or set(header) != {"serializer", "python", "libraries"}
+            or set(header) - {"absent"} != {"serializer", "python", "libraries"}
+            or header.get("absent", True) is not True
             or not isinstance(libraries := header["libraries"], dict)
         ):
             msg = "the entry's header is malformed"
             raise _CorruptEntryError(msg)
+        absent = "absent" in header
+        if absent and payload:
+            msg = "the entry is an absence, but holds a payload"
+            raise _CorruptEntryError(msg)
         expected = _header(
-            format, {str(name): distribution_version(str(name)) for name in libraries}
+            format,
+            {str(name): distribution_version(str(name)) for name in libraries},
+            absent=absent,
         )
         if header != expected:
             raise _OtherVersionError
-        return format.loads(payload)
+        return _core.ABSENT if absent else format.loads(payload)
 
 
-def _header(format: Format, libraries: dict[str, str | None]) -> dict[str, object]:  # noqa: A002  # as in `DiskCache.get`
-    """The header this process writes for a value of these libraries."""
-    return {"serializer": format.name, "python": sys.version, "libraries": libraries}
+def _header(
+    format: Format,  # noqa: A002  # as in `DiskCache.get`
+    libraries: dict[str, str | None],
+    *,
+    absent: bool = False,
+) -> dict[str, object]:
+    """The header this process writes for a value of these libraries.
+
+    With `absent`, for an entry holding `ABSENT`: its flag, which no other entry
+    has, so every entry written before it reads as it did.
+    """
+    header: dict[str, object] = {
+        "serializer": format.name,
+        "python": sys.version,
+        "libraries": libraries,
+    }
+    if absent:
+        header["absent"] = True
+    return header
 
 
 def _formats(default: Format, given: Iterable[Format]) -> Mapping[str, Format]:

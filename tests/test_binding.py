@@ -547,7 +547,7 @@ def test_stub_lists_exactly_the_runtime_names() -> None:
     assert stubbed == runtime
 
 
-ABSENT = b"\x00fnloom: optional input absent\x00\x00"
+NOT_SUPPLIED = b"\x00fnloom: optional input absent\x00\x00"
 # Versions and static parts are 32 bytes, as fingerprints and `hash_parts` make them.
 ONE, TWO, LOADED = (_core.hash_parts([name]) for name in (b"one", b"two", b"loaded"))
 STATIC = {name: _core.hash_parts([b"static", name.encode()]) for name in "bcdef"}
@@ -560,9 +560,9 @@ def _keyed(static: bytes, *versions: bytes) -> bytes:
 
 def _node(
     name: str, static: bytes | None, reads: list[str], *, stored: bool = True
-) -> tuple[str, bytes | None, list[str], bool, list[str]]:
-    """A key plan entry whose sources are its reads."""
-    return (name, static, reads, stored, reads)
+) -> tuple[str, bytes | None, list[str], bool, list[str], list[str]]:
+    """A key plan entry whose sources are its reads, none of them optional."""
+    return (name, static, reads, stored, reads, [])
 
 
 def _chain_key_plan() -> _core.KeyPlan:
@@ -626,7 +626,7 @@ def test_key_plan_marks_absent_optional_inputs() -> None:
     plan = _core.KeyPlan([_node("b", STATIC["b"], ["maybe"])])
     absent = plan.keys({})["b"]
     supplied = plan.keys({"maybe": _core.fingerprint(None, lambda _: None)})["b"]
-    assert absent == _keyed(STATIC["b"], ABSENT)
+    assert absent == _keyed(STATIC["b"], NOT_SUPPLIED)
     assert absent != supplied
 
 

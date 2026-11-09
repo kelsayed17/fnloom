@@ -18,6 +18,8 @@ use pyo3::types::{
     PyMemoryView, PySet, PySlice, PyString, PyTuple,
 };
 
+use crate::absent::Absent;
+
 create_exception!(
     fnloom,
     UnfingerprintableError,
@@ -82,6 +84,8 @@ pub(crate) enum Kind {
     /// A canonical form from the fallback: the value's type's qualified name, then the
     /// form's digest.
     Canonical = 15,
+    /// `fnloom.ABSENT`, a declined value: no parts, so one fixed digest.
+    Absent = 18,
 }
 
 /// One framed digest under construction: a kind byte, then length-prefixed parts.
@@ -128,6 +132,11 @@ pub(crate) fn digest(kind: Kind, parts: &[&[u8]]) -> Digest {
         framer.part(part);
     }
     framer.finish()
+}
+
+/// The fingerprint of `fnloom.ABSENT`, the only instance of its type.
+pub(crate) fn absent_digest() -> Digest {
+    digest(Kind::Absent, &[])
 }
 
 /// The 32-byte BLAKE3 digest of `parts`, each framed by its length.
@@ -340,6 +349,9 @@ fn visit<'py>(
 ) -> PyResult<Step<'py>> {
     if value.is_none() {
         return Ok(Step::Done(digest(Kind::None, &[])));
+    }
+    if value.is_exact_instance_of::<Absent>() {
+        return Ok(Step::Done(absent_digest()));
     }
     if value.is_exact_instance_of::<PyBool>() {
         return Ok(Step::Done(digest(
