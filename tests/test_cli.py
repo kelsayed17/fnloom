@@ -367,6 +367,50 @@ def test_diff(flow: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]) ->
     assert err.startswith("fnloom: FileNotFoundError")
 
 
+BLOCK = """
+from fnloom import Collect, Parallelizable
+
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+def details(picked: int) -> int:
+    return picked * 2
+
+def summary(details: Collect[int]) -> list[int]:
+    return list(details)
+"""
+
+
+def test_cli_draws_and_exports_a_block(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`draw` writes the block's cluster, `export` `/2`, and `diff` reads it."""
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    path = tmp_path / "fan.py"
+    path.write_text(textwrap.dedent(BLOCK))
+    status, out, _ = _run(capsys, "draw", str(path), "--no-legend")
+    assert status == 0
+    assert '  subgraph "cluster_picked" {\n    label="for each item of picked"\n' in out
+    assert '  "picked" -> "details" [label="expand"]' in out
+    assert '  "details" -> "summary" [label="collect"]' in out
+    _, mermaid, _ = _run(capsys, "draw", str(path), "--format", "mermaid")
+    assert '  subgraph b0 ["for each item of picked"]' in mermaid
+    exported = tmp_path / "fan.json"
+    status, _, _ = _run(capsys, "export", str(path), "-o", str(exported))
+    assert status == 0
+    document = json.loads(exported.read_text())
+    assert document["format"] == "fnloom.export/2"
+    kinds = {node["name"]: (node["kind"], node["block"]) for node in document["nodes"]}
+    assert kinds == {
+        "n": ("input", None),
+        "picked": ("expand", None),
+        "details": ("function", "picked"),
+        "summary": ("collect", None),
+    }
+    status, out, _ = _run(capsys, "diff", str(exported), str(exported))
+    assert (status, json.loads(out)["changed"]) == (0, {})
+
+
 def test_python_dash_m(flow: Path) -> None:
     """`python -m fnloom` is the same command."""
     done = subprocess.run(  # noqa: S603  # our own interpreter
