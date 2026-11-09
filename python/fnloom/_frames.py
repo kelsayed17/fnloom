@@ -9,6 +9,8 @@ import importlib
 from collections.abc import Hashable, Mapping, Sized
 from typing import Any, Final, Literal, override
 
+from fnloom._core import ABSENT
+
 type Library = Literal["pandas", "polars"]
 type Join = Literal["strict", "outer"]
 
@@ -32,7 +34,8 @@ def frame(
     differ, or polars outputs whose lengths differ, with a `ValueError` naming them.
     `join="outer"` aligns pandas outputs on the union of their indexes, as Hamilton's
     `PandasDataFrameResult` does, without logging; polars, which has no index,
-    refuses it. Two columns of one name are a `ValueError` naming both.
+    refuses it. Two columns of one name are a `ValueError` naming both, and so is an
+    output that is `fnloom.ABSENT`, since a column can't be absent (Q135).
 
     The library is imported here, never by fnloom itself: one that can't be imported
     is an `ImportError`. A bad argument is a `ValueError` or `TypeError` naming it.
@@ -117,7 +120,19 @@ class FrameBuilder:
         return self
 
     def __call__(self, outputs: dict[str, object]) -> Any:  # noqa: ANN401  # a pandas or polars frame
-        """The frame of `outputs`, which `execute` gives in request order."""
+        """The frame of `outputs`, which `execute` gives in request order.
+
+        An output that is `fnloom.ABSENT` is a `ValueError` naming it, with every
+        other one, sorted: a column can't be absent (Q135).
+        """
+        if absent := sorted(name for name, value in outputs.items() if value is ABSENT):
+            listed = ", ".join(repr(name) for name in absent)
+            verb = "is" if len(absent) == 1 else "are"
+            msg = (
+                "frame() can't make a column of an absent output: "
+                f"{listed} {verb} fnloom.ABSENT"
+            )
+            raise ValueError(msg)
         module = _imported(self._library)
         if self._library == "pandas":
             return self._pandas(module, outputs)

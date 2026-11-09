@@ -127,6 +127,10 @@ event by position, so a new field never breaks a hook.
       [result builder](running.md#result-builders), in a mapping of the event's own: a hook that keeps it never sees
       what the caller later changes in the dict `execute` returned. `None` when the run failed before they were all
       in. A run that only its result builder failed has them, with `ok=False` and the builder's error.
+    - `skipped`: each node the run [skipped](writing-nodes.md#declining) because an argument it needs was
+      `fnloom.ABSENT`, as `(node, branch)` pairs in the order skipped. `branch` is `()` outside a block. `()` when
+      nothing was skipped. The sync driver skips in plan order; the async driver in the order its walk reaches each
+      node, as its node events report, which can vary between runs when nodes run in threads.
 
 ```python
 class Ends(fnloom.Hook):
@@ -156,7 +160,9 @@ Hamilton:
 
 - inputs, even one requested as an output;
 - overridden nodes, and the nodes only they needed;
-- nodes the request doesn't need.
+- nodes the request doesn't need;
+- a node skipped because a node it reads [declined](writing-nodes.md#declining): it is listed in `RunEnd.skipped`
+  instead, so `PrintNodes` prints nothing for it.
 
 ```python
 ends.ends.clear()

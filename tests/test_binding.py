@@ -747,3 +747,46 @@ def test_on_value_errors_propagate_like_an_observer_error() -> None:
     assert calls == ["b"]
     assert recorder.events[-1] == ("post_graph", False)
     assert ("pre_node", "c") not in recorder.events
+
+
+class _PostOnly(_core.ObserverBase):
+    """Overrides `post_node` alone: node events are still sent to it."""
+
+    def __init__(self) -> None:
+        self.ended: list[str] = []
+
+    @override
+    def post_node(
+        self, node: str, *, ok: bool, value: object, error: BaseException | None
+    ) -> None:
+        self.ended.append(node)
+
+
+class _SkipsOnly(_core.ObserverBase):
+    """Overrides `skipped` alone: it hears skips, and no node event."""
+
+    def __init__(self) -> None:
+        self.skips: list[tuple[str, tuple[int, ...]]] = []
+
+    @override
+    def skipped(self, node: str, *, branch: tuple[int, ...]) -> None:
+        self.skips.append((node, branch))
+
+
+def _declined(**_: object) -> object:
+    return _core.ABSENT
+
+
+def test_an_observer_hears_only_the_events_its_class_overrides() -> None:
+    """One overriding `post_node` gets it; one overriding `skipped` gets skips only."""
+    graph = _core.Graph(
+        [
+            ("a", [], {}, _declined, True),
+            ("b", [("a", "required", None)], {}, _add_one, False),
+        ]
+    )
+    post, skips = _PostOnly(), _SkipsOnly()
+    plan = graph.prepare(["b"], [], [])
+    assert plan.run({}, {}, (post, skips))["b"] is _core.ABSENT
+    assert post.ended == ["a"]
+    assert skips.skips == [("b", ())]

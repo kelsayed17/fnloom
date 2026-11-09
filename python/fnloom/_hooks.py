@@ -95,7 +95,10 @@ class RunEnd:
     `execute` raises them unless an `after_run` hook raises too. `results` is a
     read-only view of the raw outputs in request order, before any result
     builder: `None` when no outputs were computed, and there even when only
-    the result builder failed.
+    the result builder failed. `skipped` lists each node the run skipped because
+    an argument it needs was `fnloom.ABSENT` (Q135), as `(node, branch)` pairs in
+    the order skipped, `branch` being `()` outside a block: a skipped node fires
+    no node event, and is absent too.
     """
 
     run_id: str
@@ -106,6 +109,7 @@ class RunEnd:
     ok: bool
     error: BaseException | None
     results: Mapping[str, object] | None
+    skipped: tuple[tuple[str, tuple[int, ...]], ...] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -283,12 +287,14 @@ class Views:
     reports them.
     """
 
-    __slots__ = ("_keyed", "_views", "names")
+    __slots__ = ("_keyed", "_views", "names", "skips")
 
     def __init__(self, names: Sequence[str], views: Mapping[str, NodeView]) -> None:
         """The views of `names`, looked up in `views`, each with its re-keying."""
         self.names = tuple(names)
         self._views = {name: views[name] for name in self.names}
+        # Whether a run may skip a node, so `RunEnd.skipped` needs the core's word.
+        self.skips = any(view.may_be_absent for view in self._views.values())
         # Only a node the core calls through `_payload`'s wrapper needs it.
         self._keyed: dict[str, Keyed] = {
             name: keyed
@@ -349,6 +355,7 @@ class Dispatch:
         "_node_error",
         "_owner",
         "_results",
+        "_skipped",
         "_start",
         "_started",
         "_token",
@@ -387,10 +394,26 @@ class Dispatch:
         # Each checked node's check results, collected while the run is on.
         self._results: dict[str, tuple[CheckResult, ...]] | None = None
         self._token: contextvars.Token[_checks.Sink | None] | None = None
+        # The `(node, branch)` pairs skipped so far, in order, for `RunEnd`.
+        self._skipped: list[tuple[str, tuple[int, ...]]] = []
 
     def observers(self) -> tuple[_core.ObserverBase, ...]:
-        """What the core run is given: one observer when node events are wanted."""
-        return (_Forward(self),) if self._hooks.nodes else ()
+        """What the core run is given: one observer when its events are wanted.
+
+        Node events need `_Forward`; a run that may skip a node, for an
+        `after_run` that wants `RunEnd.skipped` and no node event, `_Skips`.
+        """
+        hooks = self._hooks
+        if hooks.nodes:
+            return (_Forward(self),)
+        if hooks.after_run and self._views.skips:
+            return (_Skips(self),)
+        return ()
+
+    def skipped(self, name: str, branch: tuple[int, ...]) -> None:
+        """Records that node `name` was skipped in `branch`, for `RunEnd.skipped`."""
+        if self._hooks.after_run:
+            self._skipped.append((name, branch))
 
     @property
     def refused(self) -> bool:
@@ -592,6 +615,7 @@ class Dispatch:
                 results=None
                 if results is None or (ok and not succeeded)
                 else MappingProxyType(results),
+                skipped=tuple(self._skipped),
             )
             for method in methods:
                 try:
@@ -635,6 +659,22 @@ class _Forward(_core.ObserverBase):
             value,
             error,
         )
+
+    @override
+    def skipped(self, node: str, *, branch: tuple[int, ...]) -> None:
+        self._dispatch.skipped(node, branch)
+
+
+class _Skips(_core.ObserverBase):
+    """The core observer of a run that wants skips and no node event."""
+
+    def __init__(self, dispatch: Dispatch) -> None:
+        """Sends each skip to `dispatch`."""
+        self._dispatch = dispatch
+
+    @override
+    def skipped(self, node: str, *, branch: tuple[int, ...]) -> None:
+        self._dispatch.skipped(node, branch)
 
 
 _CUT: Final = 50
