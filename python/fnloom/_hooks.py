@@ -56,13 +56,16 @@ class NodeStart:
     `node` describes it. `inputs` is a read-only view of the keyword arguments its
     function gets from other nodes and inputs, by parameter name: a parameter left
     to its default is absent, and so is one bound to a `value()`. `cache` is the
-    node's cache outcome, `None` on a driver with no cache.
+    node's cache outcome, `None` on a driver with no cache. `branch` is the
+    branch a block node runs in, one item index per block, outermost first, and
+    `()` outside every block.
     """
 
     run_id: str
     node: NodeView
     inputs: Mapping[str, object] | None
     cache: CacheOutcome | None
+    branch: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -84,6 +87,22 @@ class NodeEnd:
     result: object
     error: BaseException | None
     checks: tuple[CheckResult, ...] = ()
+    branch: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ExpandEnd:
+    """An expand's items are exhausted; what `Hook.after_expand` gets.
+
+    `node` describes the expand, `branch` is the branch it ran in, `()` outside
+    every block, and `items` how many items it gave, so a progress hook knows
+    the total. An expand that declines, or whose run fails, has no `ExpandEnd`.
+    """
+
+    run_id: str
+    node: NodeView
+    branch: tuple[int, ...]
+    items: int
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -127,7 +146,7 @@ class BuildEnd:
 
 
 class Hook:
-    """Watches a driver: subclass it and override any of its five methods.
+    """Watches a driver: subclass it and override any of its six methods.
 
     Each method is a no-op here, and only the methods a subclass overrides are
     called. Each gets one event, by position. Give hooks to `Builder.with_hooks`;
@@ -150,6 +169,9 @@ class Hook:
     def after_node(self, event: NodeEnd) -> None:
         """Called after a node's function returned or raised."""
 
+    def after_expand(self, event: ExpandEnd) -> None:
+        """Called when an expand's items are exhausted, with how many there were."""
+
     def after_run(self, event: RunEnd) -> None:
         """Called once the run ended, whether or not it succeeded."""
 
@@ -159,6 +181,7 @@ _METHODS: Final = (
     "before_run",
     "before_node",
     "after_node",
+    "after_expand",
     "after_run",
 )
 
@@ -249,10 +272,20 @@ class Hooks:
     Only overridden methods are kept, so a base method is never called.
     """
 
-    __slots__ = ("after_node", "after_run", "before_node", "before_run", "nodes")
+    __slots__ = (
+        "after_expand",
+        "after_node",
+        "after_run",
+        "before_node",
+        "before_run",
+        "nodes",
+    )
 
     def __init__(self, hooks: tuple[Hook, ...]) -> None:
         """Collects the overridden methods of `hooks`, already `checked`."""
+        self.after_expand: tuple[Callable[[ExpandEnd], object], ...] = tuple(
+            h.after_expand for h in hooks if _overridden(h, "after_expand")
+        )
         self.before_run: tuple[Callable[[RunStart], object], ...] = tuple(
             h.before_run for h in hooks if _overridden(h, "before_run")
         )
@@ -272,7 +305,7 @@ class Hooks:
     def of(cls, hooks: tuple[Hook, ...]) -> Hooks | None:
         """The hooks to call, or `None` when no hook overrides any method."""
         made = cls(hooks)
-        if made.nodes or made.before_run or made.after_run:
+        if made.nodes or made.before_run or made.after_run or made.after_expand:
             return made
         return None
 
@@ -287,12 +320,14 @@ class Views:
     reports them.
     """
 
-    __slots__ = ("_keyed", "_views", "names", "skips")
+    __slots__ = ("_all", "_keyed", "_views", "names", "skips")
 
     def __init__(self, names: Sequence[str], views: Mapping[str, NodeView]) -> None:
         """The views of `names`, looked up in `views`, each with its re-keying."""
         self.names = tuple(names)
         self._views = {name: views[name] for name in self.names}
+        # An overridden expand is no reported node, but its `ExpandEnd` has its view.
+        self._all = views
         # Whether a run may skip a node, so `RunEnd.skipped` needs the core's word.
         self.skips = any(view.may_be_absent for view in self._views.values())
         # Only a node the core calls through `_payload`'s wrapper needs it.
@@ -303,8 +338,9 @@ class Views:
         }
 
     def view(self, name: str) -> NodeView:
-        """The view of reported node `name`."""
-        return self._views[name]
+        """The view of reported node `name`, or of any other node of the graph."""
+        view = self._views.get(name)
+        return self._all[name] if view is None else view
 
     def inputs(
         self, name: str, kwargs: Mapping[str, object] | None
@@ -400,15 +436,35 @@ class Dispatch:
     def observers(self) -> tuple[_core.ObserverBase, ...]:
         """What the core run is given: one observer when its events are wanted.
 
-        Node events need `_Forward`; a run that may skip a node, for an
-        `after_run` that wants `RunEnd.skipped` and no node event, `_Skips`.
+        Node events need `_Forward`; `after_expand`, or a run that may skip a
+        node, for an `after_run` that wants `RunEnd.skipped`, and no node event,
+        `_Skips`.
         """
         hooks = self._hooks
         if hooks.nodes:
             return (_Forward(self),)
-        if hooks.after_run and self._views.skips:
+        if hooks.after_expand or (hooks.after_run and self._views.skips):
             return (_Skips(self),)
         return ()
+
+    def expanded(self, name: str, branch: tuple[int, ...], items: int) -> None:
+        """Fires `after_expand` for expand `name`, exhausted after `items` items."""
+        methods = self._hooks.after_expand
+        if not methods:
+            return
+        event = ExpandEnd(
+            run_id=self._run_id(),
+            node=self._views.view(name),
+            branch=branch,
+            items=items,
+        )
+        found: list[BaseException] = []
+        for method in methods:
+            try:
+                method(event)
+            except BaseException as error:  # noqa: BLE001  # raised once every hook ran
+                found.append(error)
+        self._raised(found)
 
     def skipped(self, name: str, branch: tuple[int, ...]) -> None:
         """Records that node `name` was skipped in `branch`, for `RunEnd.skipped`."""
@@ -499,8 +555,10 @@ class Dispatch:
         name: str,
         kwargs: Mapping[str, object] | None,
         outcome: CacheOutcome | None,
+        *,
+        branch: tuple[int, ...] = (),
     ) -> None:
-        """Fires `before_node` for node `name`, called with `kwargs`.
+        """Fires `before_node` for node `name`, called with `kwargs` in `branch`.
 
         `kwargs` are what the core calls the node with, `None` for a cache hit.
         """
@@ -512,6 +570,7 @@ class Dispatch:
             node=self._views.view(name),
             inputs=self._inputs(name, kwargs),
             cache=outcome,
+            branch=branch,
         )
         found: list[BaseException] = []
         for method in methods:
@@ -521,17 +580,20 @@ class Dispatch:
                 found.append(error)
         self._raised(found)
 
-    def node_ended(  # the node, its call and its outcome
+    def node_ended(  # noqa: PLR0913  # the node, its call, its outcome and its branch
         self,
         name: str,
         kwargs: Mapping[str, object] | None,
         outcome: CacheOutcome | None,
         value: object,
         error: BaseException | None,
+        *,
+        branch: tuple[int, ...] = (),
     ) -> None:
         """Fires `after_node` for node `name`: it returned `value`, or raised `error`.
 
-        Records the error, if any, as the run's node error first.
+        Records the error, if any, as the run's node error first. `branch` is the
+        branch it ran in.
         """
         if error is not None and self._node_error is None:
             self._node_error, self._failed_node = error, name
@@ -549,6 +611,7 @@ class Dispatch:
             result=value if ok else None,
             error=error,
             checks=() if results is None else results.pop(name, ()),
+            branch=branch,
         )
         found: list[BaseException] = []
         for method in methods:
@@ -639,17 +702,28 @@ class _Forward(_core.ObserverBase):
         self._kwargs: Mapping[str, object] | None = None
 
     @override
-    def pre_node(self, node: str, kwargs: dict[str, object]) -> None:
+    def pre_node(
+        self, node: str, kwargs: dict[str, object], *, branch: tuple[int, ...] = ()
+    ) -> None:
         # The core runs one node at a time, so its end is the next `post_node`.
         self._kwargs = kwargs
         outcomes = self._outcomes
         self._dispatch.node_started(
-            node, kwargs, None if outcomes is None else outcomes.get(node)
+            node,
+            kwargs,
+            None if outcomes is None else outcomes.get(node),
+            branch=branch,
         )
 
     @override
     def post_node(
-        self, node: str, *, ok: bool, value: object, error: BaseException | None
+        self,
+        node: str,
+        *,
+        ok: bool,
+        value: object,
+        error: BaseException | None,
+        branch: tuple[int, ...] = (),
     ) -> None:
         outcomes = self._outcomes
         self._dispatch.node_ended(
@@ -658,23 +732,32 @@ class _Forward(_core.ObserverBase):
             None if outcomes is None else outcomes.get(node),
             value,
             error,
+            branch=branch,
         )
 
     @override
     def skipped(self, node: str, *, branch: tuple[int, ...]) -> None:
         self._dispatch.skipped(node, branch)
 
+    @override
+    def post_expand(self, node: str, *, branch: tuple[int, ...], items: int) -> None:
+        self._dispatch.expanded(node, branch, items)
+
 
 class _Skips(_core.ObserverBase):
-    """The core observer of a run that wants skips and no node event."""
+    """The core observer of a run that wants skips or expands, and no node event."""
 
     def __init__(self, dispatch: Dispatch) -> None:
-        """Sends each skip to `dispatch`."""
+        """Sends each skip and each exhausted expand to `dispatch`."""
         self._dispatch = dispatch
 
     @override
     def skipped(self, node: str, *, branch: tuple[int, ...]) -> None:
         self._dispatch.skipped(node, branch)
+
+    @override
+    def post_expand(self, node: str, *, branch: tuple[int, ...], items: int) -> None:
+        self._dispatch.expanded(node, branch, items)
 
 
 _CUT: Final = 50
@@ -802,8 +885,9 @@ class PrintNodes(Hook):
     each value cut to `width` characters as `LogFailures` cuts them. `nodes`
     limits what is printed to those names, or to the nodes a callable accepts
     of their `NodeView`; a name that is no node is a `ValueError` when the
-    driver is built. `print_fn` takes one string. Times are kept per run and
-    node, so concurrent runs and the async driver stay correct.
+    driver is built. `print_fn` takes one string. Times are kept per run, node
+    and branch, so concurrent runs and the async driver stay correct, and a
+    block node's line names its branch: `node 'x' (branch (3,)) ran in 1.2 ms`.
     """
 
     __slots__ = ("_lock", "_nodes", "_print", "_started", "_verbosity", "_width")
@@ -830,7 +914,7 @@ class PrintNodes(Hook):
         self._print = print_fn
         self._nodes: NodeFilter | None = _node_filter(nodes)
         self._width = width
-        self._started: dict[tuple[str, str], float] = {}
+        self._started: dict[tuple[str, str, tuple[int, ...]], float] = {}
         self._lock = threading.Lock()
 
     @override
@@ -869,9 +953,9 @@ class PrintNodes(Hook):
         return view.name in wanted
 
     @staticmethod
-    def _key(event: NodeStart | NodeEnd) -> tuple[str, str]:
-        """The one place a start time is keyed: by run, then node."""
-        return (event.run_id, event.node.name)
+    def _key(event: NodeStart | NodeEnd) -> tuple[str, str, tuple[int, ...]]:
+        """The one place a start time is keyed: by run, node, then branch."""
+        return (event.run_id, event.node.name, event.branch)
 
     @override
     def after_run(self, event: RunEnd) -> None:
@@ -895,16 +979,18 @@ class PrintNodes(Hook):
             began = self._started.pop(self._key(event), None)
         if began is None:
             return
-        name = event.node.name
+        name = f"'{event.node.name}'"
+        if event.branch:
+            name += f" (branch {event.branch})"
         elapsed = _milliseconds(time.perf_counter() - began)
         cache = event.cache
         if event.ok and cache is not None and cache.status == "hit":
-            self._print(f"node '{name}' loaded from cache")
+            self._print(f"node {name} loaded from cache")
         elif event.ok:
-            self._print(f"node '{name}' ran in {elapsed}")
+            self._print(f"node {name} ran in {elapsed}")
         else:
             self._print(
-                f"node '{name}' failed in {elapsed}: {_cut(event.error, self._width)}"
+                f"node {name} failed in {elapsed}: {_cut(event.error, self._width)}"
             )
         if self._verbosity < _VERBOSE:
             return

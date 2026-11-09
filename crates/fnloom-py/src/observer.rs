@@ -36,18 +36,26 @@ impl ObserverBase {
     const fn pre_graph(&self) {}
 
     /// Called before a computed node is evaluated, with the keyword arguments its
-    /// function is called with, by parameter name.
+    /// function is called with, by parameter name. A block node's call also gets
+    /// `branch`, its branch path; a node outside every block is called without it.
+    #[pyo3(signature = (node, kwargs, *, branch = None))]
     #[expect(unused_variables, reason = "the base hook ignores its arguments")]
     #[expect(
         clippy::unused_self,
         reason = "Python calls the hooks as instance methods"
     )]
-    const fn pre_node(&self, node: &str, kwargs: &Bound<'_, PyDict>) {}
+    const fn pre_node(
+        &self,
+        node: &str,
+        kwargs: &Bound<'_, PyDict>,
+        branch: Option<&Bound<'_, PyTuple>>,
+    ) {
+    }
 
     /// Called after a computed node was evaluated: `ok` says whether it succeeded, `value`
     /// is what it returned (`None` on failure) and `error` the exception it raised (`None`
-    /// on success).
-    #[pyo3(signature = (node, *, ok, value, error))]
+    /// on success). A block node's call also gets `branch`, as `pre_node` does.
+    #[pyo3(signature = (node, *, ok, value, error, branch = None))]
     #[expect(unused_variables, reason = "the base hook ignores its arguments")]
     #[expect(
         clippy::unused_self,
@@ -59,8 +67,20 @@ impl ObserverBase {
         ok: bool,
         value: &Bound<'_, PyAny>,
         error: &Bound<'_, PyAny>,
+        branch: Option<&Bound<'_, PyTuple>>,
     ) {
     }
+
+    /// Called when an expand's items are exhausted, with how many there were; `branch`
+    /// is the branch the expand ran in, `()` outside blocks. Sent only to an observer
+    /// whose class overrides it.
+    #[pyo3(signature = (node, *, branch, items))]
+    #[expect(unused_variables, reason = "the base hook ignores its arguments")]
+    #[expect(
+        clippy::unused_self,
+        reason = "Python calls the hooks as instance methods"
+    )]
+    const fn post_expand(&self, node: &str, branch: &Bound<'_, PyTuple>, items: usize) {}
 
     /// Called instead of `pre_node` and `post_node` for a computed node that is skipped,
     /// because an argument it needs is absent: the node is then absent too. `branch` is
@@ -94,17 +114,46 @@ pub struct PyObserver<'py, 's> {
     /// Whether the observer's class overrides `pre_node` or `post_node`: when it overrides
     /// neither, node events are not sent, so its keyword arguments are never made.
     nodes: bool,
+    /// Whether the observer's class overrides `post_expand`, which is sent only then.
+    expands: bool,
 }
 
 impl<'py, 's> PyObserver<'py, 's> {
     /// Wraps a Python observer for one run.
     pub fn new(observer: Bound<'py, ObserverBase>, kwargs: &'s Kwargs<'py, 's>) -> Self {
         let nodes = overrides(&observer, "pre_node") || overrides(&observer, "post_node");
+        let expands = overrides(&observer, "post_expand");
         Self {
             observer,
             kwargs,
             nodes,
+            expands,
         }
+    }
+
+    /// `post_node`'s keyword arguments, with `branch` when it is not empty.
+    fn outcome(
+        &self,
+        branch: &[usize],
+        outcome: Result<&Value, &PyErr>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        let py = self.observer.py();
+        let absent = py.None().into_bound(py);
+        let (value, error) = match outcome {
+            Ok(value) => (value.bind(py).clone(), absent),
+            Err(error) => (absent, error.value(py).clone().into_any()),
+        };
+        let kwargs = self.keywords(
+            outcome.is_ok(),
+            [
+                (intern!(py, "value"), &value),
+                (intern!(py, "error"), &error),
+            ],
+        )?;
+        if !branch.is_empty() {
+            kwargs.set_item(intern!(py, "branch"), PyTuple::new(py, branch)?)?;
+        }
+        Ok(kwargs)
     }
 
     /// Calls the hook `name` with `args` and the keyword arguments `kwargs`.
@@ -169,23 +218,51 @@ impl Observer<Value, PyErr> for PyObserver<'_, '_> {
     }
 
     fn post_node(&mut self, node: &str, outcome: Result<&Value, &PyErr>) -> PyResult<()> {
+        self.post_node_in(node, &[], outcome)
+    }
+
+    fn pre_node_in(
+        &mut self,
+        node: &str,
+        branch: &[usize],
+        args: &[Arg<'_, Value>],
+    ) -> PyResult<()> {
+        if branch.is_empty() {
+            return self.pre_node(node, args);
+        }
         if !self.nodes {
             return Ok(());
         }
         let py = self.observer.py();
-        let absent = py.None().into_bound(py);
-        let (value, error) = match outcome {
-            Ok(value) => (value.bind(py).clone(), absent),
-            Err(error) => (absent, error.value(py).clone().into_any()),
-        };
-        let kwargs = self.keywords(
-            outcome.is_ok(),
-            [
-                (intern!(py, "value"), &value),
-                (intern!(py, "error"), &error),
-            ],
-        )?;
+        let kwargs = self.kwargs.for_observers(node, args)?;
+        let keywords = PyDict::new(py);
+        keywords.set_item(intern!(py, "branch"), PyTuple::new(py, branch)?)?;
+        self.call(intern!(py, "pre_node"), (node, kwargs), Some(&keywords))
+    }
+
+    fn post_node_in(
+        &mut self,
+        node: &str,
+        branch: &[usize],
+        outcome: Result<&Value, &PyErr>,
+    ) -> PyResult<()> {
+        if !self.nodes {
+            return Ok(());
+        }
+        let py = self.observer.py();
+        let kwargs = self.outcome(branch, outcome)?;
         self.call(intern!(py, "post_node"), (node,), Some(&kwargs))
+    }
+
+    fn post_expand(&mut self, node: &str, branch: &[usize], items: usize) -> PyResult<()> {
+        if !self.expands {
+            return Ok(());
+        }
+        let py = self.observer.py();
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "branch"), PyTuple::new(py, branch)?)?;
+        kwargs.set_item(intern!(py, "items"), items)?;
+        self.call(intern!(py, "post_expand"), (node,), Some(&kwargs))
     }
 
     fn skipped(&mut self, node: &str, branch: &[usize]) -> PyResult<()> {

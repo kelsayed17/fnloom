@@ -1867,3 +1867,28 @@ def test_q138_two_independent_blocks_share_their_inputs(executor: Executor) -> N
     )
     assert hamilton == Outcome({"joined": [30, 120, 10]}, None)
     assert ours == hamilton
+
+
+FAILING_BRANCH = """
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+def details(picked: int) -> int:
+    if picked == 2:
+        raise KeyError(picked)
+    return picked
+
+
+def summary(details: Collect[int]) -> list[int]:
+    return list(details)
+"""
+
+
+@pytest.mark.keeps("Q128")
+@pytest.mark.parametrize("executor", EXECUTORS)
+def test_q128_a_failing_branch_raises_its_own_exception(executor: Executor) -> None:
+    """Both raise the branch's own exception class, unwrapped, and return nothing."""
+    hamilton, ours = both_blocks(FAILING_BRANCH, ["summary"], {"n": 4}, executor)
+    assert hamilton == Outcome(None, "KeyError")
+    assert ours == hamilton

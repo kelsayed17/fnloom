@@ -50,18 +50,24 @@ fn panic_error(payload: &(dyn Any + Send)) -> PyErr {
 /// plan raises `RuntimeError` naming what was found, grouped with any observer errors.
 pub fn run_error(py: Python<'_>, error: RunError<PyErr>) -> PyErr {
     match error {
-        // The branch is noted with blocks in Python, by Plan 10's task 10.
         RunError::Node {
             node,
             source,
             observer_errors,
-            branch: _,
-            block: _,
-        } => with_observer_errors(
-            noted(py, source, &format!("in node '{node}'")),
-            observer_errors,
-            || format!("node '{node}' failed and observer hooks raised"),
-        ),
+            branch,
+            block,
+        } => {
+            let note = match block {
+                Some(expand) => format!(
+                    "while computing '{node}' for branch {} of '{expand}'",
+                    branch_text(&branch)
+                ),
+                None => format!("in node '{node}'"),
+            };
+            with_observer_errors(noted(py, source, &note), observer_errors, || {
+                format!("node '{node}' failed and observer hooks raised")
+            })
+        }
         RunError::Observers { event, mut errors } => {
             if errors.len() == 1 {
                 if let Some(only) = errors.pop() {
@@ -80,6 +86,15 @@ pub fn run_error(py: Python<'_>, error: RunError<PyErr>) -> PyErr {
             || format!("broken plan: {detail}; observer hooks raised"),
         ),
     }
+}
+
+/// A branch path as Python writes the tuple: `(2,)`, `(0, 1)`.
+fn branch_text(branch: &[usize]) -> String {
+    if let [only] = branch {
+        return format!("({only},)");
+    }
+    let parts: Vec<String> = branch.iter().map(ToString::to_string).collect();
+    format!("({})", parts.join(", "))
 }
 
 /// `error` alone, or grouped with `observer_errors` under `message` when there are any.

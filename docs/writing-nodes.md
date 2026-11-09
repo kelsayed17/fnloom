@@ -409,6 +409,16 @@ nodes, up to the `Collect` parameters that gather them. A block node may also re
   one that doesn't fit is a `TypeError` naming the expand and the item's index. An item can't be `ABSENT`. Edges are
   checked as `T` into the block, and as each block node's type into the `Collect[T]` that reads it.
 - For a type checker, `Parallelizable[T]` is `Iterable[T]` and `Collect[T]` is `list[T]`.
+- A block node's branch is its path of item indices, one per block, outermost first: `(1,)`, or `(1, 0)` nested.
+  `fnloom.current_branch()` gives it inside the node, its output checks and its
+  [wrappers](running.md#node-wrappers), which run once per item, and `()` outside every block. Its
+  [hook events](hooks.md#the-events) carry it as `branch`, and `Hook.after_expand` hears each expand's item count.
+- A failing branch fails the run with the node's own exception, noted `while computing 'label' for branch (1,) of
+  'picked'`. No later item is read, the expand's generator is closed, so its `finally` runs, and nothing the earlier
+  branches computed is returned.
+- An override of the expand supplies its items, and one of a collect cuts its block. A block node can't be
+  overridden or requested as an output, since it has one value per item: the error names the collect to request, or
+  the `Collect[...]` parameter to write, and `validate` lists it.
 - The build refuses a `Collect` of a node outside any block, or of an expand itself; a node reading the blocks of
   two unrelated expands (collect both in one node to pair them); a node reading a block node and also its collect,
   which would be inside the block it collects; `@extract_fields` or `@extract_columns` on an expand; and

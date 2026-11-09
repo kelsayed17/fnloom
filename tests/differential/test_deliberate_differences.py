@@ -6264,3 +6264,36 @@ def test_q126_a_block_node_output_is_refused() -> None:
         "'details' is computed once per item of 'picked', so it is not an output; "
         "request a node that collects it: 'summary'"
     )
+
+
+# Hooks per branch (Plan 10, task 10).
+
+
+@pytest.mark.deliberate("Q130")
+def test_q130_node_events_carry_the_branch_instead_of_task_hooks() -> None:
+    """Hamilton has task hooks; fnloom has `branch` and `after_expand` instead."""
+    assert hasattr(lifecycle, "TaskExecutionHook")
+    assert hasattr(lifecycle, "TaskGroupingHook")
+    assert not any(name.startswith("Task") for name in fnloom.__all__)
+    seen: list[tuple[str, tuple[int, ...]]] = []
+    counted: list[tuple[str, tuple[int, ...], int]] = []
+
+    class Branches(fnloom.Hook):
+        @override
+        def before_node(self, event: fnloom.NodeStart) -> None:
+            seen.append((event.node.name, event.branch))
+
+        @override
+        def after_expand(self, event: fnloom.ExpandEnd) -> None:
+            counted.append((event.node.name, event.branch, event.items))
+
+    module = block_module("q130_f", PICKED, "fnloom")
+    built = fnloom.Builder().with_modules(module).with_hooks(Branches()).build()
+    built.execute(["summary"], inputs={"n": 2, "rate": 1})
+    assert seen == [
+        ("picked", ()),
+        ("details", (0,)),
+        ("details", (1,)),
+        ("summary", ()),
+    ]
+    assert counted == [("picked", (), 2)]

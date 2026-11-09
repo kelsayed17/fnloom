@@ -10,7 +10,8 @@ use fnloom_core::run::{Arg, Blocks, Evaluate, Item, Observer};
 use pyo3::exceptions::{PyRuntimeError, PyStopIteration, PyTypeError};
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PyString};
+use pyo3::sync::PyOnceLock;
+use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 use pyo3::{PyTraverseError, PyVisit};
 
 use crate::absent::{self, Absent};
@@ -304,6 +305,38 @@ impl Evaluate<Py<PyAny>> for Caller<'_, '_, '_> {
     fn blocks(&mut self) -> Option<&mut dyn Blocks<Py<PyAny>, Value, PyErr>> {
         Some(self)
     }
+
+    /// Calls a block node with `fnloom.current_branch()` set to `branch` for the call,
+    /// in the caller's context; a node outside every block is called as `evaluate` does.
+    fn evaluate_in(
+        &mut self,
+        node: &Node<Py<PyAny>>,
+        function: &Py<PyAny>,
+        args: &[Arg<'_, Value>],
+        branch: &[usize],
+    ) -> PyResult<Value> {
+        if branch.is_empty() {
+            return self.evaluate(node, function, args);
+        }
+        let py = self.kwargs.py;
+        let current = branch_variable(py)?.bind(py);
+        let token = current.call_method1(intern!(py, "set"), (PyTuple::new(py, branch)?,))?;
+        let outcome = caught(|| self.call(node, function, args));
+        let reset = current.call_method1(intern!(py, "reset"), (token,));
+        let value = outcome?;
+        reset.map(|_| value)
+    }
+}
+
+/// `fnloom._blocks.BRANCH`, the context variable `fnloom.current_branch()` reads.
+fn branch_variable(py: Python<'_>) -> PyResult<&'static Py<PyAny>> {
+    static BRANCH: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+    BRANCH.get_or_try_init(py, || {
+        Ok(py
+            .import(intern!(py, "fnloom._blocks"))?
+            .getattr(intern!(py, "BRANCH"))?
+            .unbind())
+    })
 }
 
 /// Blocks through Python: an expand's items come from the iterator its node's factory

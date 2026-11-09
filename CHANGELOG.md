@@ -101,6 +101,15 @@ change the public API; such changes are listed under **Changed** and **Removed**
   nodes that collect it, or the `Collect[...]` annotation that would; an override of one is a `ValueError` saying
   to override the expand with the items instead. `validate` lists both, with the request's other problems. Lineage
   and `inputs()` read through blocks unchanged.
+- Hooks and wrappers per branch (Q128, Q130; amends Q84, Q111). A block node fires `before_node` and `after_node`
+  once per item, with `NodeStart.branch` and `NodeEnd.branch` giving its branch path (`()` outside blocks), and
+  `RunStart.nodes` lists it once. `Hook.after_expand(ExpandEnd)`, a sixth method, hears each expand's item count
+  once its items are exhausted. `fnloom.current_branch()` gives the branch inside a node, its checks and its
+  wrappers, which run once per item. `PrintNodes` times each branch apart and prints it, as
+  `node 'details' (branch (3,)) ran in 1.2 ms`. A failing branch raises the node's own exception, noted
+  `while computing 'details' for branch (2,) of 'picked'`, after closing the expand's generator; nothing of the
+  branches before it is returned. `_core.ObserverBase` gains `post_expand(node, *, branch, items)`, and its
+  `pre_node` and `post_node` get `branch=` for a block node.
 
 ### Changed
 

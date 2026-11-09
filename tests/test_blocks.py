@@ -1,6 +1,6 @@
 """Fan-out and fan-in: `Parallelizable`, `Collect`, and the blocks between them."""
 
-from typing import Any, cast, override
+from typing import TYPE_CHECKING, Any, cast, override
 
 import pytest
 
@@ -8,6 +8,9 @@ import fnloom
 from fnloom import _core
 from helpers import make_module
 from type_snippets import blocks as snippet
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
 
 PICKED = """
 from fnloom import Collect, Parallelizable
@@ -410,4 +413,254 @@ def test_validate_lists_block_problems() -> None:
             "'details' can't be overridden: it has one value per item of 'picked'; "
             "override 'picked' with the items, or a node outside the block"
         ),
+    ]
+
+
+# Hooks, `current_branch()`, wrappers and the failing branch (task 10).
+
+
+class Recorder(fnloom.Hook):
+    """Records the run's nodes, each node event and each expand's end."""
+
+    def __init__(self) -> None:
+        """Records nothing yet."""
+        self.events: list[tuple[str, str, tuple[int, ...]]] = []
+        self.expands: list[tuple[str, tuple[int, ...], int]] = []
+        self.nodes: tuple[str, ...] = ()
+
+    @override
+    def before_run(self, event: fnloom.RunStart) -> None:
+        self.nodes = event.nodes
+
+    @override
+    def before_node(self, event: fnloom.NodeStart) -> None:
+        self.events.append(("start", event.node.name, event.branch))
+
+    @override
+    def after_node(self, event: fnloom.NodeEnd) -> None:
+        self.events.append(("end", event.node.name, event.branch))
+
+    @override
+    def after_expand(self, event: fnloom.ExpandEnd) -> None:
+        self.expands.append((event.node.name, event.branch, event.items))
+
+
+def _hooked(name: str, source: str, *hooks: fnloom.Hook) -> fnloom.Driver:
+    module = make_module(name, source)
+    return fnloom.Builder().with_modules(module).with_hooks(*hooks).build()
+
+
+def test_node_events_carry_branch_in_reference_order() -> None:
+    """Each branch runs to its end before the next; `RunStart.nodes` lists each once."""
+    recorder = Recorder()
+    built = _hooked("blocks_events", NESTED, recorder)
+    assert built.execute(["everything"]) == {"everything": [[10], [20, 21]]}
+    assert recorder.nodes == ("outer", "inner", "leaf", "per_outer", "everything")
+    starts = [
+        (name, branch) for kind, name, branch in recorder.events if kind == "start"
+    ]
+    assert starts == [
+        ("outer", ()),
+        ("inner", (0,)),
+        ("leaf", (0, 0)),
+        ("per_outer", (0,)),
+        ("inner", (1,)),
+        ("leaf", (1, 0)),
+        ("leaf", (1, 1)),
+        ("per_outer", (1,)),
+        ("everything", ()),
+    ]
+    ends = [(name, branch) for kind, name, branch in recorder.events if kind == "end"]
+    assert ends == starts
+
+
+def test_after_expand_reports_the_item_count_per_branch() -> None:
+    """Each expand's end fires once its items are exhausted, in its own branch."""
+    recorder = Recorder()
+    _hooked("blocks_expand_ends", NESTED, recorder).execute(["everything"])
+    assert recorder.expands == [
+        ("inner", (0,), 1),
+        ("inner", (1,), 2),
+        ("outer", (), 2),
+    ]
+
+
+def test_hook_with_after_expand_only_is_accepted_and_checked() -> None:
+    """A hook with only `after_expand` runs; one that can't take the event is refused.
+
+    It is refused when attached, as every hook method is.
+    """
+
+    class Counts(fnloom.Hook):
+        def __init__(self) -> None:
+            self.items: list[int] = []
+
+        @override
+        def after_expand(self, event: fnloom.ExpandEnd) -> None:
+            self.items.append(event.items)
+
+    counts = Counts()
+    built = _hooked("blocks_expand_only", PICKED, counts)
+    built.execute(["summary"], inputs={"n": 3, "rate": 1})
+    built.execute(["summary"], inputs={"rate": 1}, overrides={"picked": [4]})
+    assert counts.items == [3, 1]
+
+    class Broken(fnloom.Hook):
+        @override
+        def after_expand(self) -> None:  # ty: ignore[invalid-method-override]
+            pass
+
+    with pytest.raises(TypeError, match=r"Broken\.after_expand must take the event"):
+        fnloom.Builder().with_hooks(Broken())
+
+
+CHECKED = """
+from fnloom import Collect, Parallelizable, check_output_custom, current_branch
+
+seen = []
+
+
+def _branch_is_seen(value: int) -> bool:
+    seen.append(("check", current_branch()))
+    return True
+
+
+def picked(n: int) -> Parallelizable[int]:
+    seen.append(("picked", current_branch()))
+    yield from range(n)
+
+
+@check_output_custom(_branch_is_seen)
+def details(picked: int) -> int:
+    seen.append(("node", current_branch()))
+    return picked
+
+
+def summary(details: Collect[int]) -> list[int]:
+    seen.append(("summary", current_branch()))
+    return details
+"""
+
+
+def test_current_branch_inside_a_node_a_check_and_a_wrapper() -> None:
+    """The node, its checks and its wrappers read its branch; `()` outside blocks."""
+    module = make_module("blocks_current", CHECKED)
+    wrapped: list[tuple[str, tuple[int, ...]]] = []
+
+    def wrapper(
+        node: fnloom.NodeView, call: Callable[[], object], inputs: object
+    ) -> object:
+        del inputs
+        wrapped.append((node.name, fnloom.current_branch()))
+        return call()
+
+    built = fnloom.Builder().with_modules(module).with_node_wrappers(wrapper).build()
+    assert built.execute(["summary"], inputs={"n": 2}) == {"summary": [0, 1]}
+    assert module.seen == [
+        ("picked", ()),
+        ("node", (0,)),
+        ("check", (0,)),
+        ("node", (1,)),
+        ("check", (1,)),
+        ("summary", ()),
+    ]
+    assert wrapped == [
+        ("picked", ()),
+        ("details", (0,)),
+        ("details", (1,)),
+        ("summary", ()),
+    ]
+    assert fnloom.current_branch() == ()
+
+
+def test_a_wrapper_is_called_once_per_branch() -> None:
+    """A block node's wrapper runs for each item, and may replace its value."""
+    calls: list[str] = []
+
+    def doubled(
+        node: fnloom.NodeView, call: Callable[[], object], inputs: object
+    ) -> object:
+        del inputs
+        calls.append(node.name)
+        value = call()
+        return value * 2 if node.name == "details" else value  # ty: ignore[unsupported-operator]
+
+    module = make_module("blocks_wrapped", PICKED)
+    built = fnloom.Builder().with_modules(module).with_node_wrappers(doubled).build()
+    assert built.execute(["summary"], inputs={"n": 3, "rate": 1}) == {
+        "summary": [0, 2, 4]
+    }
+    assert calls == ["picked", "details", "details", "details", "summary"]
+
+
+FAILING = """
+from fnloom import Collect, Parallelizable
+
+closed = []
+ran = []
+
+
+def picked(n: int) -> Parallelizable[int]:
+    try:
+        yield from range(n)
+    finally:
+        closed.append(True)
+
+
+def details(picked: int) -> int:
+    ran.append(picked)
+    if picked == 2:
+        raise KeyError(picked)
+    return picked
+
+
+def summary(details: Collect[int]) -> list[int]:
+    return details
+"""
+
+
+def test_a_failing_branch_closes_the_generator_once() -> None:
+    """Review Focus 1: branch 2 fails, and the generator's `finally` runs once.
+
+    Nothing of branches 0 and 1 is returned, and the error is the node's own, noted.
+    """
+    module = make_module("blocks_failing", FAILING)
+    recorder = Recorder()
+    built = fnloom.Builder().with_modules(module).with_hooks(recorder).build()
+    with pytest.raises(KeyError) as info:
+        built.execute(["summary"], inputs={"n": 5})
+    assert info.value.args == (2,)
+    assert info.value.__notes__ == [
+        "while computing 'details' for branch (2,) of 'picked'"
+    ]
+    assert module.closed == [True]
+    assert module.ran == [0, 1, 2]
+    assert ("end", "details", (2,)) in recorder.events
+    assert recorder.expands == []
+    assert not any(name == "summary" for _, name, _ in recorder.events)
+
+
+def test_a_failing_nested_branch_names_its_whole_path() -> None:
+    """The note gives the full branch path and the innermost expand."""
+    module = make_module(
+        "blocks_failing_nested",
+        NESTED.replace("return outer * 10 + inner", "return 1 // (outer - 2)"),
+    )
+    with pytest.raises(ZeroDivisionError) as info:
+        fnloom.build(module).execute(["everything"])
+    assert info.value.__notes__ == [
+        "while computing 'leaf' for branch (1, 0) of 'inner'"
+    ]
+
+
+def test_print_nodes_times_each_branch_apart() -> None:
+    """`PrintNodes` keys its times by branch, and names a block node's branch."""
+    lines: list[str] = []
+    built = _hooked("blocks_print", PICKED, fnloom.PrintNodes(print_fn=lines.append))
+    built.execute(["summary"], inputs={"n": 2, "rate": 1})
+    assert [line.split(" ran in ")[0] for line in lines] == [
+        "node 'picked'",
+        "node 'details' (branch (0,))",
+        "node 'details' (branch (1,))",
+        "node 'summary'",
     ]

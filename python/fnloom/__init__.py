@@ -2,7 +2,7 @@
 
 from importlib.metadata import version as _version
 
-from fnloom._blocks import Collect, Parallelizable
+from fnloom._blocks import Collect, Parallelizable, current_branch
 from fnloom._caching import CacheOutcome
 from fnloom._checks import (
     CheckResult,
@@ -37,6 +37,7 @@ from fnloom._frames import FrameBuilder, frame
 from fnloom._functions import NodeSpec, node
 from fnloom._hooks import (
     BuildEnd,
+    ExpandEnd,
     Hook,
     LogFailures,
     NodeEnd,
@@ -98,6 +99,7 @@ __all__ = [
     "Drawing",
     "DrawnNode",
     "Driver",
+    "ExpandEnd",
     "FieldCache",
     "Format",
     "FrameBuilder",
@@ -131,6 +133,7 @@ __all__ = [
     "check_output",
     "check_output_custom",
     "config",
+    "current_branch",
     "defaults",
     "exclude",
     "extract_columns",
