@@ -29,9 +29,25 @@ if TYPE_CHECKING:
     from fnloom._view import InputView, NodeView, Param
 
 FORMAT = "fnloom.export/1"
+# The format of a document with a node that may be absent: each node says so (Q135).
+FORMAT_2 = "fnloom.export/2"
+_FORMATS = (FORMAT, FORMAT_2)
 
 # What `diff` compares, in the order it lists them.
-_COMPARED = ("kind", "type", "params", "config", "checks", "tags", "version", "marks")
+_COMPARED = (
+    "kind",
+    "type",
+    "params",
+    "config",
+    "checks",
+    "tags",
+    "version",
+    "marks",
+    "may_be_absent",
+)
+
+# The drawing's mark for a node that may be absent: the document says it itself.
+_ABSENT_MARK = "may be absent"
 
 
 def export(  # noqa: PLR0913  # one argument per part of the document
@@ -52,17 +68,23 @@ def export(  # noqa: PLR0913  # one argument per part of the document
     namespace's own `config=` (Q112), and `edge_checks` says which edges the
     build checked: `"on"`, `"off"`, or the nodes whose edges it skipped (Q149).
     Both enter `graph_version` when not the default.
+
+    The format is `fnloom.export/1`, unless a drawn node may be absent (Q135):
+    then it is `fnloom.export/2`, and every node says `may_be_absent`.
     """
     versions: dict[int, tuple[str | None, str | None]] = {}
+    absence = any(views[drawn.name].may_be_absent for drawn in drawing.nodes)
+    form = FORMAT_2 if absence else FORMAT
     nodes = [
         _node(
             drawn.name,
-            sorted(drawn.marks),
+            sorted(mark for mark in drawn.marks if mark != _ABSENT_MARK),
             views[drawn.name],
             inputs,
             versions,
             built_from=getattr(views, "built_from", {}).get(drawn.name),
             checks=getattr(views, "checks", {}).get(drawn.name, ()),
+            absence=absence,
         )
         for drawn in drawing.nodes
     ]
@@ -76,9 +98,9 @@ def export(  # noqa: PLR0913  # one argument per part of the document
     if edge_checks != "on":
         settings["edge_checks"] = edge_checks
     return {
-        "format": FORMAT,
+        "format": form,
         "fnloom": version,
-        "graph_version": _graph_version(nodes, views, settings),
+        "graph_version": _graph_version(nodes, views, settings, form),
         "config": {key: stable_repr(config[key]) for key in sorted(config)},
         "namespace_config": overlays,
         "edge_checks": edge_checks,
@@ -187,8 +209,11 @@ def _node(  # noqa: PLR0913  # the node's parts, and its build's
     *,
     built_from: Callable[..., object] | None = None,
     checks: Sequence[Check] = (),
+    absence: bool = False,
 ) -> dict[str, Any]:
     """One node's entry; an input's has no source or version (Q95).
+
+    With `absence`, for `fnloom.export/2`, it says whether the node may be absent.
 
     `built_from` is the function the node was built from when it isn't the
     view's `origin`, a `@resolve` copy: its decorations, such as a pinned
@@ -215,6 +240,8 @@ def _node(  # noqa: PLR0913  # the node's parts, and its build's
         "marks": marks,
         "checks": [_check(c) for c in checks],
     }
+    if absence:
+        entry["may_be_absent"] = view.may_be_absent
     if view.is_input:
         found = inputs[name]
         entry["required"] = found.required
@@ -333,6 +360,7 @@ def _graph_version(
     nodes: Sequence[Mapping[str, Any]],
     views: Mapping[str, NodeView],
     settings: Mapping[str, Any],
+    form: str = FORMAT,
 ) -> str | None:
     """A hash of every node's name, kind, type, params, conditions and version.
 
@@ -340,7 +368,8 @@ def _graph_version(
     (Q112) and the edge checks (Q149). Tags and docs are left out: they don't
     change what a node computes. A `value()` is hashed by its `value_version`.
     `None` when a node is unversioned, or a `value()` it is bound to has no
-    fingerprint: a change there could not be seen (Q96).
+    fingerprint: a change there could not be seen (Q96). The document's `form`
+    is hashed too, so a `/1` document's version is what it always was.
     """
     parts: list[object] = []
     for node in nodes:
@@ -363,9 +392,7 @@ def _graph_version(
         )
     # Without settings, the text is what it was before they existed, so a
     # graph_version stays the same across that change.
-    hashed: list[object] = (
-        [FORMAT, parts] if not settings else [FORMAT, parts, settings]
-    )
+    hashed: list[object] = [form, parts] if not settings else [form, parts, settings]
     text = json.dumps(hashed, sort_keys=True)
     return hashlib.sha256(text.encode()).hexdigest()
 
@@ -375,7 +402,8 @@ def diff(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
 
     `added` and `removed` are names, sorted; `changed` maps each node in both to
     the fields that differ, of `kind`, `type`, `params`, `config`, `checks`,
-    `tags`, `version` and `marks` (a run's output or override). `unversioned` names
+    `tags`, `version`, `marks` (a run's output or override) and `may_be_absent`,
+    which a `fnloom.export/1` document's nodes are not. `unversioned` names
     each function node in both that differs in nothing else, its version aside,
     and that a side has no version for, or a `value()` without a
     `value_version`: a change there can't be seen.
@@ -383,12 +411,13 @@ def diff(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
     and they differ. `warnings` says, for each document with no
     `graph_version`, which nodes leave it blind (Q96), and when the graph
     versions differ though no node entry does. The documents' own `config`
-    and `request` are not compared, only their nodes. `ValueError` for a
-    document of another format, or one naming a node twice.
+    and `request` are not compared, only their nodes. Either side may be
+    `fnloom.export/1` or `fnloom.export/2`. `ValueError` for a document of
+    another format, or one naming a node twice.
     """
     for side, document in (("old", old), ("new", new)):
-        if not isinstance(document, dict) or document.get("format") != FORMAT:
-            msg = f"{side}: not an fnloom export ({FORMAT})"
+        if not isinstance(document, dict) or document.get("format") not in _FORMATS:
+            msg = f"{side}: not an fnloom export ({FORMAT} or {FORMAT_2})"
             raise ValueError(msg)
         nodes = document.get("nodes")
         if not isinstance(nodes, list) or not all(
@@ -407,7 +436,7 @@ def diff(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
     unversioned: list[str] = []
     for name in sorted(before.keys() & after.keys()):
         a, b = before[name], after[name]
-        fields = [f for f in _COMPARED if a.get(f) != b.get(f)]
+        fields = [f for f in _COMPARED if _field(a, f) != _field(b, f)]
         blind = _is_blind(a) or _is_blind(b)
         if blind and fields in ([], ["version"]):
             unversioned.append(name)
@@ -436,6 +465,13 @@ def diff(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
         "graph_version_changed": moved,
         "warnings": blind,
     }
+
+
+def _field(node: Mapping[str, Any], name: str) -> object:
+    """A node's `name` field; a `/1` node's `may_be_absent` is `False` (Q135)."""
+    if name == "may_be_absent":
+        return node.get(name, False)
+    return node.get(name)
 
 
 def _is_blind(node: Mapping[str, Any]) -> bool:

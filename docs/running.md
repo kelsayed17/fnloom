@@ -67,6 +67,10 @@ driver.execute(["label"], overrides={"total": 100.0})
 An override can name any node, whether a function or an input. It wins over a supplied input of the same name, and
 it fills in for a required input you didn't supply.
 
+An override of a node that [may be absent](writing-nodes.md#declining) may be `fnloom.ABSENT`, which is how a test forces
+its consumers' skip. For any other node, and for every input, `ABSENT` is a `TypeError` naming it, with or without type
+checks: leave an input out to say it has no value.
+
 ### Strict overrides
 
 Hamilton refuses an override of an input that you haven't also supplied, because it only cuts off what is upstream of
@@ -144,7 +148,9 @@ listed.execute(["total", "price"], inputs={"price": 2.5, "quantity": 4})
 ```
 
 - **What it gets.** Each requested output once, in the order you asked for it, with the inputs and overrides you
-  requested as outputs, as Hamilton's result builder gets them (Q19).
+  requested as outputs, as Hamilton's result builder gets them (Q19). An output that is
+  [absent](writing-nodes.md#declining) is `fnloom.ABSENT`, as in the dict; `frame()` refuses it, naming it, since a
+  column can't be absent.
 - **Where it applies.** `PreparedPlan.run` builds too, and so do the async driver's `execute` and `run`. Hamilton's
   async driver silently drops a `ResultBuilder` subclass.
 - **Typed.** `Builder`, `Driver`, `AsyncDriver` and their plans take the built type as a parameter, so a type checker
@@ -801,8 +807,9 @@ asyncio.run(
 # -> {'converted': 15.0, 'rate': 1.5}
 ```
 
-Everything else is the sync driver's: inputs, overrides, the type checks and their errors, lineage, `nodes` and
-`config`. `prepare` is synchronous too, and returns a plan whose `run` is a coroutine:
+Everything else is the sync driver's: inputs, overrides, the type checks and their errors, lineage, `nodes`,
+`config`, and [declining](writing-nodes.md#declining), whose consumers are skipped, given `ABSENT` or left to their
+defaults as with `build()`. `prepare` is synchronous too, and returns a plan whose `run` is a coroutine:
 
 ```python
 async_plan = async_driver.prepare(

@@ -17,7 +17,7 @@ from fnloom._decorators import Source
 from fnloom._types import stripped
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
     from collections.abc import Set as AbstractSet
 
     from fnloom._scan import NodeDef
@@ -28,12 +28,13 @@ __all__ = [
     "Absent",
     "Kind",
     "admits_absent",
+    "applied",
     "declines",
     "dependency",
     "may_be_absent",
     "merged",
     "needs_input",
-    "refuse_async",
+    "refuse_given",
     "refuse_mixed",
     "without_absent",
 ]
@@ -202,16 +203,53 @@ def refuse_mixed(nodes: Sequence[NodeDef], absent: AbstractSet[str]) -> None:
         raise ValueError("; ".join(sorted(lines)))
 
 
-def refuse_async(nodes: Sequence[NodeDef]) -> None:
-    """`TypeError` naming, sorted, each node that declines, for `build_async`.
+def applied(
+    kwargs: dict[str, object],
+    values: Mapping[str, object],
+    watched: Sequence[tuple[str, str, Kind]],
+) -> bool:
+    """Applies the three rules to a call's `kwargs`; `False` when the node is skipped.
 
-    The async driver's walk doesn't follow the three rules yet, so it would pass
-    `ABSENT` to a parameter that doesn't admit it. Until it does, it refuses.
+    `watched` are the node's sources that may be absent, each with the keyword
+    it is passed under and the kind it is read by, as the async driver's walk
+    reads them from `values`. A source that is `ABSENT` is kept for `admits` and
+    `admits_optional`, left out for `optional`, so the default applies, and
+    skips the node for `required`, as the core's run does (Q135).
     """
-    if declining := sorted(node.name for node in nodes if declines(node)):
-        listed = ", ".join(repr(name) for name in declining)
-        msg = (
-            f"build_async() does not run a node that may decline yet: {listed}; "
-            "build() does"
-        )
-        raise TypeError(msg)
+    for source, keyword, kind in watched:
+        if values[source] is not ABSENT:
+            continue
+        if kind == "required":
+            return False
+        if kind == "optional":
+            del kwargs[keyword]
+    return True
+
+
+def refuse_given(
+    inputs: Mapping[str, object],
+    overrides: Mapping[str, object],
+    may_be_absent: AbstractSet[str],
+) -> None:
+    """`TypeError` for each `ABSENT` input, and each `ABSENT` override not allowed.
+
+    An input is never absent: leaving it out is how a run says so. An override
+    may be `ABSENT` for a node in `may_be_absent`, which forces its skip, and for
+    no other. Checked whatever the type checks say, an `Any`-typed node too.
+    Every culprit is listed, sorted.
+    """
+    lines = [
+        f"input {name!r} is fnloom.ABSENT, which an input can't be; leave it out "
+        "instead"
+        for name, given in inputs.items()
+        if given is ABSENT
+    ]
+    lines += [
+        f"override {name!r} is fnloom.ABSENT, but node {name!r} can't be absent: "
+        "its return annotation does not admit fnloom.Absent, and it reads no node "
+        "that may be; override it with a value"
+        for name, given in overrides.items()
+        if given is ABSENT and name not in may_be_absent
+    ]
+    if lines:
+        raise TypeError("; ".join(sorted(lines)))
