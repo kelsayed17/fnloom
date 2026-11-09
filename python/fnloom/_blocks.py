@@ -192,7 +192,7 @@ class Items(Iterator[object]):
     value is then the `list` of them (Q121); otherwise none is held.
     """
 
-    __slots__ = ("_check", "_index", "_items", "_iterator", "_node")
+    __slots__ = ("_branch", "_check", "_index", "_items", "_iterator", "_node")
 
     def __init__(
         self,
@@ -200,9 +200,11 @@ class Items(Iterator[object]):
         check: Callable[[object], str | None] | None,
         iterable: Iterable[object],
         record: bool,  # noqa: FBT001  # the binding passes it by position
+        branch: tuple[int, ...] = (),
     ) -> None:
-        """Iterates `iterable`, the items of `node`."""
+        """Iterates `iterable`, the items of `node`, which runs in `branch`."""
         self._node = node
+        self._branch = branch
         self._check = check
         self._iterator = iter(iterable)
         self._index = 0
@@ -211,7 +213,7 @@ class Items(Iterator[object]):
     @override
     def __next__(self) -> object:
         """The next item, checked; `StopIteration` as the iterable raised it."""
-        item = next(self._iterator)
+        item = self._in_branch(next, self._iterator)
         index = self._index
         self._index += 1
         if item is ABSENT:
@@ -231,7 +233,22 @@ class Items(Iterator[object]):
         """Closes the iterable's iterator if it can be: a generator's `finally` runs."""
         close = getattr(self._iterator, "close", None)
         if callable(close):
-            close()
+            self._in_branch(close)
+
+    def _in_branch[**A, T](
+        self, call: Callable[A, T], *args: A.args, **kwargs: A.kwargs
+    ) -> T:
+        """`call(...)` with `current_branch()` set to the expand's branch.
+
+        A generator's body runs as its items are read, so in its expand's branch.
+        """
+        if not self._branch:
+            return call(*args, **kwargs)
+        token = BRANCH.set(self._branch)
+        try:
+            return call(*args, **kwargs)
+        finally:
+            BRANCH.reset(token)
 
     def finish(self, exhausted: bool) -> list[object] | None:  # noqa: FBT001  # the binding passes it by position
         """Ends the iteration, closing it unless `exhausted`; the items, if recorded."""

@@ -61,7 +61,7 @@ class Param:
         branch order.
         """
         annotation = self.annotation
-        if isinstance(annotation, type):
+        if isinstance(annotation, type) or not isinstance(self.binding, Source):
             # The common case, read per parameter at build: a class collects nothing.
             return None
         mode = collect_mode(annotation)

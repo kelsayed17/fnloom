@@ -1298,10 +1298,12 @@ class Driver[R = dict[str, object]]:
             view = functions.get(name)
             if view is None or view.block is None:
                 continue
+            # Only a collect outside every block can be requested.
             collects = sorted(
                 repr(consumer.name)
                 for consumer in functions.values()
-                if any(
+                if consumer.block is None
+                and any(
                     p.collect is not None
                     and isinstance(p.binding, Source)
                     and p.binding.name == name

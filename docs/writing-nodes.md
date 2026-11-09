@@ -416,6 +416,9 @@ nodes, up to the `Collect` parameters that gather them. A block node may also re
 - A failing branch fails the run with the node's own exception, noted `while computing 'label' for branch (1,) of
   'picked'`. No later item is read, the expand's generator is closed, so its `finally` runs, and nothing the earlier
   branches computed is returned.
+- A generator expand's node events, wrappers and timing cover its call, which makes the generator; its body runs
+  as its items are read. So an error while it yields, or an item refused, fails the run (`RunEnd.error`, noted
+  `in node 'picked'`) after its `after_node` reported `ok=True`.
 - An override of the expand supplies its items, and one of a collect cuts its block. A block node can't be
   overridden or requested as an output, since it has one value per item: the error names the collect to request, or
   the `Collect[...]` parameter to write, and `validate` lists it.

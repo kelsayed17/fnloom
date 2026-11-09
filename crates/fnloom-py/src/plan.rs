@@ -125,6 +125,7 @@ impl Plan {
                 shared,
                 absent: absent::singleton(py)?,
                 outputs: self.plan.outputs(),
+                expanding: None,
             },
             lookup,
             &mut hooks,
@@ -282,6 +283,8 @@ struct Caller<'k, 'py, 'g> {
     absent: &'static Py<Absent>,
     /// The plan's outputs, sorted by id: an expand among them records its items.
     outputs: &'k [NodeId],
+    /// The expand last called in a branch, with that branch: its items are read in it.
+    expanding: Option<(NodeId, Vec<usize>)>,
 }
 
 impl Evaluate<Py<PyAny>> for Caller<'_, '_, '_> {
@@ -318,6 +321,9 @@ impl Evaluate<Py<PyAny>> for Caller<'_, '_, '_> {
         if branch.is_empty() {
             return self.evaluate(node, function, args);
         }
+        if node.is_expand() {
+            self.expanding = Some((node.id, branch.to_vec()));
+        }
         let py = self.kwargs.py;
         let current = branch_variable(py)?.bind(py);
         let token = current.call_method1(intern!(py, "set"), (PyTuple::new(py, branch)?,))?;
@@ -351,10 +357,15 @@ impl Blocks<Py<PyAny>, Value, PyErr> for Caller<'_, '_, '_> {
             )));
         };
         let record = self.outputs.binary_search(&node.id).is_ok();
+        // A generator's body runs as its items are read, so in the expand's branch.
+        let branch = match self.expanding.take() {
+            Some((id, branch)) if id == node.id => PyTuple::new(py, branch)?,
+            _ => PyTuple::empty(py),
+        };
         caught(|| {
             factory
                 .bind(py)
-                .call1((iterable.bind(py), record))
+                .call1((iterable.bind(py), record, branch))
                 .map(|items| Arc::new(items.unbind()))
         })
     }

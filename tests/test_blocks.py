@@ -664,3 +664,42 @@ def test_print_nodes_times_each_branch_apart() -> None:
         "node 'details' (branch (1,))",
         "node 'summary'",
     ]
+
+
+def test_a_nested_generator_expand_reads_its_branch_while_yielding() -> None:
+    """A generator's body runs as its items are read, still in its own branch."""
+    module = make_module(
+        "blocks_nested_body",
+        """
+        from fnloom import Collect, Parallelizable, current_branch
+
+        seen = []
+
+        def outer() -> Parallelizable[int]:
+            seen.append(("outer", current_branch()))
+            yield from [1, 2]
+
+        def inner(outer: int) -> Parallelizable[int]:
+            seen.append(("inner", current_branch()))
+            yield from range(outer)
+            seen.append(("inner done", current_branch()))
+
+        def leaf(inner: int) -> int:
+            return inner
+
+        def per_outer(leaf: Collect[int]) -> int:
+            return len(leaf)
+
+        def total(per_outer: Collect[int]) -> int:
+            return sum(per_outer)
+        """,
+    )
+    assert fnloom.build(module).execute(["total"]) == {"total": 3}
+    assert module.seen == [
+        ("outer", ()),
+        ("inner", (0,)),
+        ("inner done", (0,)),
+        ("inner", (1,)),
+        ("inner done", (1,)),
+    ]
+    assert fnloom.current_branch() == ()
