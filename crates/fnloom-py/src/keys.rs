@@ -6,22 +6,33 @@ use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict, PyString};
 
-use crate::fingerprint::Digest;
+use crate::fingerprint::{Digest, absent_digest};
 use crate::store::MemoryStore;
 
-/// The version of a source that is neither in `versions` nor a computed node: an optional
-/// input not supplied. It equals no fingerprint and no key but by a 2^-256 chance.
-const ABSENT: Digest = *b"\x00fnloom: optional input absent\x00\x00";
+/// The version of an optional input not supplied: a source that is neither in `versions`
+/// nor a computed node, or one read by an `optional` edge whose version is `ABSENT`'s
+/// fingerprint. It equals no fingerprint and no key but by a 2^-256 chance. Its bytes
+/// predate its name, and stay: they are in every stored key that read one.
+const NOT_SUPPLIED: Digest = *b"\x00fnloom: optional input absent\x00\x00";
 
 /// One computed node as given: its name, its static key part, the names of the sources
-/// its key reads, whether it is stored, and every source it reads.
-type NodeEntry = (String, Option<Vec<u8>>, Vec<String>, bool, Vec<String>);
+/// its key reads, whether it is stored, every source it reads, and the sources it reads
+/// by an `optional` edge (a parameter with a default, which `ABSENT` leaves out).
+type NodeEntry = (
+    String,
+    Option<Vec<u8>>,
+    Vec<String>,
+    bool,
+    Vec<String>,
+    Vec<String>,
+);
 
-/// A source a key reads: its interned name, and its position when it is a computed node
-/// (earlier in plan order).
+/// A source a key reads: its interned name, its position when it is a computed node
+/// (earlier in plan order), and whether it is read by an `optional` edge.
 struct Read {
     name: Py<PyString>,
     computed: Option<usize>,
+    optional: bool,
 }
 
 /// One computed node of the plan.
@@ -40,14 +51,19 @@ struct KeyNode {
 ///
 /// Each entry is one computed node, in plan order: its name, its static key part (32
 /// bytes, or `None` when the node is uncacheable), the names of the nodes and inputs its
-/// key reads, in declaration order, whether its policy is `default`, and every node and
-/// input it reads. `outputs` are where the walk back starts.
+/// key reads, in declaration order, whether its policy is `default`, every node and
+/// input it reads, and the ones it reads by an `optional` edge. `outputs` are where the
+/// walk back starts.
 ///
 /// A node's key is BLAKE3 keyed by its static part, over the versions of what it reads,
 /// 32 bytes each. The static part already covers the key's parameter names and constants.
+/// An `optional` read whose version is `ABSENT`'s fingerprint is hashed as an optional
+/// input not supplied: the parameter is left out, so the call is the same.
 #[pyclass(frozen, module = "fnloom._core")]
 pub struct KeyPlan {
     nodes: Vec<KeyNode>,
+    /// `fingerprint(ABSENT)`, which an `optional` read hashes as not supplied.
+    absent: Digest,
     /// Positions by name.
     index: HashMap<String, usize>,
     /// The computed outputs' positions.
@@ -70,7 +86,9 @@ impl KeyPlan {
             }
         }
         let mut built = Vec::with_capacity(nodes.len());
-        for (position, (name, stat, reads, stored, sources)) in nodes.into_iter().enumerate() {
+        for (position, (name, stat, reads, stored, sources, optional)) in
+            nodes.into_iter().enumerate()
+        {
             let stat = stat
                 .map(|stat| {
                     Digest::try_from(stat.as_slice()).map_err(|_| {
@@ -91,6 +109,7 @@ impl KeyPlan {
                         )));
                     }
                     Ok(Read {
+                        optional: optional.contains(&source),
                         name: PyString::intern(py, &source).unbind(),
                         computed,
                     })
@@ -114,6 +133,7 @@ impl KeyPlan {
             .collect();
         Ok(Self {
             nodes: built,
+            absent: absent_digest(),
             index,
             outputs,
         })
@@ -124,7 +144,8 @@ impl KeyPlan {
     ///
     /// A source's version is its entry in `versions` when it has one, even when it is
     /// also a computed node of this plan; else that computed node's own key; else the
-    /// marker of an absent optional input. A key is `None` when its static part, or any
+    /// marker of an optional input not supplied, which an `optional` read whose version
+    /// is `ABSENT`'s fingerprint reads as too. A key is `None` when its static part, or any
     /// version it reads, is `None`. Every node gets a key computed from its sources,
     /// including one named in `versions`: the caller ignores the keys of nodes it does
     /// not run.
@@ -207,7 +228,7 @@ impl KeyPlan {
         let mut keys: Vec<Option<Digest>> = Vec::with_capacity(self.nodes.len());
         let mut buffer: Vec<u8> = Vec::new();
         for node in &self.nodes {
-            let key = node_key(node, versions, &given, &keys, &mut buffer)?;
+            let key = node_key(node, versions, &given, &keys, &self.absent, &mut buffer)?;
             keys.push(key);
         }
         Ok(keys)
@@ -237,13 +258,14 @@ fn version_of(version: &Bound<'_, PyAny>) -> PyResult<Option<Digest>> {
         .map_err(|_| PyValueError::new_err(format!("a version is 32 bytes, not {}", bytes.len())))
 }
 
-/// The key of `node`, given `versions`, the computed nodes they name, and the keys of the
-/// nodes before it.
+/// The key of `node`, given `versions`, the computed nodes they name, the keys of the
+/// nodes before it, and `ABSENT`'s fingerprint.
 fn node_key(
     node: &KeyNode,
     versions: &Bound<'_, PyDict>,
     given: &[Given],
     keys: &[Option<Digest>],
+    absent: &Digest,
     buffer: &mut Vec<u8>,
 ) -> PyResult<Option<Digest>> {
     let Some(stat) = &node.stat else {
@@ -259,13 +281,18 @@ fn node_key(
             },
             None => match versions.get_item(read.name.bind(py))? {
                 Some(version) => version_of(&version)?,
-                None => Some(ABSENT),
+                None => Some(NOT_SUPPLIED),
             },
         };
         let Some(version) = version else {
             return Ok(None);
         };
-        buffer.extend_from_slice(&version);
+        // `ABSENT` given to a parameter with a default leaves it out (rule 2).
+        if read.optional && version == *absent {
+            buffer.extend_from_slice(&NOT_SUPPLIED);
+        } else {
+            buffer.extend_from_slice(&version);
+        }
     }
     Ok(Some(*blake3::keyed_hash(stat, buffer).as_bytes()))
 }

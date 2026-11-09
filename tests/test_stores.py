@@ -676,3 +676,76 @@ def test_with_cache_refuses_what_is_not_a_store() -> None:
     """A store needs `get`, `put` and `discard`; anything else fails at once."""
     with pytest.raises(TypeError, match="get, put and discard"):
         fnloom.Builder().with_cache(object())  # ty: ignore[invalid-argument-type]
+
+
+@pytest.mark.parametrize("format_", [PICKLE, JSON], ids=["pickle", "json"])
+def test_disk_stores_absent_as_a_header_flag(tmp_path: Path, format_: Format) -> None:
+    """`ABSENT` is a flag in the header with no payload, read back as the singleton."""
+    store = DiskCache(tmp_path)
+    store.put(_key(1), fnloom.ABSENT, format=format_)
+    header, payload = _unpack(_entry(tmp_path, _key(1)).read_bytes())
+    assert json.loads(header) == {
+        "serializer": format_.name,
+        "python": sys.version,
+        "libraries": {},
+        "absent": True,
+    }
+    assert payload == b""
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert store.get(_key(1), format=format_) is fnloom.ABSENT
+
+
+@pytest.mark.parametrize(
+    "value", [None, "ABSENT", "fnloom.ABSENT", {"absent": True}, [], ""]
+)
+def test_no_json_value_reads_back_as_absent(tmp_path: Path, value: object) -> None:
+    """The marker is outside every format's values, so none collides with it."""
+    store = DiskCache(tmp_path)
+    store.put(_key(1), value, format=JSON)
+    loaded = store.get(_key(1), format=JSON)
+    assert loaded is not fnloom.ABSENT
+    assert loaded == value
+
+
+def test_disk_an_absent_entry_with_a_payload_is_unreadable(tmp_path: Path) -> None:
+    """A flagged entry that carries bytes is damaged: a miss that warns, and removed."""
+    store = DiskCache(tmp_path)
+    store.put(_key(1), fnloom.ABSENT)
+    path = _entry(tmp_path, _key(1))
+    _rewrite(path, payload=pickle.dumps(ANSWER))
+    _miss_warns_once(store, _key(1), path)
+
+
+@pytest.mark.parametrize("flag", [False, 1, "yes", None])
+def test_disk_a_malformed_absent_flag_is_unreadable(
+    tmp_path: Path, flag: object
+) -> None:
+    """Only `"absent": true` marks an absence; any other value is a damaged header."""
+    store = DiskCache(tmp_path)
+    store.put(_key(1), fnloom.ABSENT)
+    path = _entry(tmp_path, _key(1))
+    _rewrite(path, absent=flag)
+    _miss_warns_once(store, _key(1), path)
+
+
+def test_disk_an_absent_entry_from_another_python_is_a_quiet_miss(
+    tmp_path: Path,
+) -> None:
+    """An absent entry's header is checked like any other's."""
+    store = DiskCache(tmp_path)
+    store.put(_key(1), fnloom.ABSENT)
+    path = _entry(tmp_path, _key(1))
+    _rewrite(path, python="2.7")
+    _quiet_miss(store, _key(1), path)
+
+
+def test_disk_an_absent_entry_under_another_serializer_is_a_quiet_miss(
+    tmp_path: Path,
+) -> None:
+    """An absence keeps its serializer's name, so another pair misses it quietly."""
+    DiskCache(tmp_path).put(_key(1), fnloom.ABSENT)
+    other = DiskCache(
+        tmp_path, dumps=_identity, loads=_identity_loads, serializer="bytes"
+    )
+    _quiet_miss(other, _key(1), _entry(tmp_path, _key(1)))

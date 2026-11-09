@@ -83,7 +83,7 @@ class Plan:
 class KeyPlan:
     def __new__(
         cls,
-        nodes: list[tuple[str, bytes | None, list[str], bool, list[str]]],
+        nodes: list[tuple[str, bytes | None, list[str], bool, list[str], list[str]]],
         outputs: Sequence[str] = (),
     ) -> Self: ...
     def keys(self, versions: dict[str, bytes | None]) -> dict[str, bytes | None]: ...
