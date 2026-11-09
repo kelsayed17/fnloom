@@ -31,7 +31,6 @@ __all__ = [
     "applied",
     "declines",
     "dependency",
-    "holds_absent",
     "may_be_absent",
     "merged",
     "needs_input",
@@ -44,9 +43,6 @@ type Kind = Literal["required", "optional", "admits", "admits_optional"]
 
 # The kinds whose consumer needs an input supplied: they have no default.
 _NEEDS_INPUT: frozenset[str] = frozenset({"required", "admits"})
-
-# `ABSENT`'s identity, which `holds_absent` looks for among a run's values.
-_ABSENT_ID = id(ABSENT)
 
 
 def _members(annotation: object) -> list[object]:
@@ -228,15 +224,6 @@ def applied(
         if kind == "optional":
             del kwargs[keyword]
     return True
-
-
-def holds_absent(values: Mapping[str, object]) -> bool:
-    """Whether any of `values` is `ABSENT`, by identity, never by `==` or truth.
-
-    Run on every run's inputs and overrides, so it compares the values' ids in C:
-    `ABSENT in values.values()` would call each value's own `__eq__`.
-    """
-    return bool(values) and _ABSENT_ID in map(id, values.values())
 
 
 def refuse_given(

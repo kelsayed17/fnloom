@@ -661,8 +661,12 @@ _STYLES: dict[str, dict[str, str]] = {
 
 def _styles(kind: Kind, marks: Iterable[str]) -> dict[str, str]:
     styles: dict[str, str] = {}
-    for key in (kind, *sorted(marks, key=list(_STYLES).index)):
+    marks = sorted(marks, key=list(_STYLES).index)
+    for key in (kind, *marks):
         styles.update(_STYLES.get(key, {}))
+    if "may be absent" in marks and "dashed" not in styles["style"]:
+        # A later mark set its own style, an override's diagonals: keep the dashes.
+        styles["style"] = '"dashed,' + styles["style"].strip('"') + '"'
     return styles
 
 

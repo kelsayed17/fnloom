@@ -24,13 +24,16 @@ change the public API; such changes are listed under **Changed** and **Removed**
   or `Any`, with or without type checks: leave the input out instead. An override may be `ABSENT` for a node that may
   be absent, forcing its consumers' skip, and is a `TypeError` for any other node. `RunEnd.skipped` lists each skipped
   node as a `(node, branch)` pair, in the order skipped, `branch` being `()` outside a block; a skipped node fires no
-  node event, so `PrintNodes` prints nothing for it. A result builder gets an absent output as `ABSENT`, and `frame()`
-  refuses one with a `ValueError` naming each. `@extract_fields` and `@extract_columns` take a producer annotated
+  node event, so `PrintNodes` prints nothing for it. Like a value check's failure, an `ABSENT` input or override fires
+  `before_run` with no nodes, then `after_run` with `ok=False`. A result builder gets an absent output as `ABSENT`,
+  and `frame()` refuses one with a `ValueError` naming each. `@extract_fields` and `@extract_columns` take a producer annotated
   `R | Absent`, and every field is absent when it declines. `@check_output*` and `with_output_type_checks()` don't
   run on `ABSENT` (`NodeEnd.checks` is `()`). A graph with a node that may be absent exports `fnloom.export/2`, each
   node with `may_be_absent`; any other graph still exports `fnloom.export/1`, byte for byte, and `fnloom diff` reads
   both. Drawings mark such a node `may be absent`, drawn dashed and named in the legend.
-- `ObserverBase.skipped(node, *, branch)`, the binding's forward of the core's `Observer::skipped`.
+- `ObserverBase.skipped(node, *, branch)`, the binding's forward of the core's `Observer::skipped`. An observer whose
+  class overrides neither `pre_node` nor `post_node` is sent no node events, so a run makes no keyword arguments for
+  it.
 - Absence on the async driver. `build_async()` builds a node that declines, and its runs follow the same rules as
   `build()`'s: a skipped node runs nothing, fires no node event, stores nothing in the cache and is listed in
   `RunEnd.skipped`. The return check runs on `async def` nodes and on sync nodes, in a thread or inline, refusing

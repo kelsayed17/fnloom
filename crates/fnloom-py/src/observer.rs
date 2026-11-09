@@ -91,12 +91,20 @@ pub struct PyObserver<'py, 's> {
     observer: Bound<'py, ObserverBase>,
     /// Where `pre_node` gets the node's keyword arguments, shared with the call.
     kwargs: &'s Kwargs<'py, 's>,
+    /// Whether the observer's class overrides `pre_node` or `post_node`: when it overrides
+    /// neither, node events are not sent, so its keyword arguments are never made.
+    nodes: bool,
 }
 
 impl<'py, 's> PyObserver<'py, 's> {
     /// Wraps a Python observer for one run.
-    pub const fn new(observer: Bound<'py, ObserverBase>, kwargs: &'s Kwargs<'py, 's>) -> Self {
-        Self { observer, kwargs }
+    pub fn new(observer: Bound<'py, ObserverBase>, kwargs: &'s Kwargs<'py, 's>) -> Self {
+        let nodes = overrides(&observer, "pre_node") || overrides(&observer, "post_node");
+        Self {
+            observer,
+            kwargs,
+            nodes,
+        }
     }
 
     /// Calls the hook `name` with `args` and the keyword arguments `kwargs`.
@@ -133,6 +141,18 @@ impl<'py, 's> PyObserver<'py, 's> {
     }
 }
 
+/// Whether `observer`'s class defines its own `name`, not `ObserverBase`'s no-op. When it
+/// can't be told, it counts as overridden, so the event is sent.
+fn overrides(observer: &Bound<'_, ObserverBase>, name: &str) -> bool {
+    let py = observer.py();
+    let own = observer.get_type().getattr(name);
+    let base = py.get_type::<ObserverBase>().getattr(name);
+    match (own, base) {
+        (Ok(own), Ok(base)) => !own.is(&base),
+        _ => true,
+    }
+}
+
 impl Observer<Value, PyErr> for PyObserver<'_, '_> {
     fn pre_graph(&mut self) -> PyResult<()> {
         let py = self.observer.py();
@@ -140,12 +160,18 @@ impl Observer<Value, PyErr> for PyObserver<'_, '_> {
     }
 
     fn pre_node(&mut self, node: &str, args: &[Arg<'_, Value>]) -> PyResult<()> {
+        if !self.nodes {
+            return Ok(());
+        }
         let py = self.observer.py();
         let kwargs = self.kwargs.for_observers(node, args)?;
         self.call(intern!(py, "pre_node"), (node, kwargs), None)
     }
 
     fn post_node(&mut self, node: &str, outcome: Result<&Value, &PyErr>) -> PyResult<()> {
+        if !self.nodes {
+            return Ok(());
+        }
         let py = self.observer.py();
         let absent = py.None().into_bound(py);
         let (value, error) = match outcome {

@@ -1017,6 +1017,73 @@ def test_run_end_lists_skipped_nodes_in_order(driver_kind: DriverKind) -> None:
     assert ends[0].skipped == expected
 
 
+_BRANCHES = """
+from fnloom import ABSENT, Absent
+
+
+def a() -> int | Absent:
+    return ABSENT
+
+
+def b() -> int | Absent:
+    return ABSENT
+
+
+def y1(a: int) -> int:
+    return a
+
+
+def y2(y1: int) -> int:
+    return y1
+
+
+def z1(b: int) -> int:
+    return b
+
+
+def z2(z1: int) -> int:
+    return z1
+"""
+
+
+def test_run_end_lists_skips_in_plan_order_on_the_sync_driver() -> None:
+    """Two declining branches: the sync driver skips in its plan's order."""
+    ends = _EndsOnly()
+    module = make_module("absence_branches", _BRANCHES)
+    driver = fnloom.Builder().with_modules(module).with_hooks(ends).build()
+    driver.execute(["y2", "z2"])
+    native = driver.prepare(["y2", "z2"])._plan  # noqa: SLF001  # the native plan's order
+    assert isinstance(native, _core.Plan)
+    plan = [name for name, _ in native.steps()]
+    assert [name for name, _ in ends.ends[0].skipped] == [
+        name for name in plan if name in {"y1", "y2", "z1", "z2"}
+    ]
+
+
+class _Started(fnloom.Hook):
+    def __init__(self) -> None:
+        self.seen: list[object] = []
+
+    @override
+    def before_run(self, event: fnloom.RunStart) -> None:
+        self.seen.append(("start", event.nodes))
+
+    @override
+    def after_run(self, event: fnloom.RunEnd) -> None:
+        self.seen.append(("end", event.ok, type(event.error).__name__))
+
+
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_an_absent_input_is_refused_after_before_run(driver_kind: DriverKind) -> None:
+    """As a value check's failure: `before_run` lists no nodes, `after_run` fails."""
+    hook = _Started()
+    module = _edges(f"absence_input_hooked_{driver_kind}")
+    builder = fnloom.Builder().with_modules(module).with_hooks(hook)
+    with pytest.raises(TypeError, match="leave it out instead"):
+        run(built(driver_kind, builder), ["loose"], inputs={"anything": ABSENT})
+    assert hook.seen == [("start", ()), ("end", False, "TypeError")]
+
+
 _FIELDS = """
 from typing import TypedDict
 
@@ -1355,6 +1422,17 @@ def test_the_may_be_absent_mark_is_drawn_and_hash_seed_stable(
     mermaid = drawing.to_mermaid()
     assert "classDef may_be_absent " in mermaid
     assert "stroke-dasharray" in drawing.to_svg()
+
+
+def test_an_overridden_node_that_may_be_absent_stays_dashed() -> None:
+    """An override's own style keeps the dashes of `may be absent` in DOT."""
+    driver = fnloom.build(_edges("absence_drawn_override"))
+    drawn = driver.draw_execution(
+        ["count"], inputs={"wanted": True}, overrides={"listing": ABSENT}
+    )
+    dot = drawn.to_dot()
+    line = next(line for line in dot.splitlines() if line.startswith('  "listing" ['))
+    assert 'style="dashed,filled,diagonals"' in line
 
 
 _TRUTHLESS = """

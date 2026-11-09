@@ -129,7 +129,8 @@ event by position, so a new field never breaks a hook.
       in. A run that only its result builder failed has them, with `ok=False` and the builder's error.
     - `skipped`: each node the run [skipped](writing-nodes.md#declining) because an argument it needs was
       `fnloom.ABSENT`, as `(node, branch)` pairs in the order skipped. `branch` is `()` outside a block. `()` when
-      nothing was skipped.
+      nothing was skipped. The sync driver skips in plan order; the async driver in the order its walk reaches each
+      node, as its node events report, which can vary between runs when nodes run in threads.
 
 ```python
 class Ends(fnloom.Hook):

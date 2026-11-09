@@ -17,6 +17,7 @@ from dataclasses import replace
 from types import MappingProxyType, ModuleType
 from typing import (
     Any,
+    Final,
     Literal,
     NamedTuple,
     NoReturn,
@@ -36,7 +37,7 @@ from fnloom import (
     _types,
     _wrappers,
 )
-from fnloom._absence import holds_absent, needs_input, refuse_given
+from fnloom._absence import needs_input, refuse_given
 from fnloom._caching import (
     NO_SETTINGS,
     Cache,
@@ -185,6 +186,22 @@ _STR_ONLY = frozenset({str})
 
 # No values, passed for a missing mapping; read, never written.
 _NO_VALUES: dict[str, object] = {}
+
+
+# `ABSENT`'s identity, which `_holds_absent` looks for among a run's values.
+_ABSENT_ID: Final = id(ABSENT)
+
+
+def _holds_absent(inputs: dict[str, Any], overrides: dict[str, Any]) -> bool:
+    """Whether an input or override is `ABSENT`, by identity, never `==` or truth.
+
+    Run on every run, so the ids are compared in C: `ABSENT in values.values()`
+    would call each value's own `__eq__`. An empty dict costs one truth test.
+    """
+    return bool(
+        (inputs and _ABSENT_ID in map(id, inputs.values()))
+        or (overrides and _ABSENT_ID in map(id, overrides.values()))
+    )
 
 
 def _names(values: Mapping[str, object] | None) -> frozenset[str]:
@@ -568,7 +585,7 @@ class PreparedPlan[R = dict[str, object]]:
             or given_overrides.keys() != self._override_names
         ):
             self._refuse_names(given_inputs, given_overrides)
-        if holds_absent(given_inputs) or holds_absent(given_overrides):
+        if _holds_absent(given_inputs, given_overrides):
             refuse_given(given_inputs, given_overrides, self._absent_overrides)
         if self._input_checks or self._override_checks:
             mismatches = _mismatches(self._input_checks, given_inputs)
@@ -730,9 +747,13 @@ class _HookedPlan[R](PreparedPlan[R]):
             or given_overrides.keys() != self._override_names
         ):
             self._refuse_names(given_inputs, given_overrides)
-        if holds_absent(given_inputs) or holds_absent(given_overrides):
-            refuse_given(given_inputs, given_overrides, self._absent_overrides)
         mismatches: list[str] | BaseException = []
+        if _holds_absent(given_inputs, given_overrides):
+            try:
+                refuse_given(given_inputs, given_overrides, self._absent_overrides)
+            except TypeError as refused:
+                # Raised by `_refuse_values`, after `before_run`, as a mismatch is.
+                return given_inputs, given_overrides, refused
         if self._input_checks or self._override_checks:
             try:
                 mismatches = _mismatches(self._input_checks, given_inputs)
