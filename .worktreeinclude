@@ -1,0 +1,3 @@
+# Gitignored files Orca copies from the main checkout into each new workspace (one literal path per line).
+# The local Claude Code permission allowlist, so agents in a new workspace start with the same approvals.
+.claude/settings.local.json
