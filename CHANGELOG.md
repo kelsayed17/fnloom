@@ -66,6 +66,13 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `PYTHONHASHSEED`: each set's members are sorted, as for a code version. Such a model used to key `DiskCache`
   differently in each process, so it missed (never a stale hit). Its cache key changes once, even under a fixed
   `PYTHONHASHSEED`; a model holding no set keeps its key.
+- A nullable pandas column or index (`Int64`, `Float64` and other extension dtypes) and any polars series holding
+  a null fingerprint their non-missing values in their own dtype, beside the missing mask. They went through a
+  float NaN, so `[2**53, NA]` and `[2**53 + 1, NA]` keyed the cache the same and could serve each other's result,
+  and a pandas `Float64` NaN keyed the same as NA. Their cache keys change once; numpy-backed columns keep theirs.
+- `@check_output(contains=...)` and `does_not_contain=` build on a node returning a `str` subclass, a `NewType`
+  over `str`, a `Literal` of strings or an `Annotated[str, ...]`. The first three were refused as not `str`, and
+  `Annotated` raised an unhelpful `TypeError` about set elements.
 
 ## [0.4.0] - 2026-11-05
 

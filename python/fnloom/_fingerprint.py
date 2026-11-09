@@ -380,7 +380,7 @@ def _pandas(value: object) -> object | None:  # noqa: PLR0911  # one return per 
                 value.columns,
                 [_pandas_dtype(column.dtype) for column in columns],
                 value.index,
-                [column.to_numpy() for column in columns],
+                [_pandas_values(column) for column in columns],
                 value.attrs,
             )
         case pd.Series():
@@ -388,7 +388,7 @@ def _pandas(value: object) -> object | None:  # noqa: PLR0911  # one return per 
                 value.name,
                 _pandas_dtype(value.dtype),
                 value.index,
-                value.to_numpy(),
+                _pandas_values(value),
                 value.attrs,
             )
         case pd.MultiIndex():
@@ -397,7 +397,12 @@ def _pandas(value: object) -> object | None:  # noqa: PLR0911  # one return per 
         case pd.Index():
             # A datetime or period index's frequency is state its values do not show.
             frequency = getattr(value, "freqstr", None)
-            return (value.name, _pandas_dtype(value.dtype), value.to_numpy(), frequency)
+            return (
+                value.name,
+                _pandas_dtype(value.dtype),
+                _pandas_values(value),
+                frequency,
+            )
         case pd.Timestamp():
             zone = _tz_form(value.tzinfo)
             if zone is None:
@@ -407,6 +412,19 @@ def _pandas(value: object) -> object | None:  # noqa: PLR0911  # one return per 
             return (value.value, value.unit)
         case _:
             return None
+
+
+def _pandas_values(values: Any) -> object:  # noqa: ANN401  # a pandas Series or Index
+    """A series' or index's values; a nullable one's as its non-missing values and mask.
+
+    `to_numpy` on a nullable column turns NA into a float NaN, rounding integers past
+    2**53 and losing NaN against NA; a numpy-backed column's `to_numpy` is exact.
+    """
+    np = sys.modules["numpy"]
+    if isinstance(values.dtype, np.dtype):
+        return values.to_numpy()
+    # An index's `isna` is already an array; a series' is a series.
+    return (values.dropna().to_numpy(), np.asarray(values.isna()))
 
 
 def _pandas_dtype(dtype: Any) -> object:  # noqa: ANN401  # numpy or pandas dtype
@@ -441,8 +459,12 @@ def _polars(value: object) -> object | None:
 
 
 def _polars_series(series: Any) -> tuple[object, object]:  # noqa: ANN401  # a polars Series
-    """A polars series' values and null mask: `to_numpy` turns a null into a NaN."""
-    return (series.to_numpy(), series.is_null().to_numpy())
+    """A polars series' non-null values and null mask.
+
+    `to_numpy` turns a null into a NaN, which rounds integers past 2**53, so the
+    nulls go first.
+    """
+    return (series.drop_nulls().to_numpy(), series.is_null().to_numpy())
 
 
 # The libraries recognised by the root of a value's module, and their branches.

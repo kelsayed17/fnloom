@@ -464,7 +464,13 @@ def _numeric(name: str) -> Callable[[object], str | None]:
 
 def _text(name: str) -> Callable[[object], str | None]:
     def problem(declared: object) -> str | None:
-        if declared in {Any, object} or _types.type_matches(str, declared):
+        # Either way round: a `str` subclass, `NewType` or `Literal` is text,
+        # and so is `str | None`.
+        if (
+            _types.checks_everything(declared)
+            or _types.type_matches(declared, str)
+            or _types.type_matches(str, declared)
+        ):
             return None
         return f"check {name} applies to str, not {inspect.formatannotation(declared)}"
 
