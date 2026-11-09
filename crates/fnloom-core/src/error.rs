@@ -11,7 +11,7 @@ pub enum BuildError {
         /// The repeated name.
         name: String,
     },
-    /// One spec lists an input twice, with different dependencies.
+    /// One spec lists an input twice, with different dependencies or collect modes.
     ConflictingInput {
         /// The node whose spec lists it.
         node: String,

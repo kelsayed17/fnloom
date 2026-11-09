@@ -36,7 +36,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
   no block (`BuildError::CollectOutsideBlock`) or of an expand (`CollectOfExpand`), a node reading blocks of two
   unrelated expands (`UnrelatedBlocks`), and a node collecting a block it is inside, by also reading it directly
   (Q124) or because the block reads its own collect back through nodes outside it (`CollectsOwnBlock`, with the
-  path). A collect passes on absence only from an absent expand, and an expand's items are never absent.
+  path). Collecting one input in two modes is a `ConflictingInput`. A collect passes on absence only from an absent
+  expand, and an expand's items are never absent.
 - Rust core: blocks, at prepare and run. `Graph::prepare` compiles each block the request reaches into a `SubPlan`
   (`Plan::blocks`), named for its expand by `Plan::block_of`, and refuses a requested output inside a block
   (`PlanError::OutputsInBlocks`, naming the nodes that collect it) or an override of a block node

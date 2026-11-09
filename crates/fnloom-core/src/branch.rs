@@ -482,7 +482,7 @@ impl<'r, P, T: Clone> Runner<'r, P, T> {
             }
             if let Some(block) = plan.block_of(step.node) {
                 for &read in &plan.blocks()[block.index()].reads {
-                    self.wanted[read.index()] = true;
+                    want(&mut self.wanted, graph, read, true);
                 }
             }
         }
@@ -497,7 +497,7 @@ impl<'r, P, T: Clone> Runner<'r, P, T> {
             }
             if let Some(block) = plan.block_of(step.node) {
                 for &read in &plan.blocks()[block.index()].reads {
-                    self.wanted[read.index()] = false;
+                    want(&mut self.wanted, graph, read, false);
                 }
             }
         }
@@ -654,7 +654,7 @@ impl<'r, P, T: Clone> Runner<'r, P, T> {
 }
 
 /// Marks `arg` wanted (or clears it), with the expand of its block: a collected node of a
-/// nested block is wanted through that block's expand step.
+/// nested or sibling block is wanted through that block's expand step.
 fn want<P>(wanted: &mut [bool], graph: &Graph<P>, arg: NodeId, to: bool) {
     wanted[arg.index()] = to;
     if let Some(expand) = graph.node(arg).block {
@@ -1526,6 +1526,63 @@ mod tests {
         .unwrap();
         let result = run(&g, &["out"], &[], &mut Fan::default()).unwrap();
         assert_eq!(result, out(&[("out", nums(&[100, 200]))]));
+    }
+
+    /// `zb` yields `[1, 2]` and `zb_m` is ten times each; inside the block of `ca`, `n`
+    /// collects the sibling block of `zb`; `total` collects `n`. Named so that `ca`'s block
+    /// sorts before `zb`'s, which it must still wait for.
+    fn sibling_collect(inside: Option<&'static str>) -> Vec<NodeSpec<Pay>> {
+        let reads_of = |name: &'static str| -> Vec<Read<'static>> {
+            inside.map(plain).into_iter().chain([plain(name)]).collect()
+        };
+        vec![
+            expand("zb", &reads_of("seed"), |_| Ok(items(&[1, 2]))),
+            node("zb_m", &[plain("zb")], tens),
+            expand("ca", &reads_of("seed"), |_| Ok(items(&[5, 6]))),
+            node("n", &[plain("ca"), collect("zb_m")], |args| {
+                Ok(args[1].clone())
+            }),
+            node("total", &[collect("n")], first),
+        ]
+    }
+
+    #[test]
+    fn a_block_collecting_a_sibling_block_waits_for_it() {
+        let mut specs = sibling_collect(None);
+        specs.push(node("seed", &[], |_| Ok(Num(0))));
+        let g = Graph::build(specs).unwrap();
+        let plan = g.prepare(&request(&["total"], &[], &[])).unwrap();
+        let outer: Vec<&str> = plan
+            .steps()
+            .iter()
+            .map(|s| g.node(s.node).name.as_str())
+            .collect();
+        assert_eq!(outer, ["seed", "zb", "ca", "total"]);
+        // The gathered values of `zb_m` are released after the block that reads them.
+        let ca = &plan.steps()[2];
+        assert!(ca.release.contains(&g.id_of("zb_m").unwrap()));
+        let result = run(&g, &["total"], &[], &mut Fan::default()).unwrap();
+        assert_eq!(
+            result,
+            out(&[("total", List(vec![nums(&[10, 20]), nums(&[10, 20])]))])
+        );
+    }
+
+    #[test]
+    fn a_nested_block_collecting_a_sibling_block_waits_for_it() {
+        let mut specs = sibling_collect(Some("outer"));
+        specs.push(expand("outer", &[], |_| Ok(items(&[1]))));
+        specs.push(node("seed", &[plain("outer")], |_| Ok(Num(0))));
+        specs.push(node("all", &[collect("total")], first));
+        let g = Graph::build(specs).unwrap();
+        let result = run(&g, &["all"], &[], &mut Fan::default()).unwrap();
+        assert_eq!(
+            result,
+            out(&[(
+                "all",
+                List(vec![List(vec![nums(&[10, 20]), nums(&[10, 20])])])
+            )])
+        );
     }
 
     #[test]

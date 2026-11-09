@@ -131,8 +131,8 @@ aborts the run, and `post_graph(false)` still runs so observers can close what t
 
 ## Errors
 
-- `BuildError`: `DuplicateName`; `ConflictingInput`, a spec listing one input twice with different dependencies (listed
-  twice alike, it is one edge); `Cycle` with the path, its first name repeated at the end; or one of the block
+- `BuildError`: `DuplicateName`; `ConflictingInput`, a spec listing one input twice with different dependencies or collect
+  modes (listed twice alike, it is one edge); `Cycle` with the path, its first name repeated at the end; or one of the block
   refusals ([Blocks](#blocks)).
 - `PlanError`: `UnknownOutputs`, `UnknownInputs`, `UnknownOverrides`, `OutputsInBlocks`, `OverridesInBlocks` or
   `MissingInputs`, checked in that order, each with every offending name sorted; `UnknownNodes` from the lineage

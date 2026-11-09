@@ -70,7 +70,8 @@ pub struct SubPlan {
     /// The block nodes that collects read, sorted: each branch's value of these is kept.
     pub collected: Vec<NodeId>,
     /// The values from outside the block that its nodes read, nested blocks included,
-    /// sorted. They are computed before the expand and shared by every branch.
+    /// sorted. They are computed before the expand and shared by every branch. A node of a
+    /// sibling block that a node inside collects is one too: its gathered values are.
     pub reads: Vec<NodeId>,
 }
 
@@ -391,12 +392,17 @@ impl<P> Graph<P> {
             };
             if action == Action::Compute {
                 for edge in &node.inputs {
-                    wait(edge.node);
+                    // A collect reads its source's block as a whole, once that has run.
+                    let place = match (edge.collect, self.node(edge.node).block) {
+                        (Some(_), Some(expand)) => expand,
+                        _ => edge.node,
+                    };
+                    wait(place);
                 }
             }
             if let Some(block) = block_of[node.id.index()] {
                 for &read in &reads[block.index()] {
-                    wait(read);
+                    wait(self.read_place(read, node.id));
                 }
             }
         }
@@ -452,7 +458,13 @@ impl<P> Graph<P> {
                 }
                 if let Some(block) = block_of[step.node.index()] {
                     for &read in &reads[block.index()] {
-                        if self.node(read).block == key && !is_collected[read.index()] {
+                        let place = self.read_place(read, step.node);
+                        let lives_here = if place == read {
+                            self.node(read).block == key && !is_collected[read.index()]
+                        } else {
+                            self.node(place).block == key
+                        };
+                        if lives_here {
                             last_use[read.index()] = Some((at, position));
                         }
                     }
@@ -494,6 +506,15 @@ impl<P> Graph<P> {
                         collected[block.index()].push(source.id);
                         is_collected[source.id.index()] = true;
                     }
+                    // A consumer inside a block below the collected block's own scope, as
+                    // when it collects a sibling block: each block between reads the
+                    // gathered values as an outer value.
+                    let scope = self.block_path(source.id).len().saturating_sub(1);
+                    for &expand in path.get(scope..).unwrap_or_default() {
+                        if let Some(block) = block_of[expand.index()] {
+                            reads[block.index()].push(source.id);
+                        }
+                    }
                     continue;
                 }
                 // The blocks of the path below the source's own: for an expand, its own block
@@ -511,6 +532,16 @@ impl<P> Graph<P> {
             list.dedup();
         }
         (reads, collected, is_collected)
+    }
+
+    /// The node whose place stands for `read` when the block of `expand` reads it: `read`
+    /// itself for a value, or the expand of `read`'s block for the gathered values of a
+    /// sibling block, which live in the scope its collects are in.
+    fn read_place(&self, read: NodeId, expand: NodeId) -> NodeId {
+        match self.node(read).block {
+            Some(block) if block != expand && !self.block_path(expand).contains(&block) => block,
+            _ => read,
+        }
     }
 
     /// The unit that stands for `id` in a scope `depth` levels deep that holds it: `id`

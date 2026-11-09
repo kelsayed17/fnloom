@@ -453,6 +453,26 @@ mod tests {
     }
 
     #[test]
+    fn collecting_one_node_two_ways_is_a_conflicting_input() {
+        let mut specs = tickers();
+        specs.push(reading(
+            "both",
+            &[
+                collect("scaled"),
+                ("scaled", Dependency::Required, Some(Collect::All)),
+            ],
+            (),
+        ));
+        assert_eq!(
+            refusal(specs),
+            BuildError::ConflictingInput {
+                node: "both".to_owned(),
+                input: "scaled".to_owned(),
+            }
+        );
+    }
+
+    #[test]
     fn collect_outside_a_block_is_refused() {
         let mut specs = tickers();
         specs.push(reading("days", &[collect("day")], ()));

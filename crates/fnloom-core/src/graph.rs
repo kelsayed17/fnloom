@@ -422,13 +422,13 @@ fn resolve_edges<P>(
     // second edge: block discovery refuses the node, since it would collect its own block.
     let repeats: Vec<(usize, usize)> = repeats
         .into_iter()
-        .filter(|&(first, at)| edges[first].collect == edges[at].collect)
+        .filter(|&(first, at)| edges[first].collect.is_some() == edges[at].collect.is_some())
         .collect();
-    // The first conflicting repeat in input order is the one reported.
-    if let Some(&(_, at)) = repeats
-        .iter()
-        .find(|&&(first, at)| edges[first].dependency != edges[at].dependency)
-    {
+    // The first conflicting repeat in input order is the one reported: two collects in two
+    // modes conflict as two dependencies do.
+    if let Some(&(_, at)) = repeats.iter().find(|&&(first, at)| {
+        edges[first].dependency != edges[at].dependency || edges[first].collect != edges[at].collect
+    }) {
         let node = edges[at].node;
         let input = spec
             .inputs
