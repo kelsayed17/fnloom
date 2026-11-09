@@ -50,10 +50,13 @@ fn panic_error(payload: &(dyn Any + Send)) -> PyErr {
 /// plan raises `RuntimeError` naming what was found, grouped with any observer errors.
 pub fn run_error(py: Python<'_>, error: RunError<PyErr>) -> PyErr {
     match error {
+        // The branch is noted with blocks in Python, by Plan 10's task 10.
         RunError::Node {
             node,
             source,
             observer_errors,
+            branch: _,
+            block: _,
         } => with_observer_errors(
             noted(py, source, &format!("in node '{node}'")),
             observer_errors,

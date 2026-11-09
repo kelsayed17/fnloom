@@ -14,6 +14,11 @@ pub struct Graph<P> {
     dependents: Vec<Vec<NodeId>>,
     /// Whether any node may be absent, so a plan of a graph without one skips the question.
     absence: bool,
+    /// The block paths: for each expand, at `spans[expand]`, the path of the nodes in its
+    /// block (its own path, then itself), packed into one buffer so `block_path` borrows.
+    /// Both are empty in a graph without an expand.
+    paths: Vec<NodeId>,
+    spans: Vec<(u32, u32)>,
 }
 
 impl<P> Graph<P> {
@@ -24,8 +29,13 @@ impl<P> Graph<P> {
     /// # Errors
     ///
     /// `BuildError::DuplicateName` when two specs share a name, `BuildError::ConflictingInput`
-    /// when a spec lists one input twice with different dependencies, `BuildError::Cycle` when
-    /// the dependencies are cyclic (a self-dependency counts).
+    /// when a spec lists one input twice with different dependencies or collect modes,
+    /// `BuildError::Cycle` when the dependencies are cyclic (a self-dependency counts). Then the
+    /// block refusals, the first in topological order: `CollectOutsideBlock` for a collect of a
+    /// node in no block, `CollectOfExpand` for a collect of an expand, `UnrelatedBlocks` for a
+    /// node reading the blocks of two unrelated expands, and `CollectsOwnBlock` for a node
+    /// collecting a block it is inside, or a block reading its own collect through nodes
+    /// outside it.
     pub fn build(specs: Vec<NodeSpec<P>>) -> Result<Self, BuildError> {
         let mut declared = index_by_name(specs)?;
         let ids = assign_ids(&declared);
@@ -42,6 +52,14 @@ impl<P> Graph<P> {
                     .collect(),
             });
         }
+        let blocks = nodes
+            .iter()
+            .any(|node| node.is_expand() || node.inputs.iter().any(|edge| edge.collect.is_some()));
+        let (paths, spans) = if blocks {
+            assign_blocks(&mut nodes)?
+        } else {
+            (Vec::new(), Vec::new())
+        };
         let absence = mark_may_be_absent(&mut nodes);
         let dependents = forward_adjacency(&nodes);
         Ok(Self {
@@ -49,7 +67,27 @@ impl<P> Graph<P> {
             ids,
             dependents,
             absence,
+            paths,
+            spans,
         })
+    }
+
+    /// The expands whose blocks hold `id`, outermost first; empty outside every block.
+    ///
+    /// An expand's own block is not on its path: the path is that of the block it sits in.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `id` did not come from this graph.
+    #[must_use]
+    pub fn block_path(&self, id: NodeId) -> &[NodeId] {
+        match self.node(id).block {
+            None => &[],
+            Some(expand) => {
+                let (start, end) = self.spans[expand.index()];
+                &self.paths[start as usize..end as usize]
+            }
+        }
     }
 
     /// All nodes, indexed by `NodeId`.
@@ -110,6 +148,11 @@ impl<P> Graph<P> {
             .into_iter()
             .filter(|id| above.binary_search(id).is_ok())
             .collect())
+    }
+
+    /// Whether any node is an expand, so a plan of a graph without one skips blocks.
+    pub(crate) fn has_blocks(&self) -> bool {
+        !self.spans.is_empty()
     }
 
     /// Whether any node of the graph may be absent (`Node::may_be_absent`).
@@ -190,8 +233,74 @@ fn forward_adjacency<P>(nodes: &[Node<P>]) -> Vec<Vec<NodeId>> {
     dependents
 }
 
+/// The packed block paths, and each expand's span in them (`Graph::paths`, `Graph::spans`).
+type BlockPaths = (Vec<NodeId>, Vec<(u32, u32)>);
+
+/// Finds every node's block, then packs the paths of the expands' blocks.
+///
+/// Returns the packed paths and, per node, the span of an expand's block path.
+fn assign_blocks<P>(nodes: &mut [Node<P>]) -> Result<BlockPaths, BuildError> {
+    let order = topological(nodes);
+    let blocks = crate::block::discover(nodes, &order)?;
+    for (node, block) in nodes.iter_mut().zip(blocks) {
+        node.block = block;
+    }
+    // In topological order an expand comes after the expand of its own block, so each
+    // block path extends a packed one.
+    let mut paths = Vec::new();
+    let mut spans = vec![(0, 0); nodes.len()];
+    for &id in &order {
+        let node = &nodes[id.index()];
+        if !node.is_expand() {
+            continue;
+        }
+        let start = paths.len();
+        if let Some(outer) = node.block {
+            let (from, to) = spans[outer.index()];
+            paths.extend_from_within(from as usize..to as usize);
+        }
+        paths.push(id);
+        spans[id.index()] = (as_u32(start), as_u32(paths.len()));
+    }
+    Ok((paths, spans))
+}
+
+/// `value` as a `u32`: an offset into the packed block paths.
+fn as_u32(value: usize) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+/// A topological order of an acyclic graph, each node after every node it reads; ties
+/// taken in id order.
+fn topological<P>(nodes: &[Node<P>]) -> Vec<NodeId> {
+    let mut waiting: Vec<usize> = nodes.iter().map(|node| node.inputs.len()).collect();
+    let dependents = forward_adjacency(nodes);
+    let mut ready: Vec<NodeId> = nodes
+        .iter()
+        .rev()
+        .filter(|node| node.inputs.is_empty())
+        .map(|node| node.id)
+        .collect();
+    let mut order = Vec::with_capacity(nodes.len());
+    while let Some(id) = ready.pop() {
+        order.push(id);
+        for &consumer in dependents[id.index()].iter().rev() {
+            waiting[consumer.index()] -= 1;
+            if waiting[consumer.index()] == 0 {
+                ready.push(consumer);
+            }
+        }
+    }
+    order
+}
+
 /// Sets `may_be_absent` on every node that declines or reads, by a `Required` edge, a node
 /// that may be absent.
+///
+/// Blocks change two edges. A collect edge passes on the absence of the collected block's
+/// expand, not of the node it reads: a block node that is absent in a branch is dropped or
+/// kept in its place, but an absent expand has no branches. An edge from an expand into its
+/// own block passes nothing: its consumers read items, and an item is never absent.
 ///
 /// The flag is a reachability from the declining nodes along `Required` edges, so an
 /// iterative worklist finds it in any order, in time linear in the graph. A graph where no
@@ -209,7 +318,15 @@ fn mark_may_be_absent<P>(nodes: &mut [Node<P>]) -> bool {
     let mut required_by = vec![Vec::new(); nodes.len()];
     for node in nodes.iter() {
         for edge in &node.inputs {
-            if edge.dependency == Dependency::Required {
+            if edge.dependency != Dependency::Required {
+                continue;
+            }
+            let source = &nodes[edge.node.index()];
+            if edge.collect.is_some() {
+                if let Some(expand) = source.block {
+                    required_by[expand.index()].push(node.id);
+                }
+            } else if !source.is_expand() {
                 required_by[edge.node.index()].push(node.id);
             }
         }
@@ -260,10 +377,15 @@ fn make_node<P>(
             id,
             inputs: resolve_edges(&spec, ids)?,
             name: spec.name,
-            kind: NodeKind::Function(spec.payload),
+            kind: if spec.expands {
+                NodeKind::Expand(spec.payload)
+            } else {
+                NodeKind::Function(spec.payload)
+            },
             tags: spec.tags,
             declines: spec.declines,
             may_be_absent: false,
+            block: None,
         },
         None => Node {
             id,
@@ -273,6 +395,7 @@ fn make_node<P>(
             tags: BTreeMap::new(),
             declines: false,
             may_be_absent: false,
+            block: None,
         },
     })
 }
@@ -293,17 +416,30 @@ fn resolve_edges<P>(
             edges.push(Edge {
                 node,
                 dependency: input.dependency,
+                collect: input.collect,
             });
         }
     }
     let Some(repeats) = repeated_edges(&edges) else {
         return Ok(edges);
     };
-    // The first conflicting repeat in input order is the one reported.
-    if let Some(&(_, at)) = repeats
-        .iter()
-        .find(|&&(first, at)| edges[first].dependency != edges[at].dependency)
-    {
+    // Each repeat pairs with the first edge of its node and its kind: a read that collects
+    // and one that doesn't are two edges, which block discovery then refuses, since the
+    // node would collect its own block. Repeats of one kind must agree, in dependency and in
+    // collect mode; the first that doesn't, in input order, is reported.
+    let repeats: Vec<(usize, usize)> = repeats
+        .into_iter()
+        .filter_map(|(_, at)| {
+            let kind = edges[at].collect.is_some();
+            let first = edges[..at]
+                .iter()
+                .position(|e| e.node == edges[at].node && e.collect.is_some() == kind)?;
+            Some((first, at))
+        })
+        .collect();
+    if let Some(&(_, at)) = repeats.iter().find(|&&(first, at)| {
+        edges[first].dependency != edges[at].dependency || edges[first].collect != edges[at].collect
+    }) {
         let node = edges[at].node;
         let input = spec
             .inputs
@@ -455,15 +591,18 @@ mod tests {
                 InputSpec {
                     name: "a".to_owned(),
                     dependency: Dependency::Required,
+                    collect: None,
                 },
                 InputSpec {
                     name: "a".to_owned(),
                     dependency: second,
+                    collect: None,
                 },
             ],
             tags: BTreeMap::new(),
             payload: (),
             declines: false,
+            expands: false,
         };
         let err = Graph::build(vec![spec(Dependency::Optional)]).unwrap_err();
         assert_eq!(
@@ -492,6 +631,7 @@ mod tests {
                 .map(|i| InputSpec {
                     name: format!("x{i:02}"),
                     dependency: Dependency::Required,
+                    collect: None,
                 })
                 .collect();
             inputs.insert(
@@ -499,15 +639,18 @@ mod tests {
                 InputSpec {
                     name: "x12".to_owned(),
                     dependency: Dependency::Required,
+                    collect: None,
                 },
             );
             inputs.push(InputSpec {
                 name: "x03".to_owned(),
                 dependency: repeat,
+                collect: None,
             });
             inputs.push(InputSpec {
                 name: "x07".to_owned(),
                 dependency: Dependency::Optional,
+                collect: None,
             });
             NodeSpec {
                 name: "total".to_owned(),
@@ -515,6 +658,7 @@ mod tests {
                 tags: BTreeMap::new(),
                 payload: (),
                 declines: false,
+                expands: false,
             }
         };
         // `x03` conflicts before `x07` does, in input order.

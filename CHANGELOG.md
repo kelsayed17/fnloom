@@ -45,6 +45,33 @@ change the public API; such changes are listed under **Changed** and **Removed**
   consumer, which is absent too. `Plan::needs_rules` says whether a plan follows these rules; one that doesn't runs
   the plain loop unchanged. `BuildError::ConflictingInput` refuses a spec listing one input twice with different
   dependencies, which no one dependency describes; listed twice alike, it is one edge, as before.
+- Rust core: blocks, at build. `NodeSpec.expands` makes a node an expand (`NodeKind::Expand(payload)`, whose
+  payload `Node::payload` returns as a function's), and `InputSpec.collect: Option<Collect>` makes a parameter
+  collect a block, keeping the present branches (`Collect::Present`) or every branch (`Collect::All`). A block holds
+  every node reading its expand along a path that crosses no collect of it; `Node.block` names a node's innermost
+  expand and `Graph::block_path` all of them, outermost first. Blocks nest, any number of collects may read one
+  block (Q123), and a node may collect one block and expand another (Q136). The build refuses a collect of a node in
+  no block (`BuildError::CollectOutsideBlock`) or of an expand (`CollectOfExpand`), a node reading blocks of two
+  unrelated expands (`UnrelatedBlocks`), and a node collecting a block it is inside, by also reading it directly
+  (Q124) or because the block reads its own collect back through nodes outside it (`CollectsOwnBlock`, with the
+  path). Collecting one input in two modes is a `ConflictingInput`. A collect passes on absence only from an absent
+  expand, and an expand's items are never absent.
+- Rust core: blocks, at prepare and run. `Graph::prepare` compiles each block the request reaches into a `SubPlan`
+  (`Plan::blocks`), named for its expand by `Plan::block_of`, and refuses a requested output inside a block
+  (`PlanError::OutputsInBlocks`, naming the nodes that collect it) or an override of a block node
+  (`OverridesInBlocks`). An override of an expand supplies its items, and one of a collect cuts its block. A value
+  read only by a block is computed before its expand, whatever its name. `Plan::run` runs each block once per item,
+  in item order, branch after branch, with nested blocks on an explicit stack (Q122). An evaluator opts in through
+  `Evaluate::blocks`, returning a `Blocks` that iterates expands (`Item::Next`, `Done`, `Declined`) and gathers
+  collects; a plan with an expand run without one is a `RunError::BrokenPlan`. An empty expand gives empty collects,
+  an expand requested alone returns its items, an absent expand gives its collects the three absence rules as a
+  whole, and a failing branch finishes every open iterator, innermost first, and reports its branch
+  (`RunError::Node.branch` and `.block`). `Evaluate::evaluate_in`, `Evaluate::lookup` (a value known without
+  computing it, asked only downstream of an expand, in reverse need order within a branch), and
+  `Observer::{pre_node_in, post_node_in, post_expand, hit_in}` carry the branch path; their defaults change nothing.
+  `Plan::block_of(expand)` names an expand's sub-plan, `Plan::is_late(node)` says whether a step is downstream of an
+  expand, and `Plan::has_expands` whether a plan has an expand step. An iterator that declines for an expand that
+  can't be absent is a `RunError::BrokenPlan`. A plan without an expand runs the plain loop unchanged.
 - Caching declared absences. A node returning `fnloom.ABSENT` is stored under its key in every store, and a hit
   replays it, so each node requiring it is skipped again without running; a skipped node is never stored.
   `DiskCache` writes `ABSENT` as an `absent` flag in the entry's header with no payload, in every format, so the
@@ -71,6 +98,12 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - Rust core: `NodeSpec` has a new field, `declines`; a spec built with struct syntax sets it, `false` for a node
   that never declines. `Dependency` has a third variant, `Admits`, and `BuildError` a new one, `ConflictingInput`,
   so a `match` on either needs an arm for it.
+- Rust core: `NodeSpec` has a new field, `expands`, and `InputSpec` and `Edge` one, `collect`; `Node` has `block`.
+  A spec built with struct syntax sets them, `false` and `None` for a graph without blocks. `NodeKind` has a third
+  variant, `Expand`, and `BuildError` four more, so a `match` on either needs arms for them.
+- Rust core: `RunError::Node` has two new fields, `branch` and `block`; a pattern naming every field needs them, or
+  `..`. `PlanError` has two more variants, `OutputsInBlocks` and
+  `OverridesInBlocks`.
 
 ### Fixed
 

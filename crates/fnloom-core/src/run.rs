@@ -41,6 +41,105 @@ pub trait Evaluate<P> {
     fn is_absent(&self, _value: &Self::Value) -> bool {
         false
     }
+
+    /// The evaluator's blocks: how it iterates an expand's value and gathers a collect.
+    ///
+    /// The default has none. A plan with an expand step, run by an evaluator without
+    /// blocks, fails with `RunError::BrokenPlan` at that step, never yielding empty blocks.
+    fn blocks(&mut self) -> Option<&mut dyn Blocks<P, Self::Value, Self::Error>> {
+        None
+    }
+
+    /// Runs `payload` as `evaluate` does, in the branch `branch`: one item index per level
+    /// of nesting, outermost first, and empty outside every block.
+    ///
+    /// The executor calls this, not `evaluate`, when a plan has an expand step. The default
+    /// calls `evaluate`.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the payload raises; the executor wraps it in `RunError::Node`.
+    fn evaluate_in(
+        &mut self,
+        node: &Node<P>,
+        payload: &P,
+        args: &[Arg<'_, Self::Value>],
+        _branch: &[usize],
+    ) -> Result<Self::Value, Self::Error> {
+        self.evaluate(node, payload, args)
+    }
+
+    /// A value for `node` in `branch` known without computing it, such as a cache hit.
+    ///
+    /// Asked only for a computed step downstream of an expand (`Plan::is_late`), whose cache
+    /// key is known only once the items are. Inside a branch, the steps are asked in
+    /// reverse need order before the branch runs, from the nodes its collects read: a hit
+    /// is not computed, and the steps only it needed are neither asked nor computed. Outside
+    /// a block, a step is asked when it is reached, and a hit skips only that step. A hit
+    /// for a node that may be absent is asked `is_absent`, as a computed value is. The
+    /// default knows none.
+    ///
+    /// # Errors
+    ///
+    /// An error fails the run as the node's own failure.
+    fn lookup(
+        &mut self,
+        _node: &Node<P>,
+        _branch: &[usize],
+    ) -> Result<Option<Self::Value>, Self::Error> {
+        Ok(None)
+    }
+}
+
+/// What an expand's iterator gave: an item, the end, or a decline while yielding.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Item<V> {
+    /// The next item, which runs one branch of the block.
+    Next(V),
+    /// The iterator is exhausted.
+    Done,
+    /// The iterator declined after yielding: the expand is absent, holding this value, and
+    /// the branches already run are dropped.
+    Declined(V),
+}
+
+/// How an evaluator runs blocks: it iterates expands and gathers collects.
+///
+/// `Evaluate::blocks` lends it out for one call at a time, so an iterator may live in the
+/// evaluator's own values and interleave with the branches it feeds.
+pub trait Blocks<P, V, E> {
+    /// An iterator over `iterable`: a computed expand's value, or an expand override.
+    ///
+    /// # Errors
+    ///
+    /// An error fails the run as the expand's own failure.
+    fn iterate(&mut self, node: &Node<P>, iterable: &V) -> Result<V, E>;
+
+    /// The next item; `Done` when exhausted; `Declined(v)` when the iterator declined while
+    /// yielding.
+    ///
+    /// # Errors
+    ///
+    /// An error fails the run as the expand's own failure.
+    fn next_item(&mut self, node: &Node<P>, iterator: &V) -> Result<Item<V>, E>;
+
+    /// Ends the iterator: `exhausted`, or stopped early, by a failure, so it should be
+    /// closed. Returns the expand node's value, which a requested expand returns. Not called
+    /// after `Declined`. On a failure it is called for every open iterator, innermost first,
+    /// and what it returns is dropped.
+    ///
+    /// # Errors
+    ///
+    /// An error fails the run as the expand's own failure.
+    fn finish_items(&mut self, node: &Node<P>, iterator: &V, exhausted: bool) -> Result<V, E>;
+
+    /// One collect argument of `consumer`, from the branches' values of `source`, in branch
+    /// order.
+    ///
+    /// # Errors
+    ///
+    /// An error fails the run as the consumer's own failure.
+    fn gather(&mut self, consumer: &Node<P>, source: NodeId, values: Vec<V>) -> Result<V, E>;
 }
 
 /// One argument passed to a node: the input it comes from and that input's value.
@@ -99,6 +198,50 @@ pub trait Observer<V, E> {
         Ok(())
     }
 
+    /// `pre_node` in a branch, for a plan with an expand step; the default calls `pre_node`.
+    ///
+    /// # Errors
+    ///
+    /// An error aborts the run after every observer has seen the event.
+    fn pre_node_in(&mut self, node: &str, _branch: &[usize], args: &[Arg<'_, V>]) -> Result<(), E> {
+        self.pre_node(node, args)
+    }
+
+    /// `post_node` in a branch, for a plan with an expand step; the default calls
+    /// `post_node`.
+    ///
+    /// # Errors
+    ///
+    /// An error aborts the run after every observer has seen the event.
+    fn post_node_in(
+        &mut self,
+        node: &str,
+        _branch: &[usize],
+        outcome: Result<&V, &E>,
+    ) -> Result<(), E> {
+        self.post_node(node, outcome)
+    }
+
+    /// Called when an expand's items are exhausted, with how many there were; `branch` is
+    /// the branch the expand ran in. Not called for an expand that is absent.
+    ///
+    /// # Errors
+    ///
+    /// An error aborts the run after every observer has seen the event.
+    fn post_expand(&mut self, _node: &str, _branch: &[usize], _items: usize) -> Result<(), E> {
+        Ok(())
+    }
+
+    /// Called instead of the node events for a step whose value `Evaluate::lookup` gave.
+    /// In a branch, the hits fire in plan order before its first step runs.
+    ///
+    /// # Errors
+    ///
+    /// An error aborts the run after every observer has seen the event.
+    fn hit_in(&mut self, _node: &str, _branch: &[usize], _value: &V) -> Result<(), E> {
+        Ok(())
+    }
+
     /// Called once after the run ended; `ok` says whether it succeeded.
     ///
     /// # Errors
@@ -121,11 +264,16 @@ pub enum RunError<E> {
         /// Errors observers raised while handling this failure (`post_node` with the error, then
         /// `post_graph(false)`); empty when they all succeeded.
         observer_errors: Vec<E>,
+        /// The branch it failed in, one item index per level of nesting, outermost first;
+        /// empty outside every block.
+        branch: Vec<usize>,
+        /// The expand of the innermost block it is in; `None` outside every block.
+        block: Option<String>,
     },
     /// One or more observers failed on an event.
     Observers {
-        /// The first failing event: `pre_graph`, `pre_node`, `post_node`, `skipped` or
-        /// `post_graph`.
+        /// The first failing event: `pre_graph`, `pre_node`, `post_node`, `skipped`,
+        /// `post_expand`, `hit` or `post_graph`.
         event: &'static str,
         /// Every error raised, in observer order, then any from the closing `post_graph(false)`.
         errors: Vec<E>,
@@ -148,7 +296,20 @@ pub enum RunError<E> {
 impl<E: fmt::Display> fmt::Display for RunError<E> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Node { node, source, .. } => write!(f, "node '{node}' failed: {source}"),
+            Self::Node {
+                node,
+                source,
+                branch,
+                block,
+                ..
+            } => match block {
+                Some(block) => write!(
+                    f,
+                    "node '{node}' failed in branch {} of '{block}': {source}",
+                    branch_text(branch)
+                ),
+                None => write!(f, "node '{node}' failed: {source}"),
+            },
             Self::Observers { event, errors } => {
                 write!(f, "{} observer error(s) in {event}", errors.len())
             }
@@ -156,6 +317,15 @@ impl<E: fmt::Display> fmt::Display for RunError<E> {
             Self::BrokenPlan { detail, .. } => write!(f, "broken plan: {detail}"),
         }
     }
+}
+
+/// A branch path as Python writes a tuple: `(2,)`, `(0, 1)`.
+pub(crate) fn branch_text(branch: &[usize]) -> String {
+    if let [only] = branch {
+        return format!("({only},)");
+    }
+    let parts: Vec<String> = branch.iter().map(ToString::to_string).collect();
+    format!("({})", parts.join(", "))
 }
 
 impl<E: Error + 'static> Error for RunError<E> {
@@ -168,13 +338,16 @@ impl<E: Error + 'static> Error for RunError<E> {
 }
 
 /// The observers of one run, driven as a group.
-struct Hooks<'a, 'o, V, E> {
-    observers: &'a mut [&'o mut dyn Observer<V, E>],
+pub(crate) struct Hooks<'a, 'o, V, E> {
+    pub(crate) observers: &'a mut [&'o mut dyn Observer<V, E>],
 }
 
 impl<V, E> Hooks<'_, '_, V, E> {
     /// Delivers one event to every observer in slice order and returns the errors raised.
-    fn fire(&mut self, mut event: impl FnMut(&mut dyn Observer<V, E>) -> Result<(), E>) -> Vec<E> {
+    pub(crate) fn fire(
+        &mut self,
+        mut event: impl FnMut(&mut dyn Observer<V, E>) -> Result<(), E>,
+    ) -> Vec<E> {
         self.observers
             .iter_mut()
             .filter_map(|observer| event(&mut **observer).err())
@@ -182,7 +355,7 @@ impl<V, E> Hooks<'_, '_, V, E> {
     }
 
     /// Delivers one event like `fire`, failing with `RunError::Observers` if any observer did.
-    fn check(
+    pub(crate) fn check(
         &mut self,
         name: &'static str,
         event: impl FnMut(&mut dyn Observer<V, E>) -> Result<(), E>,
@@ -228,6 +401,13 @@ impl Plan {
     /// Steps run in plan order. Hooks fire only around `Compute` steps. The first failure
     /// aborts the run once every observer has seen the current event; `post_graph(false)` then
     /// runs, and its errors are reported with the failure.
+    ///
+    /// A plan with an expand step (`Plan::has_expands`) runs its blocks in reference order:
+    /// at an expand step it pulls item 0, runs that branch's sub-plan to its end, pulls the
+    /// next, and so on, then goes on to the next step. Nested blocks repeat this inside a
+    /// branch. Such a plan calls `Evaluate::evaluate_in` and the observers' `_in` events,
+    /// with the branch path. On a failure, every open iterator is finished as stopped,
+    /// innermost first, before the error is returned.
     ///
     /// # Errors
     ///
@@ -280,7 +460,9 @@ impl Plan {
         let outcome = hooks
             .check("pre_graph", |observer| observer.pre_graph())
             .and_then(|()| {
-                if self.needs_rules() {
+                if self.has_expands() {
+                    crate::branch::execute(self, graph, eval, slots, &mut hooks)
+                } else if self.needs_rules() {
                     self.execute_by_rules(graph, eval, slots, &mut hooks)
                 } else {
                     self.execute(graph, eval, slots, &mut hooks)
@@ -436,9 +618,9 @@ impl Plan {
 }
 
 /// A slot of the absence-aware loop: a value, and whether it is absent.
-struct Slot<V> {
-    value: V,
-    absent: bool,
+pub(crate) struct Slot<V> {
+    pub(crate) value: V,
+    pub(crate) absent: bool,
 }
 
 /// A step's arguments under the absence rules, or the absent value that skips it.
@@ -500,12 +682,12 @@ fn gather_by_rules<'g, P, T: Clone, E>(
 
 /// The `RunError::BrokenPlan` for an input node a plan computes.
 #[cold]
-fn planned_to_compute<P, E>(node: &Node<P>) -> RunError<E> {
+pub(crate) fn planned_to_compute<P, E>(node: &Node<P>) -> RunError<E> {
     broken(format!("input node '{}' planned to compute", node.name))
 }
 
 /// A `RunError::BrokenPlan` with no observer errors yet; the closing hook adds any.
-const fn broken<E>(detail: String) -> RunError<E> {
+pub(crate) const fn broken<E>(detail: String) -> RunError<E> {
     RunError::BrokenPlan {
         detail,
         observer_errors: Vec::new(),
@@ -566,6 +748,8 @@ fn call<P, V: Evaluate<P>>(
                 node: node.name.clone(),
                 source,
                 observer_errors: Vec::new(),
+                branch: Vec::new(),
+                block: None,
             });
     }
     hooks.check("pre_node", |observer| observer.pre_node(&node.name, args))?;
@@ -582,6 +766,8 @@ fn call<P, V: Evaluate<P>>(
                 node: node.name.clone(),
                 source,
                 observer_errors,
+                branch: Vec::new(),
+                block: None,
             })
         }
     }
@@ -987,6 +1173,8 @@ mod tests {
                 node: "b".to_owned(),
                 source: "b failed".to_owned(),
                 observer_errors: Vec::new(),
+                branch: Vec::new(),
+                block: None,
             }
         );
         assert_eq!(
@@ -1019,6 +1207,7 @@ mod tests {
             node,
             source,
             observer_errors,
+            ..
         } = err
         else {
             unreachable!("expected a node error");
