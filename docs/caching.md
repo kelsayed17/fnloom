@@ -643,6 +643,11 @@ The second run calls `sales` once, for `"us"`, and prints `sales us`.
   an outer hit does (Q85).
 - **Policies apply per branch.** A `recompute` or `disable` block node runs in every branch, and what reads it in the
   branch is uncacheable, since its result is known only once the branch ran.
+- **A collect inside a block is keyed before its block runs,** so it can hit only when its expand's items are stored
+  and replayed. Under a `recompute` or `disable` inner expand, the inner branches still hit, and the collect runs.
+- **The purity contract covers items and branches.** The items are stored once the expand is exhausted, after its
+  block ran, so a block node that changes its item in place changes what is stored: don't. A node's key holds no
+  branch index, so a node whose value depends on `current_branch()` is served another branch's value after a reorder.
 - **`explain_cache` runs nothing.** It reports a block node `unknown`, keyed per item, and counts an outer expand's
   branches from its stored items, in its reason. With none stored, the reason says
   `the expand node runs, so its branches are known only at run`.

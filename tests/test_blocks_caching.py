@@ -129,6 +129,30 @@ def test_an_appended_item_computes_one_branch(
     ]
 
 
+@pytest.mark.parametrize("summary", ["default", "recompute"])
+def test_an_overridden_expand_keys_each_branch_by_its_item(
+    capsys: pytest.CaptureFixture[str], summary: str
+) -> None:
+    """An expand override's items key their branches, as computed items do."""
+    module = make_module(f"cached_blocks_overridden_{summary}", ORDERED)
+    driver = _cached(module, recompute=["summary"] if summary == "recompute" else ())
+    for items, ran in (
+        ([1, 2], ["details 1", "scaled 10", "details 2", "scaled 20", "summary"]),
+        ([1, 2], [] if summary == "default" else ["summary"]),
+        ([2, 3], ["details 3", "scaled 30", "summary"]),
+    ):
+        _called(capsys)
+        result = driver.execute(
+            ["summary"], inputs={"rate": 10}, overrides={"picked": items}
+        )
+        assert result == {"summary": [item * 10 + 1 for item in items]}
+        assert _called(capsys) == ran
+    explained = driver.explain_cache(
+        ["summary"], inputs={"rate": 10}, overrides={"picked": [2, 3]}
+    )
+    assert explained["details"] == CacheOutcome("unknown", "keyed per item of 'picked'")
+
+
 def test_a_moved_item_hits(capsys: pytest.CaptureFixture[str]) -> None:
     """A branch key holds the item's fingerprint, not its index."""
     module = make_module("cached_blocks_moved", ORDERED)

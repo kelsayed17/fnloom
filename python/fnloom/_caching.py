@@ -1006,12 +1006,15 @@ class CacheRun:
         keys = [_planned(cache.keys[name], actions) for name in computed]
         # With an expand, the nodes downstream of one are keyed per branch, during
         # the run (`LateKeys`); every other node is keyed as without blocks.
-        self._expands = frozenset(n for n in computed if n in cache.expands)
+        # An overridden expand counts: its block runs over the override's items.
+        self._expands = frozenset(n for n, _ in steps if n in cache.expands)
         self._late: tuple[str, ...] = tuple(plan.late()) if self._expands else ()
         late = frozenset(self._late)
-        self._paths = {
-            name: tuple(path) for name, path in graph.blocks().items() if name in late
-        }
+        self._paths = (
+            {name: tuple(p) for name, p in graph.blocks().items() if name in late}
+            if late
+            else {}
+        )
         self._collects = {name: cache.collects[name] for name in self._late}
         # The producer of each `recompute` field this plan, or an enclosing one,
         # computes: never looked up here, so the field reads a value the producer
@@ -1795,7 +1798,20 @@ class LateKeys:
         return name in self._shape.plans
 
     def records(self, name: str) -> bool:
-        """Whether expand `name`'s items are kept, to be stored once exhausted."""
+        """Whether expand `name`'s items are kept, to be stored once exhausted.
+
+        Not when they were replayed, nor when its key in the branch last asked
+        about is not known: then nothing could store them.
+        """
+        if not self._stores(name):
+            return False
+        prefix = self._current[: len(self._shape.paths.get(name, ()))]
+        if (name, prefix) in self._replayed:
+            return False
+        return isinstance(self._expand_key(name, prefix), bytes)
+
+    def _stores(self, name: str) -> bool:
+        """Whether node `name`'s policy looks it up and stores it."""
         return self._shape.stored.get(name, False)
 
     def lookup(self, name: str, branch: _Branch) -> tuple[object] | None:
@@ -1845,7 +1861,7 @@ class LateKeys:
         pulling = self._pulling.pop(name, None)
         versions = pulling[1] if pulling is not None and pulling[0] == prefix else []
         self._items[name, prefix] = tuple(versions)
-        if (name, prefix) in self._replayed or not self.records(name):
+        if (name, prefix) in self._replayed or not self._stores(name):
             return
         key = self._expand_key(name, prefix)
         if isinstance(key, bytes) and isinstance(value, list):
@@ -1856,7 +1872,8 @@ class LateKeys:
         k = self._shape.keys[name]
         if hit:
             return k.outcome(found=True)
-        return _late_outcome(k, self._memo.get((name, branch), _UNKNOWN))
+        # Asked again, since a key not known at the walk may be known by now.
+        return _late_outcome(k, self.key(name, branch))
 
     def key(self, name: str, branch: _Branch) -> object:
         """Late node `name`'s key in `branch`: `None` uncacheable, `_UNKNOWN` not yet.
@@ -2000,7 +2017,7 @@ class LateKeys:
             return key
         items = self._replayed.get((name, prefix))
         if items is None:
-            if not isinstance(key, bytes) or not self.records(name):
+            if not isinstance(key, bytes) or not self._stores(name):
                 return _UNKNOWN
             value = self._run.load(key, name, self._warned)
             if not isinstance(value, list):
@@ -2031,7 +2048,7 @@ class LateKeys:
         if version is not None:
             return version
         if key is _PENDING:
-            if (name, prefix) not in self._replayed and not self.records(name):
+            if (name, prefix) not in self._replayed and not self._stores(name):
                 return None
             key = self._expand_key(name, prefix)
         if not isinstance(key, bytes):
@@ -2072,7 +2089,8 @@ class LateKeys:
             else:
                 found = self._run.load(key, name, self._warned) is not MISSING
                 outcomes[name] = k.outcome(found=found)
-        for name in sorted(shape.expands - shape.plans.keys()):
+        # An overridden expand is no computed node, so it has no outcome.
+        for name in sorted((shape.expands - shape.plans.keys()) & outcomes.keys()):
             outcome = outcomes[name]
             branches = self._branches(name)
             if branches is None:
