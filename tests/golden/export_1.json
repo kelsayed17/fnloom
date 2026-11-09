@@ -2,7 +2,7 @@
   {
     "format": "fnloom.export/1",
     "fnloom": "<version>",
-    "graph_version": "f0118c066d456809c2a78a0530e313a97ecd138ca8209c83bd352006f8d78473",
+    "graph_version": "<hash>",
     "config": {},
     "namespace_config": {},
     "edge_checks": "on",
@@ -52,24 +52,6 @@
           "report",
           "sales"
         ]
-      },
-      {
-        "name": "text",
-        "kind": "function",
-        "type": "str",
-        "params": [],
-        "dependencies": [],
-        "tags": {},
-        "doc": "The whole graph's export and one run's, as JSON, fnloom's version dropped.",
-        "module": "export_golden",
-        "function": "export_golden.text",
-        "namespace": null,
-        "replaced": null,
-        "config": [],
-        "source": "def text() -> str:\n    \"\"\"The whole graph's export and one run's, as JSON, fnloom's version dropped.\"\"\"\n    import export_golden  # noqa: PLC0415  # this module, by its importable name\n\n    built = fnloom.build(export_golden)\n    documents = [\n        built.export(),\n        built.export([\"report\"], inputs={\"region\": \"n\", \"units\": 1}),\n    ]\n    for document in documents:\n        document[\"fnloom\"] = \"<version>\"\n    return json.dumps(documents, indent=2) + \"\\n\"\n",
-        "version": "43000960cfbeed5d13d12ac6d9959ab19b27827eee9b8d7415b8212a7a3d9860",
-        "marks": [],
-        "checks": []
       },
       {
         "name": "units",
@@ -125,20 +107,20 @@
           "stage": "raw"
         },
         "doc": "Sales of a region.",
-        "module": "export_golden",
-        "function": "export_golden.sales",
+        "module": "export_golden_graph",
+        "function": "export_golden_graph.sales",
         "namespace": null,
         "replaced": null,
         "config": [],
         "source": "@tag(stage=\"raw\")\ndef sales(region: str, units: int) -> float:\n    \"\"\"Sales of a region.\"\"\"\n    return float(units) if region else 0.0\n",
-        "version": "f654a351d5ebf1281d3d93fc24b91d21b2db38af4aafba47f7fa5f04096da9a1",
+        "version": "<hash>",
         "marks": [],
         "checks": []
       },
       {
         "name": "totals",
         "kind": "function",
-        "type": "export_golden.Totals",
+        "type": "export_golden_graph.Totals",
         "params": [
           {
             "name": "sales",
@@ -165,13 +147,13 @@
         ],
         "tags": {},
         "doc": "The totals of `sales`.",
-        "module": "export_golden",
-        "function": "export_golden.totals",
+        "module": "export_golden_graph",
+        "function": "export_golden_graph.totals",
         "namespace": null,
         "replaced": null,
         "config": [],
         "source": "def totals(sales: float, rate: float = 0.2) -> Totals:\n    \"\"\"The totals of `sales`.\"\"\"\n    return {\"net\": sales, \"tax\": sales * rate}\n",
-        "version": "a0177f796439e2e6c06f022501cb1b448e7195ec81e2a46b36304dfb814f1172",
+        "version": "<hash>",
         "marks": [],
         "checks": []
       },
@@ -187,7 +169,7 @@
             "value": null,
             "value_version": null,
             "required": true,
-            "type": "export_golden.Totals"
+            "type": "export_golden_graph.Totals"
           },
           {
             "name": "region",
@@ -205,13 +187,13 @@
         ],
         "tags": {},
         "doc": "A line of the report.",
-        "module": "export_golden",
-        "function": "export_golden.report",
+        "module": "export_golden_graph",
+        "function": "export_golden_graph.report",
         "namespace": null,
         "replaced": null,
         "config": [],
         "source": "def report(totals: Totals, region: str) -> str:\n    \"\"\"A line of the report.\"\"\"\n    return f\"{region}: {totals['net']}\"\n",
-        "version": "54a1f0d12f43cc05a5366753d1b4c36904a1d7111aafcbe258fddd9cf0b4041f",
+        "version": "<hash>",
         "marks": [],
         "checks": []
       }
@@ -220,7 +202,7 @@
   {
     "format": "fnloom.export/1",
     "fnloom": "<version>",
-    "graph_version": "a4a0279984e3986774ed431e168f9497bf23d1e4a3642f152662fb491f483e24",
+    "graph_version": "<hash>",
     "config": {},
     "namespace_config": {},
     "edge_checks": "on",
@@ -312,20 +294,20 @@
           "stage": "raw"
         },
         "doc": "Sales of a region.",
-        "module": "export_golden",
-        "function": "export_golden.sales",
+        "module": "export_golden_graph",
+        "function": "export_golden_graph.sales",
         "namespace": null,
         "replaced": null,
         "config": [],
         "source": "@tag(stage=\"raw\")\ndef sales(region: str, units: int) -> float:\n    \"\"\"Sales of a region.\"\"\"\n    return float(units) if region else 0.0\n",
-        "version": "f654a351d5ebf1281d3d93fc24b91d21b2db38af4aafba47f7fa5f04096da9a1",
+        "version": "<hash>",
         "marks": [],
         "checks": []
       },
       {
         "name": "totals",
         "kind": "function",
-        "type": "export_golden.Totals",
+        "type": "export_golden_graph.Totals",
         "params": [
           {
             "name": "sales",
@@ -352,13 +334,13 @@
         ],
         "tags": {},
         "doc": "The totals of `sales`.",
-        "module": "export_golden",
-        "function": "export_golden.totals",
+        "module": "export_golden_graph",
+        "function": "export_golden_graph.totals",
         "namespace": null,
         "replaced": null,
         "config": [],
         "source": "def totals(sales: float, rate: float = 0.2) -> Totals:\n    \"\"\"The totals of `sales`.\"\"\"\n    return {\"net\": sales, \"tax\": sales * rate}\n",
-        "version": "a0177f796439e2e6c06f022501cb1b448e7195ec81e2a46b36304dfb814f1172",
+        "version": "<hash>",
         "marks": [],
         "checks": []
       },
@@ -374,7 +356,7 @@
             "value": null,
             "value_version": null,
             "required": true,
-            "type": "export_golden.Totals"
+            "type": "export_golden_graph.Totals"
           },
           {
             "name": "region",
@@ -392,13 +374,13 @@
         ],
         "tags": {},
         "doc": "A line of the report.",
-        "module": "export_golden",
-        "function": "export_golden.report",
+        "module": "export_golden_graph",
+        "function": "export_golden_graph.report",
         "namespace": null,
         "replaced": null,
         "config": [],
         "source": "def report(totals: Totals, region: str) -> str:\n    \"\"\"A line of the report.\"\"\"\n    return f\"{region}: {totals['net']}\"\n",
-        "version": "54a1f0d12f43cc05a5366753d1b4c36904a1d7111aafcbe258fddd9cf0b4041f",
+        "version": "<hash>",
         "marks": [
           "output"
         ],

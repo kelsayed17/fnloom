@@ -7,6 +7,7 @@ import importlib.util
 import inspect
 import os
 import pickle
+import re
 import subprocess
 import sys
 import typing
@@ -1304,9 +1305,15 @@ def test_print_nodes_prints_nothing_for_a_skipped_node(driver_kind: DriverKind) 
 
 
 def test_export_2_only_when_a_node_may_be_absent() -> None:
-    """`/1` stays byte for byte what it was; `/2` says `may_be_absent` per node."""
+    """`/1` stays byte for byte what it was; `/2` says `may_be_absent` per node.
+
+    The golden text holds no hash: each is checked to be one, apart.
+    """
     golden = Path(__file__).parent / "golden" / "export_1.json"
     assert export_golden.text() == golden.read_text(encoding="utf-8")
+    hashes = export_golden.hashes()
+    assert len(hashes) == 8  # noqa: PLR2004  # two graph versions, six code versions
+    assert all(re.fullmatch(r"[0-9a-f]{64}", str(found)) for found in hashes)
     driver = fnloom.build(_edges("absence_export"))
     document = driver.export()
     assert document["format"] == "fnloom.export/2"
@@ -1457,15 +1464,18 @@ def count(listing: list[str]) -> int:
 
 
 @_needs_pandas
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
 def test_fnloom_never_takes_absents_truth_value(
-    caplog: pytest.LogCaptureFixture, tmp_path: Path
+    caplog: pytest.LogCaptureFixture, tmp_path: Path, driver_kind: DriverKind
 ) -> None:
     """`bool(ABSENT)` raises, so each path below would fail if it tested truth."""
     lines: list[str] = []
-    module = make_module("absence_truthless", _TRUTHLESS)
+    given = {"wanted": True}
+    module = make_module(f"absence_truthless_{driver_kind}", _TRUTHLESS)
     hooks = (fnloom.PrintNodes(2, print_fn=lines.append), fnloom.LogFailures())
-    driver = fnloom.Builder().with_modules(module).with_hooks(*hooks).build()
-    assert driver.execute(["kept", "count"], inputs={"wanted": True}) == {
+    builder = fnloom.Builder().with_modules(module)
+    driver = built(driver_kind, builder.with_hooks(*hooks))
+    assert run(driver, ["kept", "count"], inputs=given) == {
         "kept": ABSENT,
         "count": ABSENT,
     }
@@ -1473,28 +1483,22 @@ def test_fnloom_never_takes_absents_truth_value(
         caplog.at_level("ERROR", logger="fnloom"),
         pytest.raises(ValueError, match="no"),
     ):
-        driver.execute(["boom"], inputs={"wanted": True})
+        run(driver, ["boom"], inputs=given)
     assert "listing=fnloom.ABSENT" in caplog.text
     assert "  inputs: listing=fnloom.ABSENT" in lines
-    built_result = (
-        fnloom.Builder().with_modules(module).with_result_builder(dict).build()
-    )
-    assert built_result.execute(["kept"], inputs={"wanted": True}) == {"kept": ABSENT}
-    framed = fnloom.Builder().with_modules(module).with_result_builder(fnloom.frame())
+    built_result = built(driver_kind, builder.with_result_builder(dict))
+    assert run(built_result, ["kept"], inputs=given) == {"kept": ABSENT}
+    framed = built(driver_kind, builder.with_result_builder(fnloom.frame()))
     with pytest.raises(ValueError, match=r"'kept' is fnloom\.ABSENT"):
-        framed.build().execute(["kept"], inputs={"wanted": True})
+        run(framed, ["kept"], inputs=given)
     for store in (fnloom.MemoryCache(), fnloom.DiskCache(tmp_path)):
-        cached = fnloom.Builder().with_modules(module).with_cache(store).build()
+        cached = built(driver_kind, builder.with_cache(store))
         for _ in range(2):  # stored, then read back
-            outputs = cached.execute(["kept", "count"], inputs={"wanted": True})
+            outputs = run(cached, ["kept", "count"], inputs=given)
             assert outputs == {"kept": ABSENT, "count": ABSENT}
             assert outputs["kept"] is ABSENT
     overrides = {"listing": ABSENT}
-    document = driver.export(
-        ["kept", "count"], inputs={"wanted": True}, overrides=overrides
-    )
+    document = driver.export(["kept", "count"], inputs=given, overrides=overrides)
     assert document["format"] == "fnloom.export/2"
-    drawing = driver.draw_execution(
-        ["kept"], inputs={"wanted": True}, overrides=overrides
-    )
+    drawing = driver.draw_execution(["kept"], inputs=given, overrides=overrides)
     assert drawing.to_dot()
