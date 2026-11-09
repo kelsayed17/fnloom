@@ -69,7 +69,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
   (`RunError::Node.branch` and `.block`). `Evaluate::evaluate_in`, `Evaluate::lookup` (a value known without
   computing it, asked only downstream of an expand, in reverse need order within a branch), and
   `Observer::{pre_node_in, post_node_in, post_expand, hit_in}` carry the branch path; their defaults change nothing.
-  A plan without an expand runs the plain loop unchanged.
+  `Plan::block_of(expand)` names an expand's sub-plan, `Plan::is_late(node)` says whether a step is downstream of an
+  expand, and `Plan::has_expands` whether a plan has an expand step. An iterator that declines for an expand that
+  can't be absent is a `RunError::BrokenPlan`. A plan without an expand runs the plain loop unchanged.
 
 ### Changed
 

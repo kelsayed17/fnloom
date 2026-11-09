@@ -302,6 +302,9 @@ impl<'r, P, T: Clone> Runner<'r, P, T> {
             };
             let slot =
                 outcome.map_err(|source| node_error(graph, node, source, branch, Vec::new()))?;
+            if slot.absent && !node.declines {
+                return Err(declined_wrongly(node));
+            }
             let exhausted = !slot.absent;
             self.store(step.node, slot);
             if exhausted {
@@ -417,6 +420,9 @@ impl<'r, P, T: Clone> Runner<'r, P, T> {
                 Ok(())
             }
             Item::Declined(value) => {
+                if !node.declines {
+                    return Err(declined_wrongly(node));
+                }
                 // The branches already run are dropped with the frame.
                 self.frames.pop();
                 self.branch.pop();
@@ -526,9 +532,17 @@ impl<'r, P, T: Clone> Runner<'r, P, T> {
     ) -> Result<Gathered<'r, T>, RunError<V::Error>> {
         let graph = self.graph;
         let consumer = graph.node(step.node);
+        let edges = self.plan.arg_edges(step.node);
+        if edges.len() != step.args.len() {
+            return Err(broken(format!(
+                "node '{}' has no edge it was planned to read",
+                consumer.name
+            )));
+        }
+        let edge_at = |at: usize| consumer.inputs[edges[at] as usize];
         // Absence first, so a skipped node gathers nothing.
-        for &id in &step.args {
-            let edge = *edge_of(consumer, id)?;
+        for at in 0..step.args.len() {
+            let edge = edge_at(at);
             if let Some(value) = self.absent_value(consumer, edge)? {
                 if edge.dependency == Dependency::Required {
                     return Ok(Gathered::Skip(value.clone()));
@@ -536,9 +550,9 @@ impl<'r, P, T: Clone> Runner<'r, P, T> {
             }
         }
         let mut args = Vec::with_capacity(step.args.len());
-        for &id in &step.args {
+        for (at, &id) in step.args.iter().enumerate() {
             let name = graph.node(id).name.as_str();
-            let edge = *edge_of(consumer, id)?;
+            let edge = edge_at(at);
             if let Some(value) = self.absent_value(consumer, edge)? {
                 if edge.dependency != Dependency::Optional {
                     args.push(Arg {
@@ -662,20 +676,6 @@ fn want<P>(wanted: &mut [bool], graph: &Graph<P>, arg: NodeId, to: bool) {
     }
 }
 
-/// The edge of `consumer` that reads `id`.
-fn edge_of<P, E>(consumer: &Node<P>, id: NodeId) -> Result<&Edge, RunError<E>> {
-    consumer
-        .inputs
-        .iter()
-        .find(|edge| edge.node == id)
-        .ok_or_else(|| {
-            broken(format!(
-                "node '{}' has no edge it was planned to read",
-                consumer.name
-            ))
-        })
-}
-
 /// A `RunError::Node` for `node`, failed in `branch`.
 fn node_error<P, E>(
     graph: &Graph<P>,
@@ -697,6 +697,16 @@ fn node_error<P, E>(
 fn without_blocks<P, E>(node: &Node<P>) -> RunError<E> {
     broken(format!(
         "expand '{}' run by an evaluator without blocks",
+        node.name
+    ))
+}
+
+/// The `RunError::BrokenPlan` for an expand whose iterator declined though the node
+/// cannot be absent (`Node::declines` is false).
+#[cold]
+fn declined_wrongly<P, E>(node: &Node<P>) -> RunError<E> {
+    broken(format!(
+        "expand '{}' declined but cannot be absent",
         node.name
     ))
 }
@@ -821,6 +831,7 @@ mod tests {
         asked: Vec<(String, Vec<usize>)>,
         hits: BTreeMap<(String, Vec<usize>), Val>,
         fail: Option<(&'static str, Vec<usize>)>,
+        lookup_fails: Option<(&'static str, Vec<usize>)>,
     }
 
     impl Fan {
@@ -875,6 +886,13 @@ mod tests {
 
         fn lookup(&mut self, node: &Node<Pay>, branch: &[usize]) -> Result<Option<Val>, String> {
             self.asked.push((node.name.clone(), branch.to_vec()));
+            if self
+                .lookup_fails
+                .as_ref()
+                .is_some_and(|(n, b)| *n == node.name && b == branch)
+            {
+                return Err(format!("lookup of {} failed", node.name));
+            }
             Ok(self
                 .hits
                 .get(&(node.name.clone(), branch.to_vec()))
@@ -937,10 +955,11 @@ mod tests {
         }
     }
 
-    /// Logs every event with its branch.
+    /// Logs every event with its branch; fails the events that start with `fail_on`.
     #[derive(Default)]
     struct Log {
         events: Vec<String>,
+        fail_on: Option<&'static str>,
     }
 
     impl Observer<Val, String> for Log {
@@ -969,9 +988,12 @@ mod tests {
             branch: &[usize],
             items: usize,
         ) -> Result<(), String> {
-            self.events
-                .push(format!("expand:{node}:{branch:?}:{items}"));
-            Ok(())
+            let event = format!("expand:{node}:{branch:?}:{items}");
+            self.events.push(event.clone());
+            match self.fail_on {
+                Some(prefix) if event.starts_with(prefix) => Err(event),
+                _ => Ok(()),
+            }
         }
         fn hit_in(&mut self, node: &str, branch: &[usize], _value: &Val) -> Result<(), String> {
             self.events.push(format!("hit:{node}:{branch:?}"));
@@ -1280,6 +1302,26 @@ mod tests {
     }
 
     #[test]
+    fn arguments_are_read_by_their_own_edges_whatever_the_input_order() {
+        // `mixed` lists the declining outer `zz_maybe` (optional) before its collect of
+        // `details`, while its arguments are sorted by id: `details` first.
+        let mut specs = vec![
+            expand("picked", &[], |_| Ok(items(&[1, 2]))),
+            node("details", &[plain("picked")], tens),
+            declines(node("zz_maybe", &[], |_| Ok(Absent))),
+            node(
+                "mixed",
+                &[("zz_maybe", Dependency::Optional, None), collect("details")],
+                echo,
+            ),
+        ];
+        specs.push(node("other", &[plain("zz_maybe")], first));
+        let g = Graph::build(specs).unwrap();
+        let result = run(&g, &["mixed"], &[], &mut Fan::default()).unwrap();
+        assert_eq!(result, out(&[("mixed", List(vec![nums(&[10, 20])]))]));
+    }
+
+    #[test]
     fn collect_all_keeps_their_places() {
         let g = declining_details();
         let result = run(&g, &["every"], &[], &mut Fan::default()).unwrap();
@@ -1583,6 +1625,57 @@ mod tests {
                 List(vec![List(vec![nums(&[10, 20]), nums(&[10, 20])])])
             )])
         );
+    }
+
+    #[test]
+    fn an_expand_that_cannot_be_absent_declining_is_a_broken_plan() {
+        // Its block reached, and requested alone with no sub-plan.
+        let g = fan(Val::Gen(vec![Num(1)], End::Decline));
+        for output in ["total", "picked"] {
+            let err = run(&g, &[output], &[], &mut Fan::default()).unwrap_err();
+            assert_eq!(
+                err.to_string(),
+                "broken plan: expand 'picked' declined but cannot be absent",
+                "{output}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_failing_lookup_in_a_branch_is_its_nodes_failure_and_closes_the_iterator() {
+        let g = chain();
+        let mut eval = Fan {
+            lookup_fails: Some(("a", vec![1])),
+            ..Fan::default()
+        };
+        let err = run(&g, &["total"], &[], &mut eval).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "node 'a' failed in branch (1,) of 'picked': lookup of a failed"
+        );
+        assert_eq!(eval.finished, [("picked".to_owned(), false)]);
+        assert_eq!(eval.called("a"), [vec![0]]);
+    }
+
+    #[test]
+    fn a_failing_post_expand_aborts_the_run() {
+        let g = fan(items(&[1, 2]));
+        let mut eval = Fan::default();
+        let mut log = Log {
+            fail_on: Some("expand:picked"),
+            ..Log::default()
+        };
+        let err = run_logged(&g, &["total"], &[], &mut eval, &mut log).unwrap_err();
+        assert_eq!(
+            err,
+            RunError::Observers {
+                event: "post_expand",
+                errors: vec!["expand:picked:[]:2".to_owned()],
+            }
+        );
+        assert_eq!(eval.called("total"), NONE);
+        // The iterator was exhausted, and finished once.
+        assert_eq!(eval.finished, [("picked".to_owned(), true)]);
     }
 
     #[test]

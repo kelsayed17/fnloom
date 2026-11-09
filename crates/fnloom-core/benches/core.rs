@@ -1,7 +1,8 @@
 //! Instruction-count benchmarks of the core: `Graph::build`, `Graph::prepare` and `Plan::run`,
 //! each on chain, fan-in and layered graphs of 1,000 and 10,000 nodes, `Plan::run` on a
 //! 200-node chain whose first node declines (`skip_chain_200`), and `Plan::run` on a block run
-//! once per item of 1, 100 and 10,000 items (`fan_out_1` and so on).
+//! once per item of 1, 100 and 10,000 items (`fan_out_1` and so on), and over 10 items whose
+//! block reads 1,000 outer inputs (`wide_1000`).
 //!
 //! Wall-clock time is too noisy on shared CI runners to gate on, so the regression gate
 //! compares instruction counts measured under callgrind (see `scripts/bench_gate.py`).
@@ -342,17 +343,29 @@ mod suite {
     }
 
     /// `items` expands into `n` items, `branch` adds one to each, and `total` collects them.
+    fn fan_out(n: u64) -> (Graph<Fan>, Plan, BTreeMap<String, u64>) {
+        wide_fan_out(n, 0)
+    }
+
+    /// `fan_out` over 10 items, with `branch` also reading `width` outer inputs `x0`, `x1`,
+    /// ...: the per-argument cost in a block.
+    fn wide(width: usize) -> (Graph<Fan>, Plan, BTreeMap<String, u64>) {
+        wide_fan_out(10, width)
+    }
+
+    /// `items` expands into `n` items; `branch` adds one to each item and the `width` outer
+    /// inputs it reads; `total` collects `branch`.
     #[expect(
         clippy::expect_used,
         reason = "a workload that does not plan is a bug in this file, and aborting is right"
     )]
-    fn fan_out(n: u64) -> (Graph<Fan>, Plan) {
-        let spec = |name: &str, read: Option<(&str, Option<Collect>)>, payload| NodeSpec {
+    fn wide_fan_out(n: u64, width: usize) -> (Graph<Fan>, Plan, BTreeMap<String, u64>) {
+        let spec = |name: &str, reads: Vec<(String, Option<Collect>)>, payload| NodeSpec {
             name: name.to_owned(),
-            inputs: read
+            inputs: reads
                 .into_iter()
                 .map(|(input, collect)| InputSpec {
-                    name: input.to_owned(),
+                    name: input,
                     dependency: Dependency::Required,
                     collect,
                 })
@@ -362,12 +375,16 @@ mod suite {
             declines: false,
             expands: matches!(payload, Fan::Items(_)),
         };
+        let outer: Vec<String> = (0..width).map(|i| format!("x{i}")).collect();
+        let branch_reads = std::iter::once(("items".to_owned(), None))
+            .chain(outer.iter().map(|name| (name.clone(), None)))
+            .collect();
         let graph = Graph::build(vec![
-            spec("items", None, Fan::Items(n)),
-            spec("branch", Some(("items", None)), Fan::Add),
+            spec("items", Vec::new(), Fan::Items(n)),
+            spec("branch", branch_reads, Fan::Add),
             spec(
                 "total",
-                Some(("branch", Some(Collect::Present))),
+                vec![("branch".to_owned(), Some(Collect::Present))],
                 Fan::Total,
             ),
         ])
@@ -375,11 +392,11 @@ mod suite {
         let plan = graph
             .prepare(&Request {
                 outputs: vec!["total".to_owned()],
-                inputs: BTreeSet::new(),
+                inputs: outer.iter().cloned().collect(),
                 overrides: BTreeSet::new(),
             })
             .expect("the request names nodes of the generated graph");
-        (graph, plan)
+        (graph, plan, outer.into_iter().zip(0..).collect())
     }
 
     // A block run once per item: the per-branch cost of the block-aware loop.
@@ -387,11 +404,12 @@ mod suite {
     #[bench::fan_out_1(args = (1,), setup = fan_out)]
     #[bench::fan_out_100(args = (100,), setup = fan_out)]
     #[bench::fan_out_10000(args = (10_000,), setup = fan_out)]
-    fn run_blocks((graph, plan): (Graph<Fan>, Plan)) -> impl Sized {
+    #[bench::wide_1000(args = (1_000,), setup = wide)]
+    fn run_blocks((graph, plan, inputs): (Graph<Fan>, Plan, BTreeMap<String, u64>)) -> impl Sized {
         let values = plan.run(
             &graph,
             &mut Fans::default(),
-            black_box(&BTreeMap::new()),
+            black_box(&inputs),
             &BTreeMap::new(),
             &mut [],
         );

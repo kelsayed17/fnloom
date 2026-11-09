@@ -56,7 +56,8 @@ pub enum BuildError {
     UnrelatedBlocks {
         /// The node reading both.
         consumer: String,
-        /// One expand, the first by name.
+        /// One expand of the two where the block paths diverge (one level, neither inside
+        /// the other), the first by name.
         first: String,
         /// The other expand.
         second: String,

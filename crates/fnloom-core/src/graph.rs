@@ -29,8 +29,13 @@ impl<P> Graph<P> {
     /// # Errors
     ///
     /// `BuildError::DuplicateName` when two specs share a name, `BuildError::ConflictingInput`
-    /// when a spec lists one input twice with different dependencies, `BuildError::Cycle` when
-    /// the dependencies are cyclic (a self-dependency counts).
+    /// when a spec lists one input twice with different dependencies or collect modes,
+    /// `BuildError::Cycle` when the dependencies are cyclic (a self-dependency counts). Then the
+    /// block refusals, the first in topological order: `CollectOutsideBlock` for a collect of a
+    /// node in no block, `CollectOfExpand` for a collect of an expand, `UnrelatedBlocks` for a
+    /// node reading the blocks of two unrelated expands, and `CollectsOwnBlock` for a node
+    /// collecting a block it is inside, or a block reading its own collect through nodes
+    /// outside it.
     pub fn build(specs: Vec<NodeSpec<P>>) -> Result<Self, BuildError> {
         let mut declared = index_by_name(specs)?;
         let ids = assign_ids(&declared);
@@ -418,14 +423,20 @@ fn resolve_edges<P>(
     let Some(repeats) = repeated_edges(&edges) else {
         return Ok(edges);
     };
-    // A repeat that collects where the first read doesn't, or the other way round, is a
-    // second edge: block discovery refuses the node, since it would collect its own block.
+    // Each repeat pairs with the first edge of its node and its kind: a read that collects
+    // and one that doesn't are two edges, which block discovery then refuses, since the
+    // node would collect its own block. Repeats of one kind must agree, in dependency and in
+    // collect mode; the first that doesn't, in input order, is reported.
     let repeats: Vec<(usize, usize)> = repeats
         .into_iter()
-        .filter(|&(first, at)| edges[first].collect.is_some() == edges[at].collect.is_some())
+        .filter_map(|(_, at)| {
+            let kind = edges[at].collect.is_some();
+            let first = edges[..at]
+                .iter()
+                .position(|e| e.node == edges[at].node && e.collect.is_some() == kind)?;
+            Some((first, at))
+        })
         .collect();
-    // The first conflicting repeat in input order is the one reported: two collects in two
-    // modes conflict as two dependencies do.
     if let Some(&(_, at)) = repeats.iter().find(|&&(first, at)| {
         edges[first].dependency != edges[at].dependency || edges[first].collect != edges[at].collect
     }) {

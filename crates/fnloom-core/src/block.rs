@@ -78,10 +78,9 @@ pub(crate) fn discover<P>(
                 (contribution, place)
             };
             if tree.ancestor(deep, shallow.depth) != shallow.innermost {
-                let mut pair = [shallow, deep].map(|place| {
-                    place
-                        .innermost
-                        .map(|id| nodes[id.index()].name.clone())
+                // The two blocks where the paths diverge, at the shallower one's depth.
+                let mut pair = [shallow.innermost, tree.ancestor(deep, shallow.depth)].map(|id| {
+                    id.map(|id| nodes[id.index()].name.clone())
                         .unwrap_or_default()
                 });
                 pair.sort();
@@ -533,6 +532,48 @@ mod tests {
             err.to_string(),
             "'pair' reads blocks of 'left' and 'right', which are unrelated; collect both in \
              one node to pair them"
+        );
+    }
+
+    #[test]
+    fn unrelated_blocks_name_where_the_paths_diverge() {
+        // `b` is nested in `a`; `pair` reads the block of `b` and that of `c`.
+        let err = refusal(vec![
+            expanding("a", &[], ()),
+            expanding("b", &[plain("a")], ()),
+            expanding("c", &[], ()),
+            reading("in_b", &[plain("b")], ()),
+            reading("in_c", &[plain("c")], ()),
+            reading("pair", &[plain("in_b"), plain("in_c")], ()),
+        ]);
+        assert_eq!(
+            err,
+            BuildError::UnrelatedBlocks {
+                consumer: "pair".to_owned(),
+                first: "a".to_owned(),
+                second: "c".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn plain_reads_of_one_node_that_disagree_conflict_beside_a_collect() {
+        let mut specs = tickers();
+        specs.push(reading(
+            "odd",
+            &[
+                collect("scaled"),
+                plain("scaled"),
+                ("scaled", Dependency::Optional, None),
+            ],
+            (),
+        ));
+        assert_eq!(
+            refusal(specs),
+            BuildError::ConflictingInput {
+                node: "odd".to_owned(),
+                input: "scaled".to_owned(),
+            }
         );
     }
 

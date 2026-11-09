@@ -87,6 +87,10 @@ pub struct Plan {
     block_of: Vec<Option<BlockId>>,
     /// Per node, whether its step is late; empty without an expand.
     late: Vec<bool>,
+    /// For each of a step's `args`, the index of the edge in `Node::inputs` that reads it,
+    /// packed; per node, its step's span in it. Both empty without an expand.
+    arg_edges: Vec<u32>,
+    arg_spans: Vec<(u32, u32)>,
 }
 
 impl Plan {
@@ -133,6 +137,15 @@ impl Plan {
     #[must_use]
     pub fn is_late(&self, node: NodeId) -> bool {
         self.late.get(node.index()).copied().unwrap_or(false)
+    }
+
+    /// For the step of `node`, the edges its `args` are read by, as indices into
+    /// `Node::inputs`, in `args` order; empty in a plan without an expand.
+    pub(crate) fn arg_edges(&self, node: NodeId) -> &[u32] {
+        self.arg_spans
+            .get(node.index())
+            .and_then(|&(start, end)| self.arg_edges.get(start as usize..end as usize))
+            .unwrap_or_default()
     }
 
     /// Whether a step is an expand, so the run iterates and runs blocks. A plan without one
@@ -189,6 +202,8 @@ impl<P> Graph<P> {
             expands: false,
             block_of: Vec::new(),
             late: Vec::new(),
+            arg_edges: Vec::new(),
+            arg_spans: Vec::new(),
         })
     }
 
@@ -327,6 +342,13 @@ impl<P> Graph<P> {
             &resolved.outputs,
         );
 
+        let mut arg_edges: Vec<u32> = Vec::new();
+        let mut arg_spans = vec![(0, 0); count];
+        for step in scopes.iter().flatten() {
+            let start = index_u32(arg_edges.len());
+            self.push_edges_of_args(step, &mut arg_edges);
+            arg_spans[step.node.index()] = (start, index_u32(arg_edges.len()));
+        }
         let needs_rules = self.has_absence()
             && self
                 .nodes()
@@ -353,7 +375,29 @@ impl<P> Graph<P> {
             expands: true,
             block_of,
             late,
+            arg_edges,
+            arg_spans,
         }
+    }
+
+    /// Pushes, for each of `step`'s `args`, sorted by id, the index of the edge of its node
+    /// that reads it: a merge of the args with the edges sorted by source. Each source has one
+    /// edge, since a node reading one source both ways is refused at build.
+    fn push_edges_of_args(&self, step: &Step, into: &mut Vec<u32>) {
+        let inputs = &self.node(step.node).inputs;
+        let mut by_source: Vec<(NodeId, u32)> = inputs
+            .iter()
+            .enumerate()
+            .map(|(at, edge)| (edge.node, index_u32(at)))
+            .collect();
+        by_source.sort_unstable();
+        let mut sources = by_source.into_iter().peekable();
+        into.extend(step.args.iter().filter_map(|&arg| {
+            while sources.next_if(|&(source, _)| source < arg).is_some() {}
+            sources
+                .next_if(|&(source, _)| source == arg)
+                .map(|(_, at)| at)
+        }));
     }
 
     /// Each scope's units in order: the outer plan's first, then each block's by id.
