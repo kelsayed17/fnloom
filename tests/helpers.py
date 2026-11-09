@@ -1,15 +1,23 @@
 """Shared test helpers: build throwaway modules, forget them afterwards."""
 
+import asyncio
 import sys
 import textwrap
 import types
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Literal
 
 import pytest
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping, Sequence
     from pathlib import Path
+
+    import fnloom
+
+type DriverKind = Literal["sync", "async"]
+
+# The drivers a test parametrized over `driver_kind` runs on.
+DRIVER_KINDS: tuple[DriverKind, ...] = ("sync",)
 
 
 def make_module(name: str, source: str) -> types.ModuleType:
@@ -43,3 +51,24 @@ def fake_dot(folder: Path, script: str) -> None:
     path = folder / "dot"
     path.write_text(f"#!{sys.executable}\n{textwrap.dedent(script)}")
     path.chmod(0o755)
+
+
+def built(
+    driver_kind: DriverKind, builder: fnloom.Builder[Any]
+) -> fnloom.Driver[Any] | fnloom.AsyncDriver[Any]:
+    """`builder`'s driver of `driver_kind`: `build()` or `build_async()`."""
+    return builder.build() if driver_kind == "sync" else builder.build_async()
+
+
+def run(
+    driver: fnloom.Driver[Any] | fnloom.AsyncDriver[Any],
+    outputs: Sequence[str],
+    *,
+    inputs: Mapping[str, object] | None = None,
+    overrides: Mapping[str, object] | None = None,
+) -> Any:  # noqa: ANN401  # what the driver's result builder makes
+    """`driver.execute(...)`, run to completion on a new loop for an `AsyncDriver`."""
+    result = driver.execute(outputs, inputs=inputs, overrides=overrides)
+    if asyncio.iscoroutine(result):
+        return asyncio.run(result)
+    return result

@@ -41,7 +41,7 @@ if TYPE_CHECKING:
     from fnloom._config import Condition
     from fnloom._view import NodeViews
 
-type Mark = Literal["output", "override", "path", "context"]
+type Mark = Literal["output", "override", "path", "context", "may be absent"]
 type Orient = Literal["LR", "TB", "RL", "BT"]
 type Kind = Literal["function", "input"]
 type Engine = Literal["dot", "builtin"]
@@ -81,8 +81,9 @@ class DrawnNode:
     shows for it: the `display_name` tag when the node has one, else the name.
     `type` is its annotation as text, cut to 80 characters; `condition` the
     `@config.when*` conditions it was chosen by, or `None`. `marks` say what the
-    drawing shows it as: a requested `output`, an `override`, on the `path`, or
-    `context` (drawn only because a drawn node reads it).
+    drawing shows it as: a requested `output`, an `override`, on the `path`,
+    `context` (drawn only because a drawn node reads it), or `may be absent`
+    (its value may be `fnloom.ABSENT`, Q135), drawn dashed.
 
     `tags` are the `(name, value)` pairs of the tags the drawing was asked to
     show (`show_tags`), in the order asked, a tuple value joined by `, `;
@@ -472,7 +473,8 @@ def drawing(
 ) -> Drawing:
     """The drawing of `names`, each marked as `marks` says, shown as `shown` says.
 
-    Only edges between drawn nodes are drawn. `hide_inputs` leaves out every
+    Only edges between drawn nodes are drawn, and a node that may be absent is
+    marked `may be absent` too (Q135). `hide_inputs` leaves out every
     input the call didn't name: `named` are the names it did (the outputs
     requested, the nodes drawn from, a path's endpoints).
     """
@@ -495,7 +497,8 @@ def drawing(
                 type=type_text(view.type),
                 title=title or name,
                 condition=condition_text(view.config) if view.config else None,
-                marks=frozenset(marks.get(name, ())),
+                marks=frozenset(marks.get(name, ()))
+                | (_MAY_BE_ABSENT if view.may_be_absent else _NO_MARKS),
                 tags=_shown_tags(view, shown.show_tags),
                 schema=schema_fields(view.type) if shown.show_schema else (),
                 view=view,
@@ -637,9 +640,14 @@ def _label(node: DrawnNode, show_types: bool) -> str:  # noqa: FBT001  # private
     return "\\n".join(_escaped(line) for line in lines)
 
 
+# The mark of a node that may be absent, and no mark, made once.
+_MAY_BE_ABSENT: frozenset[Mark] = frozenset({"may be absent"})
+_NO_MARKS = frozenset[Mark]()
+
 # Each kind's and mark's DOT attributes, applied in this order, later ones winning.
 _STYLES: dict[str, dict[str, str]] = {
     "input": {"style": '"dashed,filled"', "fillcolor": '"#ffffff"'},
+    "may be absent": {"style": '"dashed,rounded,filled"'},
     "output": {"fillcolor": '"#FFC857"'},
     "override": {"style": '"filled,diagonals"'},
     "path": {"color": "red"},
@@ -748,7 +756,15 @@ def _dot_legend(nodes: Sequence[DrawnNode]) -> list[str]:
 
 
 # The legend's entries, in the order it lists them.
-LEGEND_KEYS = ("function", "input", "output", "override", "path", "context")
+LEGEND_KEYS = (
+    "function",
+    "input",
+    "may be absent",
+    "output",
+    "override",
+    "path",
+    "context",
+)
 
 
 # Mermaid's entity codes for the characters a quoted label can't hold as they are.
@@ -831,6 +847,7 @@ def _mermaid_init(style: Style | None) -> list[str]:
 _MERMAID_STYLES = {
     "function": "fill:#b4d8e4,stroke:#333333",
     "input": "fill:#ffffff,stroke:#333333,stroke-dasharray:5 5",
+    "may be absent": "stroke-dasharray:5 5",
     "output": "fill:#FFC857",
     "override": "stroke-dasharray:2 2,stroke-width:3px",
     "path": "stroke:red,stroke-width:2px",
@@ -847,8 +864,10 @@ def _mermaid_classes(nodes: Sequence[DrawnNode], ids: Mapping[str, str]) -> list
     lines: list[str] = []
     for key, style in _MERMAID_STYLES.items():
         if key in members:
-            lines.append(f"  classDef {key} {style}")
-            lines.append(f"  class {','.join(members[key])} {key}")
+            # A class name is one word: `may be absent` is `may_be_absent`.
+            name = key.replace(" ", "_")
+            lines.append(f"  classDef {name} {style}")
+            lines.append(f"  class {','.join(members[key])} {name}")
     return lines
 
 

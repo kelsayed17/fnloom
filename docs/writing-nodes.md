@@ -342,6 +342,15 @@ that has none, the node is skipped instead, so the default is still never used, 
   `list[str | Absent]` is a list that may hold `ABSENT`, not an absence.
 - When two parameters of one node read the same node that may be absent, as a `@parameterize` row can bind them,
   they must agree on admitting `Absent`. Otherwise the build fails, naming the node, the source and the parameters.
+- An input is never `ABSENT`: leave it out instead. An override may be `ABSENT` for a node that may be absent, to
+  force its consumers' skip, and is a `TypeError` for any other ([Overrides](running.md#overrides)).
+- A skipped node runs nothing and fires no node event; [`RunEnd.skipped`](hooks.md#the-events) lists it. A result
+  builder gets an absent output as `ABSENT`, and `frame()` refuses it.
+- The fields of `@extract_fields` and the columns of `@extract_columns` over a node annotated `R | Absent` are
+  absent when it declines. Its output checks, and `with_output_type_checks()`, don't run on `ABSENT`: there is no
+  value. A `@pipe_output` or `@mutate` step reads its target as any parameter does, and a node wrapper sees `ABSENT`
+  returned by `call()`, and may return it or a value.
+- A drawing draws a node that may be absent dashed, marked `may be absent` in its legend.
 - `build_async()` refuses a node that declines, for now, naming it: the async driver doesn't follow these rules yet.
   A node there that returns `ABSENT` without admitting it is the same `TypeError` as with `build()`, whether it is
   an `async def` or a sync function.

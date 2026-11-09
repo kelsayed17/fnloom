@@ -17,7 +17,7 @@ from fnloom._decorators import Source
 from fnloom._types import stripped
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
     from collections.abc import Set as AbstractSet
 
     from fnloom._scan import NodeDef
@@ -30,10 +30,12 @@ __all__ = [
     "admits_absent",
     "declines",
     "dependency",
+    "holds_absent",
     "may_be_absent",
     "merged",
     "needs_input",
     "refuse_async",
+    "refuse_given",
     "refuse_mixed",
     "without_absent",
 ]
@@ -42,6 +44,9 @@ type Kind = Literal["required", "optional", "admits", "admits_optional"]
 
 # The kinds whose consumer needs an input supplied: they have no default.
 _NEEDS_INPUT: frozenset[str] = frozenset({"required", "admits"})
+
+# `ABSENT`'s identity, which `holds_absent` looks for among a run's values.
+_ABSENT_ID = id(ABSENT)
 
 
 def _members(annotation: object) -> list[object]:
@@ -215,3 +220,41 @@ def refuse_async(nodes: Sequence[NodeDef]) -> None:
             "build() does"
         )
         raise TypeError(msg)
+
+
+def holds_absent(values: Mapping[str, object]) -> bool:
+    """Whether any of `values` is `ABSENT`, by identity, never by `==` or truth.
+
+    Run on every run's inputs and overrides, so it compares the values' ids in C:
+    `ABSENT in values.values()` would call each value's own `__eq__`.
+    """
+    return bool(values) and _ABSENT_ID in map(id, values.values())
+
+
+def refuse_given(
+    inputs: Mapping[str, object],
+    overrides: Mapping[str, object],
+    may_be_absent: AbstractSet[str],
+) -> None:
+    """`TypeError` for each `ABSENT` input, and each `ABSENT` override not allowed.
+
+    An input is never absent: leaving it out is how a run says so. An override
+    may be `ABSENT` for a node in `may_be_absent`, which forces its skip, and for
+    no other. Checked whatever the type checks say, an `Any`-typed node too.
+    Every culprit is listed, sorted.
+    """
+    lines = [
+        f"input {name!r} is fnloom.ABSENT, which an input can't be; leave it out "
+        "instead"
+        for name, given in inputs.items()
+        if given is ABSENT
+    ]
+    lines += [
+        f"override {name!r} is fnloom.ABSENT, but node {name!r} can't be absent: "
+        "its return annotation does not admit fnloom.Absent, and it reads no node "
+        "that may be; override it with a value"
+        for name, given in overrides.items()
+        if given is ABSENT and name not in may_be_absent
+    ]
+    if lines:
+        raise TypeError("; ".join(sorted(lines)))

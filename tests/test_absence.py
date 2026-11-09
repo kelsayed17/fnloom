@@ -2,19 +2,35 @@
 
 import asyncio
 import copy
+import importlib
+import importlib.util
 import inspect
+import os
 import pickle
+import subprocess
+import sys
 import typing
-from typing import Annotated
+from pathlib import Path
+from typing import Annotated, override
 
 import pytest
 
+import export_golden
 import fnloom
-from fnloom import ABSENT, Absent, _absence, _core
+from fnloom import ABSENT, Absent, _absence, _core, _export
 from fnloom._decorators import Source, Value
 from fnloom._scan import core_inputs
 from fnloom._view import Param
-from helpers import make_module
+from helpers import DRIVER_KINDS, DriverKind, built, make_module, run
+
+# Imported with this module, so a test's module cleanup never drops it half-way.
+_PANDAS = importlib.util.find_spec("pandas") is not None
+if _PANDAS:
+    importlib.import_module("pandas")
+_needs_pandas = pytest.mark.skipif(not _PANDAS, reason="needs pandas")
+
+if typing.TYPE_CHECKING:
+    import types
 
 _CONSUMERS = """
 from fnloom import ABSENT, Absent
@@ -632,3 +648,566 @@ def test_public_names() -> None:
     assert fnloom.Absent is Absent
     assert Absent.__module__ == "fnloom"
     inspect.signature(Absent)
+
+
+# ---- absence at the edges of a run (Task 3) -----------------------------------------
+
+_EDGES = """
+from typing import Any
+
+from fnloom import ABSENT, Absent
+
+calls = []
+
+
+def listing(wanted: bool) -> list[str] | Absent:
+    return ["a", "b"] if wanted else ABSENT
+
+
+def count(listing: list[str]) -> int:
+    calls.append("count")
+    return len(listing)
+
+
+def report(count: int) -> str:
+    calls.append("report")
+    return str(count)
+
+
+def loose(anything: Any) -> Any:
+    return anything
+
+
+def labelled(label: str) -> str:
+    return label
+"""
+
+
+def _edges(name: str) -> types.ModuleType:
+    return make_module(name, _EDGES)
+
+
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_an_absent_output_is_absent_in_the_result_and_given_to_the_builder(
+    driver_kind: DriverKind,
+) -> None:
+    """The raw dict holds `ABSENT`, and a result builder gets it as a value (Q19)."""
+    seen: list[dict[str, object]] = []
+
+    def build(outputs: dict[str, object]) -> list[str]:
+        seen.append(dict(outputs))
+        return list(outputs)
+
+    module = _edges(f"absence_result_{driver_kind}")
+    builder = fnloom.Builder().with_modules(module)
+    raw = run(
+        built(driver_kind, builder), ["count", "listing"], inputs={"wanted": False}
+    )
+    assert raw == {"count": ABSENT, "listing": ABSENT}
+    assert raw["count"] is ABSENT
+    with_builder = built(driver_kind, builder.with_result_builder(build))
+    outputs = ["report", "listing"]
+    assert run(with_builder, outputs, inputs={"wanted": False}) == outputs
+    assert seen == [{"report": ABSENT, "listing": ABSENT}]
+    assert seen[0]["report"] is ABSENT
+
+
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+@pytest.mark.parametrize("checked", [True, False], ids=["checked", "unchecked"])
+def test_an_absent_input_is_refused(driver_kind: DriverKind, *, checked: bool) -> None:
+    """Typed or `Any`, with input checks or without: leave it out instead."""
+    builder = fnloom.Builder().with_modules(_edges(f"absence_input_{driver_kind}"))
+    if not checked:
+        builder = builder.without_input_type_checks()
+    driver = built(driver_kind, builder)
+    with pytest.raises(TypeError) as raised:
+        run(driver, ["loose", "labelled"], inputs={"anything": ABSENT, "label": ABSENT})
+    assert str(raised.value) == (
+        "input 'anything' is fnloom.ABSENT, which an input can't be; leave it out "
+        "instead; input 'label' is fnloom.ABSENT, which an input can't be; leave it "
+        "out instead"
+    )
+
+
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+@pytest.mark.parametrize("checked", [True, False], ids=["checked", "unchecked"])
+def test_an_absent_override_is_allowed_only_for_a_node_that_may_be_absent(
+    driver_kind: DriverKind, *, checked: bool
+) -> None:
+    """It forces the skip of a node that may be absent; for any other, a TypeError."""
+    module = _edges(f"absence_override_{driver_kind}_{checked}")
+    builder = fnloom.Builder().with_modules(module)
+    if not checked:
+        builder = builder.without_override_type_checks()
+    driver = built(driver_kind, builder)
+    forced = run(
+        driver, ["report"], inputs={"wanted": True}, overrides={"listing": ABSENT}
+    )
+    assert forced == {"report": ABSENT}
+    # `count` may be absent, though typed `int`: its override may be `ABSENT` too.
+    assert run(driver, ["report"], overrides={"count": ABSENT}) == {"report": ABSENT}
+    assert module.calls == []
+    with pytest.raises(TypeError) as raised:
+        run(
+            driver,
+            ["loose", "labelled"],
+            inputs={"anything": 1, "label": "x"},
+            overrides={"loose": ABSENT, "labelled": ABSENT},
+        )
+    assert str(raised.value) == (
+        "override 'labelled' is fnloom.ABSENT, but node 'labelled' can't be absent: "
+        "its return annotation does not admit fnloom.Absent, and it reads no node "
+        "that may be; override it with a value; override 'loose' is fnloom.ABSENT, "
+        "but node 'loose' can't be absent: its return annotation does not admit "
+        "fnloom.Absent, and it reads no node that may be; override it with a value"
+    )
+
+
+class _Ends(fnloom.Hook):
+    """Keeps every `RunEnd`, and the nodes `before_node` saw."""
+
+    def __init__(self) -> None:
+        self.ends: list[fnloom.RunEnd] = []
+        self.started: list[str] = []
+
+    @override
+    def before_node(self, event: fnloom.NodeStart) -> None:
+        self.started.append(event.node.name)
+
+    @override
+    def after_run(self, event: fnloom.RunEnd) -> None:
+        self.ends.append(event)
+
+
+class _EndsOnly(fnloom.Hook):
+    """Keeps every `RunEnd`, and wants no node event."""
+
+    def __init__(self) -> None:
+        self.ends: list[fnloom.RunEnd] = []
+
+    @override
+    def after_run(self, event: fnloom.RunEnd) -> None:
+        self.ends.append(event)
+
+
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_run_end_lists_skipped_nodes_in_order(driver_kind: DriverKind) -> None:
+    """`(node, branch)` pairs, `()` outside blocks; a skipped node fires no event."""
+    hooked, only = _Ends(), _EndsOnly()
+    module = _edges(f"absence_run_end_{driver_kind}")
+    builder = fnloom.Builder().with_modules(module).with_hooks(hooked, only)
+    driver = built(driver_kind, builder)
+    assert run(driver, ["report"], inputs={"wanted": False}) == {"report": ABSENT}
+    expected = (("count", ()), ("report", ()))
+    assert hooked.ends[0].skipped == expected
+    assert only.ends[0].skipped == expected
+    assert hooked.started == ["listing"]
+    run(driver, ["report"], inputs={"wanted": True})
+    assert hooked.ends[1].skipped == ()
+    assert only.ends[1].skipped == ()
+    only_builder = fnloom.Builder().with_modules(module).with_hooks(_EndsOnly())
+    lone = only_builder.build()
+    lone.execute(["report"], inputs={"wanted": False})
+    ends = typing.cast("_EndsOnly", lone.hooks[0]).ends
+    assert ends[0].skipped == expected
+
+
+_FIELDS = """
+from typing import TypedDict
+
+from fnloom import ABSENT, Absent, extract_columns, extract_fields
+
+
+class Shares(TypedDict):
+    east: float
+    west: float
+
+
+@extract_fields({"net": float, "tax": float})
+def totals(wanted: bool) -> dict[str, float] | Absent:
+    return {"net": 1.0, "tax": 2.0} if wanted else ABSENT
+
+
+@extract_fields()
+def shares(wanted: bool) -> Shares | Absent:
+    return {"east": 3.0, "west": 4.0} if wanted else ABSENT
+
+
+@extract_columns("north", "south")
+def regions(wanted: bool) -> dict[str, list[int]] | Absent:
+    return {"north": [1], "south": [2]} if wanted else ABSENT
+"""
+
+
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_fields_of_an_absent_producer_are_absent(driver_kind: DriverKind) -> None:
+    """`@extract_fields` and `@extract_columns` over `R | Absent`: every field."""
+    module = make_module(f"absence_fields_{driver_kind}", _FIELDS)
+    driver = built(driver_kind, fnloom.Builder().with_modules(module))
+    names = ["net", "tax", "east", "west", "north", "south"]
+    assert all(driver.nodes[name].may_be_absent for name in names)
+    assert [driver.nodes[name].type for name in names[:4]] == [float] * 4
+    assert run(driver, names, inputs={"wanted": False}) == dict.fromkeys(names, ABSENT)
+    assert run(driver, names, inputs={"wanted": True}) == {
+        "net": 1.0,
+        "tax": 2.0,
+        "east": 3.0,
+        "west": 4.0,
+        "north": [1],
+        "south": [2],
+    }
+
+
+_CHECKED = """
+from fnloom import ABSENT, Absent, check_output
+
+
+@check_output(range=(0, 10))
+def score(wanted: bool) -> float | Absent:
+    return 3.0 if wanted else ABSENT
+
+
+def total(wanted: bool) -> int | Absent:
+    return 1 if wanted else ABSENT
+
+
+def plain() -> int:
+    return ABSENT
+"""
+
+
+class _Checks(fnloom.Hook):
+    def __init__(self) -> None:
+        self.checks: dict[str, tuple[fnloom.CheckResult, ...]] = {}
+
+    @override
+    def after_node(self, event: fnloom.NodeEnd) -> None:
+        self.checks[event.node.name] = event.checks
+
+
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_output_checks_do_not_run_on_absent(driver_kind: DriverKind) -> None:
+    """`@check_output` and `with_output_type_checks()`: no value, nothing to check."""
+    hook = _Checks()
+    module = make_module(f"absence_checks_{driver_kind}", _CHECKED)
+    builder = (
+        fnloom.Builder().with_modules(module).with_output_type_checks().with_hooks(hook)
+    )
+    driver = built(driver_kind, builder)
+    absent = run(driver, ["score", "total"], inputs={"wanted": False})
+    assert absent == {"score": ABSENT, "total": ABSENT}
+    assert hook.checks == {"score": (), "total": ()}
+    present = run(driver, ["score", "total"], inputs={"wanted": True})
+    assert present == {"score": 3.0, "total": 1}
+    assert [result.passes for result in hook.checks["score"]] == [True]
+    # A node that doesn't decline gets the return check's error, not a check's.
+    with pytest.raises(TypeError, match=r"returned fnloom\.ABSENT, but its return"):
+        run(driver, ["plain"])
+
+
+_STEPS = """
+from fnloom import ABSENT, Absent, pipe_output, step
+
+
+def _sorted(v: list[str]) -> list[str]:
+    return sorted(v)
+
+
+def _filled(v: list[str] | Absent) -> list[str]:
+    return ["none"] if v is ABSENT else v
+
+
+@pipe_output(step(_sorted))
+def plain(wanted: bool) -> list[str] | Absent:
+    return ["b", "a"] if wanted else ABSENT
+
+
+@pipe_output(step(_filled))
+def filled(wanted: bool) -> list[str] | Absent:
+    return ["b", "a"] if wanted else ABSENT
+"""
+
+
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_a_pipe_output_step_reads_absence_by_its_signature(
+    driver_kind: DriverKind,
+) -> None:
+    """A step is an ordinary node reading its target: skipped, or given `ABSENT`."""
+    module = make_module(f"absence_steps_{driver_kind}", _STEPS)
+    driver = built(driver_kind, fnloom.Builder().with_modules(module))
+    assert driver.nodes["plain"].may_be_absent
+    assert not driver.nodes["filled"].may_be_absent
+    assert run(driver, ["plain", "filled"], inputs={"wanted": False}) == {
+        "plain": ABSENT,
+        "filled": ["none"],
+    }
+    assert run(driver, ["plain", "filled"], inputs={"wanted": True}) == {
+        "plain": ["a", "b"],
+        "filled": ["b", "a"],
+    }
+
+
+def test_a_wrapper_sees_absent_from_call_and_may_replace_it() -> None:
+    """`call()` returns `ABSENT`; a wrapper may give a value, or `ABSENT` back."""
+    seen: list[tuple[str, object]] = []
+
+    def filling(
+        node: fnloom.NodeView,
+        call: typing.Callable[[], object],
+        inputs: typing.Mapping[str, object],
+    ) -> object:
+        del inputs
+        value = call()
+        seen.append((node.name, value))
+        if node.name == "listing" and value is ABSENT:
+            return ["z"]
+        return value
+
+    module = _edges("absence_wrapper_fills")
+    builder = fnloom.Builder().with_modules(module).with_node_wrappers(filling)
+    driver = builder.build()
+    assert driver.execute(["count"], inputs={"wanted": False}) == {"count": 1}
+    assert seen == [("listing", ABSENT), ("count", 1)]
+
+    def absenting(
+        node: fnloom.NodeView,
+        call: typing.Callable[[], object],
+        inputs: typing.Mapping[str, object],
+    ) -> object:
+        del inputs
+        value = call()
+        return ABSENT if node.name == "count" else value
+
+    refused = (
+        fnloom.Builder()
+        .with_modules(_edges("absence_wrapper_refused"))
+        .with_node_wrappers(absenting)
+        .build()
+    )
+    with pytest.raises(TypeError) as raised:
+        refused.execute(["count"], inputs={"wanted": True})
+    assert str(raised.value) == (
+        "node 'count' returned fnloom.ABSENT, but its return annotation does "
+        "not admit fnloom.Absent"
+    )
+
+
+@_needs_pandas
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_frame_refuses_an_absent_output(driver_kind: DriverKind) -> None:
+    """A column can't be absent: a `ValueError` naming each absent output, sorted."""
+    module = _edges(f"absence_frame_{driver_kind}")
+    builder = fnloom.Builder().with_modules(module).with_result_builder(fnloom.frame())
+    driver = built(driver_kind, builder)
+    with pytest.raises(ValueError, match=r"fnloom\.ABSENT") as raised:
+        run(
+            driver,
+            ["report", "count", "labelled"],
+            inputs={"wanted": False, "label": "x"},
+        )
+    assert str(raised.value) == (
+        "frame() can't make a column of an absent output: 'count', 'report' "
+        "are fnloom.ABSENT"
+    )
+    made = run(driver, ["count"], inputs={"wanted": True, "label": "x"})
+    assert list(made["count"]) == [2]
+
+
+def test_print_nodes_prints_nothing_for_a_skipped_node() -> None:
+    """Only `listing` runs, so only it is printed, its result `fnloom.ABSENT`."""
+    lines: list[str] = []
+    printing = fnloom.PrintNodes(2, print_fn=lines.append)
+    module = _edges("absence_print_nodes")
+    driver = fnloom.Builder().with_modules(module).with_hooks(printing).build()
+    driver.execute(["report"], inputs={"wanted": False})
+    assert [line.split(" ran in ")[0] for line in lines] == [
+        "node 'listing'",
+        "  inputs: wanted=False",
+        "  result: fnloom.ABSENT",
+    ]
+
+
+def test_export_2_only_when_a_node_may_be_absent() -> None:
+    """`/1` stays byte for byte what it was; `/2` says `may_be_absent` per node."""
+    golden = Path(__file__).parent / "golden" / "export_1.json"
+    assert export_golden.text() == golden.read_text(encoding="utf-8")
+    driver = fnloom.build(_edges("absence_export"))
+    document = driver.export()
+    assert document["format"] == "fnloom.export/2"
+    flags = {node["name"]: node["may_be_absent"] for node in document["nodes"]}
+    assert flags == {
+        "anything": False,
+        "label": False,
+        "wanted": False,
+        "listing": True,
+        "count": True,
+        "report": True,
+        "loose": False,
+        "labelled": False,
+    }
+    assert all(node["marks"] == [] for node in document["nodes"])
+    run_document = driver.export(["loose"], inputs={"anything": 1})
+    assert run_document["format"] == "fnloom.export/1"
+    assert "may_be_absent" not in run_document["nodes"][0]
+
+
+def test_diff_reads_export_1_and_2() -> None:
+    """A node that may now be absent is changed in `may_be_absent` and its type."""
+    before = make_module(
+        "absence_diff_1",
+        """
+def listing(wanted: bool) -> list[str]:
+    return []
+""",
+    )
+    after = make_module(
+        "absence_diff_2",
+        """
+from fnloom import ABSENT, Absent
+
+
+def listing(wanted: bool) -> list[str] | Absent:
+    return []
+""",
+    )
+    old, new = fnloom.build(before).export(), fnloom.build(after).export()
+    assert (old["format"], new["format"]) == ("fnloom.export/1", "fnloom.export/2")
+    changed = _export.diff(old, new)["changed"]
+    assert changed == {"listing": ["type", "may_be_absent"]}
+    assert _export.diff(new, new)["changed"] == {}
+    assert _export.diff(old, old)["changed"] == {}
+
+
+_DRAWN = """
+from fnloom import ABSENT, Absent
+
+
+def listing(wanted: bool) -> list[str] | Absent:
+    return ABSENT
+
+
+def count(listing: list[str]) -> int:
+    return len(listing)
+
+
+def shown(listing: list[str] | Absent) -> str:
+    return ""
+"""
+
+_DRAW_SCRIPT = """
+import sys
+
+sys.path.insert(0, sys.argv[1])
+
+import fnloom
+import absence_drawn
+
+drawing = fnloom.build(absence_drawn).draw()
+sys.stdout.write(drawing.to_dot())
+sys.stdout.write(drawing.to_mermaid())
+sys.stdout.write(drawing.to_svg())
+"""
+
+
+def test_the_may_be_absent_mark_is_drawn_and_hash_seed_stable(
+    tmp_path: Path,
+) -> None:
+    """Dashed, in the legend, in DOT, Mermaid and SVG, under three hash seeds."""
+    (tmp_path / "absence_drawn.py").write_text(_DRAWN)
+    script = tmp_path / "draw.py"
+    script.write_text(_DRAW_SCRIPT)
+    texts = {
+        subprocess.run(  # noqa: S603  # this interpreter, on the test's own script
+            [sys.executable, str(script), str(tmp_path)],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ, "PYTHONHASHSEED": seed},
+        ).stdout
+        for seed in ("0", "1", "4242")
+    }
+    assert len(texts) == 1
+    sys.path.insert(0, str(tmp_path))
+    try:
+        drawing = fnloom.build(importlib.import_module("absence_drawn")).draw()
+    finally:
+        sys.path.remove(str(tmp_path))
+    marks = {node.name: node.marks for node in drawing.nodes}
+    assert marks["listing"] == {"may be absent"}
+    assert marks["count"] == {"may be absent"}
+    assert marks["shown"] == frozenset()
+    dot = drawing.to_dot()
+    assert '"listing" [label=' in dot
+    listing_line = next(line for line in dot.splitlines() if '"listing" [' in line)
+    assert "dashed" in listing_line
+    assert '"legend: may be absent" [label="may be absent"' in dot
+    shown_line = next(line for line in dot.splitlines() if '"shown" [' in line)
+    assert "dashed" not in shown_line
+    mermaid = drawing.to_mermaid()
+    assert "classDef may_be_absent " in mermaid
+    assert "stroke-dasharray" in drawing.to_svg()
+
+
+_TRUTHLESS = """
+from fnloom import ABSENT, Absent
+
+
+def listing(wanted: bool) -> list[str] | Absent:
+    return ABSENT
+
+
+def boom(listing: list[str] | Absent) -> int:
+    raise ValueError("no")
+
+
+def kept(listing: list[str] | Absent) -> list[str] | Absent:
+    return listing
+
+
+def count(listing: list[str]) -> int:
+    return len(listing)
+"""
+
+
+@_needs_pandas
+def test_fnloom_never_takes_absents_truth_value(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """`bool(ABSENT)` raises, so each path below would fail if it tested truth."""
+    lines: list[str] = []
+    module = make_module("absence_truthless", _TRUTHLESS)
+    hooks = (fnloom.PrintNodes(2, print_fn=lines.append), fnloom.LogFailures())
+    driver = fnloom.Builder().with_modules(module).with_hooks(*hooks).build()
+    assert driver.execute(["kept", "count"], inputs={"wanted": True}) == {
+        "kept": ABSENT,
+        "count": ABSENT,
+    }
+    with (
+        caplog.at_level("ERROR", logger="fnloom"),
+        pytest.raises(ValueError, match="no"),
+    ):
+        driver.execute(["boom"], inputs={"wanted": True})
+    assert "listing=fnloom.ABSENT" in caplog.text
+    assert "  inputs: listing=fnloom.ABSENT" in lines
+    built_result = (
+        fnloom.Builder().with_modules(module).with_result_builder(dict).build()
+    )
+    assert built_result.execute(["kept"], inputs={"wanted": True}) == {"kept": ABSENT}
+    framed = fnloom.Builder().with_modules(module).with_result_builder(fnloom.frame())
+    with pytest.raises(ValueError, match=r"'kept' is fnloom\.ABSENT"):
+        framed.build().execute(["kept"], inputs={"wanted": True})
+    for store in (fnloom.MemoryCache(), fnloom.DiskCache(tmp_path)):
+        cached = fnloom.Builder().with_modules(module).with_cache(store).build()
+        for _ in range(2):  # stored, then read back
+            outputs = cached.execute(["kept", "count"], inputs={"wanted": True})
+            assert outputs == {"kept": ABSENT, "count": ABSENT}
+            assert outputs["kept"] is ABSENT
+    overrides = {"listing": ABSENT}
+    document = driver.export(
+        ["kept", "count"], inputs={"wanted": True}, overrides=overrides
+    )
+    assert document["format"] == "fnloom.export/2"
+    drawing = driver.draw_execution(
+        ["kept"], inputs={"wanted": True}, overrides=overrides
+    )
+    assert drawing.to_dot()

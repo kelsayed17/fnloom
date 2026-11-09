@@ -20,6 +20,17 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `-> Absent` alone feeds any parameter, which it never gives a value. `build_async()` refuses a node that declines
   until the async driver follows these rules, and a node that returns `ABSENT` there without admitting it is the same
   `TypeError`, from an `async def` node or a sync one.
+- Absence at the edges of a run (Q135; amends Q19, Q84, Q95). An `ABSENT` input is a `TypeError` naming it, typed
+  or `Any`, with or without type checks: leave the input out instead. An override may be `ABSENT` for a node that may
+  be absent, forcing its consumers' skip, and is a `TypeError` for any other node. `RunEnd.skipped` lists each skipped
+  node as a `(node, branch)` pair, in the order skipped, `branch` being `()` outside a block; a skipped node fires no
+  node event, so `PrintNodes` prints nothing for it. A result builder gets an absent output as `ABSENT`, and `frame()`
+  refuses one with a `ValueError` naming each. `@extract_fields` and `@extract_columns` take a producer annotated
+  `R | Absent`, and every field is absent when it declines. `@check_output*` and `with_output_type_checks()` don't
+  run on `ABSENT` (`NodeEnd.checks` is `()`). A graph with a node that may be absent exports `fnloom.export/2`, each
+  node with `may_be_absent`; any other graph still exports `fnloom.export/1`, byte for byte, and `fnloom diff` reads
+  both. Drawings mark such a node `may be absent`, drawn dashed and named in the legend.
+- `ObserverBase.skipped(node, *, branch)`, the binding's forward of the core's `Observer::skipped`.
 - Rust core: absence. `Dependency::Admits { optional }` is a third way to read an input, `NodeSpec.declines` marks a
   node whose value may be absent, and `Node.may_be_absent` is known at build. `Evaluate::is_absent` (default
   `false`) recognises an absent value, and `Observer::skipped(node, branch)` reports a node skipped because a

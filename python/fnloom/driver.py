@@ -36,7 +36,7 @@ from fnloom import (
     _types,
     _wrappers,
 )
-from fnloom._absence import needs_input
+from fnloom._absence import holds_absent, needs_input, refuse_given
 from fnloom._caching import (
     NO_SETTINGS,
     Cache,
@@ -45,6 +45,7 @@ from fnloom._caching import (
     CacheSettings,
     refuse_bad_fields,
 )
+from fnloom._core import ABSENT
 from fnloom._decorators import CacheBehavior, Source, Value
 from fnloom._defaults import default_problems
 from fnloom._drawing import Drawing, Mark, display, drawing, with_context
@@ -244,6 +245,9 @@ def _mismatches(checks: Sequence[_Check], values: Mapping[str, object]) -> list[
         # and only `object`, `NoneType` and a union with it take it (Q79).
         if cls is not None and isinstance(value, cls):
             continue
+        if value is ABSENT:
+            # An override `refuse_given` let through: its node may be absent.
+            continue
         # Refused by class: the check answers the same, or a custom check admits.
         try:
             if matches(value):
@@ -311,7 +315,9 @@ def _returning(
     checked, by a coroutine function the async driver awaits as it would the
     node's own. With `awaits`, a sync node's awaitable result is not checked:
     the async driver refuses it, saying to make the node an `async def`, and
-    closes it, so it never warns as never awaited.
+    closes it, so it never warns as never awaited. `fnloom.ABSENT` is passed on
+    unchecked: there is no value, and the return check refuses it for a node
+    that does not decline (Q135).
     """
     name, declared, payload = node.name, node.returns, node.payload
     classes, matches = _types.admitting(
@@ -320,8 +326,9 @@ def _returning(
 
     def checked(value: object) -> object:
         # Refused by class, or no plain class: the check, custom ones included.
+        # `ABSENT` has no value to check: the return check decides on it (Q135).
         try:
-            if matches(value):
+            if value is ABSENT or matches(value):
                 return value
         except _types.UnresolvedError as error:
             msg = f"{name}: {error}"
@@ -470,6 +477,8 @@ class PreparedPlan[R = dict[str, object]]:
         self._input_names = input_names
         self._override_names = override_names
         self._input_checks, self._override_checks = checks
+        # The overridden nodes that may be absent, whose override may be `ABSENT`.
+        self._absent_overrides: frozenset[str] = _NO_NAMES
         # The driver's result builder, which only a subclass applies.
         self._build: _ResultBuilder[R] | None = None
         # The driver that prepared this plan, which pickling rebuilds it through.
@@ -559,6 +568,8 @@ class PreparedPlan[R = dict[str, object]]:
             or given_overrides.keys() != self._override_names
         ):
             self._refuse_names(given_inputs, given_overrides)
+        if holds_absent(given_inputs) or holds_absent(given_overrides):
+            refuse_given(given_inputs, given_overrides, self._absent_overrides)
         if self._input_checks or self._override_checks:
             mismatches = _mismatches(self._input_checks, given_inputs)
             mismatches += _mismatches(self._override_checks, given_overrides)
@@ -719,6 +730,8 @@ class _HookedPlan[R](PreparedPlan[R]):
             or given_overrides.keys() != self._override_names
         ):
             self._refuse_names(given_inputs, given_overrides)
+        if holds_absent(given_inputs) or holds_absent(given_overrides):
+            refuse_given(given_inputs, given_overrides, self._absent_overrides)
         mismatches: list[str] | BaseException = []
         if self._input_checks or self._override_checks:
             try:
@@ -1078,6 +1091,11 @@ class Driver[R = dict[str, object]]:
             prepared = PreparedPlan(
                 runnable, outputs, input_names, override_names, checks
             )
+        prepared._absent_overrides = frozenset(  # noqa: SLF001  # the driver's own plan
+            name
+            for name in override_names
+            if name in self._nodes and self._nodes[name].may_be_absent
+        )
         prepared._driver = self  # noqa: SLF001  # the driver's own plan
         return prepared
 

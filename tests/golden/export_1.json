@@ -1,0 +1,409 @@
+[
+  {
+    "format": "fnloom.export/1",
+    "fnloom": "<version>",
+    "graph_version": "f0118c066d456809c2a78a0530e313a97ecd138ca8209c83bd352006f8d78473",
+    "config": {},
+    "namespace_config": {},
+    "edge_checks": "on",
+    "request": null,
+    "nodes": [
+      {
+        "name": "rate",
+        "kind": "input",
+        "type": "float",
+        "params": [],
+        "dependencies": [],
+        "tags": {},
+        "doc": null,
+        "module": null,
+        "function": null,
+        "namespace": null,
+        "replaced": null,
+        "config": [],
+        "source": null,
+        "version": null,
+        "marks": [],
+        "checks": [],
+        "required": false,
+        "consumers": [
+          "totals"
+        ]
+      },
+      {
+        "name": "region",
+        "kind": "input",
+        "type": "str",
+        "params": [],
+        "dependencies": [],
+        "tags": {},
+        "doc": null,
+        "module": null,
+        "function": null,
+        "namespace": null,
+        "replaced": null,
+        "config": [],
+        "source": null,
+        "version": null,
+        "marks": [],
+        "checks": [],
+        "required": true,
+        "consumers": [
+          "report",
+          "sales"
+        ]
+      },
+      {
+        "name": "text",
+        "kind": "function",
+        "type": "str",
+        "params": [],
+        "dependencies": [],
+        "tags": {},
+        "doc": "The whole graph's export and one run's, as JSON, fnloom's version dropped.",
+        "module": "export_golden",
+        "function": "export_golden.text",
+        "namespace": null,
+        "replaced": null,
+        "config": [],
+        "source": "def text() -> str:\n    \"\"\"The whole graph's export and one run's, as JSON, fnloom's version dropped.\"\"\"\n    import export_golden  # noqa: PLC0415  # this module, by its importable name\n\n    built = fnloom.build(export_golden)\n    documents = [\n        built.export(),\n        built.export([\"report\"], inputs={\"region\": \"n\", \"units\": 1}),\n    ]\n    for document in documents:\n        document[\"fnloom\"] = \"<version>\"\n    return json.dumps(documents, indent=2) + \"\\n\"\n",
+        "version": "43000960cfbeed5d13d12ac6d9959ab19b27827eee9b8d7415b8212a7a3d9860",
+        "marks": [],
+        "checks": []
+      },
+      {
+        "name": "units",
+        "kind": "input",
+        "type": "int",
+        "params": [],
+        "dependencies": [],
+        "tags": {},
+        "doc": null,
+        "module": null,
+        "function": null,
+        "namespace": null,
+        "replaced": null,
+        "config": [],
+        "source": null,
+        "version": null,
+        "marks": [],
+        "checks": [],
+        "required": true,
+        "consumers": [
+          "sales"
+        ]
+      },
+      {
+        "name": "sales",
+        "kind": "function",
+        "type": "float",
+        "params": [
+          {
+            "name": "region",
+            "slot": null,
+            "reads": "region",
+            "value": null,
+            "value_version": null,
+            "required": true,
+            "type": "str"
+          },
+          {
+            "name": "units",
+            "slot": null,
+            "reads": "units",
+            "value": null,
+            "value_version": null,
+            "required": true,
+            "type": "int"
+          }
+        ],
+        "dependencies": [
+          "region",
+          "units"
+        ],
+        "tags": {
+          "stage": "raw"
+        },
+        "doc": "Sales of a region.",
+        "module": "export_golden",
+        "function": "export_golden.sales",
+        "namespace": null,
+        "replaced": null,
+        "config": [],
+        "source": "@tag(stage=\"raw\")\ndef sales(region: str, units: int) -> float:\n    \"\"\"Sales of a region.\"\"\"\n    return float(units) if region else 0.0\n",
+        "version": "f654a351d5ebf1281d3d93fc24b91d21b2db38af4aafba47f7fa5f04096da9a1",
+        "marks": [],
+        "checks": []
+      },
+      {
+        "name": "totals",
+        "kind": "function",
+        "type": "export_golden.Totals",
+        "params": [
+          {
+            "name": "sales",
+            "slot": null,
+            "reads": "sales",
+            "value": null,
+            "value_version": null,
+            "required": true,
+            "type": "float"
+          },
+          {
+            "name": "rate",
+            "slot": null,
+            "reads": "rate",
+            "value": null,
+            "value_version": null,
+            "required": false,
+            "type": "float"
+          }
+        ],
+        "dependencies": [
+          "rate",
+          "sales"
+        ],
+        "tags": {},
+        "doc": "The totals of `sales`.",
+        "module": "export_golden",
+        "function": "export_golden.totals",
+        "namespace": null,
+        "replaced": null,
+        "config": [],
+        "source": "def totals(sales: float, rate: float = 0.2) -> Totals:\n    \"\"\"The totals of `sales`.\"\"\"\n    return {\"net\": sales, \"tax\": sales * rate}\n",
+        "version": "a0177f796439e2e6c06f022501cb1b448e7195ec81e2a46b36304dfb814f1172",
+        "marks": [],
+        "checks": []
+      },
+      {
+        "name": "report",
+        "kind": "function",
+        "type": "str",
+        "params": [
+          {
+            "name": "totals",
+            "slot": null,
+            "reads": "totals",
+            "value": null,
+            "value_version": null,
+            "required": true,
+            "type": "export_golden.Totals"
+          },
+          {
+            "name": "region",
+            "slot": null,
+            "reads": "region",
+            "value": null,
+            "value_version": null,
+            "required": true,
+            "type": "str"
+          }
+        ],
+        "dependencies": [
+          "region",
+          "totals"
+        ],
+        "tags": {},
+        "doc": "A line of the report.",
+        "module": "export_golden",
+        "function": "export_golden.report",
+        "namespace": null,
+        "replaced": null,
+        "config": [],
+        "source": "def report(totals: Totals, region: str) -> str:\n    \"\"\"A line of the report.\"\"\"\n    return f\"{region}: {totals['net']}\"\n",
+        "version": "54a1f0d12f43cc05a5366753d1b4c36904a1d7111aafcbe258fddd9cf0b4041f",
+        "marks": [],
+        "checks": []
+      }
+    ]
+  },
+  {
+    "format": "fnloom.export/1",
+    "fnloom": "<version>",
+    "graph_version": "a4a0279984e3986774ed431e168f9497bf23d1e4a3642f152662fb491f483e24",
+    "config": {},
+    "namespace_config": {},
+    "edge_checks": "on",
+    "request": {
+      "outputs": [
+        "report"
+      ],
+      "inputs": [
+        "region",
+        "units"
+      ],
+      "overrides": []
+    },
+    "nodes": [
+      {
+        "name": "region",
+        "kind": "input",
+        "type": "str",
+        "params": [],
+        "dependencies": [],
+        "tags": {},
+        "doc": null,
+        "module": null,
+        "function": null,
+        "namespace": null,
+        "replaced": null,
+        "config": [],
+        "source": null,
+        "version": null,
+        "marks": [],
+        "checks": [],
+        "required": true,
+        "consumers": [
+          "report",
+          "sales"
+        ]
+      },
+      {
+        "name": "units",
+        "kind": "input",
+        "type": "int",
+        "params": [],
+        "dependencies": [],
+        "tags": {},
+        "doc": null,
+        "module": null,
+        "function": null,
+        "namespace": null,
+        "replaced": null,
+        "config": [],
+        "source": null,
+        "version": null,
+        "marks": [],
+        "checks": [],
+        "required": true,
+        "consumers": [
+          "sales"
+        ]
+      },
+      {
+        "name": "sales",
+        "kind": "function",
+        "type": "float",
+        "params": [
+          {
+            "name": "region",
+            "slot": null,
+            "reads": "region",
+            "value": null,
+            "value_version": null,
+            "required": true,
+            "type": "str"
+          },
+          {
+            "name": "units",
+            "slot": null,
+            "reads": "units",
+            "value": null,
+            "value_version": null,
+            "required": true,
+            "type": "int"
+          }
+        ],
+        "dependencies": [
+          "region",
+          "units"
+        ],
+        "tags": {
+          "stage": "raw"
+        },
+        "doc": "Sales of a region.",
+        "module": "export_golden",
+        "function": "export_golden.sales",
+        "namespace": null,
+        "replaced": null,
+        "config": [],
+        "source": "@tag(stage=\"raw\")\ndef sales(region: str, units: int) -> float:\n    \"\"\"Sales of a region.\"\"\"\n    return float(units) if region else 0.0\n",
+        "version": "f654a351d5ebf1281d3d93fc24b91d21b2db38af4aafba47f7fa5f04096da9a1",
+        "marks": [],
+        "checks": []
+      },
+      {
+        "name": "totals",
+        "kind": "function",
+        "type": "export_golden.Totals",
+        "params": [
+          {
+            "name": "sales",
+            "slot": null,
+            "reads": "sales",
+            "value": null,
+            "value_version": null,
+            "required": true,
+            "type": "float"
+          },
+          {
+            "name": "rate",
+            "slot": null,
+            "reads": "rate",
+            "value": null,
+            "value_version": null,
+            "required": false,
+            "type": "float"
+          }
+        ],
+        "dependencies": [
+          "rate",
+          "sales"
+        ],
+        "tags": {},
+        "doc": "The totals of `sales`.",
+        "module": "export_golden",
+        "function": "export_golden.totals",
+        "namespace": null,
+        "replaced": null,
+        "config": [],
+        "source": "def totals(sales: float, rate: float = 0.2) -> Totals:\n    \"\"\"The totals of `sales`.\"\"\"\n    return {\"net\": sales, \"tax\": sales * rate}\n",
+        "version": "a0177f796439e2e6c06f022501cb1b448e7195ec81e2a46b36304dfb814f1172",
+        "marks": [],
+        "checks": []
+      },
+      {
+        "name": "report",
+        "kind": "function",
+        "type": "str",
+        "params": [
+          {
+            "name": "totals",
+            "slot": null,
+            "reads": "totals",
+            "value": null,
+            "value_version": null,
+            "required": true,
+            "type": "export_golden.Totals"
+          },
+          {
+            "name": "region",
+            "slot": null,
+            "reads": "region",
+            "value": null,
+            "value_version": null,
+            "required": true,
+            "type": "str"
+          }
+        ],
+        "dependencies": [
+          "region",
+          "totals"
+        ],
+        "tags": {},
+        "doc": "A line of the report.",
+        "module": "export_golden",
+        "function": "export_golden.report",
+        "namespace": null,
+        "replaced": null,
+        "config": [],
+        "source": "def report(totals: Totals, region: str) -> str:\n    \"\"\"A line of the report.\"\"\"\n    return f\"{region}: {totals['net']}\"\n",
+        "version": "54a1f0d12f43cc05a5366753d1b4c36904a1d7111aafcbe258fddd9cf0b4041f",
+        "marks": [
+          "output"
+        ],
+        "checks": []
+      }
+    ]
+  }
+]

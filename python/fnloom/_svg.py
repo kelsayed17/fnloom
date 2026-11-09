@@ -853,7 +853,9 @@ def _look(
     for mark in LEGEND_KEYS:
         if mark not in marks:
             continue
-        if mark == "output":
+        if mark == "may be absent":
+            dashes = "5,3"
+        elif mark == "output":
             fill = "#ffc857"
         elif mark == "override":
             width, dashes = 3.0, "2,2"
@@ -861,16 +863,23 @@ def _look(
             stroke, width = "#ff0000", max(width, 2.0)
         elif mark == "context":
             fill, stroke, font = "#eeeeee", "#999999", "#777777"
-    shape = "rounded"
-    if style is not None:
-        fill = hex_colour(style.fill) if style.fill is not None else fill
-        stroke = hex_colour(style.stroke) if style.stroke is not None else stroke
-        font = hex_colour(style.font_color) if style.font_color is not None else font
-        width = style.stroke_width if style.stroke_width is not None else width
-        if style.dashed is not None:
-            dashes = "5,3" if style.dashed else None
-        shape = style.shape if style.shape is not None else shape
-    return _Look(fill, stroke, font, width, dashes, shape)
+    look = _Look(fill, stroke, font, width, dashes, "rounded")
+    return look if style is None else _styled(look, style)
+
+
+def _styled(look: _Look, style: Style) -> _Look:
+    """`look`, with what `style` sets taking over."""
+    dashes = look.dashes
+    if style.dashed is not None:
+        dashes = "5,3" if style.dashed else None
+    return _Look(
+        hex_colour(style.fill) if style.fill is not None else look.fill,
+        hex_colour(style.stroke) if style.stroke is not None else look.stroke,
+        hex_colour(style.font_color) if style.font_color is not None else look.font,
+        style.stroke_width if style.stroke_width is not None else look.width,
+        dashes,
+        style.shape if style.shape is not None else look.shape,
+    )
 
 
 def _n(value: float) -> str:

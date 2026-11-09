@@ -9,7 +9,7 @@ use pyo3::types::{PyDict, PyString, PyTuple};
 use crate::errors::caught;
 use crate::plan::{Kwargs, Value};
 
-/// Base class for run observers; subclass it and override any of the four hooks.
+/// Base class for run observers; subclass it and override any of the five hooks.
 ///
 /// Every hook is a no-op here. An exception raised by a hook aborts the run once every
 /// observer has seen the event, and is raised as itself.
@@ -61,6 +61,17 @@ impl ObserverBase {
         error: &Bound<'_, PyAny>,
     ) {
     }
+
+    /// Called instead of `pre_node` and `post_node` for a computed node that is skipped,
+    /// because an argument it needs is absent: the node is then absent too. `branch` is
+    /// the block branch it was skipped in, `()` outside blocks.
+    #[pyo3(signature = (node, *, branch))]
+    #[expect(unused_variables, reason = "the base hook ignores its arguments")]
+    #[expect(
+        clippy::unused_self,
+        reason = "Python calls the hooks as instance methods"
+    )]
+    const fn skipped(&self, node: &str, branch: &Bound<'_, PyTuple>) {}
 
     /// Called once after the run ended; `ok` says whether it succeeded.
     #[pyo3(signature = (*, ok))]
@@ -149,6 +160,13 @@ impl Observer<Value, PyErr> for PyObserver<'_, '_> {
             ],
         )?;
         self.call(intern!(py, "post_node"), (node,), Some(&kwargs))
+    }
+
+    fn skipped(&mut self, node: &str, branch: &[usize]) -> PyResult<()> {
+        let py = self.observer.py();
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "branch"), PyTuple::new(py, branch)?)?;
+        self.call(intern!(py, "skipped"), (node,), Some(&kwargs))
     }
 
     fn post_graph(&mut self, ok: bool) -> PyResult<()> {
