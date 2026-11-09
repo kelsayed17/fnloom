@@ -6297,3 +6297,50 @@ def test_q130_node_events_carry_the_branch_instead_of_task_hooks() -> None:
         ("summary", ()),
     ]
     assert counted == [("picked", (), 2)]
+
+
+# Drawing and export of blocks (Plan 10, task 13).
+
+
+@pytest.mark.deliberate("Q131")
+@pytest.mark.usefixtures("fake_graphviz")
+def test_q131_a_block_is_one_cluster() -> None:
+    """Hamilton marks expand and collect nodes and groups nothing; fnloom clusters."""
+    hamilton = (
+        hamilton_driver.Builder()
+        .enable_dynamic_execution(allow_experimental_mode=True)
+        .with_modules(block_module("q131_h", PICKED, "hamilton"))
+        .build()
+        .display_all_functions(show_legend=False)
+    )
+    assert hamilton.subgraphs == []
+    looks = {name: attrs for name, _, attrs in hamilton.nodes}
+    assert looks["picked"]["peripheries"] == "2"
+    assert looks["summary"]["peripheries"] == "2"
+    arrows = {(tail, head): attrs for tail, head, attrs in hamilton.edges}
+    assert arrows["picked", "details"]["arrowhead"] == "crow"
+    assert arrows["details", "summary"]["arrowtail"] == "crow"
+    drawing = fnloom.build(block_module("q131_f", PICKED, "fnloom")).draw()
+    dot = drawing.to_dot(legend=False)
+    assert dot.count("subgraph ") == 1
+    assert '  subgraph "cluster_picked" {\n    label="for each item of picked"\n' in dot
+    assert '    "details" [label="details\\nint"]\n  }\n' in dot
+    assert '  "picked" -> "details" [label="expand"]' in dot
+    assert '  "details" -> "summary" [label="collect"]' in dot
+    assert "peripheries" not in dot
+
+
+@pytest.mark.deliberate("Q95")
+def test_q95_a_graph_with_a_block_exports_format_2() -> None:
+    """Hamilton's export has no kinds or blocks; fnloom's `/2` names both."""
+    built = fnloom.build(block_module("q95_blocks", PICKED, "fnloom"))
+    document = built.export()
+    assert document["format"] == "fnloom.export/2"
+    shown = {node["name"]: (node["kind"], node["block"]) for node in document["nodes"]}
+    assert shown == {
+        "n": ("input", None),
+        "rate": ("input", None),
+        "picked": ("expand", None),
+        "details": ("function", "picked"),
+        "summary": ("collect", None),
+    }

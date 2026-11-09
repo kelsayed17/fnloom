@@ -7,17 +7,17 @@ import shutil
 import subprocess
 import sys
 import textwrap
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
 
 import fnloom
-from fnloom import Drawing, DrawnNode
+from fnloom import Drawing, DrawnNode, Style
 from helpers import fake_dot, make_module
 
 if TYPE_CHECKING:
     import types
-    from pathlib import Path
 
 PROBE = """
 from typing import Annotated, NewType
@@ -720,3 +720,230 @@ def test_render_reads_a_format_in_any_case(
     )
     assert drawing.render(tmp_path / "c", format=".GV").read_text() == drawing.to_dot()
     assert drawing.render(tmp_path / "d", format="SVG").read_text() == "-Tsvg"
+
+
+# ---- blocks (Q131) -------------------------------------------------------------------
+
+BLOCKS = """
+from fnloom import Collect, Parallelizable
+
+def outer(regions: list[str]) -> Parallelizable[str]:
+    yield from regions
+
+def inner(outer: str) -> Parallelizable[int]:
+    yield from range(len(outer))
+
+def leaf(inner: int, outer: str) -> int:
+    return inner + len(outer)
+
+def scaled(leaf: int) -> int:
+    return leaf * 2
+
+def per_outer(scaled: Collect[int], outer: str) -> int:
+    return sum(scaled)
+
+def everything(per_outer: Collect[int]) -> int:
+    return sum(per_outer)
+"""
+
+BLOCKS_DOT = """\
+digraph {
+  graph [rankdir=LR]
+  node [shape=box style="rounded,filled" fillcolor="#b4d8e4" fontname=Helvetica]
+  "regions" [label="regions\\nlist[str]" style="dashed,filled" fillcolor="#ffffff"]
+  "outer" [label="outer\\nParallelizable[str]"]
+  "everything" [label="everything\\nint"]
+  subgraph "cluster_outer" {
+    label="for each item of outer"
+    "inner" [label="inner\\nParallelizable[int]"]
+    "per_outer" [label="per_outer\\nint"]
+    subgraph "cluster_inner" {
+      label="for each item of inner"
+      "leaf" [label="leaf\\nint"]
+      "scaled" [label="scaled\\nint"]
+    }
+  }
+  "regions" -> "outer"
+  "outer" -> "inner" [label="expand"]
+  "inner" -> "leaf" [label="expand"]
+  "outer" -> "leaf" [label="expand"]
+  "leaf" -> "scaled"
+  "outer" -> "per_outer" [label="expand"]
+  "scaled" -> "per_outer" [label="collect"]
+  "per_outer" -> "everything" [label="collect"]
+}
+"""
+
+BLOCKS_MERMAID = """\
+flowchart LR
+  n0["regions<br>list[str]"]
+  n1["outer<br>Parallelizable[str]"]
+  n6["everything<br>int"]
+  subgraph b0 ["for each item of outer"]
+    n2["inner<br>Parallelizable[int]"]
+    n5["per_outer<br>int"]
+    subgraph b1 ["for each item of inner"]
+      n3["leaf<br>int"]
+      n4["scaled<br>int"]
+    end
+  end
+  n0 --> n1
+  n1 -- expand --> n2
+  n2 -- expand --> n3
+  n1 -- expand --> n3
+  n3 --> n4
+  n1 -- expand --> n5
+  n4 -- collect --> n5
+  n5 -- collect --> n6
+  classDef function fill:#b4d8e4,stroke:#333333
+  class n1,n2,n3,n4,n5,n6 function
+  classDef input fill:#ffffff,stroke:#333333,stroke-dasharray:5 5
+  class n0 input
+"""
+
+_BLOCKS_TEXT = """
+import fnloom
+from helpers import make_module
+from test_drawing import BLOCKS
+
+drawn = fnloom.build(make_module("blocks_drawn", BLOCKS)).draw()
+print(drawn.to_dot(legend=False) + drawn.to_mermaid(), end="")
+"""
+
+
+def _blocks() -> fnloom.Driver:
+    return fnloom.build(make_module("drawing_blocks", BLOCKS))
+
+
+def test_blocks_draw_as_nested_clusters_in_dot_and_mermaid() -> None:
+    """A cluster per block, nested as the blocks nest, under any hash seed."""
+    drawing = _blocks().draw()
+    assert drawing.to_dot(legend=False) == BLOCKS_DOT
+    assert drawing.to_mermaid() == BLOCKS_MERMAID
+    assert drawing.blocks == (("inner", "outer"), ("outer", None))
+    assert {n.name: n.block for n in drawing.nodes} == {
+        "regions": None,
+        "outer": None,
+        "inner": "outer",
+        "leaf": "inner",
+        "scaled": "inner",
+        "per_outer": "outer",
+        "everything": None,
+    }
+    tests = Path(__file__).parent
+    texts = {
+        subprocess.run(  # noqa: S603  # our own interpreter and script
+            [sys.executable, "-c", _BLOCKS_TEXT],
+            env={**os.environ, "PYTHONHASHSEED": seed, "PYTHONPATH": str(tests)},
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for seed in ("0", "1", "2")
+    }
+    assert texts == {BLOCKS_DOT + BLOCKS_MERMAID}
+
+
+def test_a_block_whose_expand_is_not_drawn_still_nests() -> None:
+    """A path inside the inner block draws both clusters around it."""
+    drawing = _blocks().draw_path_between("leaf", "scaled")
+    assert drawing.blocks == (("inner", "outer"), ("outer", None))
+    text = drawing.to_dot(legend=False)
+    assert '  subgraph "cluster_outer" {\n    label="for each item of outer"\n' in text
+    assert '    subgraph "cluster_inner" {' in text
+    assert '  "leaf" -> "scaled" [color=red]' in text
+
+
+def test_a_filtered_drawing_opens_no_empty_cluster() -> None:
+    """Nodes dropped but `blocks` kept: only blocks with a drawn node are clusters."""
+    import dataclasses  # noqa: PLC0415  # this test only
+
+    drawing = _blocks().draw()
+    kept = {"regions", "outer", "inner"}
+    filtered = dataclasses.replace(
+        drawing,
+        nodes=tuple(n for n in drawing.nodes if n.name in kept),
+        edges=tuple(e for e in drawing.edges if set(e) <= kept),
+    )
+    assert filtered.to_dot().count("subgraph ") == 2  # noqa: PLR2004  # outer, legend
+    assert "cluster_inner" not in filtered.to_dot()
+    assert filtered.to_mermaid().count("subgraph ") == 1
+
+
+def test_a_node_that_collects_and_expands_sits_between_two_clusters() -> None:
+    """Q136: its collect edge leaves one block, its expand edge enters the next."""
+    source = """
+from fnloom import Collect, Parallelizable
+
+def first(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+def each(first: int) -> int:
+    return first
+
+def again(each: Collect[int]) -> Parallelizable[int]:
+    yield from each
+
+def last(again: int) -> int:
+    return again
+"""
+    dot = fnloom.build(make_module("drawing_q136", source)).draw().to_dot()
+    assert '  "each" -> "again" [label="collect"]' in dot
+    assert '  "again" -> "last" [label="expand"]' in dot
+    assert '  "again" [label="again\\nParallelizable[int]"]' in dot
+    assert dot.count("subgraph ") == 3  # noqa: PLR2004  # two blocks, the legend
+
+
+def test_draw_execution_draws_a_block_once() -> None:
+    """Each block node is drawn once, however many items its expand yields."""
+    drawing = _blocks().draw_execution(["everything"], inputs={"regions": ["a", "b"]})
+    names = [n.name for n in drawing.nodes]
+    assert sorted(names) == sorted(set(names))
+    text = drawing.to_dot()
+    assert text.count('subgraph "cluster_outer"') == 1
+    assert text.count('subgraph "cluster_inner"') == 1
+    assert text.count('"leaf" [label="leaf') == 1
+
+
+def test_styles_apply_inside_clusters() -> None:
+    """A style function reaches block nodes; the legend keeps its own cluster."""
+    drawing = (
+        _blocks()
+        .draw()
+        .styled(
+            style=lambda view, _: Style(fill="gold") if view.block is not None else None
+        )
+    )
+    dot = drawing.to_dot()
+    assert '      "leaf" [label="leaf\\nint" fillcolor="#ffd700"]' in dot
+    assert '  "everything" [label="everything\\nint"]' in dot
+    assert "  subgraph cluster_legend {" in dot
+    assert "  style n3 fill:#ffd700" in drawing.to_mermaid()
+
+
+def test_an_expand_named_legend_keeps_its_cluster() -> None:
+    """The legend's cluster steps aside for an expand named `legend`."""
+    source = BLOCKS.replace("outer", "legend")
+    dot = fnloom.build(make_module("drawing_legend_block", source)).draw().to_dot()
+    assert '  subgraph "cluster_legend" {' in dot
+    assert "  subgraph cluster__legend {" in dot
+
+
+def test_a_drawn_node_keeps_its_block_through_pickling() -> None:
+    """`block` is pickled, and left out of equality."""
+    drawing = _blocks().draw()
+    leaf = next(n for n in drawing.nodes if n.name == "leaf")
+    assert pickle.loads(pickle.dumps(leaf)).block == "inner"  # noqa: S301  # our own
+    assert pickle.loads(pickle.dumps(drawing)) == drawing  # noqa: S301  # our own
+    assert DrawnNode("a", "function", "int", "a", block="x") == DrawnNode(
+        "a", "function", "int", "a"
+    )
+
+
+def test_the_builtin_svg_names_the_block_on_each_member() -> None:
+    """No box: each member says its block, and the edges say expand and collect."""
+    svg = _blocks().draw().to_svg()
+    assert svg.count("for each item of inner") == 2  # noqa: PLR2004  # leaf, scaled
+    assert svg.count("for each item of outer") == 2  # noqa: PLR2004  # inner, per_outer
+    assert svg.count(">expand</tspan>") == 4  # noqa: PLR2004  # four expand edges
+    assert svg.count(">collect</tspan>") == 2  # noqa: PLR2004  # two collect edges

@@ -29,7 +29,8 @@ if TYPE_CHECKING:
     from fnloom._view import InputView, NodeView, Param
 
 FORMAT = "fnloom.export/1"
-# The format of a document with a node that may be absent: each node says so (Q135).
+# The format of a document with a node that may be absent (Q135), or a block
+# (Q131): each node says whether it may be absent, its kind and its block.
 FORMAT_2 = "fnloom.export/2"
 _FORMATS = (FORMAT, FORMAT_2)
 
@@ -44,6 +45,7 @@ _COMPARED = (
     "version",
     "marks",
     "may_be_absent",
+    "block",
 )
 
 # The drawing's mark for a node that may be absent: the document says it itself.
@@ -69,12 +71,14 @@ def export(  # noqa: PLR0913  # one argument per part of the document
     build checked: `"on"`, `"off"`, or the nodes whose edges it skipped (Q149).
     Both enter `graph_version` when not the default.
 
-    The format is `fnloom.export/1`, unless a drawn node may be absent (Q135):
-    then it is `fnloom.export/2`, and every node says `may_be_absent`.
+    The format is `fnloom.export/1`, unless a drawn node may be absent (Q135)
+    or is an expand, a collect or in a block (Q131): then it is
+    `fnloom.export/2`. Its nodes each say `may_be_absent` and `block`, its
+    `kind` may be `"expand"` or `"collect"`, and each param says `collect`.
     """
     versions: dict[int, tuple[str | None, str | None]] = {}
-    absence = any(views[drawn.name].may_be_absent for drawn in drawing.nodes)
-    form = FORMAT_2 if absence else FORMAT
+    second = any(_needs_2(views[drawn.name]) for drawn in drawing.nodes)
+    form = FORMAT_2 if second else FORMAT
     nodes = [
         _node(
             drawn.name,
@@ -84,7 +88,7 @@ def export(  # noqa: PLR0913  # one argument per part of the document
             versions,
             built_from=getattr(views, "built_from", {}).get(drawn.name),
             checks=getattr(views, "checks", {}).get(drawn.name, ()),
-            absence=absence,
+            second=second,
         )
         for drawn in drawing.nodes
     ]
@@ -209,11 +213,13 @@ def _node(  # noqa: PLR0913  # the node's parts, and its build's
     *,
     built_from: Callable[..., object] | None = None,
     checks: Sequence[Check] = (),
-    absence: bool = False,
+    second: bool = False,
 ) -> dict[str, Any]:
     """One node's entry; an input's has no source or version (Q95).
 
-    With `absence`, for `fnloom.export/2`, it says whether the node may be absent.
+    With `second`, for `fnloom.export/2`, it says whether the node may be
+    absent, its block, and for each param whether it collects; its `kind` may
+    be `"expand"` or `"collect"` (Q131).
 
     `built_from` is the function the node was built from when it isn't the
     view's `origin`, a `@resolve` copy: its decorations, such as a pinned
@@ -222,9 +228,9 @@ def _node(  # noqa: PLR0913  # the node's parts, and its build's
     """
     entry: dict[str, Any] = {
         "name": name,
-        "kind": "input" if view.is_input else "function",
+        "kind": view.kind if second else "input" if view.is_input else "function",
         "type": type_text(view.type),
-        "params": [_param(p) for p in view.params],
+        "params": [_param(p, second=second) for p in view.params],
         "dependencies": list(view.dependencies),
         "tags": {
             k: list(v) if isinstance(v, tuple) else v for k, v in view.tags.items()
@@ -240,8 +246,9 @@ def _node(  # noqa: PLR0913  # the node's parts, and its build's
         "marks": marks,
         "checks": [_check(c) for c in checks],
     }
-    if absence:
+    if second:
         entry["may_be_absent"] = view.may_be_absent
+        entry["block"] = view.block
     if view.is_input:
         found = inputs[name]
         entry["required"] = found.required
@@ -316,9 +323,17 @@ def _check(check: Check) -> dict[str, Any]:
     }
 
 
-def _param(param: Param) -> dict[str, Any]:
+def _needs_2(view: NodeView) -> bool:
+    """Whether `view` needs `fnloom.export/2` to be told: absence, or a block."""
+    return view.may_be_absent or view.block is not None or view.kind in _BLOCK_KINDS
+
+
+_BLOCK_KINDS = frozenset({"expand", "collect"})
+
+
+def _param(param: Param, *, second: bool = False) -> dict[str, Any]:
     binding = param.binding
-    return {
+    entry = {
         "name": param.name,
         "slot": param.slot,
         "reads": binding.name if isinstance(binding, Source) else None,
@@ -329,6 +344,9 @@ def _param(param: Param) -> dict[str, Any]:
         "required": param.required,
         "type": type_text(param.annotation),
     }
+    if second:
+        entry["collect"] = param.collect
+    return entry
 
 
 def _source(fn: Callable[..., object]) -> str | None:
@@ -369,24 +387,29 @@ def _graph_version(
     change what a node computes. A `value()` is hashed by its `value_version`.
     `None` when a node is unversioned, or a `value()` it is bound to has no
     fingerprint: a change there could not be seen (Q96). The document's `form`
-    is hashed too, so a `/1` document's version is what it always was.
+    is hashed too, so a `/1` document's version is what it always was; a `/2`
+    one's hashes each node's block and each param's collect as well (Q131).
     """
+    second = form == FORMAT_2
     parts: list[object] = []
     for node in nodes:
-        if node["kind"] == "function" and node["version"] is None:
+        if node["kind"] != "input" and node["version"] is None:
             return None
         bound: list[object] = []
         params = views[node["name"]].params
         for param, entry in zip(params, node["params"], strict=True):
             binding = param.binding
             if isinstance(binding, Source):
-                bound.append([param.name, param.slot, binding.name, param.required])
+                read = [param.name, param.slot, binding.name, param.required]
+                bound.append([*read, entry["collect"]] if second else read)
                 continue
             value = entry["value_version"]
             if value is None:
                 return None
             bound.append([param.name, param.slot, None, value])
         named = [node[key] for key in ("name", "kind", "type")]
+        if second:
+            named.append(node["block"])
         parts.append(
             [*named, bound, node["config"], node.get("checks", []), node["version"]]
         )
@@ -402,8 +425,9 @@ def diff(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
 
     `added` and `removed` are names, sorted; `changed` maps each node in both to
     the fields that differ, of `kind`, `type`, `params`, `config`, `checks`,
-    `tags`, `version`, `marks` (a run's output or override) and `may_be_absent`,
-    which a `fnloom.export/1` document's nodes are not. `unversioned` names
+    `tags`, `version`, `marks` (a run's output or override), `may_be_absent`,
+    which a `fnloom.export/1` document's nodes are not, and `block`, which
+    they are in none of; a `/1` param collects nothing (Q131). `unversioned` names
     each function node in both that differs in nothing else, its version aside,
     and that a side has no version for, or a `value()` without a
     `value_version`: a change there can't be seen.
@@ -468,15 +492,24 @@ def diff(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _field(node: Mapping[str, Any], name: str) -> object:
-    """A node's `name` field; a `/1` node's `may_be_absent` is `False` (Q135)."""
+    """A node's `name` field, a `/1` node's read as `/2` writes it.
+
+    Its `may_be_absent` is `False` (Q135), its `block` `None` and each param's
+    `collect` `None` (Q131).
+    """
     if name == "may_be_absent":
         return node.get(name, False)
+    if name == "params" and isinstance(params := node.get(name), list):
+        return [
+            {"collect": None, **param} if isinstance(param, dict) else param
+            for param in params
+        ]
     return node.get(name)
 
 
 def _is_blind(node: Mapping[str, Any]) -> bool:
     """Whether a change in `node` could hide: no code version, or no value version."""
-    if node.get("kind") != "function":
+    if node.get("kind") in {"input", None}:
         return False
     if node.get("version") is None:
         return True

@@ -673,3 +673,82 @@ def test_checks_are_in_the_export_and_its_versions() -> None:
     ]
     found = _export.diff(documents["range10"], documents["range5"])
     assert found["changed"] == {"a": ["checks", "version"]}
+
+
+BLOCKS = """
+from fnloom import Collect, Parallelizable
+
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+def details(picked: int, rate: int) -> int:
+    return picked * rate
+
+def summary(details: Collect[int]) -> list[int]:
+    return list(details)
+"""
+
+# `BLOCKS` with no block: `details` reads the items as a whole.
+FLAT = """
+def picked(n: int) -> list[int]:
+    return list(range(n))
+
+def details(picked: list[int], rate: int) -> int:
+    return len(picked) * rate
+
+def summary(details: int) -> list[int]:
+    return [details]
+"""
+
+COLLECT_ALL = BLOCKS.replace(
+    "from fnloom import", "from fnloom import Absent,"
+).replace("Collect[int]", "Collect[int | Absent]")
+
+
+def test_export_2_carries_kind_block_and_collect() -> None:
+    """A graph with a block is `/2`: each node's kind and block, params' collect."""
+    document = _driver(BLOCKS, "exported_blocks").export()
+    assert document["format"] == "fnloom.export/2"
+    nodes = _nodes(document)
+    shown = {name: (node["kind"], node["block"]) for name, node in nodes.items()}
+    assert shown == {
+        "n": ("input", None),
+        "rate": ("input", None),
+        "picked": ("expand", None),
+        "details": ("function", "picked"),
+        "summary": ("collect", None),
+    }
+    assert [p["collect"] for p in nodes["summary"]["params"]] == ["present"]
+    assert [p["collect"] for p in nodes["details"]["params"]] == [None, None]
+    assert all(node["may_be_absent"] is False for node in nodes.values())
+    assert document["graph_version"] is not None
+    run = _driver(BLOCKS, "exported_blocks_run").export(
+        ["summary"], inputs={"n": 2, "rate": 3}
+    )
+    assert run["format"] == "fnloom.export/2"
+    assert _nodes(run)["details"]["block"] == "picked"
+
+
+def test_the_graph_version_sees_a_block_and_a_collect() -> None:
+    """Collecting all, or no block at all, changes the graph version."""
+    versions = {
+        _driver(source, f"exported_blocks_v{i}").export()["graph_version"]
+        for i, source in enumerate((BLOCKS, COLLECT_ALL, FLAT))
+    }
+    assert len(versions) == 3  # noqa: PLR2004  # all three differ
+
+
+def test_diff_sees_a_param_changed_to_collect() -> None:
+    """`Collect[int]` to `Collect[int | Absent]` changes params; `/1` to `/2` too."""
+    old = _driver(BLOCKS, "exported_diff_old").export()
+    new = _driver(COLLECT_ALL, "exported_diff_new").export()
+    assert _export.diff(old, new)["changed"] == {"summary": ["params"]}
+    flat = _driver(FLAT, "exported_diff_flat").export()
+    assert flat["format"] == "fnloom.export/1"
+    assert _export.diff(flat, old)["changed"] == {
+        "details": ["params", "version", "block"],
+        "picked": ["kind", "type", "version"],
+        "summary": ["kind", "params", "version"],
+    }
+    assert _export.diff(flat, flat)["changed"] == {}
+    assert _export.diff(old, old)["changed"] == {}

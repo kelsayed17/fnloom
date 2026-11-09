@@ -224,6 +224,18 @@ boxed.to_dot().splitlines()[1]
 Each `DrawnNode` keeps its `NodeView` as `view`, so a style function can be run again on a drawing; `view` is left out
 of equality, `repr` and pickling.
 
+## Blocks
+
+A [block](writing-nodes.md#fan-out-and-fan-in), the nodes computed once per item of an expand, is drawn once, whatever
+the number of items, as a cluster titled `for each item of <expand>`. DOT writes it as `subgraph "cluster_<expand>"`,
+and Mermaid as `subgraph b0 ["for each item of <expand>"]`, nested as the blocks nest. An edge from an expand into its
+block is labelled `expand`, and one from a block node to the node that collects it `collect`. Nodes outside every block
+come first; then each block, by its expand's name, its nodes in the drawing's order, then the blocks inside it. So the
+text never depends on the hash seed. Styles apply inside a cluster as anywhere else. `DrawnNode.block` names the
+expand of the node's innermost block, and `Drawing.blocks` how the drawn blocks nest, so a block's cluster is nested
+right even when its expand isn't drawn. The builtin SVG engine draws no box, since its layers don't keep a block
+together: each block node gets a `for each item of <expand>` line, and its edges get the same labels.
+
 ## Mermaid and images
 
 `to_mermaid()` writes the drawing as a Mermaid flowchart, which GitHub and many Markdown tools show as a diagram:
@@ -282,8 +294,11 @@ text = json.dumps(document, sort_keys=True)
 
 Each node gives its kind (`"function"` or `"input"`), its whole type, each parameter and what it reads, its tags, doc,
 function, config conditions, source, marks and output checks. An input says whether it is required and which nodes read
-it. When a node drawn [may be absent](writing-nodes.md#declining), the format is `fnloom.export/2` instead, and every
-node also says `may_be_absent`; any other document is `fnloom.export/1`, unchanged. `fnloom diff` reads both:
+it. When a node drawn [may be absent](writing-nodes.md#declining), or is part of a [block](#blocks), the format is
+`fnloom.export/2` instead. Every node then also says `may_be_absent` and `block`, the expand of the innermost block it
+is in or `None`; a node's kind may also be `"expand"` or `"collect"`, and each parameter says `collect`: `"present"`,
+`"all"` or `None`. Any other document is `fnloom.export/1`, unchanged. `fnloom diff` reads both, and compares
+`block` and each parameter's `collect` too:
 
 ```python
 tax = document["nodes"][4]
@@ -301,10 +316,10 @@ output checks has them in its `version` too, as the result cache keys them, so `
 so does a variant a [`config.matches`](writing-nodes.md#a-predicate-of-config-keys) predicate selects, its condition
 shown as `matches(module.qualname)`. A node that [replaced](writing-nodes.md#replacing-a-node) another module's names
 that module as `replaced`.
-`graph_version` hashes every node's name, kind, type, wiring, conditions and version, so it changes when any of them
-does, and it is `None` when some node is unversioned. The document's `namespace_config` lists each namespace's own
-`config=`, and `edge_checks` is `"on"`, `"off"` or the nodes whose edges the build skipped; both are in
-`graph_version` too.
+`graph_version` hashes every node's name, kind, type, wiring, conditions and version, and in `fnloom.export/2` its
+block and what each parameter collects, so it changes when any of them does, and it is `None` when some node is
+unversioned. The document's `namespace_config` lists each namespace's own `config=`, and `edge_checks` is `"on"`,
+`"off"` or the nodes whose edges the build skipped; both are in `graph_version` too.
 
 A value's text is the same in every process: a set's members are sorted, and an address in a default `repr` is
 dropped. A `value()` holding an object known only by its address has no fingerprint, so `graph_version` is `None`.
