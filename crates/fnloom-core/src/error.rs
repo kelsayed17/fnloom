@@ -148,8 +148,35 @@ pub enum PlanError {
     UnknownInputs(Vec<String>),
     /// Overrides that do not exist in the graph.
     UnknownOverrides(Vec<String>),
+    /// Requested outputs inside blocks, which have one value per branch; sorted.
+    OutputsInBlocks(Vec<OutputInBlock>),
+    /// Overrides of nodes inside blocks, which would need one value per branch; sorted.
+    OverridesInBlocks(Vec<String>),
     /// Required inputs that are neither supplied nor overridden, each with what needs it.
     MissingInputs(Vec<MissingInput>),
+}
+
+/// A requested output inside a block, and what collects it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputInBlock {
+    /// The output's name.
+    pub node: String,
+    /// The expand of its innermost block.
+    pub expand: String,
+    /// The nodes that collect it, sorted; empty when none does.
+    pub collects: Vec<String>,
+}
+
+impl fmt::Display for OutputInBlock {
+    /// `'x' (in the block of 'e'; collected by 'a', 'b')`, or `...; collect it to return it)`.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "'{}' (in the block of '{}'; ", self.node, self.expand)?;
+        if self.collects.is_empty() {
+            write!(f, "collect it to return it)")
+        } else {
+            write!(f, "collected by {})", quoted(&self.collects, ", "))
+        }
+    }
 }
 
 /// A required input that is neither supplied nor overridden, and what needs it.
@@ -186,6 +213,19 @@ impl fmt::Display for PlanError {
             Self::UnknownOverrides(names) => {
                 write!(f, "unknown overrides: {}", quoted(names, ", "))
             }
+            Self::OutputsInBlocks(outputs) => {
+                let listed: Vec<String> = outputs.iter().map(ToString::to_string).collect();
+                write!(
+                    f,
+                    "outputs inside blocks, with one value per branch: {}",
+                    listed.join("; ")
+                )
+            }
+            Self::OverridesInBlocks(names) => write!(
+                f,
+                "overrides of nodes inside blocks, with one value per branch: {}",
+                quoted(names, ", ")
+            ),
             Self::MissingInputs(missing) => {
                 let listed: Vec<String> = missing.iter().map(ToString::to_string).collect();
                 write!(f, "missing inputs: {}", listed.join("; "))

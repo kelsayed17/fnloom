@@ -145,6 +145,11 @@ impl<P> Graph<P> {
             .collect())
     }
 
+    /// Whether any node is an expand, so a plan of a graph without one skips blocks.
+    pub(crate) fn has_blocks(&self) -> bool {
+        !self.spans.is_empty()
+    }
+
     /// Whether any node of the graph may be absent (`Node::may_be_absent`).
     pub(crate) const fn has_absence(&self) -> bool {
         self.absence

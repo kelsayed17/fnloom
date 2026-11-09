@@ -3,7 +3,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap};
 
-use crate::error::{MissingInput, PlanError};
+use crate::error::{MissingInput, OutputInBlock, PlanError};
 use crate::graph::Graph;
 use crate::node::{Node, NodeId, NodeKind};
 
@@ -44,12 +44,48 @@ pub struct Step {
     pub release: Vec<NodeId>,
 }
 
+/// Identifier of a sub-plan: its position in `Plan::blocks`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct BlockId(pub u32);
+
+impl BlockId {
+    /// Position of this sub-plan in `Plan::blocks`.
+    #[must_use]
+    pub const fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// The steps of one block, run once per item of its expand.
+///
+/// A nested block is one step of its outer sub-plan: the step of its expand, whose own
+/// sub-plan `Plan::block_of` names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SubPlan {
+    /// The expand whose items run the block; its slot holds the branch's item.
+    pub expand: NodeId,
+    /// The steps of one branch, in order. A position in it is a step's order key within a
+    /// branch.
+    pub steps: Vec<Step>,
+    /// The block nodes that collects read, sorted: each branch's value of these is kept.
+    pub collected: Vec<NodeId>,
+    /// The values from outside the block that its nodes read, nested blocks included,
+    /// sorted. They are computed before the expand and shared by every branch.
+    pub reads: Vec<NodeId>,
+}
+
 /// A validated execution order for one request.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Plan {
     steps: Vec<Step>,
     outputs: Vec<NodeId>,
     needs_rules: bool,
+    blocks: Vec<SubPlan>,
+    expands: bool,
+    /// Per node, the sub-plan its expand step runs; empty without an expand.
+    block_of: Vec<Option<BlockId>>,
+    /// Per node, whether its step is late; empty without an expand.
+    late: Vec<bool>,
 }
 
 impl Plan {
@@ -70,6 +106,39 @@ impl Plan {
     #[must_use]
     pub const fn needs_rules(&self) -> bool {
         self.needs_rules
+    }
+
+    /// The sub-plans of the blocks the request reaches, nested ones included; each expand
+    /// step's own is named by `Plan::block_of`.
+    #[must_use]
+    pub fn blocks(&self) -> &[SubPlan] {
+        &self.blocks
+    }
+
+    /// The sub-plan the step of `expand` runs once per item, computed or overridden; `None`
+    /// for any other node, and for an expand whose block the request doesn't reach: its
+    /// items are then pulled and returned as its value.
+    ///
+    /// Kept beside the steps rather than in `Step`, so a step stays the size it is in a
+    /// plan without blocks.
+    #[must_use]
+    pub fn block_of(&self, expand: NodeId) -> Option<BlockId> {
+        self.block_of.get(expand.index()).copied().flatten()
+    }
+
+    /// Whether the step of `node` is downstream of an expand, so its cache key is known
+    /// only during the run: `Evaluate::lookup` is asked for it before it computes. Every
+    /// step of a sub-plan is.
+    #[must_use]
+    pub fn is_late(&self, node: NodeId) -> bool {
+        self.late.get(node.index()).copied().unwrap_or(false)
+    }
+
+    /// Whether a step is an expand, so the run iterates and runs blocks. A plan without one
+    /// runs the plain loop.
+    #[must_use]
+    pub const fn has_expands(&self) -> bool {
+        self.expands
     }
 }
 
@@ -92,16 +161,33 @@ impl<P> Graph<P> {
     /// # Errors
     ///
     /// The first non-empty category of `UnknownOutputs`, `UnknownInputs`, `UnknownOverrides`,
-    /// `MissingInputs`, each listing its names sorted and de-duplicated.
+    /// `OutputsInBlocks`, `OverridesInBlocks`, `MissingInputs`, each listing its names sorted
+    /// and de-duplicated.
     pub fn prepare(&self, request: &Request) -> Result<Plan, PlanError> {
         let resolved = self.resolve_request(request)?;
+        if self.has_blocks() {
+            self.refuse_in_blocks(&resolved)?;
+        }
         let actions = self.plan_actions(&resolved)?;
+        if self.has_blocks()
+            && self
+                .nodes()
+                .iter()
+                .zip(&actions)
+                .any(|(node, action)| action.is_some() && node.is_expand())
+        {
+            return Ok(self.plan_blocks(&actions, resolved));
+        }
         let order = self.topological_order(&actions);
         let needs_rules = self.has_absence() && order.iter().any(|&id| self.node(id).may_be_absent);
         Ok(Plan {
             steps: self.build_steps(&order, &actions, &resolved.outputs),
             outputs: resolved.outputs,
             needs_rules,
+            blocks: Vec::new(),
+            expands: false,
+            block_of: Vec::new(),
+            late: Vec::new(),
         })
     }
 
@@ -126,6 +212,317 @@ impl<P> Graph<P> {
             supplied: self.mask(&supplied),
             overrides: self.mask(&overrides),
         })
+    }
+
+    /// `OutputsInBlocks` for requested outputs inside blocks, then `OverridesInBlocks` for
+    /// overrides of nodes inside blocks: each has one value per branch.
+    #[cold]
+    #[inline(never)]
+    fn refuse_in_blocks(&self, resolved: &Resolved) -> Result<(), PlanError> {
+        let outputs: Vec<OutputInBlock> = resolved
+            .outputs
+            .iter()
+            .filter_map(|&id| {
+                let expand = self.node(id).block?;
+                let collects = self
+                    .dependents(id)
+                    .iter()
+                    .filter(|&&consumer| {
+                        self.node(consumer)
+                            .inputs
+                            .iter()
+                            .any(|edge| edge.node == id && edge.collect.is_some())
+                    })
+                    .map(|&consumer| self.node(consumer).name.clone())
+                    .collect();
+                Some(OutputInBlock {
+                    node: self.node(id).name.clone(),
+                    expand: self.node(expand).name.clone(),
+                    collects,
+                })
+            })
+            .collect();
+        if !outputs.is_empty() {
+            return Err(PlanError::OutputsInBlocks(outputs));
+        }
+        let overrides: Vec<String> = self
+            .nodes()
+            .iter()
+            .filter(|node| resolved.overrides[node.id.index()] && node.block.is_some())
+            .map(|node| node.name.clone())
+            .collect();
+        if overrides.is_empty() {
+            Ok(())
+        } else {
+            Err(PlanError::OverridesInBlocks(overrides))
+        }
+    }
+
+    /// The plan of a request that reaches an expand: the outer steps, and a sub-plan for
+    /// each block the request reaches.
+    ///
+    /// Each scope, the outer plan or one block, is ordered by Kahn's algorithm over its own
+    /// units, ties broken by id: a node of the scope stands for itself, and a nested block
+    /// for its expand. A unit waits for the units its inputs stand for in its scope; an
+    /// expand also waits for those its block reads, so a value read only inside the block
+    /// is computed first. A collect thus waits for the expand of the block it collects, and
+    /// a block's own expand, outside its scope, counts as done.
+    ///
+    /// A value is released in the scope it lives in, after the last step there that reads
+    /// it; an expand step reads what its block reads. A node a collect reads is kept for the
+    /// whole branch, then gathered, and released after the last collect reading it.
+    #[inline(never)]
+    fn plan_blocks(&self, actions: &[Option<Action>], resolved: Resolved) -> Plan {
+        let count = self.nodes().len();
+        // The blocks the request reaches, numbered in the order of their expands' ids.
+        let mut entered = vec![false; count];
+        for node in self.nodes() {
+            if actions[node.id.index()].is_some() {
+                if let Some(expand) = node.block {
+                    entered[expand.index()] = true;
+                }
+            }
+        }
+        let mut block_of: Vec<Option<BlockId>> = vec![None; count];
+        let mut expands: Vec<NodeId> = Vec::new();
+        for node in self.nodes() {
+            if entered[node.id.index()] {
+                block_of[node.id.index()] = Some(BlockId(index_u32(expands.len())));
+                expands.push(node.id);
+            }
+        }
+        let (reads, collected, is_collected) = self.block_reads(actions, &block_of);
+        let orders = self.scope_orders(actions, &block_of, &reads);
+        let mut late = vec![false; count];
+        let mut scopes: Vec<Vec<Step>> = Vec::with_capacity(orders.len());
+        for (at, order) in orders.iter().enumerate() {
+            let mut steps = Vec::with_capacity(order.len());
+            for &id in order {
+                let Some(action) = actions[id.index()] else {
+                    continue;
+                };
+                let args = self.passed_args(id, action, actions);
+                let is_late = at > 0
+                    || (action == Action::Compute
+                        && (self.node(id).inputs.iter().any(|e| e.collect.is_some())
+                            || args.iter().any(|arg| late[arg.index()])));
+                late[id.index()] = is_late;
+                steps.push(Step {
+                    node: id,
+                    action,
+                    args,
+                    release: Vec::new(),
+                });
+            }
+            scopes.push(steps);
+        }
+
+        self.release_in_scopes(
+            &mut scopes,
+            &expands,
+            &block_of,
+            &reads,
+            &is_collected,
+            &resolved.outputs,
+        );
+
+        let needs_rules = self.has_absence()
+            && self
+                .nodes()
+                .iter()
+                .any(|node| actions[node.id.index()].is_some() && node.may_be_absent);
+        let mut scopes = scopes.into_iter();
+        let steps = scopes.next().unwrap_or_default();
+        let blocks = expands
+            .iter()
+            .zip(scopes)
+            .zip(reads.into_iter().zip(collected))
+            .map(|((&expand, steps), (reads, collected))| SubPlan {
+                expand,
+                steps,
+                collected,
+                reads,
+            })
+            .collect();
+        Plan {
+            steps,
+            outputs: resolved.outputs,
+            needs_rules,
+            blocks,
+            expands: true,
+            block_of,
+            late,
+        }
+    }
+
+    /// Each scope's units in order: the outer plan's first, then each block's by id.
+    ///
+    /// One Kahn's algorithm over every planned unit, popping the smallest id first: a unit
+    /// waits only for units of its own scope, so each scope's order is its own.
+    fn scope_orders(
+        &self,
+        actions: &[Option<Action>],
+        block_of: &[Option<BlockId>],
+        reads: &[Vec<NodeId>],
+    ) -> Vec<Vec<NodeId>> {
+        let scope = |id: NodeId| {
+            self.node(id)
+                .block
+                .and_then(|expand| block_of[expand.index()])
+                .map_or(0, |block| block.index() + 1)
+        };
+
+        let count = self.nodes().len();
+        // The contracted dependencies, as forward edges and waiting counts.
+        let mut waiting = vec![0_usize; count];
+        let mut next: Vec<Vec<NodeId>> = vec![Vec::new(); count];
+        for node in self.nodes() {
+            let Some(action) = actions[node.id.index()] else {
+                continue;
+            };
+            let depth = self.block_path(node.id).len();
+            let mut wait = |source: NodeId| {
+                if let Some(unit) = self.unit_in(source, depth) {
+                    if unit != node.id {
+                        waiting[node.id.index()] += 1;
+                        next[unit.index()].push(node.id);
+                    }
+                }
+            };
+            if action == Action::Compute {
+                for edge in &node.inputs {
+                    wait(edge.node);
+                }
+            }
+            if let Some(block) = block_of[node.id.index()] {
+                for &read in &reads[block.index()] {
+                    wait(read);
+                }
+            }
+        }
+        let mut queue: BinaryHeap<Reverse<NodeId>> = self
+            .nodes()
+            .iter()
+            .filter(|node| actions[node.id.index()].is_some() && waiting[node.id.index()] == 0)
+            .map(|node| Reverse(node.id))
+            .collect();
+        // Every scope's order at once: its units only wait for one another.
+        let mut orders: Vec<Vec<NodeId>> = vec![Vec::new(); reads.len() + 1];
+        while let Some(Reverse(id)) = queue.pop() {
+            orders[scope(id)].push(id);
+            for &consumer in &next[id.index()] {
+                waiting[consumer.index()] -= 1;
+                if waiting[consumer.index()] == 0 {
+                    queue.push(Reverse(consumer));
+                }
+            }
+        }
+        orders
+    }
+
+    /// Fills each step's `release`, in the scope its value lives in: after the last step
+    /// there that reads it, an expand step reading what its block reads. A collected node
+    /// lives in the scope of its collects. Outer outputs are never released.
+    fn release_in_scopes(
+        &self,
+        scopes: &mut [Vec<Step>],
+        expands: &[NodeId],
+        block_of: &[Option<BlockId>],
+        reads: &[Vec<NodeId>],
+        is_collected: &[bool],
+        outputs: &[NodeId],
+    ) {
+        // Releases, each in the scope its value lives in.
+        let count = self.nodes().len();
+        let mut last_use: Vec<Option<(usize, usize)>> = vec![None; count];
+        for (at, steps) in scopes.iter().enumerate() {
+            let key = at.checked_sub(1).map(|block| expands[block]);
+            for (position, step) in steps.iter().enumerate() {
+                for &arg in &step.args {
+                    // A collected node is gathered into the scope its collects are in.
+                    let block = self.node(arg).block;
+                    let home = if is_collected[arg.index()] {
+                        block.and_then(|expand| self.node(expand).block)
+                    } else {
+                        block
+                    };
+                    if home == key {
+                        last_use[arg.index()] = Some((at, position));
+                    }
+                }
+                if let Some(block) = block_of[step.node.index()] {
+                    for &read in &reads[block.index()] {
+                        if self.node(read).block == key && !is_collected[read.index()] {
+                            last_use[read.index()] = Some((at, position));
+                        }
+                    }
+                }
+            }
+        }
+        for (index, place) in last_use.into_iter().enumerate() {
+            let Some((at, position)) = place else {
+                continue;
+            };
+            let id = NodeId(index_u32(index));
+            if at == 0 && outputs.binary_search(&id).is_ok() {
+                continue;
+            }
+            scopes[at][position].release.push(id);
+        }
+    }
+
+    /// Per reached block, the outer values its nodes read and the nodes collects read, both
+    /// sorted; and whether each node is collected.
+    fn block_reads(
+        &self,
+        actions: &[Option<Action>],
+        block_of: &[Option<BlockId>],
+    ) -> (Vec<Vec<NodeId>>, Vec<Vec<NodeId>>, Vec<bool>) {
+        let blocks = block_of.iter().flatten().count();
+        let mut reads: Vec<Vec<NodeId>> = vec![Vec::new(); blocks];
+        let mut collected: Vec<Vec<NodeId>> = vec![Vec::new(); blocks];
+        let mut is_collected = vec![false; self.nodes().len()];
+        for node in self.nodes() {
+            if actions[node.id.index()] != Some(Action::Compute) {
+                continue;
+            }
+            let path = self.block_path(node.id);
+            for edge in &node.inputs {
+                let source = self.node(edge.node);
+                if edge.collect.is_some() {
+                    if let Some(block) = source.block.and_then(|e| block_of[e.index()]) {
+                        collected[block.index()].push(source.id);
+                        is_collected[source.id.index()] = true;
+                    }
+                    continue;
+                }
+                // The blocks of the path below the source's own: for an expand, its own block
+                // reads it as the item, so that one is left out too.
+                let below = self.block_path(source.id).len() + usize::from(source.is_expand());
+                for &expand in path.get(below..).unwrap_or_default() {
+                    if let Some(block) = block_of[expand.index()] {
+                        reads[block.index()].push(source.id);
+                    }
+                }
+            }
+        }
+        for list in reads.iter_mut().chain(collected.iter_mut()) {
+            list.sort_unstable();
+            list.dedup();
+        }
+        (reads, collected, is_collected)
+    }
+
+    /// The unit that stands for `id` in a scope `depth` levels deep that holds it: `id`
+    /// itself, or the expand of the nested block holding it. `None` when `id` is outside
+    /// the scope, which is then done before the scope runs.
+    fn unit_in(&self, id: NodeId, depth: usize) -> Option<NodeId> {
+        let path = self.block_path(id);
+        match path.len().cmp(&depth) {
+            std::cmp::Ordering::Less => None,
+            std::cmp::Ordering::Equal => Some(id),
+            std::cmp::Ordering::Greater => Some(path[depth]),
+        }
     }
 
     /// A flag per node, set for `ids`.
@@ -319,6 +716,11 @@ impl<P> Graph<P> {
         args.sort_unstable();
         args
     }
+}
+
+/// `index` as a `u32` id; a graph never holds more nodes than ids can count.
+fn index_u32(index: usize) -> u32 {
+    u32::try_from(index).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]
@@ -621,5 +1023,232 @@ mod tests {
             .prepare(&request(&["n000000"], &["n050000"], &[]))
             .unwrap();
         assert_eq!(plan.steps().len(), 50_001);
+    }
+
+    mod blocks {
+        //! Sub-plans: which blocks a request reaches, their order and their refusals.
+
+        use super::*;
+        use crate::error::OutputInBlock;
+        use crate::node::NodeSpec;
+        use crate::testing::{collect, expanding, plain, reading};
+
+        /// `picked` expands; `details` reads each item and the outer `zz_rate`, which sorts
+        /// after `picked`; `total` and `count` collect `details`.
+        fn fan() -> Graph<()> {
+            Graph::build(vec![
+                expanding("picked", &[plain("wanted")], ()),
+                reading("zz_rate", &[], ()),
+                reading("details", &[plain("picked"), plain("zz_rate")], ()),
+                reading("total", &[collect("details")], ()),
+                reading("count", &[collect("details")], ()),
+            ])
+            .unwrap()
+        }
+
+        fn order(graph: &Graph<()>, steps: &[Step]) -> Vec<String> {
+            steps
+                .iter()
+                .map(|s| graph.node(s.node).name.clone())
+                .collect()
+        }
+
+        #[test]
+        fn an_outer_value_read_only_by_the_block_and_named_after_the_expand_runs_first() {
+            let g = fan();
+            let plan = g.prepare(&request(&["total"], &["wanted"], &[])).unwrap();
+            assert_eq!(
+                order(&g, plan.steps()),
+                ["wanted", "zz_rate", "picked", "total"]
+            );
+            assert_eq!(plan.blocks().len(), 1);
+            let block = &plan.blocks()[0];
+            assert_eq!(g.node(block.expand).name, "picked");
+            assert_eq!(order(&g, &block.steps), ["details"]);
+            assert_eq!(names(&g, &block.collected), ["details"]);
+            assert_eq!(names(&g, &block.reads), ["zz_rate"]);
+            let picked = &plan.steps()[2];
+            assert_eq!(plan.block_of(picked.node), Some(BlockId(0)));
+            // The outer value is released after the expand step, its last use.
+            assert_eq!(names(&g, &picked.release), ["wanted", "zz_rate"]);
+            // A collect's collected node is released after the last collect reading it.
+            let total = &plan.steps()[3];
+            assert_eq!(names(&g, &total.args), ["details"]);
+            assert_eq!(names(&g, &total.release), ["details"]);
+            assert!(plan.is_late(total.node) && !plan.is_late(picked.node));
+            assert!(plan.is_late(block.steps[0].node));
+            assert_eq!(block.steps[0].release, []);
+            assert!(plan.has_expands());
+        }
+
+        #[test]
+        fn a_nested_blocks_outer_read_named_after_its_expand_runs_first() {
+            let g = Graph::build(vec![
+                expanding("a", &[], ()),
+                reading("zz", &[plain("a")], ()),
+                expanding("b", &[plain("a")], ()),
+                reading("leaf", &[plain("b"), plain("zz")], ()),
+                reading("bs", &[collect("leaf")], ()),
+                reading("total", &[collect("bs")], ()),
+            ])
+            .unwrap();
+            let plan = g.prepare(&request(&["total"], &[], &[])).unwrap();
+            assert_eq!(order(&g, plan.steps()), ["a", "total"]);
+            let outer = &plan.blocks()[plan.block_of(plan.steps()[0].node).unwrap().index()];
+            assert_eq!(order(&g, &outer.steps), ["zz", "b", "bs"]);
+            assert_eq!(names(&g, &outer.collected), ["bs"]);
+            let inner = &plan.blocks()[plan.block_of(outer.steps[1].node).unwrap().index()];
+            assert_eq!(order(&g, &inner.steps), ["leaf"]);
+            assert_eq!(names(&g, &inner.reads), ["zz"]);
+            assert_eq!(names(&g, &outer.reads), [] as [&str; 0]);
+            // `zz` is released in each outer branch once the inner block has run.
+            assert_eq!(names(&g, &outer.steps[1].release), ["zz"]);
+            assert_eq!(names(&g, &outer.steps[2].release), ["leaf"]);
+        }
+
+        #[test]
+        fn a_collect_runs_after_its_block() {
+            // Two collects, one of them reading another collect and an outer node: no step
+            // is left waiting.
+            let g = Graph::build(vec![
+                expanding("e", &[plain("seed")], ()),
+                reading("m", &[plain("e"), plain("seed")], ()),
+                reading("n", &[plain("m")], ()),
+                reading("c1", &[collect("m"), plain("seed")], ()),
+                reading("c2", &[collect("n"), plain("c1")], ()),
+            ])
+            .unwrap();
+            let plan = g.prepare(&request(&["c2"], &["seed"], &[])).unwrap();
+            assert_eq!(order(&g, plan.steps()), ["seed", "e", "c1", "c2"]);
+            assert_eq!(order(&g, &plan.blocks()[0].steps), ["m", "n"]);
+            assert_eq!(names(&g, &plan.blocks()[0].collected), ["m", "n"]);
+        }
+
+        #[test]
+        fn an_expand_requested_alone_compiles_no_sub_plan() {
+            let g = fan();
+            let plan = g.prepare(&request(&["picked"], &["wanted"], &[])).unwrap();
+            assert_eq!(order(&g, plan.steps()), ["wanted", "picked"]);
+            assert_eq!(plan.blocks(), []);
+            assert_eq!(plan.block_of(plan.steps()[1].node), None);
+            assert!(plan.has_expands());
+        }
+
+        #[test]
+        fn a_collect_override_cuts_the_block() {
+            let g = fan();
+            let plan = g.prepare(&request(&["total"], &[], &["total"])).unwrap();
+            assert_eq!(order(&g, plan.steps()), ["total"]);
+            assert!(plan.blocks().is_empty() && !plan.has_expands());
+        }
+
+        #[test]
+        fn an_output_in_a_block_is_refused_naming_its_collects() {
+            let mut specs: Vec<NodeSpec<()>> = Vec::new();
+            specs.extend([
+                expanding("picked", &[plain("wanted")], ()),
+                reading("zz_rate", &[], ()),
+                reading("details", &[plain("picked"), plain("zz_rate")], ()),
+                reading("total", &[collect("details")], ()),
+                reading("count", &[collect("details")], ()),
+                reading("lonely", &[plain("picked")], ()),
+            ]);
+            let g = Graph::build(specs).unwrap();
+            let err = g
+                .prepare(&request(
+                    &["total", "lonely", "details"],
+                    &["wanted"],
+                    &["ghost"],
+                ))
+                .unwrap_err();
+            assert!(matches!(err, PlanError::UnknownOverrides(_)));
+            let err = g
+                .prepare(&request(&["total", "lonely", "details"], &[], &[]))
+                .unwrap_err();
+            assert_eq!(
+                err,
+                PlanError::OutputsInBlocks(vec![
+                    OutputInBlock {
+                        node: "details".to_owned(),
+                        expand: "picked".to_owned(),
+                        collects: strings(&["count", "total"]),
+                    },
+                    OutputInBlock {
+                        node: "lonely".to_owned(),
+                        expand: "picked".to_owned(),
+                        collects: Vec::new(),
+                    },
+                ])
+            );
+            assert_eq!(
+                err.to_string(),
+                "outputs inside blocks, with one value per branch: 'details' (in the block of \
+                 'picked'; collected by 'count', 'total'); 'lonely' (in the block of 'picked'; \
+                 collect it to return it)"
+            );
+        }
+
+        #[test]
+        fn an_override_of_a_block_node_is_refused() {
+            let g = fan();
+            // Checked before missing inputs: `wanted` is not supplied.
+            let err = g
+                .prepare(&request(&["total"], &[], &["details", "picked"]))
+                .unwrap_err();
+            assert_eq!(err, PlanError::OverridesInBlocks(strings(&["details"])));
+            assert_eq!(
+                err.to_string(),
+                "overrides of nodes inside blocks, with one value per branch: 'details'"
+            );
+            // An override of the expand supplies its items.
+            assert!(g.prepare(&request(&["total"], &[], &["picked"])).is_ok());
+        }
+
+        #[test]
+        fn a_plan_without_blocks_or_absence_runs_the_plain_loop() {
+            // A graph with a block, and a request that doesn't reach it.
+            let g = fan();
+            let plan = g.prepare(&request(&["zz_rate"], &[], &[])).unwrap();
+            assert!(!plan.has_expands() && plan.blocks().is_empty() && !plan.needs_rules());
+            assert!(
+                plan.steps()
+                    .iter()
+                    .all(|s| plan.block_of(s.node).is_none() && !plan.is_late(s.node))
+            );
+        }
+
+        #[test]
+        fn a_step_is_no_larger_than_without_blocks() {
+            // A larger `Step` moves the allocator's layout under the plain loop, which the
+            // instruction-count gate sees on `run.fan_in_1000`.
+            assert!(std::mem::size_of::<Step>() <= 56);
+        }
+
+        #[test]
+        fn a_thousand_deep_nesting_plans_without_recursion() {
+            let depth = 1_000;
+            let mut specs = vec![expanding("e0000", &[], ())];
+            specs.extend(
+                (1..depth).map(|i| {
+                    expanding(&format!("e{i:04}"), &[plain(&format!("e{:04}", i - 1))], ())
+                }),
+            );
+            specs.push(reading("leaf", &[plain(&format!("e{:04}", depth - 1))], ()));
+            specs.push(reading(
+                &format!("c{:04}", depth - 1),
+                &[collect("leaf")],
+                (),
+            ));
+            specs.extend((0..depth - 1).map(|i| {
+                reading(
+                    &format!("c{i:04}"),
+                    &[collect(&format!("c{:04}", i + 1))],
+                    (),
+                )
+            }));
+            let g = Graph::build(specs).unwrap();
+            let plan = g.prepare(&request(&["c0000"], &[], &[])).unwrap();
+            assert_eq!(plan.blocks().len(), depth);
+        }
     }
 }

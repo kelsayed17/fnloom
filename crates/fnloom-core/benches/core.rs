@@ -1,6 +1,7 @@
 //! Instruction-count benchmarks of the core: `Graph::build`, `Graph::prepare` and `Plan::run`,
-//! each on chain, fan-in and layered graphs of 1,000 and 10,000 nodes, and `Plan::run` on a
-//! 200-node chain whose first node declines (`skip_chain_200`).
+//! each on chain, fan-in and layered graphs of 1,000 and 10,000 nodes, `Plan::run` on a
+//! 200-node chain whose first node declines (`skip_chain_200`), and `Plan::run` on a block run
+//! once per item of 1, 100 and 10,000 items (`fan_out_1` and so on).
 //!
 //! Wall-clock time is too noisy on shared CI runners to gate on, so the regression gate
 //! compares instruction counts measured under callgrind (see `scripts/bench_gate.py`).
@@ -34,9 +35,9 @@ mod suite {
     use std::hint::black_box;
 
     use fnloom_core::graph::Graph;
-    use fnloom_core::node::{Dependency, InputSpec, Node, NodeSpec};
+    use fnloom_core::node::{Collect, Dependency, InputSpec, Node, NodeId, NodeSpec};
     use fnloom_core::plan::{Plan, Request};
-    use fnloom_core::run::{Arg, Evaluate};
+    use fnloom_core::run::{Arg, Blocks, Evaluate, Item};
     use gungraun::prelude::*;
 
     /// Row width of the layered shape, as in `benches/generate.py`.
@@ -98,6 +99,89 @@ mod suite {
 
         fn is_absent(&self, value: &i64) -> bool {
             *value == ABSENT
+        }
+    }
+
+    /// What a node of the fan-out workload does.
+    #[derive(Clone, Copy, Debug)]
+    pub enum Fan {
+        /// Expands into this many items, `0..n`.
+        Items(u64),
+        /// One more than the sum of its arguments: the block's one node.
+        Add,
+        /// The sum of its one argument, gathered from every branch.
+        Total,
+    }
+
+    /// Runs the fan-out workload: an expand's items are counted out by one cursor, and a
+    /// collect gathers the branches' values into their sum.
+    ///
+    /// Its own payload type keeps the plain loop's code, which `Sum` measures, as it was.
+    #[derive(Default)]
+    struct Fans {
+        next: u64,
+        len: u64,
+    }
+
+    impl Evaluate<Fan> for Fans {
+        type Value = u64;
+        type Error = Infallible;
+
+        fn evaluate(
+            &mut self,
+            _node: &Node<Fan>,
+            payload: &Fan,
+            args: &[Arg<'_, u64>],
+        ) -> Result<u64, Infallible> {
+            let sum = args
+                .iter()
+                .fold(0_u64, |sum, arg| sum.wrapping_add(arg.value));
+            Ok(match payload {
+                Fan::Items(n) => *n,
+                Fan::Add => sum.wrapping_add(1),
+                Fan::Total => sum,
+            })
+        }
+
+        fn blocks(&mut self) -> Option<&mut dyn Blocks<Fan, u64, Infallible>> {
+            Some(self)
+        }
+    }
+
+    impl Blocks<Fan, u64, Infallible> for Fans {
+        fn iterate(&mut self, _node: &Node<Fan>, iterable: &u64) -> Result<u64, Infallible> {
+            (self.next, self.len) = (0, *iterable);
+            Ok(*iterable)
+        }
+
+        fn next_item(
+            &mut self,
+            _node: &Node<Fan>,
+            _iterator: &u64,
+        ) -> Result<Item<u64>, Infallible> {
+            if self.next == self.len {
+                return Ok(Item::Done);
+            }
+            self.next += 1;
+            Ok(Item::Next(self.next - 1))
+        }
+
+        fn finish_items(
+            &mut self,
+            _node: &Node<Fan>,
+            _iterator: &u64,
+            _exhausted: bool,
+        ) -> Result<u64, Infallible> {
+            Ok(self.next)
+        }
+
+        fn gather(
+            &mut self,
+            _consumer: &Node<Fan>,
+            _source: NodeId,
+            values: Vec<u64>,
+        ) -> Result<u64, Infallible> {
+            Ok(values.into_iter().fold(0, u64::wrapping_add))
         }
     }
 
@@ -257,6 +341,63 @@ mod suite {
         (graph, plan, inputs)
     }
 
+    /// `items` expands into `n` items, `branch` adds one to each, and `total` collects them.
+    #[expect(
+        clippy::expect_used,
+        reason = "a workload that does not plan is a bug in this file, and aborting is right"
+    )]
+    fn fan_out(n: u64) -> (Graph<Fan>, Plan) {
+        let spec = |name: &str, read: Option<(&str, Option<Collect>)>, payload| NodeSpec {
+            name: name.to_owned(),
+            inputs: read
+                .into_iter()
+                .map(|(input, collect)| InputSpec {
+                    name: input.to_owned(),
+                    dependency: Dependency::Required,
+                    collect,
+                })
+                .collect(),
+            tags: BTreeMap::new(),
+            payload,
+            declines: false,
+            expands: matches!(payload, Fan::Items(_)),
+        };
+        let graph = Graph::build(vec![
+            spec("items", None, Fan::Items(n)),
+            spec("branch", Some(("items", None)), Fan::Add),
+            spec(
+                "total",
+                Some(("branch", Some(Collect::Present))),
+                Fan::Total,
+            ),
+        ])
+        .expect("generated specs form a valid graph");
+        let plan = graph
+            .prepare(&Request {
+                outputs: vec!["total".to_owned()],
+                inputs: BTreeSet::new(),
+                overrides: BTreeSet::new(),
+            })
+            .expect("the request names nodes of the generated graph");
+        (graph, plan)
+    }
+
+    // A block run once per item: the per-branch cost of the block-aware loop.
+    #[library_benchmark]
+    #[bench::fan_out_1(args = (1,), setup = fan_out)]
+    #[bench::fan_out_100(args = (100,), setup = fan_out)]
+    #[bench::fan_out_10000(args = (10_000,), setup = fan_out)]
+    fn run_blocks((graph, plan): (Graph<Fan>, Plan)) -> impl Sized {
+        let values = plan.run(
+            &graph,
+            &mut Fans::default(),
+            black_box(&BTreeMap::new()),
+            &BTreeMap::new(),
+            &mut [],
+        );
+        (graph, plan, values)
+    }
+
     #[library_benchmark]
     #[bench::chain_1000(args = (Shape::Chain, 1_000), setup = planned)]
     #[bench::chain_10000(args = (Shape::Chain, 10_000), setup = planned)]
@@ -290,7 +431,10 @@ mod suite {
         (graph, plan, values)
     }
 
-    library_benchmark_group!(name = engine; benchmarks = build, prepare, run, run_skips);
+    library_benchmark_group!(
+        name = engine;
+        benchmarks = build, prepare, run, run_skips, run_blocks
+    );
 }
 
 #[cfg(target_os = "linux")]
