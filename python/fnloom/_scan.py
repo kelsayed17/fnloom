@@ -9,9 +9,9 @@ import types
 import typing
 from dataclasses import dataclass, field, replace
 from types import MappingProxyType
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Literal, NamedTuple
 
-from fnloom import _config, _extract, _resolve
+from fnloom import _blocks, _config, _extract, _resolve
 from fnloom._absence import Kind, dependency, merged
 from fnloom._config import (
     Condition,
@@ -98,20 +98,25 @@ class NodeDef:
     replaced: str | None = None
 
 
-def core_inputs(params: tuple[Param, ...]) -> list[tuple[str, Kind, None]]:
+def core_inputs(
+    params: tuple[Param, ...],
+) -> list[tuple[str, Kind, Literal["present", "all"] | None]]:
     """The distinct sources `params` read, first-appearance order, with their kind.
 
     A source read by several parameters has one kind, merged by `_absence.merged`:
     `required` when any of them lacks a default, unless all admit `fnloom.Absent`.
-    The third element is the collect mode, `None` for now.
+    The third element is the collect mode, `"present"` or `"all"` for a `Collect`
+    parameter, else `None`; a source read in two modes is listed once per mode,
+    which the core refuses, naming the node.
     """
-    by_source: dict[str, list[Param]] = {}
+    by_source: dict[tuple[str, Literal["present", "all"] | None], list[Param]] = {}
     for param in params:
         if isinstance(param.binding, Source):
-            by_source.setdefault(param.binding.name, []).append(param)
+            key = (param.binding.name, param.collect)
+            by_source.setdefault(key, []).append(param)
     return [
-        (name, dependency(read[0]) if len(read) == 1 else merged(read), None)
-        for name, read in by_source.items()
+        (name, dependency(read[0]) if len(read) == 1 else merged(read), mode)
+        for (name, mode), read in by_source.items()
     ]
 
 
@@ -469,11 +474,22 @@ def _groups(
 def _check_kind(name: str, fn: Callable[..., object], *, awaits: bool) -> None:
     """`ValueError` when calling `fn` would not run its body to a value (Q32).
 
-    With `awaits`, an `async def` is accepted: the async driver awaits it.
+    With `awaits`, an `async def` is accepted: the async driver awaits it. A
+    generator function annotated `-> Parallelizable[...]` is an expand, and one
+    whose return annotation is still a string is left to `_blocks.refuse`, after
+    `resolve`, which refuses it with this message unless it is an expand.
     """
     kind = _unsupported_function_kind(fn)
     if kind is None or (awaits and kind == "async function"):
         return
+    if kind == "generator function":
+        returns = annotationlib.get_annotations(
+            fn, format=annotationlib.Format.FORWARDREF
+        ).get("return")
+        if isinstance(returns, str | annotationlib.ForwardRef) or _blocks.expands(
+            returns
+        ):
+            return
     if kind == "async function":
         msg = (
             f"{name!r}: async function is not supported by build(), which calls "

@@ -30,6 +30,7 @@ from typing import (
 from fnloom import (
     _absence,
     _async,
+    _blocks,
     _checks,
     _core,
     _hooks,
@@ -398,11 +399,19 @@ def _edge_mismatches(
             if not isinstance(p.binding, Source):
                 continue
             upstream = functions.get(p.binding.name)
+            if upstream is None:
+                continue
             # `T | Absent` feeds what `T` feeds: an absence never reaches a
             # parameter that does not admit it (Q135).
-            if upstream is None or _types.type_matches(
-                _absence.without_absent(upstream.type), p.annotation
-            ):
+            produced = _absence.without_absent(upstream.type)
+            required = p.annotation
+            # An expand feeds its block one item at a time, and a block node feeds
+            # a collect's elements (Q127).
+            if (collected := _blocks.collect_mode(required)) is not None:
+                required = collected[1]
+            elif (item := _blocks.expanded_type(upstream.type)) is not None:
+                produced = item
+            if _types.type_matches(produced, required):
                 continue
             shown = p.name if p.slot is None else f"{p.name}[{p.slot!r}]"
             line = (
@@ -2483,12 +2492,17 @@ def _prepare_again[R](driver: Driver[R], key: _PlanKey) -> PreparedPlan[R]:
     )
 
 
-def _graph_of(nodes: list[NodeDef]) -> _core.Graph:
+def _graph_of(
+    nodes: list[NodeDef],
+    items: Callable[[NodeDef], Callable[..., object]] | None = None,
+) -> _core.Graph:
     """Builds the native graph for scanned nodes: their core inputs and payloads.
 
     Each node says whether it declines: its return annotation admits
-    `fnloom.Absent` (Q135).
+    `fnloom.Absent` (Q135). Each expand gets its item iterator factory from
+    `items`, or the unchecked `_blocks.Items` when it is not given.
     """
+    make = items or (lambda n: functools.partial(_blocks.Items, n.name, None))
     return _core.Graph(
         [
             (
@@ -2497,11 +2511,28 @@ def _graph_of(nodes: list[NodeDef]) -> _core.Graph:
                 dict(n.tags),
                 n.payload,
                 _absence.declines(n),
+                make(n) if _blocks.expands(n.returns) else None,
             )
             for n in nodes
         ],
         {n.name: dict(n.renames) for n in nodes if n.renames},
     )
+
+
+def _item_factory(
+    rules: _types.Rules, value_checks: tuple[ValueCheck, ...], *, checked: bool
+) -> Callable[[NodeDef], Callable[..., object]]:
+    """Each expand's item iterator factory.
+
+    With `checked`, its items are checked by the input rules (Q127).
+    """
+
+    def factory(node: NodeDef) -> Callable[..., object]:
+        item = _blocks.expanded_type(node.returns)
+        check = _blocks.item_check(item, rules, value_checks) if checked else None
+        return functools.partial(_blocks.Items, node.name, check)
+
+    return factory
 
 
 def _checked_modules(modules: Sequence[object]) -> tuple[ModuleType, ...]:
@@ -3464,6 +3495,7 @@ class Builder[R = dict[str, object]]:
         nodes = _checks.attached(
             resolve(scanned.nodes, self._rules, self._value_checks)
         )
+        _blocks.refuse(nodes, awaits=awaits)
         if unbuilt := _steps.unbuilt_targets(self._modules, nodes):
             raise ValueError("\n".join(unbuilt))
         steps_of: dict[str, set[str]] = {}
@@ -3481,11 +3513,12 @@ class Builder[R = dict[str, object]]:
             unmatched = {n: why for n, why in unmatched.items() if n not in names}
             if absent := _unmatched_edges(nodes, unmatched):
                 raise ValueError(absent)
-        absent = _absence.may_be_absent(nodes)
+        blocks, absent = self._blocks_and_absence(nodes)
         views = node_views(
             nodes,
             stepped | frozenset(node.name for node in nodes if is_generated(node)),
             absent,
+            blocks,
         )
         if self._output_type_checks:
             nodes = _output_checked(
@@ -3496,7 +3529,10 @@ class Builder[R = dict[str, object]]:
         nodes = _checks.wrapped(nodes, awaits=awaits, owner=owner)
         if self._wrappers:
             nodes = self._chained(nodes, views, relays, awaits=awaits)
-        graph = _graph_of(nodes)
+        graph = _graph_of(
+            nodes,
+            _item_factory(self._rules, self._value_checks, checked=self._check_inputs),
+        )
         _absence.refuse_mixed(nodes, absent)
         if (
             self._loose_edges
@@ -3515,6 +3551,26 @@ class Builder[R = dict[str, object]]:
         ):
             raise ValueError("\n".join(refused))
         return nodes, views, graph, unmatched, scanned.left_out, owner
+
+    def _blocks_and_absence(
+        self, nodes: list[NodeDef]
+    ) -> tuple[dict[str, list[str]], frozenset[str]]:
+        """Each block node's block path, and the nodes that may be absent.
+
+        With no expand, there are no blocks, and absence is found here. With one,
+        the core finds both, since a collect passes absence on only from an absent
+        expand (§7.4 of the dynamic execution design); a cached driver refuses
+        it, as branches are not keyed yet.
+        """
+        expanding = sorted(n.name for n in nodes if _blocks.expands(n.returns))
+        if not expanding:
+            return {}, _absence.may_be_absent(nodes)
+        if self._store is not None:
+            listed = ", ".join(f"{name!r}" for name in expanding)
+            msg = f"with_cache() does not cache blocks yet; {listed} expands"
+            raise ValueError(msg)
+        found = _graph_of(nodes)
+        return found.blocks(), frozenset(found.may_be_absent())
 
     def _chained(
         self,

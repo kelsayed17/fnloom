@@ -354,6 +354,67 @@ that has none, the node is skipped instead, so the default is still never used, 
 - `build_async()` follows every rule here, for an `async def` node and a sync one alike, and a node there that
   returns `ABSENT` without admitting it is the same `TypeError` as with `build()`.
 
+## Fan-out and fan-in
+
+A node annotated `-> Parallelizable[T]` is an **expand**: it returns, or yields, items of type `T`, and every node
+reading it runs once per item. A parameter annotated `Collect[T]` gathers one such node's value from every item, as
+a `list`, in item order:
+
+```python
+# file: shelves.py
+from fnloom import Collect, Parallelizable
+
+
+def picked(shelf: str) -> Parallelizable[str]:
+    """The items on a shelf, one at a time."""
+    yield from shelf.split(",")
+
+
+def label(picked: str, prefix: str) -> str:
+    """One item's label; runs once per item, sharing `prefix`."""
+    return f"{prefix}{picked}"
+
+
+def labels(label: Collect[str]) -> list[str]:
+    """Every label, in the order the items came."""
+    return label
+```
+
+```python
+import fnloom
+import shelves
+
+driver = fnloom.build(shelves)
+driver.execute(["labels"], inputs={"shelf": "chair,desk", "prefix": "#"})
+# -> {'labels': ['#chair', '#desk']}
+driver.nodes["label"].block
+# -> 'picked'
+driver.nodes["labels"].kind
+# -> 'collect'
+```
+
+The nodes that run once per item are the expand's **block**: every node reading it, directly or through other block
+nodes, up to the `Collect` parameters that gather them. A block node may also read nodes outside the block, such as
+`prefix`, which are computed once and shared by every item. There is no flag to turn this on.
+
+- The expand may return a list or any other iterable instead of yielding. It is read lazily, one item at a time:
+  item 0's branch runs to its end before item 1 is read, and so on. Requested as an output, the expand gives the
+  `list` of its items.
+- `NodeView.block` names the expand of a node's innermost block, and `NodeView.kind` is `"expand"`, `"collect"`,
+  `"function"` or `"input"`. `Param.collect` is `"present"` for a `Collect[T]` parameter and `"all"` for
+  `Collect[T | Absent]`.
+- Blocks nest: an expand inside a block makes a block per item of the outer one, and its `Collect` gathers per outer
+  item. Two collects may read one block, and a node may collect one block and expand another.
+- Each item is checked as an input of type `T` is, unless the driver was built with `without_input_type_checks()`:
+  one that doesn't fit is a `TypeError` naming the expand and the item's index. An item can't be `ABSENT`. Edges are
+  checked as `T` into the block, and as each block node's type into the `Collect[T]` that reads it.
+- For a type checker, `Parallelizable[T]` is `Iterable[T]` and `Collect[T]` is `list[T]`.
+- The build refuses a `Collect` of a node outside any block, or of an expand itself; a node reading the blocks of
+  two unrelated expands (collect both in one node to pair them); a node reading a block node and also its collect,
+  which would be inside the block it collects; `@extract_fields` or `@extract_columns` on an expand; and
+  `Parallelizable[T | Absent]`: write `Parallelizable[T] | Absent` for an expand that may decline as a whole.
+- `build_async()` refuses a graph with an expand until Plan 11, and so does `with_cache()` for now.
+
 ## Annotations
 
 Every parameter and every return value needs a type annotation, so each edge in the graph is typed where it's

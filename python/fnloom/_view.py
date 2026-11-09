@@ -8,9 +8,10 @@ import inspect
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import TYPE_CHECKING, NamedTuple, override
+from typing import TYPE_CHECKING, Literal, NamedTuple, override
 
 from fnloom._absence import admits_absent
+from fnloom._blocks import collect_mode, expands
 from fnloom._config import Condition
 from fnloom._decorators import Source, Value
 from fnloom._resolve import original
@@ -51,6 +52,17 @@ class Param:
         """
         return admits_absent(self.annotation)
 
+    @property
+    def collect(self) -> Literal["present", "all"] | None:
+        """How the parameter collects a block, or `None` when it does not.
+
+        `"present"` for `Collect[T]`, which receives the present branches' values,
+        and `"all"` for `Collect[T | Absent]`, which receives every branch's, in
+        branch order.
+        """
+        mode = collect_mode(self.annotation)
+        return None if mode is None else mode[0]
+
 
 @dataclass(frozen=True)
 class NodeView:
@@ -70,7 +82,9 @@ class NodeView:
     `may_be_absent` says whether the node's value may be `fnloom.ABSENT`: its
     return annotation admits `fnloom.Absent`, or a parameter without a default and
     not admitting it reads a node that may be absent (Q135). It is `False` for an
-    input, which is never absent.
+    input, which is never absent. `block` names the expand of the innermost block
+    the node is in, and is `None` outside every block (§4.2 of the dynamic
+    execution design).
     """
 
     name: str
@@ -85,6 +99,22 @@ class NodeView:
     namespace: str | None = None
     replaced: str | None = None
     may_be_absent: bool = False
+    block: str | None = None
+
+    @property
+    def kind(self) -> Literal["input", "function", "expand", "collect"]:
+        """What part the node plays: `"input"`, `"function"`, `"expand"` or `"collect"`.
+
+        `"expand"` is a `Parallelizable` node and `"collect"` one with a `Collect`
+        parameter; a node that both collects and expands is `"expand"` (Q136).
+        """
+        if self.is_input:
+            return "input"
+        if expands(self.type):
+            return "expand"
+        if any(p.collect is not None for p in self.params):
+            return "collect"
+        return "function"
 
     @property
     def dependencies(self) -> tuple[str, ...]:
@@ -371,13 +401,14 @@ def node_views(
     nodes: Sequence[NodeDef],
     generated: AbstractSet[str] = frozenset(),
     absent: AbstractSet[str] = frozenset(),
+    blocks: Mapping[str, Sequence[str]] = MappingProxyType({}),
 ) -> NodeViews:
     """The views of `nodes` and of the inputs they read, read-only, sorted by name.
 
     `nodes` carry resolved annotations. `ValueError` when two of an input's
     consumers declare types that match neither way. `generated` names the nodes
-    made from a function's output, such as extracted fields, and `absent` the
-    nodes whose value may be absent.
+    made from a function's output, such as extracted fields, `absent` the nodes
+    whose value may be absent, and `blocks` each block node's block path.
     """
     # Positional, every field in order: a view is made per node, so it is kept cheap.
     functions = {
@@ -394,6 +425,7 @@ def node_views(
             node.namespace,
             node.replaced,
             node.name in absent,
+            blocks[node.name][-1] if node.name in blocks else None,
         )
         for node in nodes
     }

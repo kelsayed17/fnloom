@@ -20,6 +20,7 @@ from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, final, override
 
 from fnloom import _types
 from fnloom._absence import without_absent
+from fnloom._blocks import expands
 from fnloom._decorators import (
     _ATTRIBUTE,
     Decorations,
@@ -426,6 +427,14 @@ def _value_type(returns: object) -> tuple[bool, object | None]:
     return True, args[1] if len(args) == 2 else None  # noqa: PLR2004  # key and value
 
 
+def _expanding(label: str) -> str:
+    """Why expand `label` can't have its fields extracted: its value is its items."""
+    return (
+        f"{label} expands, so @extract_fields and @extract_columns can't split its "
+        "value; extract the fields in a node of its block"
+    )
+
+
 def _shape(label: str, items: tuple[Item, ...], returns: object) -> str | None:
     """What is wrong with extracting `items` from a `returns` value, or `None`.
 
@@ -498,6 +507,8 @@ def extract_fields[F: Callable[..., object]](
             msg = f"{label}: extract_fields needs a return annotation"
             raise ValueError(msg)
         returns = annotations["return"]
+        if expands(returns):
+            raise ValueError(_expanding(label))
         if (
             _evaluated(returns)
             and (problem := _shape(label, items, returns)) is not None
@@ -652,8 +663,10 @@ def lower(
     field nodes are placeholders, used only to find duplicate names: a field the
     decorator gave no type is typed `Any`, and nothing is checked yet. Column nodes are
     typed by `column_type` of the resolved return, and `Any` before it resolves;
-    each carries its own doc.
+    each carries its own doc. An expand is refused: its value is its items.
     """
+    if expands(producer.returns):
+        raise ValueError(_expanding(repr(producer.name)))
     if extraction.kind == "columns":
         declared = column_type(without_absent(producer.returns)) if resolved else Any
         return _lowered_columns(producer, extraction, declared, rules, value_checks)

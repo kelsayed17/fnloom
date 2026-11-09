@@ -15,9 +15,12 @@ from hamilton import driver as hamilton_driver
 from hamilton import lifecycle
 from hamilton.function_modifiers.base import InvalidDecoratorException
 from harness import (
+    EXECUTORS,
     Direction,
+    Executor,
     Nodes,
     Outcome,
+    block_module,
     lineage_fnloom,
     lineage_hamilton,
     load_fixture,
@@ -25,6 +28,7 @@ from harness import (
     nodes_hamilton,
     run_fnloom,
     run_hamilton,
+    run_hamilton_blocks,
 )
 from type_matrix import (
     TYPES,
@@ -1696,3 +1700,170 @@ def test_no_result_is_checked_by_default() -> None:
     request: dict[str, Any] = {"final_vars": ["wrong", "reads"]}
     assert hamilton.execute(**request) == ours.execute(**request)
     assert ours.execute(**request) == {"wrong": "s", "reads": "ss"}
+
+
+# Fan-out and fan-in (Plan 10, task 8): one program per behaviour, run by both
+# runtimes with only its import swapped, and by Hamilton on both of its executors.
+PICKED = """
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+def details(picked: int, rate: int) -> int:
+    return picked * rate
+
+
+def summary(details: Collect[int]) -> list[int]:
+    return list(details)
+"""
+
+
+def both_blocks(
+    source: str,
+    outputs: list[str],
+    inputs: dict[str, object],
+    executor: Executor = "synchronous",
+    overrides: dict[str, object] | None = None,
+) -> tuple[Outcome, Outcome]:
+    """Hamilton's outcome and fnloom's, for one block program."""
+    name = f"blocks_{executor}_{len(sys.modules)}"
+    hamilton = run_hamilton_blocks(
+        block_module(f"{name}_h", source, "hamilton"),
+        outputs,
+        inputs,
+        overrides,
+        executor=executor,
+    )
+    ours = run_fnloom(
+        [block_module(f"{name}_f", source, "fnloom")], outputs, inputs, overrides
+    )
+    return hamilton, ours
+
+
+@pytest.mark.keeps("Q119")
+@pytest.mark.parametrize("executor", EXECUTORS)
+def test_q119_collect_receives_branches_in_item_order(executor: Executor) -> None:
+    """Both collect in yield order, on either Hamilton executor."""
+    hamilton, ours = both_blocks(PICKED, ["summary"], {"n": 5, "rate": 3}, executor)
+    assert hamilton == Outcome({"summary": [0, 3, 6, 9, 12]}, None)
+    assert ours == hamilton
+
+
+@pytest.mark.keeps("Q120")
+@pytest.mark.parametrize("executor", EXECUTORS)
+def test_q120_an_empty_expand_gives_an_empty_collect(executor: Executor) -> None:
+    """An expand that yields nothing gives its collect `[]`."""
+    hamilton, ours = both_blocks(PICKED, ["summary"], {"n": 0, "rate": 3}, executor)
+    assert hamilton == Outcome({"summary": []}, None)
+    assert ours == hamilton
+
+
+LISTED = """
+def picked(n: int) -> Parallelizable[int]:
+    return list(range(n))
+
+
+def details(picked: int) -> int:
+    return picked + 1
+
+
+def summary(details: Collect[int]) -> list[int]:
+    return list(details)
+"""
+
+
+@pytest.mark.keeps("Q121")
+@pytest.mark.parametrize("executor", EXECUTORS)
+def test_q121_an_expand_may_return_a_list_and_is_output_as_one(
+    executor: Executor,
+) -> None:
+    """A list is iterated like a generator, and the expand as an output is a list."""
+    hamilton, ours = both_blocks(LISTED, ["summary"], {"n": 3}, executor)
+    assert hamilton == Outcome({"summary": [1, 2, 3]}, None)
+    assert ours == hamilton
+    for source in (LISTED, PICKED):
+        hamilton, ours = both_blocks(source, ["picked"], {"n": 3}, executor)
+        assert hamilton == Outcome({"picked": [0, 1, 2]}, None)
+        assert ours == hamilton
+        assert ours.values is not None
+        assert type(ours.values["picked"]) is list
+
+
+EXPAND_EDGE = """
+def picked() -> Parallelizable[str]:
+    yield "a"
+
+
+def details(picked: int) -> int:
+    return picked
+
+
+def summary(details: Collect[int]) -> int:
+    return len(details)
+"""
+
+COLLECT_EDGE = """
+def picked() -> Parallelizable[int]:
+    yield 1
+
+
+def details(picked: int) -> int:
+    return picked
+
+
+def summary(details: Collect[str]) -> int:
+    return len(details)
+"""
+
+
+@pytest.mark.keeps("Q127")
+@pytest.mark.parametrize("source", [EXPAND_EDGE, COLLECT_EDGE])
+def test_q127_block_edges_are_checked_at_build(source: str) -> None:
+    """An expand feeds `T`, a block node a collect's element: both refuse a mismatch."""
+    hamilton, ours = both_blocks(source, ["summary"], {})
+    assert hamilton == Outcome(None, "ValueError")
+    assert ours == hamilton
+
+
+TWO_BLOCKS = """
+def left(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+def right(n: int) -> Parallelizable[int]:
+    yield from range(n, 2 * n)
+
+
+def scaled_left(left: int, k: int) -> int:
+    return left * k
+
+
+def scaled_right(right: int, k: int) -> int:
+    return right * k
+
+
+def left_sum(scaled_left: Collect[int]) -> int:
+    return sum(scaled_left)
+
+
+def right_sum(scaled_right: Collect[int]) -> int:
+    return sum(scaled_right)
+
+
+def joined(left_sum: int, right_sum: int, k: int) -> list[int]:
+    return [left_sum, right_sum, k]
+"""
+
+
+@pytest.mark.keeps("Q138")
+@pytest.mark.parametrize("executor", EXECUTORS)
+def test_q138_two_independent_blocks_share_their_inputs(executor: Executor) -> None:
+    """Two blocks joined downstream run; an input is shared by every branch."""
+    hamilton, ours = both_blocks(TWO_BLOCKS, ["joined"], {"n": 3, "k": 2}, executor)
+    assert hamilton == Outcome({"joined": [6, 24, 2]}, None)
+    assert ours == hamilton
+    hamilton, ours = both_blocks(
+        TWO_BLOCKS, ["joined"], {"n": 3, "k": 2}, executor, {"k": 10}
+    )
+    assert hamilton == Outcome({"joined": [30, 120, 10]}, None)
+    assert ours == hamilton

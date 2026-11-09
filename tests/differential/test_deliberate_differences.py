@@ -20,6 +20,7 @@ import pytest
 from hamilton import async_driver as hamilton_async
 from hamilton import driver as hamilton_driver
 from hamilton import graph_types, htypes, lifecycle
+from hamilton.execution import executors
 from hamilton.function_modifiers import hamilton_exclude
 from hamilton.function_modifiers.base import InvalidDecoratorException
 from hamilton.lifecycle import NoEdgeAndInputTypeChecking
@@ -28,6 +29,8 @@ from harness import (
     FIXTURES,
     Nodes,
     Outcome,
+    block_module,
+    hamilton_blocks_in_subprocess,
     load_fixture,
     nodes_fnloom,
     nodes_hamilton,
@@ -37,11 +40,13 @@ from harness import (
 from test_semantics import (
     DELIBERATE,
     HOOKED_GRAPH,
+    PICKED,
     FnloomRecorder,
     FnloomSeen,
     HamiltonRecorder,
     HamiltonSeen,
     HookEntry,
+    both_blocks,
 )
 from type_matrix import (
     TYPES,
@@ -6023,3 +6028,194 @@ def test_q95_a_graph_that_may_be_absent_exports_format_2() -> None:
     assert document["format"] == "fnloom.export/2"
     flags = {node["name"]: node["may_be_absent"] for node in document["nodes"]}
     assert flags == {"listing": True, "count": True, "report": True}
+
+
+# Fan-out and fan-in (Plan 10, task 8). Each program runs on both runtimes with only
+# its import swapped (see `test_semantics.both_blocks`).
+
+
+@pytest.mark.deliberate("Q118")
+def test_q118_blocks_need_no_flag() -> None:
+    """Hamilton needs a flag, and misspells it in its error; fnloom needs nothing."""
+    module = block_module("q118_h", PICKED, "hamilton")
+    plain = hamilton_driver.Builder().with_modules(module).build()
+    with pytest.raises(Exception, match="cannot handle parallelizable") as info:
+        plain.execute(["summary"], inputs={"n": 2, "rate": 1})
+    assert type(info.value).__name__ == "InvalidExecutorException"
+    with pytest.raises(ValueError, match="allow_experiemental_mode"):
+        hamilton_driver.Builder().enable_dynamic_execution()
+
+    ours = fnloom.build(block_module("q118_f", PICKED, "fnloom"))
+    assert ours.execute(["summary"], inputs={"n": 2, "rate": 1}) == {"summary": [0, 1]}
+
+
+_NESTED = """
+def outer() -> Parallelizable[int]:
+    yield from [1, 2]
+
+
+def inner(outer: int) -> Parallelizable[int]:
+    yield from range(outer)
+
+
+def leaf(inner: int, outer: int) -> int:
+    return outer * 10 + inner
+
+
+def per_outer(leaf: Collect[int]) -> list[int]:
+    return list(leaf)
+
+
+def everything(per_outer: Collect[list[int]]) -> list[list[int]]:
+    return list(per_outer)
+"""
+
+
+@pytest.mark.deliberate("Q122")
+def test_q122_nested_blocks_gather_per_outer_branch() -> None:
+    """Hamilton never returns on this nesting; fnloom gathers per outer branch."""
+    assert hamilton_blocks_in_subprocess(_NESTED, ["everything"]) is None
+    ours = fnloom.build(block_module("q122_f", _NESTED, "fnloom"))
+    assert ours.execute(["everything"]) == {"everything": [[10], [20, 21]]}
+
+
+_TWO_COLLECTS = """
+def picked() -> Parallelizable[int]:
+    yield from [1, 2]
+
+
+def details(picked: int) -> int:
+    return picked
+
+
+def total(details: Collect[int]) -> int:
+    return sum(details)
+
+
+def count(details: Collect[int]) -> int:
+    return len(details)
+"""
+
+
+@pytest.mark.deliberate("Q123")
+def test_q123_two_collects_of_one_block() -> None:
+    """Hamilton's two groups clash in its cache; fnloom collects a block twice."""
+    hamilton, ours = both_blocks(_TWO_COLLECTS, ["total", "count"], {})
+    assert hamilton == Outcome(None, "KeyError")
+    assert ours == Outcome({"total": 3, "count": 2}, None)
+
+
+_OWN_COLLECT = """
+def picked() -> Parallelizable[int]:
+    yield from [1, 2]
+
+
+def details(picked: int) -> int:
+    return picked
+
+
+def summary(details: Collect[int]) -> int:
+    return sum(details)
+
+
+def both(details: int, summary: int) -> int:
+    return details + summary
+"""
+
+
+@pytest.mark.deliberate("Q124")
+def test_q124_reading_a_block_node_and_its_collect_is_refused() -> None:
+    """Hamilton spins forever; fnloom's build refuses, naming the path."""
+    assert hamilton_blocks_in_subprocess(_OWN_COLLECT, ["both"]) is None
+    module = block_module("q124_f", _OWN_COLLECT, "fnloom")
+    with pytest.raises(ValueError, match="reads its own collect 'summary'") as info:
+        fnloom.build(module)
+    assert str(info.value).endswith("'picked' -> 'both' -> 'summary' -> 'picked'")
+
+
+_STR_ITEM = """
+def picked() -> Parallelizable[int]:
+    yield 1
+    yield "x"
+
+
+def details(picked: int) -> str:
+    return repr(picked)
+
+
+def summary(details: Collect[str]) -> list[str]:
+    return list(details)
+"""
+
+
+@pytest.mark.deliberate("Q127")
+def test_q127_items_are_checked_as_inputs() -> None:
+    """Hamilton passes a `str` item to an `int` consumer; fnloom refuses it by index."""
+    hamilton, _ = both_blocks(_STR_ITEM, ["summary"], {})
+    assert hamilton == Outcome({"summary": ["1", "'x'"]}, None)
+    ours = fnloom.build(block_module("q127_items_f", _STR_ITEM, "fnloom"))
+    with pytest.raises(TypeError, match="item 1 of 'picked': expected int, got str"):
+        ours.execute(["summary"])
+
+
+@pytest.mark.deliberate("Q132")
+def test_q132_build_async_refuses_blocks_until_plan_11() -> None:
+    """Hamilton's async builder refuses the flag; fnloom's refuses the graph."""
+    with pytest.raises(ValueError, match="not supported for the async driver"):
+        hamilton_async.Builder().enable_dynamic_execution(allow_experimental_mode=True)
+    module = block_module("q132_f", PICKED, "fnloom")
+    with pytest.raises(
+        TypeError, match="blocks run on the async driver from Plan 11; 'picked' expands"
+    ):
+        fnloom.Builder().with_modules(module).build_async()
+
+
+_BOTH_KINDS = """
+def first() -> Parallelizable[int]:
+    yield from [1, 2]
+
+
+def doubled(first: int) -> int:
+    return first * 2
+
+
+def second(doubled: Collect[int]) -> Parallelizable[int]:
+    yield from doubled
+
+
+def plus(second: int) -> int:
+    return second + 1
+
+
+def done(plus: Collect[int]) -> list[int]:
+    return list(plus)
+"""
+
+
+@pytest.mark.deliberate("Q136")
+def test_q136_a_node_collects_one_block_and_expands_another() -> None:
+    """Hamilton fails, with an error that varies by hash seed; fnloom runs both."""
+    hamilton, ours = both_blocks(_BOTH_KINDS, ["done"], {})
+    # A generator reaches `plus` (`TypeError`), or a group is missing (`KeyError`).
+    assert hamilton in (Outcome(None, "TypeError"), Outcome(None, "KeyError"))
+    assert ours == Outcome({"done": [3, 5]}, None)
+    built = fnloom.build(block_module("q136_view", _BOTH_KINDS, "fnloom"))
+    assert built.nodes["second"].kind == "expand"
+    assert [p.collect for p in built.nodes["second"].params] == ["present"]
+
+
+@pytest.mark.deliberate("Q137")
+def test_q137_no_executor_settings() -> None:
+    """Hamilton's executor settings need the flag; fnloom has none to set."""
+    with pytest.raises(ValueError, match="without first enabling the V2 Driver"):
+        hamilton_driver.Builder().with_remote_executor(
+            executors.MultiThreadingExecutor(2)
+        )
+    for name in (
+        "with_local_executor",
+        "with_remote_executor",
+        "with_execution_manager",
+        "with_grouping_strategy",
+        "enable_dynamic_execution",
+    ):
+        assert not hasattr(fnloom.Builder, name)

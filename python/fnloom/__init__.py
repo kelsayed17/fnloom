@@ -2,6 +2,7 @@
 
 from importlib.metadata import version as _version
 
+from fnloom._blocks import Collect, Parallelizable
 from fnloom._caching import CacheOutcome
 from fnloom._checks import (
     CheckResult,
@@ -91,6 +92,7 @@ __all__ = [
     "CacheStore",
     "CacheWarning",
     "CheckResult",
+    "Collect",
     "Condition",
     "DiskCache",
     "Drawing",
@@ -108,6 +110,7 @@ __all__ = [
     "NodeSpec",
     "NodeStart",
     "NodeView",
+    "Parallelizable",
     "Param",
     "PreparedPlan",
     "PrintNodes",
