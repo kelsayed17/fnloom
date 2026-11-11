@@ -481,6 +481,14 @@ def test_polars_frames() -> None:
     high = pl.Series("i", [2**53 + 1, None])
     assert fingerprint(low) != fingerprint(high)
     assert fingerprint(low.to_frame()) != fingerprint(high.to_frame())
+    # Nor a null inside a list, array or struct item.
+    for build in (
+        lambda n: pl.Series([[n, None]]),
+        lambda n: pl.Series([[n, None]], dtype=pl.Array(pl.Int64, 2)),
+        lambda n: pl.Series([{"a": n}, {"a": None}]),
+    ):
+        assert fingerprint(build(2**53)) != fingerprint(build(2**53 + 1))
+        assert fingerprint(build(2**53)) == fingerprint(build(2**53))
 
 
 def test_pandas_nullable_columns() -> None:

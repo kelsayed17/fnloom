@@ -314,15 +314,19 @@ def unit(x: str) -> Annotated[str, {"unit": "name"}]:
 @check_output(contains="a")
 def maybe(x: str) -> str | None:
     return x
+
+@check_output(contains="a")
+def maybe_name(x: str) -> Name | None:
+    return Name(x)
 """
 
 
 def test_text_checks_take_every_kind_of_str() -> None:
     """`contains` and `does_not_contain` build on any type a `str` value has."""
     driver = _driver(TEXTUAL, "textual")
-    outputs = ["sub", "name", "letter", "unit", "maybe"]
+    outputs = ["sub", "name", "letter", "unit", "maybe", "maybe_name"]
     assert driver.execute(outputs, inputs={"x": "abc"}) == dict.fromkeys(
-        ["sub", "name", "unit", "maybe"], "abc"
+        ["sub", "name", "unit", "maybe", "maybe_name"], "abc"
     ) | {"letter": "ab"}
     with pytest.raises(ValueError, match="sub"):
         driver.execute(["sub"], inputs={"x": "zzz"})

@@ -462,8 +462,11 @@ def _polars_series(series: Any) -> tuple[object, object]:  # noqa: ANN401  # a p
     """A polars series' non-null values and null mask.
 
     `to_numpy` turns a null into a NaN, which rounds integers past 2**53, so the
-    nulls go first.
+    nulls go first. A nested series (list, array, struct) can hide a null in any
+    item, so it goes through exact Python values instead.
     """
+    if series.dtype.is_nested():
+        return (series.to_list(), None)
     return (series.drop_nulls().to_numpy(), series.is_null().to_numpy())
 
 
