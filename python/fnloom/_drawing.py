@@ -9,6 +9,7 @@ Q94, Q146). `Drawing.styled` adds `Style`s that every writer draws (Q139).
 import annotationlib
 import dataclasses
 import inspect
+import itertools
 import json
 
 # `os` is imported for real: `render`'s signature annotates with `os.PathLike`,
@@ -37,6 +38,7 @@ from fnloom._view import NodeView, topological
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
+    from collections.abc import Set as AbstractSet
 
     from fnloom._config import Condition
     from fnloom._view import NodeViews
@@ -91,7 +93,10 @@ class DrawnNode:
     `NamedTuple` return type (`show_schema`). `style` is the node's own `Style`,
     from `Drawing.styled`. `view` is the node's `NodeView`, for a style
     function; it is left out of equality, `repr` and pickling, and is `None`
-    for a node made by hand or unpickled.
+    for a node made by hand or unpickled. `block` names the expand of the
+    innermost block the node is in (`NodeView.block`), or `None`: DOT and
+    Mermaid draw the node inside that block's cluster (Q131). It is left out
+    of equality, like `view`.
     """
 
     name: str
@@ -104,6 +109,7 @@ class DrawnNode:
     schema: tuple[tuple[str, str], ...] = ()
     style: Style | None = None
     view: NodeView | None = field(default=None, compare=False, repr=False)
+    block: str | None = field(default=None, compare=False)
 
     def __copy__(self) -> DrawnNode:
         """A copy keeping `view`: only pickling leaves it out."""
@@ -129,6 +135,8 @@ class DrawnNode:
                 self.tags,
                 self.schema,
                 self.style,
+                None,
+                self.block,
             ),
         )
 
@@ -145,7 +153,10 @@ class Drawing:
     dependencies' names. Neither depends on `PYTHONHASHSEED` (Q90). `str()` of a
     drawing is its DOT text. `graph_style` and `edge_style` are the `Style`s
     `styled` gave the whole graph and every edge; `show_types` says whether a
-    label shows its node's type.
+    label shows its node's type. `blocks` pairs each drawn block's expand with
+    the expand of the block it is in, or `None`, sorted by expand: it says how
+    the clusters nest (Q131). A node's `block` missing from it is a cluster at
+    the top.
     """
 
     nodes: tuple[DrawnNode, ...]
@@ -153,6 +164,7 @@ class Drawing:
     graph_style: Style | None = None
     edge_style: Style | None = None
     show_types: bool = True
+    blocks: tuple[tuple[str, str | None], ...] = ()
 
     def styled(
         self,
@@ -218,16 +230,26 @@ class Drawing:
         ]
         if self.edge_style is not None:
             lines.append(f"  edge [{_listed(_dot_edge(self.edge_style))}]")
-        lines.extend(
-            f"  {_quoted(n.name)} [{_listed(_dot_attributes(n, self.show_types))}]"
-            for n in self.nodes
-        )
+        for step, depth in clustered(self):
+            indent = "  " * depth
+            if isinstance(step, DrawnNode):
+                attributes = _listed(_dot_attributes(step, self.show_types))
+                lines.append(f"{indent}{_quoted(step.name)} [{attributes}]")
+            elif step is None:
+                lines.append(f"{indent}}}")
+            else:
+                lines.append(f"{indent}subgraph {_quoted(f'cluster_{step}')} {{")
+                lines.append(f"{indent}  label={_quoted(block_title(step))}")
         on_path = {n.name for n in self.nodes if "path" in n.marks}
-        for dependency, node in self.edges:
-            styled = " [color=red]" if {dependency, node} <= on_path else ""
+        labels = edge_labels(self)
+        for (dependency, node), label in zip(self.edges, labels, strict=True):
+            attributes = {} if label is None else {"label": _quoted(label)}
+            if {dependency, node} <= on_path:
+                attributes["color"] = "red"
+            styled = f" [{_listed(attributes)}]" if attributes else ""
             lines.append(f"  {_quoted(dependency)} -> {_quoted(node)}{styled}")
         if legend and self.nodes:
-            lines.extend(_dot_legend(self.nodes))
+            lines.extend(_dot_legend(self.nodes, {b for b, _ in self.blocks}))
         lines.append("}")
         return "\n".join(lines) + "\n"
 
@@ -243,13 +265,13 @@ class Drawing:
         ids = {n.name: f"n{i}" for i, n in enumerate(self.nodes)}
         lines = _mermaid_init(self.graph_style)
         lines.append(f"flowchart {orient}")
-        lines.extend(
-            f"  {ids[n.name]}{_mermaid_node(n, self.show_types)}" for n in self.nodes
-        )
+        lines.extend(_mermaid_nodes(self, ids))
         on_path = {n.name for n in self.nodes if "path" in n.marks}
         red: list[str] = []
+        labels = edge_labels(self)
         for i, (dependency, node) in enumerate(self.edges):
-            lines.append(f"  {ids[dependency]} --> {ids[node]}")
+            arrow = "-->" if labels[i] is None else f"-- {labels[i]} -->"
+            lines.append(f"  {ids[dependency]} {arrow} {ids[node]}")
             if {dependency, node} <= on_path:
                 red.append(str(i))
         if self.edge_style is not None and self.edges:
@@ -377,6 +399,80 @@ class Drawing:
         return self.to_dot()
 
 
+def block_title(expand: str) -> str:
+    """The title of the cluster of `expand`'s block."""
+    return f"for each item of {expand}"
+
+
+def clustered(drawing: Drawing) -> list[tuple[DrawnNode | str | None, int]]:
+    """The drawing's nodes as DOT and Mermaid write them, each block a cluster.
+
+    Each step is a node, a block's expand opening its cluster, or `None` closing
+    the last one opened, with its depth. Nodes outside every block come first,
+    in the drawing's order; then each block, by its expand's name, its nodes in
+    the drawing's order, then the blocks nested in it. Walked on a stack, so
+    any depth of nesting draws (Q131).
+    """
+    members: dict[str | None, list[DrawnNode]] = {}
+    for n in drawing.nodes:
+        members.setdefault(n.block, []).append(n)
+    parents = _parents(drawing)
+    children: dict[str | None, list[str]] = {}
+    for block in sorted(parents, reverse=True):
+        children.setdefault(parents[block], []).append(block)
+    steps: list[tuple[DrawnNode | str | None, int]] = [
+        (n, 1) for n in members.get(None, ())
+    ]
+    stack: list[tuple[str | None, int]] = [(b, 1) for b in children.get(None, ())]
+    while stack:
+        block, depth = stack.pop()
+        if block is None:
+            steps.append((None, depth))
+            continue
+        steps.append((block, depth))
+        steps.extend((n, depth + 1) for n in members.get(block, ()))
+        stack.append((None, depth))
+        stack.extend((b, depth + 1) for b in children.get(block, ()))
+    return steps
+
+
+def _parents(drawing: Drawing) -> dict[str, str | None]:
+    """Each block a drawn node is in, and each block that is in, with its parent.
+
+    One `blocks` doesn't name is at the top. A block of `blocks` with no drawn
+    node in it or in a block inside it, as after filtering nodes, is left out.
+    """
+    given = dict(drawing.blocks)
+    parents: dict[str, str | None] = {}
+    for n in drawing.nodes:
+        block = n.block
+        while block is not None and block not in parents:
+            parents[block] = given.get(block)
+            block = parents[block]
+    return parents
+
+
+def edge_labels(drawing: Drawing) -> list[str | None]:
+    """Each edge's label, in the drawing's order: `expand`, `collect` or `None`.
+
+    An edge from an expand into its block is `expand`; one from a block node to
+    a node outside that block, which collects it, is `collect` (Q131).
+    """
+    parents = _parents(drawing)
+    block_of = {n.name: n.block for n in drawing.nodes}
+    labels: list[str | None] = []
+    for dependency, node in drawing.edges:
+        if dependency in parents:
+            labels.append("expand")
+            continue
+        inner = block_of[dependency]
+        outer = block_of[node]
+        while outer is not None and outer != inner:
+            outer = parents.get(outer)
+        labels.append(None if inner is None or outer == inner else "collect")
+    return labels
+
+
 def checked_parts(drawing: Drawing) -> None:
     """`ValueError` for two nodes of one name, or an edge to a node not drawn."""
     seen: set[str] = set()
@@ -502,10 +598,29 @@ def drawing(
                 tags=_shown_tags(view, shown.show_tags),
                 schema=schema_fields(view.type) if shown.show_schema else (),
                 view=view,
+                block=view.block,
             )
         )
         edges.extend((dep, name) for dep in view.dependencies if dep in drawn)
-    return Drawing(tuple(nodes), tuple(edges), show_types=shown.show_types)
+    return Drawing(
+        tuple(nodes),
+        tuple(edges),
+        show_types=shown.show_types,
+        blocks=_nesting(views, (n.block for n in nodes)),
+    )
+
+
+def _nesting(
+    views: NodeViews, blocks: Iterable[str | None]
+) -> tuple[tuple[str, str | None], ...]:
+    """Each of `blocks`, and each block they are in, with the block it is in."""
+    parents: dict[str, str | None] = {}
+    for start in blocks:
+        block = start
+        while block is not None and block not in parents:
+            parents[block] = views[block].block
+            block = parents[block]
+    return tuple(sorted(parents.items()))
 
 
 def _shown_tags(view: NodeView, names: Sequence[str]) -> tuple[tuple[str, str], ...]:
@@ -739,13 +854,17 @@ def _dot_edge(style: Style) -> dict[str, str]:
     return _with(out, _dot_vocabulary(style, fill="fillcolor"))
 
 
-def _dot_legend(nodes: Sequence[DrawnNode]) -> list[str]:
+def _dot_legend(nodes: Sequence[DrawnNode], blocks: AbstractSet[str]) -> list[str]:
     """A legend box naming each kind and mark drawn, in a fixed order."""
     used = {n.kind for n in nodes} | {m for n in nodes for m in n.marks}
     # A node may be named like a legend entry: such an entry's id gets
-    # underscores until no drawn node has it.
+    # underscores until no drawn node has it. An expand named `legend` would
+    # share the legend's cluster: the legend's gets underscores too.
     taken = {n.name for n in nodes}
-    lines = ["  subgraph cluster_legend {", '    label="Legend"']
+    legend = "legend"
+    while legend in blocks:
+        legend = f"_{legend}"
+    lines = [f"  subgraph cluster_{legend} {{", '    label="Legend"']
     for key in LEGEND_KEYS:
         if key in used:
             kind: Kind = "input" if key == "input" else "function"
@@ -794,14 +913,32 @@ _MERMAID_SHAPES = {
 }
 
 
+def _mermaid_text(line: str) -> str:
+    """`line` for inside a quoted Mermaid label."""
+    # A control character, a line break among them, can't stand in a label.
+    return "".join(" " if ord(c) < 32 else _MERMAID_ESCAPES.get(c, c) for c in line)  # noqa: PLR2004  # the C0 controls
+
+
 def _mermaid_label(node: DrawnNode, show_types: bool = True) -> str:  # noqa: FBT001, FBT002  # private
     lines = label_lines(node, show_types=show_types)
-    # A control character, a line break among them, can't stand in a label.
-    escaped = (
-        "".join(" " if ord(c) < 32 else _MERMAID_ESCAPES.get(c, c) for c in line)  # noqa: PLR2004  # the C0 controls
-        for line in lines
-    )
-    return "<br>".join(escaped)
+    return "<br>".join(_mermaid_text(line) for line in lines)
+
+
+def _mermaid_nodes(drawing: Drawing, ids: Mapping[str, str]) -> list[str]:
+    """The drawing's nodes as Mermaid lines, each block a `subgraph` (Q131)."""
+    lines: list[str] = []
+    clusters = itertools.count()
+    for step, depth in clustered(drawing):
+        indent = "  " * depth
+        if isinstance(step, DrawnNode):
+            shown = _mermaid_node(step, drawing.show_types)
+            lines.append(f"{indent}{ids[step.name]}{shown}")
+        elif step is None:
+            lines.append(f"{indent}end")
+        else:
+            title = _mermaid_text(block_title(step))
+            lines.append(f'{indent}subgraph b{next(clusters)} ["{title}"]')
+    return lines
 
 
 def _mermaid_node(node: DrawnNode, show_types: bool) -> str:  # noqa: FBT001  # private

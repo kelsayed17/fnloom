@@ -109,6 +109,13 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `while computing 'details' for branch (2,) of 'picked'`, after closing the expand's generator; nothing of the
   branches before it is returned. `_core.ObserverBase` gains `post_expand(node, *, branch, items)`, and its
   `pre_node` and `post_node` get `branch=` for a block node.
+- Drawing and export of blocks (Q131; amends Q95). DOT and Mermaid draw each block as a cluster titled `for each
+  item of <expand>`, nested as blocks nest, with the edges into and out of it labelled `expand` and `collect`; the
+  builtin SVG engine writes the title on each block node instead, and labels the edges the same. `DrawnNode.block`
+  (left out of equality, like `view`) names a node's block, and `Drawing.blocks` how the drawn blocks nest. A graph
+  with a block exports `fnloom.export/2`: each node says `block`, its `kind` may be `"expand"` or `"collect"`, each
+  parameter says `collect`, `graph_version` hashes both, and `diff` compares them, reading a `/1` document's nodes as
+  in no block and collecting nothing.
 - Caching blocks (Q129). `with_cache()` caches a graph with blocks. A block node's key is its ordinary key, with the
   item's fingerprint as the version of its expand and no branch index, so a moved or repeated item hits and an
   appended one computes one branch; a hit at a block's exit skips its upstream in that branch, and fires

@@ -18,7 +18,13 @@ from bisect import bisect_left, bisect_right, insort
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from fnloom._drawing import LEGEND_KEYS, checked_parts, label_lines
+from fnloom._drawing import (
+    LEGEND_KEYS,
+    block_title,
+    checked_parts,
+    edge_labels,
+    label_lines,
+)
 from fnloom._style import Style, hex_colour, number
 
 if TYPE_CHECKING:
@@ -800,9 +806,14 @@ def _route(
 
 
 def _lines(node: DrawnNode, show_types: bool) -> list[str]:  # noqa: FBT001  # private
-    return [
-        line.replace("\n", " ") for line in label_lines(node, show_types=show_types)
-    ]
+    """A node's label lines, and its block's title: the builtin engine draws no cluster.
+
+    Its layers don't keep a block's nodes together, so each says its block (Q131).
+    """
+    lines = label_lines(node, show_types=show_types)
+    if node.block is not None:
+        lines.append(block_title(node.block))
+    return [line.replace("\n", " ") for line in lines]
 
 
 def _legend_keys(drawing: Drawing) -> list[str]:
@@ -962,6 +973,17 @@ def _text(lines: Sequence[str], x: float, y: float, colour: str) -> str:
     return f'<text text-anchor="middle" fill="{colour}">{spans}</text>'
 
 
+def _edge_label(
+    label: str | None, route: Sequence[tuple[float, float]], colour: str
+) -> str:
+    """An edge's `expand` or `collect`, at the middle of its route, or nothing."""
+    if label is None:
+        return ""
+    middle = len(route) // 2
+    (x0, y0), (x1, y1) = route[middle - 1], route[middle]
+    return _text([label], (x0 + x1) / 2, (y0 + y1) / 2 - _LINE / 2, colour)
+
+
 def _arrow(route: Sequence[tuple[float, float]], colour: str) -> str:
     """The arrowhead at the route's last point, pointing along its last segment."""
     (x0, y0), (x1, y1) = route[-2], route[-1]
@@ -997,7 +1019,10 @@ def svg(
     ]
     on_path = {n.name for n in drawing.nodes if "path" in n.marks}
     edge = drawing.edge_style
-    for (dependency, node), route in zip(drawing.edges, placed.edges, strict=True):
+    labels = edge_labels(drawing)
+    for (dependency, node), route, label in zip(
+        drawing.edges, placed.edges, labels, strict=True
+    ):
         colour, width, dashes = _BLACK, 1.0, None
         if edge is not None:
             colour = hex_colour(edge.stroke) if edge.stroke is not None else colour
@@ -1018,7 +1043,8 @@ def svg(
         out.append(
             f'<g class="edge"><title>{title}</title>'
             f'<polyline points="{points}" fill="none" stroke="{colour}" '
-            f'stroke-width="{number(width)}"{dash}/>{_arrow(route, colour)}</g>'
+            f'stroke-width="{number(width)}"{dash}/>{_arrow(route, colour)}'
+            f"{_edge_label(label, route, colour)}</g>"
         )
     for n, box in zip(drawing.nodes, placed.boxes, strict=True):
         look = _look(n.kind, n.marks, n.style)
