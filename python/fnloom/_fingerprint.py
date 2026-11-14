@@ -103,7 +103,7 @@ def fallback(value: object) -> object | None:
     A value of a user class carries the class's code version too: a node may call its
     methods, so the same content under edited code is another value.
     """
-    form = _form(value)
+    form = fingerprint_form(value)
     if form is None:
         return None
     version = _class_version(type(value))
@@ -133,7 +133,7 @@ def _class_version(cls: type) -> bytes | None:
     return version
 
 
-def _form(value: object) -> object | None:
+def fingerprint_form(value: object) -> object | None:
     """`value`'s canonical form by its declaration, a registration or its kind."""
     own = getattr(type(value), "__fnloom_fingerprint__", None)
     if own is not None:
@@ -147,7 +147,7 @@ def _form(value: object) -> object | None:
         # A library value is known to its branch or refused: never read as a bare
         # buffer, which would drop a subclass's state (a masked array's mask, say).
         return library(value)
-    for known in (_stdlib, _record, _buffer):
+    for known in (stdlib_form, record_form, _buffer):
         form = known(value)
         if form is not None:
             return form
@@ -160,7 +160,7 @@ _PATHS = frozenset(
 )
 
 
-def _stdlib(value: object) -> object | None:  # noqa: PLR0911  # one return per type
+def stdlib_form(value: object) -> object | None:  # noqa: PLR0911  # one return per type
     """The canonical form of a standard-library value, or `None` for anything else.
 
     Types match exactly, since a subclass may hold state the form leaves out; enum
@@ -219,7 +219,7 @@ def model_fields(cls: type) -> dict[str, Any] | None:
     return fields if isinstance(fields, dict) else None
 
 
-def _record(value: object) -> object | None:
+def record_form(value: object) -> object | None:
     """A named tuple's, dataclass's or frozen pydantic model's fields, or `None`.
 
     State set beyond the fields (by `__post_init__`, say, or later) follows them, by
