@@ -12,7 +12,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, NamedTuple
 
 from fnloom import _blocks, _config, _extract, _resolve
-from fnloom._absence import Kind, dependency, merged
+from fnloom._absence import Kind, merged
 from fnloom._config import (
     Condition,
     Found,
@@ -69,7 +69,7 @@ class NodeDef:
     keyword per core input: `origin` itself, `origin` with each `Value` bound, or a
     call that maps those keywords onto `origin`'s parameters. `renames` maps a core
     input to the parameter keyword the core passes it under, when the two differ.
-    `returns` is the return annotation: as written after `collect`, its value after
+    `returns` is the return annotation: as written after `scan`, its value after
     `resolve`, as are the params' annotations. `config` holds the conditions that
     selected the function, empty for a plain one or a `@config.default`. `doc` is
     the node's own docstring, as an `extract_columns` `(name, doc)` or a
@@ -114,10 +114,7 @@ def core_inputs(
         if isinstance(param.binding, Source):
             key = (param.binding.name, param.collect)
             by_source.setdefault(key, []).append(param)
-    return [
-        (name, dependency(read[0]) if len(read) == 1 else merged(read), mode)
-        for (name, mode), read in by_source.items()
-    ]
+    return [(name, merged(read), mode) for (name, mode), read in by_source.items()]
 
 
 def _is_node(module: ModuleType, name: str, value: object) -> bool:
@@ -619,15 +616,12 @@ _UNLISTED = "not listed in its __all__"
 def _listed(module: ModuleType) -> frozenset[str] | None:
     """The names in `module.__all__`, or `None` when it defines none (Q73).
 
-    `TypeError` when it is not a list or tuple of `str`; `_functions` has checked
-    every module before this is called on one.
+    `_functions` has refused every module whose `__all__` is not a list or
+    tuple of `str` before this is called on one.
     """
     if "__all__" not in vars(module):
         return None
-    given: object = vars(module)["__all__"]
-    if isinstance(given, list | tuple):
-        return frozenset(str(n) for n in given if isinstance(n, str))
-    return frozenset[str]()
+    return frozenset(map(str, vars(module)["__all__"]))
 
 
 def _malformed_all(module: ModuleType) -> str | None:
@@ -939,35 +933,6 @@ class Scanned(NamedTuple):
     left_out: LeftOut
 
 
-def collect(
-    modules: Sequence[ModuleType],
-    config: Mapping[str, object] = _NO_CONFIG,
-    *,
-    awaits: bool = False,
-    functions: Sequence[FunctionSource] = (),
-    namespaces: Sequence[str | None] = (),
-) -> list[NodeDef]:
-    """Returns the nodes of `modules`; `ValueError` on a malformed or duplicate one.
-
-    Every duplicate name is listed, sorted by name, in one `ValueError`. A module
-    with no node is refused too, before duplicates, every such module in one
-    `ValueError` naming each function it holds and why that is not a node (Q53). A
-    function `@exclude` marks, or a module's `__all__` does not name, is not a node
-    (Q73); an `__all__` that is not a list or tuple of `str` is a `TypeError`
-    naming every such module.
-
-    `config` selects among `@config.when*` variants (see `scan`), and `awaits`
-    accepts `async def` nodes, as `build_async` does. `functions` are the node
-    sources given to `with_functions`, after the modules' (Q72). `namespaces`
-    holds each module's namespace, in order (see `scan`).
-
-    Annotations are read without being evaluated; `resolve` evaluates them.
-    """
-    return scan(
-        modules, config, awaits=awaits, functions=functions, namespaces=namespaces
-    ).nodes
-
-
 def _given(
     functions: Sequence[FunctionSource], found: Sequence[Found]
 ) -> list[Found | NodeSpec]:
@@ -1008,9 +973,18 @@ def scan(  # noqa: PLR0913  # keyword-only options, one per kind of source
     overlays: Mapping[str, Mapping[str, object]] | None = None,
     replaces: Sequence[Sequence[str]] = (),
 ) -> Scanned:
-    """`collect`, with the reason each node that no variant gave is absent.
+    """The nodes of `modules`, with the reason each node no variant gave is absent.
 
-    Variants are selected first, one per node (`_config.select`), so a variant
+    `ValueError` on a malformed or duplicate node: every duplicate name is
+    listed, sorted by name, in one `ValueError`. A module with no node is
+    refused too, before duplicates, every such module in one `ValueError`
+    naming each function it holds and why that is not a node (Q53). A function
+    `@exclude` marks, or a module's `__all__` does not name, is not a node
+    (Q73); an `__all__` that is not a list or tuple of `str` is a `TypeError`
+    naming every such module. Annotations are read without being evaluated;
+    `resolve` evaluates them.
+
+    Variants are selected first, one per node (`_config.resolve_variants`), so a variant
     the config does not select is never lowered. A module none of whose
     variants is selected is not empty. Without a config-decorated function
     there is nothing to select, and selection is skipped entirely. A function
@@ -1186,7 +1160,7 @@ def _selected(  # noqa: PLR0913  # keyword-only options, one per part of the sel
     *,
     namespaced: bool,
     configs: Mapping[str | None, Mapping[str, object]],
-    apart: AbstractSet[tuple[str | None, str, str]] = frozenset(),
+    apart: AbstractSet[tuple[str | None, str, str]],
 ) -> tuple[list[_Entry], Selection]:
     """`entries` with only the variants `config` selects, and the selection.
 
@@ -1346,7 +1320,7 @@ def _made(  # one pass over the nodes, replacements in it
     names: Mapping[str, Within],
     *,
     awaits: bool,
-    replacing: Mapping[tuple[str | None, str], _Replacing] | None = None,
+    replacing: Mapping[tuple[str | None, str], _Replacing],
 ) -> dict[str, NodeDef]:
     """The nodes `entries` make, by name; `ValueError` naming every clash, sorted.
 
@@ -1364,9 +1338,6 @@ def _made(  # one pass over the nodes, replacements in it
     from_given: set[int] = set()
     seen: dict[str, NodeDef] = {}
     clashes: list[tuple[str, str]] = []
-    by_module = (
-        dict[tuple[str | None, str], _Replacing]() if replacing is None else replacing
-    )
     # The names each replacing module made, and those it did replace.
     defined: dict[tuple[str | None, str], set[str]] = {}
     replaced: set[tuple[str | None, str, str]] = set()
@@ -1386,7 +1357,7 @@ def _made(  # one pass over the nodes, replacements in it
             made = _node_defs(*entry, awaits=awaits, within=within)
             # A function given to `with_functions` replaces nothing.
             replaces = (
-                None if id(entry) in sourced else by_module.get((namespace, entry[0]))
+                None if id(entry) in sourced else replacing.get((namespace, entry[0]))
             )
         if sourced and id(entry) in sourced:
             from_given.update(id(node) for node in made)
@@ -1415,7 +1386,7 @@ def _made(  # one pass over the nodes, replacements in it
                 clash = _duplicate(old, node, from_given)
                 clashes.append((node.name, clash))
     # A `replace=` that missed comes first: a misspelt name is why a clash is left.
-    problems = sorted(_replacement_problems(by_module, defined, replaced))
+    problems = sorted(_replacement_problems(replacing, defined, replaced))
     if clashes or problems:
         # Sorted by node name; a name clashing more than once keeps scan order.
         clashes.sort(key=lambda clash: clash[0])
