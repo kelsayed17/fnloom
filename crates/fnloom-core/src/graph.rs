@@ -1,16 +1,15 @@
 //! Graph construction: id assignment, input synthesis and cycle detection.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::error::{BuildError, PlanError};
-use crate::node::{Dependency, Edge, Node, NodeId, NodeKind, NodeSpec};
+use crate::node::{Dependency, Edge, Node, NodeId, NodeKind, NodeSpec, as_u32};
 
 /// An immutable, acyclic dependency graph whose node ids follow sorted name order.
 #[derive(Debug)]
 pub struct Graph<P> {
     nodes: Vec<Node<P>>,
-    /// Each node's id by name, hashed: building a graph looks up every edge here.
-    ids: HashMap<String, NodeId>,
+    ids: BTreeMap<String, NodeId>,
     /// For each node, the nodes that read from it, in id order.
     dependents: Vec<Vec<NodeId>>,
     /// Whether any node may be absent, so a plan of a graph without one skips the question.
@@ -38,23 +37,12 @@ impl<P> Graph<P> {
     /// collecting a block it is inside, or a block reading its own collect through nodes
     /// outside it.
     pub fn build(specs: Vec<NodeSpec<P>>) -> Result<Self, BuildError> {
-        let names = sorted_names(&specs)?;
-        let ids: HashMap<String, NodeId> = names.iter().cloned().zip((0..).map(NodeId)).collect();
-        // Each declared spec at its node's id; a name without one is an input.
-        let mut declared: Vec<Option<NodeSpec<P>>> = Vec::new();
-        declared.resize_with(names.len(), || None);
-        for spec in specs {
-            if let Some(slot) = ids
-                .get(&spec.name)
-                .and_then(|id| declared.get_mut(id.index()))
-            {
-                *slot = Some(spec);
-            }
-        }
+        let mut declared = index_by_name(specs)?;
+        let ids = assign_ids(&declared);
         // A loop rather than a `Result` collect, which cannot reserve the exact length.
-        let mut nodes = Vec::with_capacity(names.len());
-        for ((id, name), spec) in (0..).map(NodeId).zip(names).zip(declared) {
-            nodes.push(make_node(id, name, spec, &ids)?);
+        let mut nodes = Vec::with_capacity(ids.len());
+        for (name, &id) in &ids {
+            nodes.push(make_node(id, name, declared.remove(name), &ids)?);
         }
         if let Some(path) = find_cycle(&nodes) {
             return Err(BuildError::Cycle {
@@ -277,11 +265,6 @@ fn assign_blocks<P>(nodes: &mut [Node<P>]) -> Result<BlockPaths, BuildError> {
     Ok((paths, spans))
 }
 
-/// `value` as a `u32`: an offset into the packed block paths.
-fn as_u32(value: usize) -> u32 {
-    u32::try_from(value).unwrap_or(u32::MAX)
-}
-
 /// A topological order of an acyclic graph, each node after every node it reads; ties
 /// taken in id order.
 fn topological<P>(nodes: &[Node<P>]) -> Vec<NodeId> {
@@ -355,25 +338,24 @@ fn mark_may_be_absent<P>(nodes: &mut [Node<P>]) -> bool {
     true
 }
 
-/// Every declared and depended-on name, once each, sorted: a node's id is its position.
-///
-/// `BuildError::DuplicateName` for the first spec, in order, whose name an earlier one has.
-/// Names are deduplicated before they are sorted, since a name is read by many edges.
-fn sorted_names<P>(specs: &[NodeSpec<P>]) -> Result<Vec<String>, BuildError> {
-    let mut seen: HashSet<&str> = HashSet::with_capacity(specs.len());
+fn index_by_name<P>(specs: Vec<NodeSpec<P>>) -> Result<BTreeMap<String, NodeSpec<P>>, BuildError> {
+    let mut declared = BTreeMap::new();
     for spec in specs {
-        if !seen.insert(&spec.name) {
-            return Err(BuildError::DuplicateName {
-                name: spec.name.clone(),
-            });
+        let name = spec.name.clone();
+        if declared.insert(name.clone(), spec).is_some() {
+            return Err(BuildError::DuplicateName { name });
         }
     }
-    for spec in specs {
-        seen.extend(spec.inputs.iter().map(|input| input.name.as_str()));
-    }
-    let mut names: Vec<&str> = seen.into_iter().collect();
-    names.sort_unstable();
-    Ok(names.into_iter().map(str::to_owned).collect())
+    Ok(declared)
+}
+
+/// Ids over declared and depended-on names together, in sorted order.
+fn assign_ids<P>(declared: &BTreeMap<String, NodeSpec<P>>) -> BTreeMap<String, NodeId> {
+    let names: BTreeSet<&String> = declared
+        .iter()
+        .flat_map(|(name, spec)| std::iter::once(name).chain(spec.inputs.iter().map(|i| &i.name)))
+        .collect();
+    names.into_iter().cloned().zip((0..).map(NodeId)).collect()
 }
 
 /// The node `name` with `id`: a function for a declared spec, an input otherwise.
@@ -381,9 +363,9 @@ fn sorted_names<P>(specs: &[NodeSpec<P>]) -> Result<Vec<String>, BuildError> {
 /// `BuildError::ConflictingInput` when the spec lists one input twice, differently.
 fn make_node<P>(
     id: NodeId,
-    name: String,
+    name: &str,
     spec: Option<NodeSpec<P>>,
-    ids: &HashMap<String, NodeId>,
+    ids: &BTreeMap<String, NodeId>,
 ) -> Result<Node<P>, BuildError> {
     Ok(match spec {
         Some(spec) => Node {
@@ -402,7 +384,7 @@ fn make_node<P>(
         },
         None => Node {
             id,
-            name,
+            name: name.to_owned(),
             kind: NodeKind::Input,
             inputs: Vec::new(),
             tags: BTreeMap::new(),
@@ -419,7 +401,7 @@ fn make_node<P>(
 /// one of them says how the node reads it, so neither is kept.
 fn resolve_edges<P>(
     spec: &NodeSpec<P>,
-    ids: &HashMap<String, NodeId>,
+    ids: &BTreeMap<String, NodeId>,
 ) -> Result<Vec<Edge>, BuildError> {
     // At least four, the capacity a first push gives, so a node with few inputs allocates
     // as it always has.

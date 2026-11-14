@@ -24,7 +24,6 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import TYPE_CHECKING, Literal, Protocol, override
 
-from fnloom._config import condition_text
 from fnloom._style import (
     Style,
     StyleTypeError,
@@ -41,6 +40,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Mapping, Sequence
     from collections.abc import Set as AbstractSet
 
+    from fnloom._config import Condition
     from fnloom._view import NodeViews
 
 type Mark = Literal["output", "override", "path", "context", "may be absent"]
@@ -691,6 +691,25 @@ def type_text(annotation: object) -> str:
     if len(text) > _TYPE_WIDTH:
         return text[: _TYPE_WIDTH - 1] + "…"
     return text
+
+
+_OPERATORS = {"when": "==", "when_not": "!=", "when_in": "in", "when_not_in": "not in"}
+
+
+def condition_text(conditions: Sequence[Condition]) -> str:
+    """The `@config.when*` conditions as text: `mode == 'fast'`, joined by `, `."""
+    parts: list[str] = []
+    for c in conditions:
+        if c.kind == "matches":
+            parts.append(f"matches({c.key})")
+            continue
+        operator = _OPERATORS[c.kind]
+        if c.kind in {"when", "when_not"}:
+            parts.append(f"{c.key} {operator} {c.values[0]!r}")
+        else:
+            listed = ", ".join(map(repr, c.values))
+            parts.append(f"{c.key} {operator} [{listed}]")
+    return ", ".join(parts)
 
 
 def _checked_orient(orient: object) -> None:

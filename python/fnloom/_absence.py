@@ -30,6 +30,7 @@ __all__ = [
     "admits_absent",
     "applied",
     "declines",
+    "dependency",
     "may_be_absent",
     "merged",
     "needs_input",
@@ -100,6 +101,17 @@ def without_absent(annotation: object) -> object:
 def declines(node: NodeDef) -> bool:
     """Whether `node` may return `ABSENT`: its return annotation admits `Absent`."""
     return admits_absent(node.returns)
+
+
+def dependency(param: Param) -> Kind:
+    """How one parameter reads its source.
+
+    `admits` when its annotation admits `Absent`, or `admits_optional` with a
+    default; otherwise `optional` with a default, and `required` without.
+    """
+    if param.admits_absent:
+        return "admits" if param.required else "admits_optional"
+    return "required" if param.required else "optional"
 
 
 def merged(params: Sequence[Param]) -> Kind:

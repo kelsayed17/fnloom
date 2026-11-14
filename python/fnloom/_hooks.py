@@ -847,15 +847,6 @@ def _cut(value: object, width: int = _CUT) -> str:
     return text if len(text) <= width else f"{text[:width]}..."
 
 
-def _inputs_text(inputs: Mapping[str, object] | None, width: int = _CUT) -> str:
-    """A node's inputs as `name=value`, sorted, each cut to `width`; or `none`."""
-    if inputs is None or len(inputs) == 0:
-        return "none"
-    return ", ".join(
-        f"{name}={_cut(value, width)}" for name, value in sorted(inputs.items())
-    )
-
-
 class LogFailures(Hook):
     """Logs each node that raised, with its inputs and its exception.
 
@@ -878,7 +869,15 @@ class LogFailures(Hook):
     def after_node(self, event: NodeEnd) -> None:
         if event.ok:
             return
-        shown = _inputs_text(event.inputs)
+        inputs = event.inputs
+        shown = (
+            "none"
+            if inputs is None
+            else ", ".join(
+                f"{name}={_cut(value)}" for name, value in sorted(inputs.items())
+            )
+            or "none"
+        )
         error = event.error
         self._logger.log(
             self._level,
@@ -1017,7 +1016,15 @@ class PrintNodes(Hook):
             )
         if self._verbosity < _VERBOSE:
             return
-        shown = _inputs_text(event.inputs, self._width)
+        inputs = event.inputs
+        shown = (
+            "none"
+            if inputs is None or len(inputs) == 0
+            else ", ".join(
+                f"{key}={_cut(value, self._width)}"
+                for key, value in sorted(inputs.items())
+            )
+        )
         self._print(f"  inputs: {shown}")
         if event.ok:
             self._print(f"  result: {_cut(event.result, self._width)}")

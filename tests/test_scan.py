@@ -1,11 +1,11 @@
-"""Tests for `fnloom._scan.scan`: which functions are nodes, which are bad."""
+"""Tests for `fnloom._scan.collect`: which functions are nodes, which are bad."""
 
 import inspect
 
 import pytest
 
 from fnloom import Source
-from fnloom._scan import scan
+from fnloom._scan import collect
 from fnloom._view import Param
 from helpers import make_module
 
@@ -27,7 +27,7 @@ def test_underscore_and_imported_functions_are_not_nodes() -> None:
         value = 3
         """,
     )
-    assert [n.name for n in scan([module]).nodes] == ["public"]
+    assert [n.name for n in collect([module])] == ["public"]
 
 
 @pytest.mark.parametrize(
@@ -41,7 +41,7 @@ def test_missing_annotation_raises_value_error(source: str, needle: str) -> None
     """A missing parameter or return annotation names the function and the slot."""
     module = make_module("scan_bad", source)
     with pytest.raises(ValueError, match=needle) as excinfo:
-        scan([module])
+        collect([module])
     assert "f" in str(excinfo.value)
 
 
@@ -59,7 +59,7 @@ def test_unsupported_parameter_kinds_raise_value_error(
     """Nodes are called by keyword, so variadic and positional-only are errors."""
     module = make_module("scan_kinds", source)
     with pytest.raises(ValueError, match=needle):
-        scan([module])
+        collect([module])
 
 
 @pytest.mark.parametrize(
@@ -76,7 +76,7 @@ def test_functions_that_do_not_return_their_value_raise_value_error(
     """Calling these returns a coroutine or generator, not the node's value."""
     module = make_module("scan_lazy", source)
     with pytest.raises(ValueError, match=f"'f': {needle}"):
-        scan([module])
+        collect([module])
 
 
 def test_default_parameter_is_optional() -> None:
@@ -84,7 +84,7 @@ def test_default_parameter_is_optional() -> None:
     module = make_module(
         "scan_default", "def f(a: int, b: int = 2) -> int:\n    return a + b\n"
     )
-    (node,) = scan([module]).nodes
+    (node,) = collect([module])
     assert node.params == (
         Param("a", Source("a"), required=True, annotation=int),
         Param("b", Source("b"), required=False, annotation=int),
@@ -120,7 +120,7 @@ signed.__signature__ = inspect.signature(_shape)
 def test_parameters_are_read_as_inspect_signature_reads_them() -> None:
     """Defaults, keyword-only parameters, `functools.wraps` and `__signature__`."""
     module = make_module("scan_signatures", "import inspect\n" + SIGNATURES)
-    nodes = {node.name: node for node in scan([module]).nodes}
+    nodes = {node.name: node for node in collect([module])}
     for name in ("mixed", "wrapped", "signed"):
         expected = [
             (p.name, p.default is inspect.Parameter.empty)
@@ -148,7 +148,7 @@ def test_unresolvable_annotations_are_accepted() -> None:
             return a
         """,
     )
-    nodes = {n.name: n for n in scan([module]).nodes}
+    nodes = {n.name: n for n in collect([module])}
     assert sorted(nodes) == ["f", "g"]
     assert [(p.name, p.required) for p in nodes["g"].params] == [
         ("a", True),
@@ -161,20 +161,20 @@ def test_duplicate_name_across_modules_names_both_modules() -> None:
     first = make_module("scan_first", "def f(a: int) -> int:\n    return a\n")
     second = make_module("scan_second", "def f(a: int) -> int:\n    return a\n")
     with pytest.raises(ValueError, match=r"'f'.*scan_first.*scan_second"):
-        scan([first, second])
+        collect([first, second])
 
 
 def test_same_module_passed_twice_is_deduplicated() -> None:
     """Passing one module object repeatedly yields each node once."""
     module = make_module("scan_twice", "def f(a: int) -> int:\n    return a\n")
-    assert [n.name for n in scan([module, module]).nodes] == ["f"]
+    assert [n.name for n in collect([module, module])] == ["f"]
 
 
 def test_repeated_module_keeps_first_occurrence_order() -> None:
     """`[a, b, a]` scans `a` then `b`, each once."""
     a = make_module("scan_a", "def fa(x: int) -> int:\n    return x\n")
     b = make_module("scan_b", "def fb(x: int) -> int:\n    return x\n")
-    assert [n.name for n in scan([a, b, a]).nodes] == ["fa", "fb"]
+    assert [n.name for n in collect([a, b, a])] == ["fa", "fb"]
 
 
 def test_duplicate_error_lists_modules_in_scan_order() -> None:
@@ -182,7 +182,7 @@ def test_duplicate_error_lists_modules_in_scan_order() -> None:
     a = make_module("scan_one", "def f(x: int) -> int:\n    return x\n")
     b = make_module("scan_two", "def f(x: int) -> int:\n    return x\n")
     with pytest.raises(ValueError, match=r"'scan_one' and 'scan_two'"):
-        scan([a, b, a])
+        collect([a, b, a])
 
 
 def test_every_duplicate_name_is_listed_sorted_in_one_message() -> None:
@@ -196,7 +196,7 @@ def test_every_duplicate_name_is_listed_sorted_in_one_message() -> None:
         "def z(a: int) -> int:\n    return a\ndef b(a: int) -> int:\n    return a\n",
     )
     with pytest.raises(ValueError, match="defined in both") as excinfo:
-        scan([first, second])
+        collect([first, second])
     assert str(excinfo.value) == (
         "node 'b' is defined in both 'scan_many_first' and 'scan_many_second'; "
         "node 'z' is defined in both 'scan_many_first' and 'scan_many_second'"

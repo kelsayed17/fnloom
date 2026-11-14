@@ -24,7 +24,7 @@ from fnloom import (
 )
 from fnloom._decorators import decorations
 from fnloom._extract import MISSING_FILL, Extraction, _Extractor, column_type
-from fnloom._scan import resolve, scan
+from fnloom._scan import collect, resolve
 from fnloom._types import Unresolved
 from helpers import make_module
 
@@ -894,7 +894,7 @@ def test_columns_split_a_mapping() -> None:
 
 def _extract_payload(module: ModuleType, name: str) -> object:
     """The payload of node `name` of `module`, resolved as a build resolves it."""
-    nodes = {node.name: node for node in resolve(scan([module]).nodes)}
+    nodes = {node.name: node for node in resolve(collect([module]))}
     return nodes[name].payload
 
 

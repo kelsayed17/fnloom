@@ -569,11 +569,6 @@ def _need(condition: Condition) -> str:
     return f"{condition.key} {_OPERATORS[condition.kind]} {shown}"
 
 
-def condition_text(conditions: Sequence[Condition]) -> str:
-    """The `@config.when*` conditions as text: `mode == 'fast'`, joined by `, `."""
-    return ", ".join(map(_need, conditions))
-
-
 def unmatched(
     name: str, config: Mapping[str, object], variants: Sequence[Variant]
 ) -> str:
@@ -682,11 +677,7 @@ def resolve_variants(
     configs: Mapping[str | None, Mapping[str, object]] | None = None,
     apart: AbstractSet[tuple[str | None, str, str]] = frozenset(),
 ) -> Selection:
-    """Selects one variant per node, and says why a node has none.
-
-    A node's variant is the one whose conditions all hold for `config`, or else
-    its `@config.default`; a node with neither has no function. A function
-    bound under two names counts once, under the first.
+    """Selects one variant per node; see `select`. Also says why a node has none.
 
     `namespaces`, when given, holds the namespace of each of `functions`, in
     order (Q74): a variant's node is named under it, so each namespace selects
@@ -730,6 +721,22 @@ def resolve_variants(
             chosen.discard((namespace, id(fn)))
             selected.append(found)
     return Selection(selected, missing)
+
+
+def select(functions: Sequence[Found], config: Mapping[str, object]) -> list[Found]:
+    """The functions to lower: every plain one, and one variant per node.
+
+    A node's variant is the one whose conditions all hold for `config`, or else
+    its `@config.default`; a node with neither has no function. A function
+    bound under two names counts once, under the first.
+
+    Raises:
+        ValueError: Two variants of one node match, or one node has two
+            defaults; every such node in one message, sorted.
+        TypeError: An `==` did not return a `bool` (see `matches`); every
+            such key in one message.
+    """
+    return resolve_variants(functions, config).functions
 
 
 def redefinitions(module: ModuleType) -> list[str]:
