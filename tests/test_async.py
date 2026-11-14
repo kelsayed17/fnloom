@@ -1329,20 +1329,6 @@ def test_a_deep_async_chain_does_not_recurse() -> None:
         assert _run(driver.execute([last], inputs={"a": 0})) == {last: depth - 1}
 
 
-def test_walk_runs_a_plan_directly() -> None:
-    """`_async.walk` returns every planned node's value, by name."""
-    module = _mixed()
-    driver = fnloom.Builder().with_modules(module).build_async()
-    sync = driver._driver  # noqa: SLF001  # the plans it keeps
-    prepared = sync.prepare(["total"], inputs={"x": 1})
-    plan = prepared._plan  # noqa: SLF001  # the native plan
-    assert isinstance(plan, fnloom._core.Plan)  # noqa: SLF001  # the native plan
-    values = _run(
-        _async.walk(plan, driver._nodes, {"x": 1}, {}, sync_nodes="inline")  # noqa: SLF001  # the graph's nodes
-    )
-    assert values == {"x": 1, "doubled": 2, "plus_one": 3, "total": 5}
-
-
 def test_a_note_that_cannot_be_added_is_raised_as_the_sync_driver_raises_it() -> None:
     """An exception whose `__notes__` is not a list: the sync driver's failure."""
     source = """

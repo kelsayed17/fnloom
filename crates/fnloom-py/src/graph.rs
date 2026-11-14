@@ -7,6 +7,7 @@ use fnloom_core::node::{Collect, Dependency, InputSpec, NodeId, NodeSpec, TagVal
 use fnloom_core::plan::Request;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+use pyo3::pybacked::PyBackedStr;
 use pyo3::types::{PyDict, PyString};
 use pyo3::{PyTraverseError, PyVisit};
 
@@ -24,7 +25,7 @@ pub type PyCoreGraph = CoreGraph<Py<PyAny>>;
 /// for an expand the callable making its item iterator, `items(iterable, record)`.
 type NodeTuple = (
     String,
-    Vec<(String, String, Option<String>)>,
+    Vec<(String, PyBackedStr, Option<PyBackedStr>)>,
     BTreeMap<String, PyTagValue>,
     Py<PyAny>,
     bool,
@@ -250,7 +251,7 @@ impl Graph {
 
 fn node_spec(
     name: String,
-    params: Vec<(String, String, Option<String>)>,
+    params: Vec<(String, PyBackedStr, Option<PyBackedStr>)>,
     tags: BTreeMap<String, PyTagValue>,
     function: Py<PyAny>,
     declines: bool,
