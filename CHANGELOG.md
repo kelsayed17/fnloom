@@ -31,9 +31,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
   run on `ABSENT` (`NodeEnd.checks` is `()`). A graph with a node that may be absent exports `fnloom.export/2`, each
   node with `may_be_absent`; any other graph still exports `fnloom.export/1`, byte for byte, and `fnloom diff` reads
   both. Drawings mark such a node `may be absent`, drawn dashed and named in the legend.
-- `ObserverBase.skipped(node, *, branch)`, the binding's forward of the core's `Observer::skipped`. An observer whose
-  class overrides neither `pre_node` nor `post_node` is sent no node events, so a run makes no keyword arguments for
-  it.
+- `ObserverBase.skipped(node, *, branch)`, the binding's forward of the core's `Observer::skipped`, sent, like
+  `post_expand` and `hit_in`, only to an observer whose class overrides it. An observer whose class overrides neither
+  `pre_node` nor `post_node` is sent no node events, so a run makes no keyword arguments for it.
 - Absence on the async driver. `build_async()` builds a node that declines, and its runs follow the same rules as
   `build()`'s: a skipped node runs nothing, fires no node event, stores nothing in the cache and is listed in
   `RunEnd.skipped`. The return check runs on `async def` nodes and on sync nodes, in a thread or inline, refusing
@@ -62,7 +62,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
   (`OverridesInBlocks`). An override of an expand supplies its items, and one of a collect cuts its block. A value
   read only by a block is computed before its expand, whatever its name. `Plan::run` runs each block once per item,
   in item order, branch after branch, with nested blocks on an explicit stack (Q122). An evaluator opts in through
-  `Evaluate::blocks`, returning a `Blocks` that iterates expands (`Item::Next`, `Done`, `Declined`) and gathers
+  `Evaluate::blocks`, returning a `Blocks` that iterates expands, each in the branch it ran in (`Item::Next`, `Done`,
+  `Declined`), and gathers
   collects; a plan with an expand run without one is a `RunError::BrokenPlan`. An empty expand gives empty collects,
   an expand requested alone returns its items, an absent expand gives its collects the three absence rules as a
   whole, and a failing branch finishes every open iterator, innermost first, and reports its branch
@@ -164,6 +165,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - Rust core: `RunError::Node` has two new fields, `branch` and `block`; a pattern naming every field needs them, or
   `..`. `PlanError` has two more variants, `OutputsInBlocks` and
   `OverridesInBlocks`.
+- A run with node hooks is about a third faster: `before_node` and `after_node` cost about 1.7 µs per node rather
+  than 2.6 (a 10,000-node chain). The events are the same `NodeStart` and `NodeEnd` objects.
 
 ### Fixed
 
@@ -181,6 +184,25 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `str`, a `Literal` of strings, an `Annotated[str, ...]`, or a union with one of them such as `Name | None`. The
   first three, and such unions, were refused as not `str`, and `Annotated` raised an unhelpful `TypeError` about set
   elements.
+- A failed node leads the `ExceptionGroup` with `node '<name>' failed and hooks raised` when only run hooks
+  (`before_run`, `after_run`) watch and one raises, as `build_async()` and a driver with node hooks say. The sync
+  driver said `the run failed and hooks raised`.
+- `@check_output(range=...)`, `allow_nans=` and `max_fraction_nans=` refuse, at build, a node whose values can only be
+  text or `None`: a union such as `str | None` or `Name | None`, a `NewType` over `str`, or a `Literal` of strings. Such
+  a node built, then failed every run (Q101). A union with a numeric arm, such as `int | str`, still builds.
+- `max_fraction_nans=` given text, such as `"0.5"`, or anything `float()` can't read, is refused with the `ValueError`
+  naming the argument that an out-of-range number gets, rather than a bare comparison `TypeError`. A `Decimal` or
+  `Fraction` is still read as its float.
+- An annotation that raises when evaluated, other than for an unknown name, such as `-> "int | 3"`, fails the build
+  with a note naming its function. The error named nothing.
+- A `Validator` whose attributes hold a `set`, and an `extract_fields`/`extract_columns` `fill_with=` holding one,
+  key the cache the same on every `PYTHONHASHSEED`, as a `value()` binding does. They keyed `DiskCache` differently in
+  each process, so the node missed every time (never a stale hit). Their keys change, so an existing disk cache
+  misses once for them; any other check or fill keeps its key.
+- A check function whose code version can't be read, such as one whose default's registered fingerprint raises, makes
+  its node uncacheable with a `CacheWarning` saying why, as a node's own function does. The cached build raised
+  instead, though the same build without a cache ran. `export()` of such a node warns the same way and leaves its
+  `version` out, saying why in `unversioned`; it raised.
 - A node's code version counts the classes of everything its defaults' fingerprints read: state set on a dataclass
   outside its fields, and a `__fnloom_fingerprint__` or registered form. A class reached only that way was left out,
   so editing its methods kept the version and the cache could return a stale result. Such a node's version changes,
@@ -193,6 +215,13 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - On a free-threaded build, fingerprinting a `dict` or a `set` that another thread was changing raised a
   `PanicException` from inside the binding. A `dict`, `set` or `list` is now read whole under its own lock, so the
   fingerprint is of one state of it.
+- `MemoryCache.put` of a value it cannot size, under a key that already held one, drops the old value. It used to
+  keep it, so a later `get` returned the value the put meant to replace.
+- `fnloom diff` of an export whose node has a `kind` that is not a `str`, or `params` that are not a list of entries,
+  exits 2, a bad file (Q98), naming the side. It raised `AttributeError` and exited 1, which says the graphs changed.
+- `to_dot()`, `to_mermaid()`, `render(...)` to `.dot` or `.mmd`, and `fnloom draw` replace a lone surrogate in a label
+  with U+FFFD, as `to_svg()` does. They raised `UnicodeEncodeError`. The preview's Graphviz input gets U+FFFD too,
+  rather than `?`.
 
 ## [0.4.0] - 2026-11-05
 

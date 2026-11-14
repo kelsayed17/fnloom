@@ -611,6 +611,74 @@ def test_every_hook_runs_before_errors_are_raised() -> None:
     assert list(stopped.exceptions) == list(error.exceptions[:2])
 
 
+def test_a_failed_node_leads_the_group_when_only_run_hooks_watch() -> None:
+    """With no node event wanted, the group still names the node, as async's does."""
+
+    class RunOnly(fnloom.Hook):
+        @override
+        def after_run(self, event: RunEnd) -> None:
+            msg = "after_run raised"
+            raise HookError(msg)
+
+    driver = _driver(FAILING, RunOnly())
+    with pytest.raises(ExceptionGroup) as raised:
+        driver.execute(["after"], inputs={"x": 1})
+    group = raised.value
+    assert str(group) == "node 'boom' failed and hooks raised (2 sub-exceptions)"
+    assert [type(error) for error in group.exceptions] == [ValueError, HookError]
+
+
+class _RunOnly(fnloom.Hook):
+    """Watches the run only, and raises after it."""
+
+    @override
+    def after_run(self, event: RunEnd) -> None:
+        msg = "after_run raised"
+        raise HookError(msg)
+
+
+def _group_node(driver: fnloom.Driver, output: str) -> str:
+    """The node the group a failed run raises names, or its message."""
+    with pytest.raises(ExceptionGroup) as raised:
+        driver.execute([output], inputs={"x": 1})
+    return str(raised.value).partition(" failed")[0]
+
+
+def test_a_nested_drivers_failure_names_the_outer_node() -> None:
+    """The node of this run, whose error came from another driver's run inside it."""
+    module = make_module(
+        "hooks_nested_outer",
+        "def outer(x: int) -> int:\n"
+        "    return INNER.execute(['after'], inputs={'x': x})['after']\n",
+    )
+    module.INNER = _driver(FAILING)  # ty: ignore[unresolved-attribute]  # a global set after the module is made
+    driver = fnloom.Builder().with_modules(module).with_hooks(_RunOnly()).build()
+    assert _group_node(driver, "outer") == "node 'outer'"
+
+
+SHARED_ERROR = """
+ERROR = ValueError("shared")
+
+def a(x: int) -> int:
+    raise ERROR
+
+def b(x: int) -> int:
+    raise ERROR
+"""
+
+
+def test_one_error_object_raised_again_names_each_runs_node() -> None:
+    """The newest note names the node; one the core already holds is not added.
+
+    So `a`, then `b`, then `a` again names `b` the third time: the limit the
+    `_noted_node` shortcut says.
+    """
+    driver = _driver(SHARED_ERROR, _RunOnly())
+    assert _group_node(driver, "a") == "node 'a'"
+    assert _group_node(driver, "b") == "node 'b'"
+    assert _group_node(driver, "a") == "node 'b'"
+
+
 def test_node_failure_with_raising_hooks_is_one_group_led_by_the_node() -> None:
     """Review Focus 1: the node's error first, with its note, then the hooks'."""
     log: list[Entry] = []
