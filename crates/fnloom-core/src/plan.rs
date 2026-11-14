@@ -809,12 +809,19 @@ impl<P> Graph<P> {
                 })
             })
             .collect();
-        // For each node passed as an argument, the position of the last step that reads it.
-        let mut last_use = vec![None; self.nodes().len()];
+        // For each node passed as an argument, the position of the last step that reads it;
+        // and each step's slot, its position. Steps come in topological order, so an
+        // argument's slot is known by the step that reads it.
+        let count = self.nodes().len();
+        let mut last_use = vec![None; count];
+        let mut slot_of = vec![u32::MAX; count];
+        let mut arg_slots = Vec::with_capacity(steps.len());
         for (position, step) in steps.iter().enumerate() {
             for &arg in &step.args {
                 last_use[arg.index()] = Some(position);
+                arg_slots.push(slot_of[arg.index()]);
             }
+            slot_of[step.node.index()] = index_u32(position);
         }
         for (node, position) in self.nodes().iter().zip(last_use) {
             if let Some(position) = position {
@@ -823,21 +830,14 @@ impl<P> Graph<P> {
                 }
             }
         }
-        // Each step's slot is its position; every planned node, so every arg, release and
-        // output, has a step.
-        let mut slot_of = vec![u32::MAX; self.nodes().len()];
-        for (position, step) in steps.iter().enumerate() {
-            slot_of[step.node.index()] = index_u32(position);
+        let mut release_slots = Vec::with_capacity(steps.len());
+        for step in &steps {
+            release_slots.extend(step.release.iter().map(|id| slot_of[id.index()]));
         }
-        let slot = |id: &NodeId| slot_of[id.index()];
         Slotted {
-            arg_slots: steps.iter().flat_map(|step| &step.args).map(slot).collect(),
-            release_slots: steps
-                .iter()
-                .flat_map(|step| &step.release)
-                .map(slot)
-                .collect(),
-            output_slots: outputs.iter().map(slot).collect(),
+            output_slots: outputs.iter().map(|id| slot_of[id.index()]).collect(),
+            arg_slots,
+            release_slots,
             steps,
         }
     }

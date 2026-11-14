@@ -3,7 +3,6 @@
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
-use std::slice;
 
 use crate::error::quoted;
 use crate::graph::Graph;
@@ -529,14 +528,14 @@ impl Plan {
         hooks: &mut Hooks<'_, '_, V::Value, V::Error>,
     ) -> Result<Outputs<V::Value>, RunError<V::Error>> {
         // Each step's argument and release slots come next in these, as many as it has.
-        let mut arg_slots = self.arg_slots().iter();
-        let mut release_slots = self.release_slots().iter();
+        let (mut arg_slots, mut release_slots) = (self.arg_slots(), self.release_slots());
         for (slot, step) in self.steps().iter().enumerate() {
+            let args = next_slots(&mut arg_slots, step.args.len());
             if step.action == Action::Compute {
-                let value = compute(graph, eval, hooks, step, &mut arg_slots, &slots)?;
+                let value = compute(graph, eval, hooks, step, args, &slots)?;
                 store(&mut slots, slot, Some(value));
             }
-            for &dead in release_slots.by_ref().take(step.release.len()) {
+            for &dead in next_slots(&mut release_slots, step.release.len()) {
                 store(&mut slots, dead as usize, None);
             }
         }
@@ -578,8 +577,7 @@ impl Plan {
                 })
             })
             .collect();
-        let mut arg_slots = self.arg_slots().iter();
-        let mut release_slots = self.release_slots().iter();
+        let (mut arg_slots, mut release_slots) = (self.arg_slots(), self.release_slots());
         for (position, step) in self.steps().iter().enumerate() {
             let node = graph.node(step.node);
             match step.action {
@@ -592,7 +590,8 @@ impl Plan {
                     let Some(payload) = node.payload() else {
                         return Err(planned_to_compute(node));
                     };
-                    let slot = match gather_by_rules(graph, step, &mut arg_slots, &slots)? {
+                    let args = next_slots(&mut arg_slots, step.args.len());
+                    let slot = match gather_by_rules(graph, step, args, &slots)? {
                         Gathered::Args(args) => {
                             let value = call(eval, hooks, node, payload, &args)?;
                             let absent = node.declines && eval.is_absent(&value);
@@ -610,7 +609,7 @@ impl Plan {
                 }
                 _ => {}
             }
-            for &dead in release_slots.by_ref().take(step.release.len()) {
+            for &dead in next_slots(&mut release_slots, step.release.len()) {
                 store(&mut slots, dead as usize, None);
             }
         }
@@ -648,20 +647,17 @@ enum Gathered<'g, V> {
 fn gather_by_rules<'g, P, T: Clone, E>(
     graph: &'g Graph<P>,
     step: &Step,
-    arg_slots: &mut slice::Iter<'_, u32>,
+    arg_slots: &[u32],
     slots: &[Option<Slot<T>>],
 ) -> Result<Gathered<'g, T>, RunError<E>> {
     let consumer = graph.node(step.node);
+    if arg_slots.len() != step.args.len() {
+        return Err(short_of_slots(graph, step));
+    }
     // The consumer's edges sorted by input id, made on its first absent argument.
     let mut edges: Option<Vec<(NodeId, Dependency)>> = None;
     let mut args = Vec::with_capacity(step.args.len());
-    // Taken whole first, since a skip returns before reading them all.
-    let rest = arg_slots.as_slice();
-    let Some(these) = rest.get(..step.args.len()) else {
-        return Err(short_of_slots(graph, step));
-    };
-    *arg_slots = rest.get(these.len()..).unwrap_or_default().iter();
-    for (&id, &at) in step.args.iter().zip(these) {
+    for (&id, &at) in step.args.iter().zip(arg_slots) {
         let name = graph.node(id).name.as_str();
         let Some(slot) = slots.get(at as usize).and_then(Option::as_ref) else {
             // A planned argument is always produced earlier and not yet released.
@@ -723,6 +719,14 @@ pub(crate) const fn broken<E>(detail: String) -> RunError<E> {
     }
 }
 
+/// The next `len` of a plain plan's packed slots, moving `packed` past them; fewer when
+/// it runs short, which a plan never does, and which `gather` then reports.
+fn next_slots<'p>(packed: &mut &'p [u32], len: usize) -> &'p [u32] {
+    let (these, rest) = packed.split_at_checked(len).unwrap_or((packed, &[]));
+    *packed = rest;
+    these
+}
+
 fn store<T>(slots: &mut [Option<T>], at: usize, value: Option<T>) {
     if let Some(slot) = slots.get_mut(at) {
         *slot = value;
@@ -740,7 +744,7 @@ fn compute<P, V: Evaluate<P>>(
     eval: &mut V,
     hooks: &mut Hooks<'_, '_, V::Value, V::Error>,
     step: &Step,
-    arg_slots: &mut slice::Iter<'_, u32>,
+    arg_slots: &[u32],
     slots: &[Option<V::Value>],
 ) -> Result<V::Value, RunError<V::Error>> {
     let node = graph.node(step.node);
@@ -812,13 +816,15 @@ fn call<P, V: Evaluate<P>>(
 fn gather<'g, P, T: Clone, E>(
     graph: &'g Graph<P>,
     step: &Step,
-    arg_slots: &mut slice::Iter<'_, u32>,
+    arg_slots: &[u32],
     slots: &[Option<T>],
 ) -> Result<Vec<Arg<'g, T>>, RunError<E>> {
-    let args: Vec<Arg<'g, T>> = step
-        .args
+    if arg_slots.len() != step.args.len() {
+        return Err(short_of_slots(graph, step));
+    }
+    step.args
         .iter()
-        .zip(arg_slots.by_ref().take(step.args.len()))
+        .zip(arg_slots)
         .map(|(&id, &at)| {
             let name = graph.node(id).name.as_str();
             match slots.get(at as usize).and_then(Option::as_ref) {
@@ -834,12 +840,7 @@ fn gather<'g, P, T: Clone, E>(
                 ))),
             }
         })
-        .collect::<Result<_, _>>()?;
-    if args.len() == step.args.len() {
-        Ok(args)
-    } else {
-        Err(short_of_slots(graph, step))
-    }
+        .collect()
 }
 
 #[cfg(test)]
