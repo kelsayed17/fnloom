@@ -391,6 +391,13 @@ def _pandas(value: object) -> object | None:  # noqa: PLR0911  # one return per 
                 _pandas_values(value),
                 value.attrs,
             )
+        case pd.RangeIndex():
+            # Its values by length, first value and step: never built in full to
+            # hash, and equal values (`range(0, 4, 2)`, `range(0, 3, 2)`) alike.
+            values = range(value.start, value.stop, value.step)
+            first = values[0] if values else None
+            step = values.step if len(values) > 1 else None
+            return (value.name, "range", len(values), first, step)
         case pd.MultiIndex():
             dtypes = [_pandas_dtype(dtype) for dtype in value.dtypes]
             return (list(value.names), dtypes, value.to_numpy())

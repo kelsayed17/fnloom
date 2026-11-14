@@ -636,3 +636,24 @@ def test_a_stable_fingerprint_refuses_what_the_fingerprint_refuses() -> None:
             stable_fingerprint(_Later(held))
         with pytest.raises(UnfingerprintableError):
             stable_fingerprint(defaultdict[str, object](list, {"a": held}))
+
+
+def test_a_range_index_is_hashed_without_building_its_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """By length, first value and step: equal values alike, any length at once."""
+    pd = pytest.importorskip("pandas")
+
+    def never(*_: object, **__: object) -> object:
+        msg = "a RangeIndex was materialised"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(pd.RangeIndex, "to_numpy", never)
+    huge = fingerprint(pd.RangeIndex(10**12))
+    assert huge != fingerprint(pd.RangeIndex(10**12 - 1))
+    assert fingerprint(pd.RangeIndex(0, 4, 2)) == fingerprint(pd.RangeIndex(0, 3, 2))
+    assert fingerprint(pd.RangeIndex(0, 4, 2)) != fingerprint(pd.RangeIndex(0, 4, 1))
+    assert fingerprint(pd.RangeIndex(5, 5)) == fingerprint(pd.RangeIndex(0, 0))
+    assert fingerprint(pd.RangeIndex(3, name="a")) != fingerprint(pd.RangeIndex(3))
+    frame = pd.DataFrame({"x": [1, 2]})
+    assert fingerprint(frame) != fingerprint(frame.set_axis([5, 6]))

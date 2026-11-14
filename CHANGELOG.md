@@ -139,6 +139,10 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Changed
 
+- A pandas `RangeIndex`, the default index of every frame and series, is fingerprinted by its length, first value and
+  step rather than by building every value: a 10-million-row one takes 0.1 ms rather than 1.1 s, and a 1-million-row
+  frame half the time. Equal ranges, such as `range(0, 4, 2)` and `range(0, 3, 2)`, still fingerprint alike. The
+  fingerprint of every such frame, series and index changes, so an existing disk cache misses once for them.
 - A default on a `Collect` parameter whose expand can't decline is refused as a shadowed default, since it is never
   used; one reading a block node that may be absent was accepted before.
 - A parameter with a default that reads a node that may be absent, and doesn't admit `Absent`, is no longer a
