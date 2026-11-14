@@ -168,6 +168,13 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `str`, a `Literal` of strings, an `Annotated[str, ...]`, or a union with one of them such as `Name | None`. The
   first three, and such unions, were refused as not `str`, and `Annotated` raised an unhelpful `TypeError` about set
   elements.
+- A `Validator` whose attributes hold a `set`, and an `extract_fields`/`extract_columns` `fill_with=` holding one,
+  key the cache the same on every `PYTHONHASHSEED`, as a `value()` binding does. They keyed `DiskCache` differently in
+  each process, so the node missed every time (never a stale hit). Their keys change, so an existing disk cache
+  misses once for them; any other check or fill keeps its key.
+- A check function whose code version can't be read, such as one whose default's registered fingerprint raises, makes
+  its node uncacheable with a `CacheWarning` saying why, as a node's own function does. The cached build raised
+  instead, though the same build without a cache ran.
 
 ## [0.4.0] - 2026-11-05
 

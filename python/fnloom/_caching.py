@@ -634,7 +634,7 @@ def _extraction_parts(node: NodeDef) -> tuple[list[bytes], str | None]:
     if payload.fill is _extract.MISSING_FILL:
         return [*parts, b"no fill", b""], None
     try:
-        return [*parts, b"fill", fingerprint(payload.fill)], None
+        return [*parts, b"fill", stable_fingerprint(payload.fill)], None
     except _core.UnfingerprintableError as error:
         return parts, f"fill_with of {noun} {payload.field!r}: {error}"
     except Exception as error:  # noqa: BLE001  # a failing fingerprint: uncacheable
@@ -753,12 +753,19 @@ def check_parts(checks: Sequence[Check]) -> tuple[list[bytes], str | None]:
                 version = code_version(function)
             else:
                 validator = rest[0]
-                version = class_version(type(validator)) + fingerprint(
+                # The same on every hash seed, so an attribute holding a set hits
+                # in another process, as a `value()` does.
+                version = class_version(type(validator)) + stable_fingerprint(
                     dict(sorted(vars(validator).items()))
                 )
         except (UncacheableError, _core.UnfingerprintableError, TypeError) as error:
             reason = error.reason if isinstance(error, UncacheableError) else error
             return [], f"check {check.name}: {reason}"
+        except Exception as error:  # noqa: BLE001  # a failing version: uncacheable
+            # Such as a default's fingerprint function raising: as for `_own_code`.
+            reason = f"cannot read the version of check {check.name}: {error!r}"
+            _warn_build(reason)
+            return [], reason
         parts += [
             b"check",
             check.name.encode(),

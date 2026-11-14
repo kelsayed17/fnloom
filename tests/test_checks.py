@@ -4,6 +4,9 @@ import asyncio
 import contextlib
 import importlib
 import logging
+import os
+import subprocess
+import sys
 from typing import TYPE_CHECKING, Any, cast, override
 
 import pytest
@@ -14,6 +17,7 @@ from helpers import make_module
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from pathlib import Path
 
 
 # Imported once, here: the helpers forget modules a test imports, and numpy
@@ -618,6 +622,95 @@ def a(x: int) -> int:
     assert outcome.status == "uncacheable"
     assert outcome.reason is not None
     assert "check Holds" in outcome.reason
+
+
+def test_a_check_whose_version_fails_makes_the_node_uncacheable() -> None:
+    """The cached build goes on, as the uncached one does, and says why."""
+    source = """
+from fnloom import check_output_custom, register_fingerprint
+
+class Broken:
+    pass
+
+def _refuse(value: Broken) -> object:
+    raise ZeroDivisionError("no fingerprint")
+
+register_fingerprint(Broken, _refuse)
+
+def _positive(value: int, limit: Broken = Broken()) -> bool:
+    return value > 0
+
+@check_output_custom(_positive)
+def a(x: int) -> int:
+    return x
+"""
+    module = make_module("failing_check_version", source)
+    with pytest.warns(fnloom.CacheWarning, match="ZeroDivisionError"):
+        driver = (
+            fnloom.Builder()
+            .with_modules(module)
+            .with_cache(fnloom.MemoryCache())
+            .build()
+        )
+    assert driver.execute(["a"], inputs={"x": 1}) == {"a": 1}
+    outcome = driver.explain_cache(["a"], inputs={"x": 1})["a"]
+    assert outcome.status == "uncacheable"
+    assert outcome.reason is not None
+    assert "check _positive" in outcome.reason
+
+
+VALIDATOR_WITH_A_SET = """
+import sys
+
+from fnloom import Builder, DiskCache, Validator, check_output_custom, extract_fields
+
+class Allowed(Validator):
+    def __init__(self) -> None:
+        super().__init__()
+        self.allowed = {"north", "south", "east", "west"}
+
+    def validate(self, value, inputs):
+        return value in self.allowed
+
+@check_output_custom(Allowed())
+def a(x: str) -> str:
+    return x
+
+@extract_fields({"tags": frozenset}, fill_with=frozenset({"north", "south", "east"}))
+def found(x: str) -> dict:
+    return {}
+
+def b(tags: frozenset) -> int:
+    return len(tags)
+
+if __name__ == "__main__":
+    driver = Builder().with_modules(sys.modules[__name__]).with_cache(
+        DiskCache(sys.argv[1])
+    ).build()
+    explained = driver.explain_cache(["a", "b"], inputs={"x": "north"})
+    print(explained["a"].status, explained["b"].status)
+    driver.execute(["a", "b"], inputs={"x": "north"})
+"""
+
+
+def test_a_check_or_fill_holding_a_set_hits_in_another_process(tmp_path: Path) -> None:
+    """Its attributes are keyed the same on every hash seed, as a `value()` is.
+
+    So is a `fill_with=` holding a set, which keys the node reading its field.
+    """
+    script = tmp_path / "validated.py"
+    script.write_text(VALIDATOR_WITH_A_SET)
+    statuses = [
+        subprocess.run(  # noqa: S603  # runs this interpreter on a fixed script
+            [sys.executable, str(script), str(tmp_path / "cache")],
+            capture_output=True,
+            check=True,
+            text=True,
+            env={**os.environ, "PYTHONHASHSEED": seed},
+        ).stdout.strip()
+        for seed in ("1", "2", "3")
+    ]
+    assert statuses == ["miss miss", "hit hit", "hit hit"]
 
 
 def test_a_failing_node_is_never_checked() -> None:
