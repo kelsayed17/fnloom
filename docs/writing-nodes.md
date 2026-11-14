@@ -426,7 +426,25 @@ nodes, up to the `Collect` parameters that gather them. A block node may also re
   two unrelated expands (collect both in one node to pair them); a node reading a block node and also its collect,
   which would be inside the block it collects; `@extract_fields` or `@extract_columns` on an expand; and
   `Parallelizable[T | Absent]`: write `Parallelizable[T] | Absent` for an expand that may decline as a whole.
-- `build_async()` refuses a graph with an expand until Plan 11, and so does `with_cache()` for now.
+- Blocks are named by their expand, namespace included, so two copies of a module given with
+  [`namespace=`](#namespaces) have two independent blocks, `eu.picked` and `us.picked`. A namespace's `bind=` to a
+  node outside every block is computed once and shared by its branches. A block node has a value per item, so a
+  binding to one is refused at build unless only `Collect` parameters read it: bind the collect that gathers it
+  instead, or read it with a `Collect` parameter.
+- Decorators apply to a block node as to any other node, once per item: `@parameterize`, `@config.when*` and
+  `@config.matches` (with a namespace's `config=` too), `@tag`, `@check_output*`, steps from `@pipe_input`,
+  `@pipe_output` and `@mutate` under any step namespace, `@inject`, `@resolve`, `@cache` and node wrappers. A step of
+  a block node is a block node too. `@parameterize` on an expand makes one expand per row, each with a block of its
+  own, and `replace=` may replace an expand.
+- A block node may [decline](#declining). `Collect[T]` gathers the items that gave a value, in item order, and
+  `Collect[T | Absent]` has one entry per item, `ABSENT` where its branch declined. An expand annotated
+  `-> Parallelizable[T] | Absent` may decline as a whole by returning `ABSENT`, a generator too, after yielding. What
+  its branches computed is then dropped, and each collect of its block follows the three rules as a whole: one
+  annotated `Collect[T] | Absent` receives `ABSENT`, one with a default takes it, and any other skips its node. So an
+  absent expand isn't an empty one, which gives `[]`. A default on a `Collect` parameter whose expand can't decline
+  is never used, and is refused as a [shadowed default](#defaults-the-build-refuses). A cached branch that declined
+  replays its absence, so the block nodes reading it skip again.
+- `build_async()` refuses a graph with an expand until Plan 11.
 
 ## Annotations
 

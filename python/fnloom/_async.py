@@ -286,22 +286,6 @@ class CachedSchedule:
                 return known
 
 
-async def walk(
-    plan: _core.Plan,
-    nodes: Mapping[str, NodeDef],
-    inputs: Mapping[str, object],
-    overrides: Mapping[str, object],
-    *,
-    sync_nodes: SyncNodes,
-) -> dict[str, object]:
-    """Runs `plan` on the running loop; every planned node's value, by name.
-
-    `nodes` are the graph's nodes; `inputs` and `overrides` the checked values.
-    `AsyncPreparedPlan` keeps the `Schedule` this makes, to read the steps once.
-    """
-    return await Schedule(plan, calls(nodes, sync_nodes)).run(inputs, overrides)
-
-
 def noted(error: BaseException, node: str) -> BaseException:
     """`error` with the sync driver's note naming `node`, added once.
 
