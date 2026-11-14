@@ -444,11 +444,11 @@ def diff(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
             msg = f"{side}: not an fnloom export ({FORMAT} or {FORMAT_2})"
             raise ValueError(msg)
         nodes = document.get("nodes")
-        if not isinstance(nodes, list) or not all(
-            isinstance(node, dict) and isinstance(node.get("name"), str)
-            for node in nodes
-        ):
-            msg = f"{side}: an fnloom export's nodes must be a list of named entries"
+        if not isinstance(nodes, list) or not all(map(_well_formed, nodes)):
+            msg = (
+                f"{side}: an fnloom export's nodes must be a list of named entries, "
+                "each with a list of params"
+            )
             raise ValueError(msg)
         names = [node["name"] for node in nodes]
         if twice := sorted({n for n in names if names.count(n) > 1}):
@@ -491,6 +491,16 @@ def diff(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _well_formed(node: object) -> bool:
+    """Whether `node` is a named entry whose params, if any, are a list of entries."""
+    if not isinstance(node, dict) or not isinstance(node.get("name"), str):
+        return False
+    params = node.get("params")
+    return params is None or (
+        isinstance(params, list) and all(isinstance(p, dict) for p in params)
+    )
+
+
 def _field(node: Mapping[str, Any], name: str) -> object:
     """A node's `name` field, a `/1` node's read as `/2` writes it.
 
@@ -499,11 +509,8 @@ def _field(node: Mapping[str, Any], name: str) -> object:
     """
     if name == "may_be_absent":
         return node.get(name, False)
-    if name == "params" and isinstance(params := node.get(name), list):
-        return [
-            {"collect": None, **param} if isinstance(param, dict) else param
-            for param in params
-        ]
+    if name == "params" and (params := node.get(name)) is not None:
+        return [{"collect": None, **param} for param in params]
     return node.get(name)
 
 

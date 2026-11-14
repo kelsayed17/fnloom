@@ -650,10 +650,10 @@ def test_dot_text_holds_no_control_character() -> None:
 def test_a_lone_surrogate_never_escapes_the_preview(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Graphviz gets it replaced, as `?`, rather than a `UnicodeEncodeError`."""
+    """Graphviz gets it replaced, as U+FFFD, rather than a `UnicodeEncodeError`."""
     fake_dot(tmp_path, "import sys\nsys.stdout.write(sys.stdin.read())\n")
     monkeypatch.setenv("PATH", str(tmp_path))
     node = DrawnNode(name="n", kind="function", type="int", title="a\ud800b")
     preview = Drawing((node,), ())._repr_svg_()  # Jupyter's hook
     assert preview is not None
-    assert "a?b" in preview
+    assert "a\ufffdb" in preview
