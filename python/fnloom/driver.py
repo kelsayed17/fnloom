@@ -3634,7 +3634,7 @@ class Builder[R = dict[str, object]]:
             mismatches := _edge_mismatches(views.functions, loose)
         ):
             raise ValueError("\n".join(mismatches))
-        if problems := default_problems(nodes, absent):
+        if problems := default_problems(nodes, absent, blocks):
             raise ValueError("\n".join(problems))
         if self._declared_inputs and (
             refused := _undeclared(views, self._declared_inputs)

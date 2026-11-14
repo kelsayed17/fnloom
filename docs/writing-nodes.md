@@ -435,6 +435,14 @@ nodes, up to the `Collect` parameters that gather them. A block node may also re
   `@pipe_output` and `@mutate` under any step namespace, `@inject`, `@resolve`, `@cache` and node wrappers. A step of
   a block node is a block node too. `@parameterize` on an expand makes one expand per row, each with a block of its
   own, and `replace=` may replace an expand.
+- A block node may [decline](#declining). `Collect[T]` gathers the items that gave a value, in item order, and
+  `Collect[T | Absent]` has one entry per item, `ABSENT` where its branch declined. An expand annotated
+  `-> Parallelizable[T] | Absent` may decline as a whole by returning `ABSENT`, a generator too, after yielding. What
+  its branches computed is then dropped, and each collect of its block follows the three rules as a whole: one
+  annotated `Collect[T] | Absent` receives `ABSENT`, one with a default takes it, and any other skips its node. So an
+  absent expand isn't an empty one, which gives `[]`. A default on a `Collect` parameter whose expand can't decline
+  is never used, and is refused as a [shadowed default](#defaults-the-build-refuses). A cached branch that declined
+  replays its absence, so the block nodes reading it skip again.
 - `build_async()` refuses a graph with an expand until Plan 11.
 
 ## Annotations
