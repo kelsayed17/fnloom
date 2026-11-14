@@ -4,7 +4,7 @@ use std::any::Any;
 use std::fmt::Display;
 use std::panic::{self, AssertUnwindSafe};
 
-use fnloom_core::run::RunError;
+use fnloom_core::run::{RunError, branch_text};
 use pyo3::exceptions::{PyBaseExceptionGroup, PyRuntimeError, PyValueError};
 use pyo3::intern;
 use pyo3::panic::PanicException;
@@ -86,15 +86,6 @@ pub fn run_error(py: Python<'_>, error: RunError<PyErr>) -> PyErr {
             || format!("broken plan: {detail}; observer hooks raised"),
         ),
     }
-}
-
-/// A branch path as Python writes the tuple: `(2,)`, `(0, 1)`.
-fn branch_text(branch: &[usize]) -> String {
-    if let [only] = branch {
-        return format!("({only},)");
-    }
-    let parts: Vec<String> = branch.iter().map(ToString::to_string).collect();
-    format!("({})", parts.join(", "))
 }
 
 /// `error` alone, or grouped with `observer_errors` under `message` when there are any.

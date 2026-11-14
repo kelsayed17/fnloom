@@ -412,6 +412,14 @@ async def _passed_async(value: object) -> object:
     return value
 
 
+def _has_steps(node: NodeDef) -> bool:
+    """Whether `node` has a `@pipe_input`, `@pipe_output` or `@mutate` step."""
+    recorded = decorations(node.origin)
+    return bool(
+        recorded.pipe_input is not None or recorded.pipe_output or recorded.mutations
+    )
+
+
 def relays(nodes: Sequence[NodeDef]) -> frozenset[str]:
     """The `@pipe_output` nodes that only pass their last step's value on."""
     return frozenset(
@@ -438,6 +446,22 @@ def lowered(  # noqa: PLR0913  # the build's parts, the last keyword-only
     there is kept by, over `config`. `steps_of`, when given, gathers the names
     of the step nodes each node was lowered to, by its name (Q149).
     """
+    if not any(map(_has_steps, nodes)):
+        # The common case: nothing to lower, so nothing made and nothing to refuse.
+        return list(nodes), frozenset[str]()
+    return _lowered(nodes, config, bound, used, overlays, steps_of=steps_of)
+
+
+def _lowered(  # noqa: PLR0913  # `lowered`'s parts, the last keyword-only
+    nodes: Sequence[NodeDef],
+    config: Mapping[str, object],
+    bound: Mapping[str, Mapping[str, Source | Value]] | None,
+    used: dict[str, set[str]] | None,
+    overlays: Mapping[str, Mapping[str, object]] | None,
+    *,
+    steps_of: dict[str, set[str]] | None,
+) -> tuple[list[NodeDef], frozenset[str]]:
+    """`lowered`, for nodes of which at least one has a step."""
     configs = overlaid(config, overlays)
     lowered_to: dict[str, set[str]] = {} if steps_of is None else steps_of
     out: list[NodeDef] = []
@@ -907,25 +931,32 @@ def unbuilt_targets(
     select. A built node's mutator must be of a built module too, or its step
     would be lost when the driver is pickled and built again elsewhere.
     """
-    defined = {
-        id(value)
+    mutators = [
+        value
         for module in modules
         for value in vars(module).values()
         if inspect.isfunction(value)
-    }
-    defined |= {id(node.origin) for node in nodes}
-    built = {module.__name__ for module in modules}
+        and value.__module__ == module.__name__
+        and decorations(value).mutates
+    ]
     found: set[str] = set()
-    for module in modules:
-        for value in vars(module).values():
-            if not inspect.isfunction(value) or value.__module__ != module.__name__:
-                continue
-            found.update(
-                f"mutate on {_named(value)}: its target {_named(target)} "
-                "is no function of the build"
-                for target in decorations(value).mutates
-                if id(target) not in defined
-            )
+    if mutators:
+        # Only then is every function of the build needed, to look targets up.
+        defined = {
+            id(value)
+            for module in modules
+            for value in vars(module).values()
+            if inspect.isfunction(value)
+        }
+        defined |= {id(node.origin) for node in nodes}
+        found.update(
+            f"mutate on {_named(value)}: its target {_named(target)} "
+            "is no function of the build"
+            for value in mutators
+            for target in decorations(value).mutates
+            if id(target) not in defined
+        )
+    built = {module.__name__ for module in modules}
     for node in nodes:
         for _, mutation in decorations(node.origin).mutations:
             home = getattr(mutation.fn, "__module__", None)
