@@ -405,8 +405,7 @@ class CacheOutcome(NamedTuple):
 
 
 # A run's keys on the binding's walk, which keeps them itself.
-_EMPTY_KEYS: dict[str, bytes | None] = {}
-_NO_KEYS: Mapping[str, bytes | None] = MappingProxyType(_EMPTY_KEYS)
+_NO_KEYS: Mapping[str, bytes | None] = MappingProxyType[str, bytes | None]({})
 
 # The outcome of an extracted field with a key: run when needed, never stored.
 _EXTRACTED = CacheOutcome(
@@ -460,21 +459,13 @@ class NodeKey:
         return CacheOutcome("hit" if found else "miss", reason)
 
 
-def node_keys(
-    nodes: Sequence[NodeDef], settings: CacheSettings = NO_SETTINGS
-) -> dict[str, NodeKey]:
-    """The `NodeKey` of every node, by name; made once, at build.
-
-    Each node's behavior is settled first (`_resolved`). A function's code
-    version is computed once, however many rows it has.
-    """
-    return _keyed(nodes, _resolved(nodes, settings))
-
-
 def _keyed(
     nodes: Sequence[NodeDef], resolved: Mapping[str, _Resolved]
 ) -> dict[str, NodeKey]:
-    """`node_keys`, given each node's settled policy."""
+    """The `NodeKey` of every node, by name, given its settled policy; made at build.
+
+    A function's code version is computed once, however many rows it has.
+    """
     by_name = {node.name: node for node in nodes}
     # By the origin's id; `nodes` keeps every origin alive meanwhile.
     versions: dict[int, bytes | UncacheableError] = {}
