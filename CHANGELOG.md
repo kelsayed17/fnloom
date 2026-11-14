@@ -31,9 +31,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
   run on `ABSENT` (`NodeEnd.checks` is `()`). A graph with a node that may be absent exports `fnloom.export/2`, each
   node with `may_be_absent`; any other graph still exports `fnloom.export/1`, byte for byte, and `fnloom diff` reads
   both. Drawings mark such a node `may be absent`, drawn dashed and named in the legend.
-- `ObserverBase.skipped(node, *, branch)`, the binding's forward of the core's `Observer::skipped`. An observer whose
-  class overrides neither `pre_node` nor `post_node` is sent no node events, so a run makes no keyword arguments for
-  it.
+- `ObserverBase.skipped(node, *, branch)`, the binding's forward of the core's `Observer::skipped`, sent, like
+  `post_expand` and `hit_in`, only to an observer whose class overrides it. An observer whose class overrides neither
+  `pre_node` nor `post_node` is sent no node events, so a run makes no keyword arguments for it.
 - Absence on the async driver. `build_async()` builds a node that declines, and its runs follow the same rules as
   `build()`'s: a skipped node runs nothing, fires no node event, stores nothing in the cache and is listed in
   `RunEnd.skipped`. The return check runs on `async def` nodes and on sync nodes, in a thread or inline, refusing
@@ -62,7 +62,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
   (`OverridesInBlocks`). An override of an expand supplies its items, and one of a collect cuts its block. A value
   read only by a block is computed before its expand, whatever its name. `Plan::run` runs each block once per item,
   in item order, branch after branch, with nested blocks on an explicit stack (Q122). An evaluator opts in through
-  `Evaluate::blocks`, returning a `Blocks` that iterates expands (`Item::Next`, `Done`, `Declined`) and gathers
+  `Evaluate::blocks`, returning a `Blocks` that iterates expands, each in the branch it ran in (`Item::Next`, `Done`,
+  `Declined`), and gathers
   collects; a plan with an expand run without one is a `RunError::BrokenPlan`. An empty expand gives empty collects,
   an expand requested alone returns its items, an absent expand gives its collects the three absence rules as a
   whole, and a failing branch finishes every open iterator, innermost first, and reports its branch
@@ -211,6 +212,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
   result. Their keys change, so an existing disk cache misses once for them. A `defaultdict`, whose `default_factory`
   is state, is refused whether or not it holds a set, and a dataclass with an unset `init=False` field holding a set is
   refused as `UnfingerprintableError` rather than a raw `AttributeError`.
+- `MemoryCache.put` of a value it cannot size, under a key that already held one, drops the old value. It used to
+  keep it, so a later `get` returned the value the put meant to replace.
 - `fnloom diff` of an export whose node has a `kind` that is not a `str`, or `params` that are not a list of entries,
   exits 2, a bad file (Q98), naming the side. It raised `AttributeError` and exited 1, which says the graphs changed.
 - `to_dot()`, `to_mermaid()`, `render(...)` to `.dot` or `.mmd`, and `fnloom draw` replace a lone surrogate in a label
