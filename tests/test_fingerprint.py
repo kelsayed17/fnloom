@@ -476,6 +476,35 @@ def test_polars_frames() -> None:
     nans = pl.Series("f", [float("nan")], dtype=pl.Float64)
     assert fingerprint(nulls) != fingerprint(nans)
     assert fingerprint(nulls.to_frame()) != fingerprint(nans.to_frame())
+    # A null must not round the integers beside it through a float.
+    low = pl.Series("i", [2**53, None])
+    high = pl.Series("i", [2**53 + 1, None])
+    assert fingerprint(low) != fingerprint(high)
+    assert fingerprint(low.to_frame()) != fingerprint(high.to_frame())
+    # Nor a null inside a list, array or struct item.
+    for build in (
+        lambda n: pl.Series([[n, None]]),
+        lambda n: pl.Series([[n, None]], dtype=pl.Array(pl.Int64, 2)),
+        lambda n: pl.Series([{"a": n}, {"a": None}]),
+    ):
+        assert fingerprint(build(2**53)) != fingerprint(build(2**53 + 1))
+        assert fingerprint(build(2**53)) == fingerprint(build(2**53))
+
+
+def test_pandas_nullable_columns() -> None:
+    """A nullable column keeps its integers exact and its NaN apart from NA."""
+    pd = pytest.importorskip("pandas")
+    np = pytest.importorskip("numpy")
+    low = pd.Series([2**53, None], dtype="Int64")
+    high = pd.Series([2**53 + 1, None], dtype="Int64")
+    assert fingerprint(low) != fingerprint(high)
+    assert fingerprint(low.to_frame()) != fingerprint(high.to_frame())
+    assert fingerprint(pd.Index(low)) != fingerprint(pd.Index(high))
+    values = np.array([np.nan, 1.0])
+    nan = pd.Series(pd.arrays.FloatingArray(values, np.array([False, False])))
+    na = pd.Series(pd.arrays.FloatingArray(values, np.array([True, False])))
+    assert fingerprint(nan) != fingerprint(na)
+    assert fingerprint(low) == fingerprint(pd.Series([2**53, None], dtype="Int64"))
 
 
 def test_python_never_imports_numpy() -> None:

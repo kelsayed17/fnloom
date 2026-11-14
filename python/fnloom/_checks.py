@@ -462,9 +462,22 @@ def _numeric(name: str) -> Callable[[object], str | None]:
     return problem
 
 
+def _could_be_text(declared: object) -> bool:
+    # Either way round: a `str` subclass, `NewType` or `Literal` is text, and so is
+    # a union with a text arm, such as `str | None` or `Name | None`.
+    declared = _types.stripped(declared)
+    if typing.get_origin(declared) in {typing.Union, types.UnionType}:
+        return any(_could_be_text(arm) for arm in typing.get_args(declared))
+    return (
+        _types.checks_everything(declared)
+        or _types.type_matches(declared, str)
+        or _types.type_matches(str, declared)
+    )
+
+
 def _text(name: str) -> Callable[[object], str | None]:
     def problem(declared: object) -> str | None:
-        if declared in {Any, object} or _types.type_matches(str, declared):
+        if _could_be_text(declared):
             return None
         return f"check {name} applies to str, not {inspect.formatannotation(declared)}"
 
