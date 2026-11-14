@@ -165,6 +165,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - Rust core: `RunError::Node` has two new fields, `branch` and `block`; a pattern naming every field needs them, or
   `..`. `PlanError` has two more variants, `OutputsInBlocks` and
   `OverridesInBlocks`.
+- A run with node hooks is about a third faster: `before_node` and `after_node` cost about 1.7 µs per node rather
+  than 2.6 (a 10,000-node chain). The events are the same `NodeStart` and `NodeEnd` objects.
 
 ### Fixed
 
@@ -182,6 +184,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `str`, a `Literal` of strings, an `Annotated[str, ...]`, or a union with one of them such as `Name | None`. The
   first three, and such unions, were refused as not `str`, and `Annotated` raised an unhelpful `TypeError` about set
   elements.
+- A failed node leads the `ExceptionGroup` with `node '<name>' failed and hooks raised` when only run hooks
+  (`before_run`, `after_run`) watch and one raises, as `build_async()` and a driver with node hooks say. The sync
+  driver said `the run failed and hooks raised`.
 - `@check_output(range=...)`, `allow_nans=` and `max_fraction_nans=` refuse, at build, a node whose values can only be
   text or `None`: a union such as `str | None` or `Name | None`, a `NewType` over `str`, or a `Literal` of strings. Such
   a node built, then failed every run (Q101). A union with a numeric arm, such as `int | str`, still builds.
@@ -209,6 +214,11 @@ change the public API; such changes are listed under **Changed** and **Removed**
   refused as `UnfingerprintableError` rather than a raw `AttributeError`.
 - `MemoryCache.put` of a value it cannot size, under a key that already held one, drops the old value. It used to
   keep it, so a later `get` returned the value the put meant to replace.
+- `fnloom diff` of an export whose node has a `kind` that is not a `str`, or `params` that are not a list of entries,
+  exits 2, a bad file (Q98), naming the side. It raised `AttributeError` and exited 1, which says the graphs changed.
+- `to_dot()`, `to_mermaid()`, `render(...)` to `.dot` or `.mmd`, and `fnloom draw` replace a lone surrogate in a label
+  with U+FFFD, as `to_svg()` does. They raised `UnicodeEncodeError`. The preview's Graphviz input gets U+FFFD too,
+  rather than `?`.
 
 ## [0.4.0] - 2026-11-05
 
