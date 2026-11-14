@@ -562,18 +562,45 @@ def test_disk_prune_removes_stale_temporary_files(tmp_path: Path) -> None:
     assert _entry(tmp_path, _key(1)).exists()
 
 
-def test_disk_bound_prunes_on_open_and_every_hundred_writes(tmp_path: Path) -> None:
-    """A bounded store prunes when it opens and after every 100 writes."""
+def test_disk_bound_prunes_on_open_and_when_its_writes_pass_the_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bounded store prunes when it opens, and when its own writes pass the bound.
+
+    Writes that stay within the bound walk no directory, however many there are.
+    """
     size = _fill(DiskCache(tmp_path), 20)
     DiskCache(tmp_path, max_bytes=5 * size)
     assert len(_files(tmp_path)) == 5  # noqa: PLR2004  # five entries fit
 
     other = tmp_path / "other"
     bounded = DiskCache(other, max_bytes=10 * size)
-    _fill(bounded, 99)
-    assert len(_files(other)) == 99  # noqa: PLR2004  # no prune yet
-    bounded.put(_key(99), b"x" * 1000)
-    assert len(_files(other)) == 10  # noqa: PLR2004  # ten entries fit
+    pruned: list[int] = []
+    prune = DiskCache.prune
+
+    def counted(store: DiskCache, max_bytes: int) -> None:
+        pruned.append(max_bytes)
+        prune(store, max_bytes)
+
+    monkeypatch.setattr(DiskCache, "prune", counted)
+    _fill(bounded, 10)
+    assert (len(_files(other)), pruned) == (10, [])  # ten fit
+    bounded.put(_key(10), b"x" * 1000)
+    assert (len(_files(other)), pruned) == (10, [10 * size])  # one over
+
+
+def test_a_reopened_bounded_store_does_not_prune(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store sent to a worker starts from the size it was taken to hold."""
+    size = _fill(DiskCache(tmp_path), 3)
+    store = DiskCache(tmp_path, max_bytes=3 * size)
+    pruned: list[int] = []
+    monkeypatch.setattr(DiskCache, "prune", lambda _, n: pruned.append(n))
+    copy = pickle.loads(pickle.dumps(store))  # noqa: S301  # our own store
+    assert pruned == []
+    copy.put(_key(3), b"x" * 1000)
+    assert pruned == [3 * size]
 
 
 def test_disk_clear_and_prune_on_a_new_directory(tmp_path: Path) -> None:

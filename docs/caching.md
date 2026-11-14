@@ -690,8 +690,9 @@ to lock or corrupt, and a lookup is one file read.
   a pandas upgrade its entry is read back by the new pandas, or found unreadable and removed.
 - Without `max_bytes` the directory grows without bound, and entries of another Python or library version stay until
   a write replaces them. With `max_bytes`, the least recently read entries are removed until the rest fit, when the
-  store opens and after every 100 writes. `prune(max_bytes)` does it on demand, and `clear()` removes every entry,
-  warning about any it cannot.
+  store opens and when this process's writes since take it past `max_bytes`. A store pickled to a worker process
+  starts from the size it was taken to hold, without pruning. Writes from other processes are seen at the next
+  prune. `prune(max_bytes)` does it on demand, and `clear()` removes every entry, warning about any it cannot.
 - A write is not synced to disk. After a crash or a power loss an entry may be torn, and a torn entry is found
   unreadable, so it is a miss, never a wrong value.
 - `dumps` and `loads` replace pickle. Give `serializer` a new name whenever you change them: entries written under

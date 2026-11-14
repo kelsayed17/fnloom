@@ -139,6 +139,10 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Changed
 
+- A bounded `DiskCache` prunes when it opens and when its own writes take it past `max_bytes`, rather than after every
+  100 writes, so writes within the bound never walk the directory. A store pickled to a worker process no longer
+  prunes as it loads: it starts from the size the pickled store held. Writes from other processes are seen at the
+  next prune.
 - A default on a `Collect` parameter whose expand can't decline is refused as a shadowed default, since it is never
   used; one reading a block node that may be absent was accepted before.
 - A parameter with a default that reads a node that may be absent, and doesn't admit `Absent`, is no longer a

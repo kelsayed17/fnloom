@@ -281,8 +281,6 @@ _ENTRY_NAME = re.compile(r"[0-9a-f]+")
 _TEMPORARY_NAME = re.compile(r"\..*\.tmp")
 # A temporary file older than this was left by a writer that died; prune removes it.
 _STALE_TEMPORARY_NS = 3600 * 10**9
-# Writes between the prunes of a bounded store.
-_PRUNE_EVERY = 100
 
 
 class _CorruptEntryError(ValueError):
@@ -350,8 +348,8 @@ class DiskCache:
     Args:
         path: The directory, created on the first write.
         max_bytes: The most bytes of entries kept, or None for no bound. When the
-            store opens and after every 100 writes, the least recently read
-            entries are removed until the rest fit.
+            store opens, and when this process's writes since take it past the
+            bound, the least recently read entries are removed until the rest fit.
         dumps: Turns a value into bytes.
         loads: Turns those bytes back into the value.
         serializer: The name of the `dumps`/`loads` pair, recorded in every entry.
@@ -405,7 +403,9 @@ class DiskCache:
         self._default = Format(serializer, dumps, loads)
         self._given = tuple(formats)
         self._formats = _formats(self._default, self._given)
-        self._writes = 0
+        # The bytes the store is taken to hold: its size at the last prune, and
+        # every entry this process wrote since, a replaced one counted twice.
+        self._held = 0
         self._lock = threading.Lock()
         if max_bytes is not None:
             self._prune_quietly(max_bytes)
@@ -421,6 +421,7 @@ class DiskCache:
             default.loads,
             default.name,
             self._given,
+            self._held,
         )
 
     @property
@@ -506,7 +507,7 @@ class DiskCache:
         finally:
             if temporary is not None:
                 self._remove(Path(temporary))
-        if self._max_bytes is not None and self._count_write():
+        if self._max_bytes is not None and self._grown(len(data)):
             self._prune_quietly(self._max_bytes)
 
     def discard(self, key: bytes) -> None:
@@ -556,12 +557,14 @@ class DiskCache:
                 break
             Path(file).unlink(missing_ok=True)
             total -= size
-
-    def _count_write(self) -> bool:
-        """Counts a write; True on every `_PRUNE_EVERY`th."""
         with self._lock:
-            self._writes += 1
-            return self._writes % _PRUNE_EVERY == 0
+            self._held = total
+
+    def _grown(self, written: int) -> bool:
+        """Counts `written` bytes; True when the store is taken to be past its bound."""
+        with self._lock:
+            self._held += written
+            return self._max_bytes is not None and self._held > self._max_bytes
 
     def _prune_quietly(self, max_bytes: int) -> None:
         """Prunes, turning a failure into a warning."""
@@ -723,16 +726,23 @@ def _reopen(  # noqa: PLR0913, PLR0917  # pickle passes the constructor's argume
     loads: Callable[[bytes], object],
     serializer: str,
     formats: tuple[Format, ...] = (),
+    held: int | None = None,
 ) -> DiskCache:
     """Opens a `DiskCache` from the arguments a pickled one was made with.
 
     `formats` defaults to none, so a store pickled before formats existed loads.
+    `held` is the size the pickled store took itself to hold: given, the store
+    starts from it rather than pruning, so each worker a store is sent to does
+    not walk the whole directory as it starts.
     """
-    return DiskCache(
+    store = DiskCache(
         path,
-        max_bytes=max_bytes,
+        max_bytes=None if held is not None else max_bytes,
         dumps=dumps,
         loads=loads,
         serializer=serializer,
         formats=formats,
     )
+    if held is not None:
+        store._max_bytes, store._held = max_bytes, held  # noqa: SLF001  # its own class
+    return store
