@@ -181,8 +181,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `str`, a `Literal` of strings, an `Annotated[str, ...]`, or a union with one of them such as `Name | None`. The
   first three, and such unions, were refused as not `str`, and `Annotated` raised an unhelpful `TypeError` about set
   elements.
-- `fnloom diff` of an export whose node has `params` that are not a list of entries exits 2, a bad file (Q98), naming
-  the side. It raised `AttributeError` and exited 1, which says the graphs changed.
+- `fnloom diff` of an export whose node has a `kind` that is not a `str`, or `params` that are not a list of entries,
+  exits 2, a bad file (Q98), naming the side. It raised `AttributeError` and exited 1, which says the graphs changed.
 - `to_dot()`, `to_mermaid()`, `render(...)` to `.dot` or `.mmd`, and `fnloom draw` replace a lone surrogate in a label
   with U+FFFD, as `to_svg()` does. They raised `UnicodeEncodeError`. The preview's Graphviz input gets U+FFFD too,
   rather than `?`.

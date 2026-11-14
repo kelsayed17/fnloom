@@ -447,7 +447,7 @@ def diff(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
         if not isinstance(nodes, list) or not all(map(_well_formed, nodes)):
             msg = (
                 f"{side}: an fnloom export's nodes must be a list of named entries, "
-                "each with a list of params"
+                "each with a str kind and a list of params"
             )
             raise ValueError(msg)
         names = [node["name"] for node in nodes]
@@ -492,8 +492,13 @@ def diff(old: Mapping[str, Any], new: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _well_formed(node: object) -> bool:
-    """Whether `node` is a named entry whose params, if any, are a list of entries."""
+    """Whether `node` is a named entry, its `kind` a `str` and params a list of entries.
+
+    `kind` and `params` may be left out.
+    """
     if not isinstance(node, dict) or not isinstance(node.get("name"), str):
+        return False
+    if not isinstance(node.get("kind"), str | None):
         return False
     params = node.get("params")
     return params is None or (

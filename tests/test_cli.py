@@ -514,6 +514,8 @@ _NODE = '{"name": "a", "kind": "function", "version": "x", "params": %s}'
         '{"format": "fnloom.export/1"}',
         '{"format": "fnloom.export/1", "nodes": [%s]}' % (_NODE % '["oops"]'),
         '{"format": "fnloom.export/1", "nodes": [%s]}' % (_NODE % '{"x": 1}'),
+        '{"format": "fnloom.export/1", "nodes": [{"name": "a", "kind": []}]}',
+        '{"format": "fnloom.export/1", "nodes": [{"name": "a", "kind": {}}]}',
     ],
 )
 def test_diff_of_a_malformed_export_is_status_2(
