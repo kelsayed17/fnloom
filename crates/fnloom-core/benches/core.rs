@@ -150,7 +150,12 @@ mod suite {
     }
 
     impl Blocks<Fan, u64, Infallible> for Fans {
-        fn iterate(&mut self, _node: &Node<Fan>, iterable: &u64) -> Result<u64, Infallible> {
+        fn iterate(
+            &mut self,
+            _node: &Node<Fan>,
+            iterable: &u64,
+            _branch: &[usize],
+        ) -> Result<u64, Infallible> {
             (self.next, self.len) = (0, *iterable);
             Ok(*iterable)
         }

@@ -74,6 +74,7 @@ from fnloom._view import (
     InputView,
     NodeView,
     NodeViews,
+    Param,
     node_views,
     output_names,
     topological,
@@ -411,26 +412,47 @@ def _edge_mismatches(
             required = p.annotation
             # An expand feeds its block one item at a time, and a block node feeds
             # a collect's elements (Q127); the line names the types compared.
-            requires = f"requires {inspect.formatannotation(p.annotation)}"
-            returns = f"returns {inspect.formatannotation(upstream.type)}"
-            if (collected := _blocks.collect_mode(required)) is not None:
+            collected = _blocks.collect_mode(required)
+            item = None if collected else _blocks.expanded_type(upstream.type)
+            if collected is not None:
                 required = collected[1]
-                shown_type = inspect.formatannotation(required)
-                requires = f"collects elements of type {shown_type}"
-            elif (item := _blocks.expanded_type(upstream.type)) is not None:
+            elif item is not None:
                 produced = item
-                returns = f"yields items of type {inspect.formatannotation(item)}"
             if _types.type_matches(produced, required):
                 continue
-            shown = p.name if p.slot is None else f"{p.name}[{p.slot!r}]"
-            line = f"{view.name}.{shown} {requires} but {upstream.name} {returns}"
-            if isinstance(p.annotation, _types.Unresolved) or isinstance(
-                upstream.type, _types.Unresolved
-            ):
-                # An unresolved annotation matches only the same text and `Any`.
-                line += "; import what the unresolved annotation names at run time"
-            found.append(line)
+            # Only a mismatch is written out: most edges match.
+            found.append(_mismatch_line(view, p, upstream, collected, item))
     return sorted(found)
+
+
+def _mismatch_line(
+    view: NodeView,
+    p: Param,
+    upstream: NodeView,
+    collected: tuple[str, object] | None,
+    item: object | None,
+) -> str:
+    """The line for parameter `p` of `view`, fed by `upstream` a type it rejects.
+
+    `collected` is `p`'s collect mode and element when it collects, and `item`
+    the type `upstream` yields when it expands.
+    """
+    if collected is not None:
+        requires = f"collects elements of type {inspect.formatannotation(collected[1])}"
+    else:
+        requires = f"requires {inspect.formatannotation(p.annotation)}"
+    if item is not None:
+        returns = f"yields items of type {inspect.formatannotation(item)}"
+    else:
+        returns = f"returns {inspect.formatannotation(upstream.type)}"
+    shown = p.name if p.slot is None else f"{p.name}[{p.slot!r}]"
+    line = f"{view.name}.{shown} {requires} but {upstream.name} {returns}"
+    if isinstance(p.annotation, _types.Unresolved) or isinstance(
+        upstream.type, _types.Unresolved
+    ):
+        # An unresolved annotation matches only the same text and `Any`.
+        line += "; import what the unresolved annotation names at run time"
+    return line
 
 
 def _lowered_names(

@@ -1,5 +1,6 @@
 """Exports: the document a graph or a run makes, its versions, and their diff."""
 
+import copy
 import json
 import os
 import subprocess
@@ -729,13 +730,50 @@ def test_export_2_carries_kind_block_and_collect() -> None:
     assert _nodes(run)["details"]["block"] == "picked"
 
 
-def test_the_graph_version_sees_a_block_and_a_collect() -> None:
-    """Collecting all, or no block at all, changes the graph version."""
-    versions = {
-        _driver(source, f"exported_blocks_v{i}").export()["graph_version"]
-        for i, source in enumerate((BLOCKS, COLLECT_ALL, FLAT))
-    }
-    assert len(versions) == 3  # noqa: PLR2004  # all three differ
+def _fixed_versions(document: dict[str, Any]) -> list[dict[str, Any]]:
+    """`document`'s nodes, each code version one fixed hash: the same on any machine."""
+    nodes = copy.deepcopy(document["nodes"])
+    for node in nodes:
+        if node["version"] is not None:
+            node["version"] = "0" * 64
+    return nodes
+
+
+def test_the_graph_version_hashes_a_block_and_a_collect_each_on_its_own() -> None:
+    """A `/2` version moves with one node's block alone, or one param's collect alone.
+
+    A `/1` version hashes neither, so it is what it was before `/2` (Q131).
+    """
+    driver = _driver(BLOCKS, "exported_blocks_alone")
+    nodes = _fixed_versions(driver.export())
+    by_name = {node["name"]: node for node in nodes}
+
+    def version(form: str) -> object:
+        return _export._graph_version(nodes, driver.nodes, {}, form)  # noqa: SLF001  # the hash itself
+
+    base, flat = version(_export.FORMAT_2), version(_export.FORMAT)
+    by_name["details"]["block"] = None
+    moved_block = version(_export.FORMAT_2)
+    assert version(_export.FORMAT) == flat
+    by_name["details"]["block"] = "picked"
+    by_name["summary"]["params"][0]["collect"] = "all"
+    moved_collect = version(_export.FORMAT_2)
+    assert version(_export.FORMAT) == flat
+    assert len({base, moved_block, moved_collect}) == 3  # noqa: PLR2004  # all three differ
+
+
+def test_a_v1_graph_version_is_pinned() -> None:
+    """Captured from `main`: a change to what `/1` hashes can't move it silently."""
+    driver = _driver(FLAT, "exported_pinned")
+    document = driver.export()
+    assert document["format"] == _export.FORMAT
+    pinned = "c63335a0b81d3cf318bc473da2ec231de45ee6557691f2e09b265dafb6b2afa5"
+    assert (
+        _export._graph_version(  # noqa: SLF001  # the hash itself
+            _fixed_versions(document), driver.nodes, {}, _export.FORMAT
+        )
+        == pinned
+    )
 
 
 def test_diff_sees_a_param_changed_to_collect() -> None:
@@ -752,3 +790,11 @@ def test_diff_sees_a_param_changed_to_collect() -> None:
     }
     assert _export.diff(flat, flat)["changed"] == {}
     assert _export.diff(old, old)["changed"] == {}
+    # One field at a time: a block alone, then a collect alone.
+    moved = copy.deepcopy(old)
+    next(n for n in moved["nodes"] if n["name"] == "details")["block"] = None
+    assert _export.diff(old, moved)["changed"] == {"details": ["block"]}
+    moved = copy.deepcopy(old)
+    summary = next(n for n in moved["nodes"] if n["name"] == "summary")
+    summary["params"][0]["collect"] = "all"
+    assert _export.diff(old, moved)["changed"] == {"summary": ["params"]}

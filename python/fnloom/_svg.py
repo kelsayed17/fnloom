@@ -190,6 +190,11 @@ def _topological(drawing: Drawing) -> list[str]:
     return order
 
 
+# A boundary edge as the feasible tree's heaps hold it: its key, part node, place
+# among that node's edges, and the edge.
+type _Boundary = tuple[int, int, int, int]
+
+
 class _Ranking:
     """Network simplex over a graph whose nodes are `0..count-1` in topological order.
 
@@ -238,40 +243,93 @@ class _Ranking:
                     self.rank[v] -= lowest
         return self.rank
 
-    def _tight(self, part: set[int]) -> None:
-        """Grows the tree in `part` by every tight edge it can reach."""
-        stack = sorted(part)
+    def _feasible_tree(self, root: int) -> set[int]:
+        """A tight spanning tree of `root`'s part, its ranks shifted to make one.
+
+        Each round adds the boundary edge of least slack, the first of them by
+        part node and then by its place in that node's edges, shifts the part to
+        make it tight, and grows the tree by every tight edge it can reach, from
+        the part's nodes in descending order, depth first. Each boundary edge
+        waits in a heap and the part's shift is one offset, so a round costs
+        what changes in it, not the size of the part.
+        """
+        self._part: set[int] = set()
+        # A part node's rank is `rank[v] + shift`: the part moves as one.
+        self._shift = 0
+        # Boundary edges by slack, part node and place: `outward` from the part,
+        # whose slack falls as the part rises, then `inward`, whose slack grows.
+        # An entry's key is its slack less, or plus, the shift when it was made.
+        self._outward: list[_Boundary] = []
+        self._inward: list[_Boundary] = []
+        self._join(root)
+        self._tight([root])
+        while True:
+            tops = (self._first(self._outward, -1), self._first(self._inward, 1))
+            best = min((top for top in tops if top is not None), default=None)
+            if best is None:
+                break
+            delta, _, _, e = best
+            self._shift += -delta if self.edges[e][1] in self._part else delta
+            self._tight(self._tight_now())
+        part = self._part
+        for v in part:
+            self.rank[v] += self._shift
+        return part
+
+    def _at(self, v: int) -> int:
+        """`v`'s rank while the feasible tree grows: a part node's shifted."""
+        return self.rank[v] + self._shift if v in self._part else self.rank[v]
+
+    def _growing_slack(self, e: int) -> int:
+        a, b = self.edges[e]
+        return self._at(b) - self._at(a) - 1
+
+    def _join(self, v: int) -> None:
+        """Adds `v` to the part, its edges out of the part to the heaps."""
+        part = self._part
+        self.rank[v] -= self._shift
+        part.add(v)
+        for place, e in enumerate(self.incident[v]):
+            a, b = self.edges[e]
+            if (a in part) == (b in part):
+                continue
+            slack = self._growing_slack(e)
+            if a == v:
+                heapq.heappush(self._outward, (slack + self._shift, v, place, e))
+            else:
+                heapq.heappush(self._inward, (slack - self._shift, v, place, e))
+
+    def _first(self, heap: list[_Boundary], sign: int) -> _Boundary | None:
+        """The heap's least boundary entry, with its slack now; spent ones dropped."""
+        part, edges = self._part, self.edges
+        while heap and (edges[heap[0][3]][0] in part) == (edges[heap[0][3]][1] in part):
+            heapq.heappop(heap)
+        if not heap:
+            return None
+        key, v, place, e = heap[0]
+        return (key + sign * self._shift, v, place, e)
+
+    def _tight_now(self) -> list[int]:
+        """The part nodes with a boundary edge of no slack, taken off the heaps."""
+        found: set[int] = set()
+        for heap, sign in ((self._outward, -1), (self._inward, 1)):
+            while (top := self._first(heap, sign)) is not None and top[0] == 0:
+                found.add(top[1])
+                heapq.heappop(heap)
+        return list(found)
+
+    def _tight(self, starts: list[int]) -> None:
+        """Grows the tree by every tight edge reachable from `starts`, depth first."""
+        stack = sorted(starts)
         while stack:
             v = stack.pop()
             for e in self.incident[v]:
                 a, b = self.edges[e]
                 other = b if a == v else a
-                if other not in part and self._slack(e) == 0:
-                    part.add(other)
+                if other not in self._part and self._growing_slack(e) == 0:
+                    self._join(other)
                     self.tree.add(e)
                     stack.append(other)
-
-    def _feasible_tree(self, root: int) -> set[int]:
-        """A tight spanning tree of `root`'s part, its ranks shifted to make one."""
-        part = {root}
-        self._tight(part)
-        while True:
-            best: int | None = None
-            for v in sorted(part):
-                for e in self.incident[v]:
-                    a, b = self.edges[e]
-                    if (a in part) != (b in part) and (
-                        best is None or self._slack(e) < self._slack(best)
-                    ):
-                        best = e
-            if best is None:
-                return part
-            delta = self._slack(best)
-            if self.edges[best][1] in part:
-                delta = -delta
-            for v in part:
-                self.rank[v] += delta
-            self._tight(part)
 
     def _ranges(self, root: int) -> None:
         """Each tree node's parent, and `low`/`lim`: its subtree's postorder span."""

@@ -108,12 +108,14 @@ pub enum Item<V> {
 /// `Evaluate::blocks` lends it out for one call at a time, so an iterator may live in the
 /// evaluator's own values and interleave with the branches it feeds.
 pub trait Blocks<P, V, E> {
-    /// An iterator over `iterable`: a computed expand's value, or an expand override.
+    /// An iterator over `iterable`: a computed expand's value, a cache hit's, or an
+    /// expand override. `branch` is the branch the expand ran in, empty outside every
+    /// block, so an iterator that runs code as it yields can run it there.
     ///
     /// # Errors
     ///
     /// An error fails the run as the expand's own failure.
-    fn iterate(&mut self, node: &Node<P>, iterable: &V) -> Result<V, E>;
+    fn iterate(&mut self, node: &Node<P>, iterable: &V, branch: &[usize]) -> Result<V, E>;
 
     /// The next item; `Done` when exhausted; `Declined(v)` when the iterator declined while
     /// yielding.
@@ -189,7 +191,8 @@ pub trait Observer<V, E> {
     }
 
     /// Called instead of the node events when a computed node is skipped, because a
-    /// `Required` argument is absent: the node is then absent too. `branch` is empty.
+    /// `Required` argument is absent: the node is then absent too. `branch` is the branch
+    /// it was skipped in, empty outside every block.
     ///
     /// # Errors
     ///
@@ -319,8 +322,9 @@ impl<E: fmt::Display> fmt::Display for RunError<E> {
     }
 }
 
-/// A branch path as Python writes a tuple: `(2,)`, `(0, 1)`.
-pub(crate) fn branch_text(branch: &[usize]) -> String {
+/// A branch path as Python writes a tuple: `(2,)`, `(0, 1)`, as `RunError` shows it.
+#[must_use]
+pub fn branch_text(branch: &[usize]) -> String {
     if let [only] = branch {
         return format!("({only},)");
     }

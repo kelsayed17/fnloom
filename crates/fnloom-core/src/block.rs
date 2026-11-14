@@ -8,7 +8,7 @@
 use std::collections::VecDeque;
 
 use crate::error::BuildError;
-use crate::node::{Node, NodeId};
+use crate::node::{Node, NodeId, as_u32};
 
 /// Where an edge places its consumer: inside the block of `innermost` (`None`: in none), at
 /// this many levels of nesting.
@@ -289,10 +289,6 @@ fn contracted_cycle<P>(nodes: &[Node<P>], tree: &Tree) -> Option<BuildError> {
         }
     }
     None
-}
-
-fn as_u32(index: usize) -> u32 {
-    u32::try_from(index).unwrap_or(u32::MAX)
 }
 
 /// The refusal for the cycle closed by `closing`, back to a unit on `stack`.
