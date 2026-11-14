@@ -2,6 +2,7 @@
 #![deny(unsafe_code)]
 
 mod absent;
+mod call;
 mod errors;
 mod fingerprint;
 mod graph;

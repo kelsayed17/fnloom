@@ -22,6 +22,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
     from collections.abc import Set as AbstractSet
 
+    from fnloom._checks import Check
     from fnloom._scan import NodeDef
 
 
@@ -282,7 +283,7 @@ class NodeViews(Mapping[str, NodeView]):
         # `origin`: a `@resolve` copy, which holds the resolved decorators.
         self.built_from: Mapping[str, Callable[..., object]] = {}
         # Each checked node's output checks, for an export to describe.
-        self.checks: Mapping[str, tuple[object, ...]] = {}
+        self.checks: Mapping[str, tuple[Check, ...]] = {}
 
     def type_of(self, name: str) -> object:
         """The type of node or input `name`, without making an input's view."""

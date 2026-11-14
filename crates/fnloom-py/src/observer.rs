@@ -150,12 +150,12 @@ impl<'py, 's> PyObserver<'py, 's> {
     fn outcome(
         &self,
         branch: &[usize],
-        outcome: Result<&Value, &PyErr>,
+        outcome: Result<&Value<'py>, &PyErr>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let py = self.observer.py();
         let absent = py.None().into_bound(py);
         let (value, error) = match outcome {
-            Ok(value) => (value.bind(py).clone(), absent),
+            Ok(value) => (value.clone(), absent),
             Err(error) => (absent, error.value(py).clone().into_any()),
         };
         let kwargs = self.keywords(
@@ -217,13 +217,13 @@ fn overrides(observer: &Bound<'_, ObserverBase>, name: &str) -> bool {
     }
 }
 
-impl Observer<Value, PyErr> for PyObserver<'_, '_> {
+impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
     fn pre_graph(&mut self) -> PyResult<()> {
         let py = self.observer.py();
         self.call(intern!(py, "pre_graph"), (), None)
     }
 
-    fn pre_node(&mut self, node: &str, args: &[Arg<'_, Value>]) -> PyResult<()> {
+    fn pre_node(&mut self, node: &str, args: &[Arg<'_, Value<'py>>]) -> PyResult<()> {
         if !self.nodes {
             return Ok(());
         }
@@ -232,7 +232,7 @@ impl Observer<Value, PyErr> for PyObserver<'_, '_> {
         self.call(intern!(py, "pre_node"), (node, kwargs), None)
     }
 
-    fn post_node(&mut self, node: &str, outcome: Result<&Value, &PyErr>) -> PyResult<()> {
+    fn post_node(&mut self, node: &str, outcome: Result<&Value<'py>, &PyErr>) -> PyResult<()> {
         self.post_node_in(node, &[], outcome)
     }
 
@@ -240,7 +240,7 @@ impl Observer<Value, PyErr> for PyObserver<'_, '_> {
         &mut self,
         node: &str,
         branch: &[usize],
-        args: &[Arg<'_, Value>],
+        args: &[Arg<'_, Value<'py>>],
     ) -> PyResult<()> {
         if branch.is_empty() {
             return self.pre_node(node, args);
@@ -259,7 +259,7 @@ impl Observer<Value, PyErr> for PyObserver<'_, '_> {
         &mut self,
         node: &str,
         branch: &[usize],
-        outcome: Result<&Value, &PyErr>,
+        outcome: Result<&Value<'py>, &PyErr>,
     ) -> PyResult<()> {
         if !self.nodes {
             return Ok(());
@@ -280,14 +280,14 @@ impl Observer<Value, PyErr> for PyObserver<'_, '_> {
         self.call(intern!(py, "post_expand"), (node,), Some(&kwargs))
     }
 
-    fn hit_in(&mut self, node: &str, branch: &[usize], value: &Value) -> PyResult<()> {
+    fn hit_in(&mut self, node: &str, branch: &[usize], value: &Value<'py>) -> PyResult<()> {
         if !self.hits {
             return Ok(());
         }
         let py = self.observer.py();
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "branch"), PyTuple::new(py, branch)?)?;
-        kwargs.set_item(intern!(py, "value"), value.bind(py))?;
+        kwargs.set_item(intern!(py, "value"), value)?;
         self.call(intern!(py, "hit_in"), (node,), Some(&kwargs))
     }
 
