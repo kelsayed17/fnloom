@@ -2,12 +2,13 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::sync::Arc;
+use std::ptr;
 
 use fnloom_core::node::{Node, NodeId};
 use fnloom_core::plan::{Action, Plan as CorePlan, Step};
 use fnloom_core::run::{Arg, Blocks, Evaluate, Item, Observer};
 use pyo3::exceptions::{PyRuntimeError, PyStopIteration, PyTypeError};
+use pyo3::ffi;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -20,9 +21,9 @@ use crate::graph::Graph;
 use crate::keys::Keys;
 use crate::observer::{ObserverBase, PyObserver};
 
-/// A value flowing along an edge. `Arc` makes the core's per-argument clones free of
-/// reference-count traffic on the Python object, and needs no GIL to clone.
-pub type Value = Arc<Py<PyAny>>;
+/// A value flowing along an edge: a strong reference, held under the GIL a run holds
+/// throughout, so cloning it for an argument is one reference-count increment.
+pub type Value<'py> = Bound<'py, PyAny>;
 
 /// A validated execution order for one request, bound to the graph it was prepared from.
 #[pyclass(frozen, module = "fnloom._core")]
@@ -30,13 +31,48 @@ pub struct Plan {
     /// Held so that a plan can never be paired with another graph, nor outlive its own.
     /// A Python reference rather than a shared Rust one, so the GC sees the edge.
     graph: Py<Graph>,
-    plan: CorePlan,
+    core: CorePlan,
+    /// By node id, the keywords each computed step passes its arguments under.
+    calls: Vec<Option<Call>>,
+}
+
+/// The keywords a computed step's function is called with, made when the plan is.
+struct Call {
+    /// The step's arguments, the nodes whose values are passed, in order.
+    args: Box<[NodeId]>,
+    /// Their keywords, in the same order: the `kwnames` of a vectorcall.
+    names: Py<PyTuple>,
 }
 
 impl Plan {
-    /// Binds a core plan to the graph that prepared it.
-    pub const fn new(graph: Py<Graph>, plan: CorePlan) -> Self {
-        Self { graph, plan }
+    /// Binds a core plan to the graph that prepared it, and makes each computed step's
+    /// keyword names, so a run passes its arguments without building a dict.
+    pub fn new(py: Python<'_>, graph: Py<Graph>, plan: CorePlan) -> PyResult<Self> {
+        let bound = graph.get();
+        let mut calls: Vec<Option<Call>> = Vec::new();
+        calls.resize_with(bound.core().nodes().len(), || None);
+        let steps = plan
+            .steps()
+            .iter()
+            .chain(plan.blocks().iter().flat_map(|block| &block.steps));
+        for step in steps.filter(|step| step.action == Action::Compute) {
+            let names = step
+                .args
+                .iter()
+                .map(|&input| keyword_for(py, bound, step.node, input));
+            let call = Call {
+                args: step.args.clone().into_boxed_slice(),
+                names: PyTuple::new(py, names)?.unbind(),
+            };
+            if let Some(slot) = calls.get_mut(step.node.index()) {
+                *slot = Some(call);
+            }
+        }
+        Ok(Self {
+            graph,
+            core: plan,
+            calls,
+        })
     }
 }
 
@@ -101,22 +137,22 @@ impl Plan {
         });
         let mut late_hook = late.map(|late| LateHook {
             late,
-            plan: &self.plan,
+            plan: &self.core,
             graph,
             keywords,
         });
-        let mut hooks: Vec<&mut dyn Observer<Value, PyErr>> = adapters
+        let mut hooks: Vec<&mut dyn Observer<Value<'py>, PyErr>> = adapters
             .iter_mut()
-            .map(|adapter| adapter as &mut dyn Observer<Value, PyErr>)
+            .map(|adapter| adapter as &mut dyn Observer<Value<'py>, PyErr>)
             .chain(
                 value_hook
                     .as_mut()
-                    .map(|hook| hook as &mut dyn Observer<Value, PyErr>),
+                    .map(|hook| hook as &mut dyn Observer<Value<'py>, PyErr>),
             )
             .chain(
                 late_hook
                     .as_mut()
-                    .map(|hook| hook as &mut dyn Observer<Value, PyErr>),
+                    .map(|hook| hook as &mut dyn Observer<Value<'py>, PyErr>),
             )
             .collect();
         // A failed lookup (a key whose `__eq__` raises) is kept and raised after the run.
@@ -129,20 +165,21 @@ impl Plan {
             };
             let key = keyword(py, keywords, id, &graph.core().node(id).name);
             match values.get_item(key) {
-                Ok(value) => value.map(|value| Arc::new(value.unbind())),
+                Ok(value) => value,
                 Err(error) => {
                     failure.get_or_insert(error);
                     None
                 }
             }
         };
-        let outcome = self.plan.run_by_id(
+        let outcome = self.core.run_by_id(
             graph.core(),
             &mut Caller {
                 kwargs: &kwargs,
                 shared,
                 absent: absent::singleton(py)?,
-                outputs: self.plan.outputs(),
+                outputs: self.core.outputs(),
+                calls: &self.calls,
                 expanding: None,
                 late,
             },
@@ -156,7 +193,7 @@ impl Plan {
         let result = PyDict::new(py);
         for (id, value) in outputs {
             let name = &graph.core().node(id).name;
-            result.set_item(keyword(py, keywords, id, name), value.bind(py))?;
+            result.set_item(keyword(py, keywords, id, name), value)?;
         }
         Ok(result)
     }
@@ -167,17 +204,17 @@ impl Plan {
     /// every node the plan computes is listed once, nested blocks too.
     fn steps(&self) -> Vec<(String, &'static str)> {
         let graph = self.graph.get().core();
-        let mut listed = Vec::with_capacity(self.plan.steps().len());
+        let mut listed = Vec::with_capacity(self.core.steps().len());
         // An explicit stack of the step lists still being read, so nesting never recurses.
-        let mut open: Vec<std::slice::Iter<'_, Step>> = vec![self.plan.steps().iter()];
+        let mut open: Vec<std::slice::Iter<'_, Step>> = vec![self.core.steps().iter()];
         while let Some(steps) = open.last_mut() {
             let Some(step) = steps.next() else {
                 open.pop();
                 continue;
             };
             listed.push((graph.node(step.node).name.clone(), action_name(step.action)));
-            if let Some(block) = self.plan.block_of(step.node) {
-                open.push(self.plan.blocks()[block.index()].steps.iter());
+            if let Some(block) = self.core.block_of(step.node) {
+                open.push(self.core.blocks()[block.index()].steps.iter());
             }
         }
         listed
@@ -190,7 +227,7 @@ impl Plan {
         let graph = self.graph.get().core();
         self.steps()
             .into_iter()
-            .filter(|(name, _)| graph.id_of(name).is_some_and(|id| self.plan.is_late(id)))
+            .filter(|(name, _)| graph.id_of(name).is_some_and(|id| self.core.is_late(id)))
             .map(|(name, _)| name)
             .collect()
     }
@@ -200,7 +237,7 @@ impl Plan {
     /// listed under its own expand.
     fn blocks(&self) -> BTreeMap<String, Vec<(String, &'static str)>> {
         let graph = self.graph.get().core();
-        self.plan
+        self.core
             .blocks()
             .iter()
             .map(|sub| {
@@ -240,6 +277,20 @@ fn keyword<'py>(
     )
 }
 
+/// The keyword `consumer` takes `input`'s value under: a `@parameterize` row's own
+/// name for it, else `input`'s interned name.
+fn keyword_for<'py>(
+    py: Python<'py>,
+    graph: &Graph,
+    consumer: NodeId,
+    input: NodeId,
+) -> Bound<'py, PyString> {
+    match graph.renamed(consumer, input) {
+        Some(renamed) => renamed.bind(py).clone(),
+        None => keyword(py, graph.keywords(), input, &graph.core().node(input).name),
+    }
+}
+
 /// Builds each node's keyword arguments, by parameter name.
 ///
 /// When a run has observers, the dict built for a node's `pre_node` is kept until the
@@ -257,17 +308,18 @@ pub struct Kwargs<'py, 'g> {
 
 impl<'py> Kwargs<'py, '_> {
     /// A new dict of `args`, keyed as `consumer`'s function takes them.
-    fn build(&self, consumer: NodeId, args: &[Arg<'_, Value>]) -> PyResult<Bound<'py, PyDict>> {
+    fn build(
+        &self,
+        consumer: NodeId,
+        args: &[Arg<'_, Value<'py>>],
+    ) -> PyResult<Bound<'py, PyDict>> {
         let kwargs = PyDict::new(self.py);
         for arg in args {
             // CPython binds a keyword to a parameter by identity with the interned
             // parameter name, else by `==` against every parameter. A fresh key string
             // takes the slow path, which makes an n-parameter call cost O(n²).
-            let keyword = match self.graph.renamed(consumer, arg.node) {
-                Some(renamed) => renamed.bind(self.py).clone(),
-                None => keyword(self.py, self.keywords, arg.node, arg.name),
-            };
-            kwargs.set_item(keyword, arg.value.bind(self.py))?;
+            let keyword = keyword_for(self.py, self.graph, consumer, arg.node);
+            kwargs.set_item(keyword, &arg.value)?;
         }
         Ok(kwargs)
     }
@@ -277,7 +329,7 @@ impl<'py> Kwargs<'py, '_> {
     pub fn for_observers(
         &self,
         node: &str,
-        args: &[Arg<'_, Value>],
+        args: &[Arg<'_, Value<'py>>],
     ) -> PyResult<Bound<'py, PyDict>> {
         let Some(consumer) = self.graph.core().id_of(node) else {
             return Err(PyRuntimeError::new_err(format!(
@@ -296,7 +348,11 @@ impl<'py> Kwargs<'py, '_> {
     }
 
     /// The dict to call `consumer`'s function with: the observers' one, else a new one.
-    fn for_call(&self, consumer: NodeId, args: &[Arg<'_, Value>]) -> PyResult<Bound<'py, PyDict>> {
+    fn for_call(
+        &self,
+        consumer: NodeId,
+        args: &[Arg<'_, Value<'py>>],
+    ) -> PyResult<Bound<'py, PyDict>> {
         match self.pending.borrow_mut().take() {
             Some((id, kwargs)) if id == consumer => Ok(kwargs),
             _ => self.build(consumer, args),
@@ -314,31 +370,33 @@ struct Caller<'k, 'py, 'g> {
     absent: &'static Py<Absent>,
     /// The plan's outputs, sorted by id: an expand among them records its items.
     outputs: &'k [NodeId],
+    /// The keywords of each computed step, by node id.
+    calls: &'k [Option<Call>],
     /// The expand last called in a branch, with that branch: its items are read in it.
     expanding: Option<(NodeId, Vec<usize>)>,
     /// A cached run's late keys, as `Plan.run`'s `late` describes; `None` uncached.
     late: Option<&'k Bound<'py, PyAny>>,
 }
 
-impl Evaluate<Py<PyAny>> for Caller<'_, '_, '_> {
-    type Value = Value;
+impl<'py> Evaluate<Py<PyAny>> for Caller<'_, 'py, '_> {
+    type Value = Value<'py>;
     type Error = PyErr;
 
     fn evaluate(
         &mut self,
         node: &Node<Py<PyAny>>,
         function: &Py<PyAny>,
-        args: &[Arg<'_, Value>],
-    ) -> PyResult<Value> {
+        args: &[Arg<'_, Value<'py>>],
+    ) -> PyResult<Value<'py>> {
         caught(|| self.call(node, function, args))
     }
 
     /// Whether `value` is `fnloom.ABSENT`, by identity.
-    fn is_absent(&self, value: &Value) -> bool {
+    fn is_absent(&self, value: &Value<'py>) -> bool {
         value.as_ptr() == self.absent.as_ptr()
     }
 
-    fn blocks(&mut self) -> Option<&mut dyn Blocks<Py<PyAny>, Value, PyErr>> {
+    fn blocks(&mut self) -> Option<&mut dyn Blocks<Py<PyAny>, Value<'py>, PyErr>> {
         Some(self)
     }
 
@@ -348,9 +406,9 @@ impl Evaluate<Py<PyAny>> for Caller<'_, '_, '_> {
         &mut self,
         node: &Node<Py<PyAny>>,
         function: &Py<PyAny>,
-        args: &[Arg<'_, Value>],
+        args: &[Arg<'_, Value<'py>>],
         branch: &[usize],
-    ) -> PyResult<Value> {
+    ) -> PyResult<Value<'py>> {
         if branch.is_empty() {
             return self.evaluate(node, function, args);
         }
@@ -367,7 +425,7 @@ impl Evaluate<Py<PyAny>> for Caller<'_, '_, '_> {
     }
 
     /// A cache hit from `late.lookup`, which returns a 1-tuple, or `None` for none.
-    fn lookup(&mut self, node: &Node<Py<PyAny>>, branch: &[usize]) -> PyResult<Option<Value>> {
+    fn lookup(&mut self, node: &Node<Py<PyAny>>, branch: &[usize]) -> PyResult<Option<Value<'py>>> {
         let Some(late) = self.late else {
             return Ok(None);
         };
@@ -378,7 +436,7 @@ impl Evaluate<Py<PyAny>> for Caller<'_, '_, '_> {
         if found.is_none() {
             return Ok(None);
         }
-        Ok(Some(Arc::new(found.get_item(0)?.unbind())))
+        Ok(Some(found.get_item(0)?))
     }
 }
 
@@ -395,8 +453,8 @@ fn branch_variable(py: Python<'_>) -> PyResult<&'static Py<PyAny>> {
 
 /// Blocks through Python: an expand's items come from the iterator its node's factory
 /// makes (`fnloom._blocks.Items`), and a collect argument is a `list`.
-impl Blocks<Py<PyAny>, Value, PyErr> for Caller<'_, '_, '_> {
-    fn iterate(&mut self, node: &Node<Py<PyAny>>, iterable: &Value) -> PyResult<Value> {
+impl<'py> Blocks<Py<PyAny>, Value<'py>, PyErr> for Caller<'_, 'py, '_> {
+    fn iterate(&mut self, node: &Node<Py<PyAny>>, iterable: &Value<'py>) -> PyResult<Value<'py>> {
         let py = self.kwargs.py;
         let Some(factory) = self.kwargs.graph.items(node.id) else {
             return Err(PyRuntimeError::new_err(format!(
@@ -414,17 +472,16 @@ impl Blocks<Py<PyAny>, Value, PyErr> for Caller<'_, '_, '_> {
             Some((id, branch)) if id == node.id => PyTuple::new(py, branch)?,
             _ => PyTuple::empty(py),
         };
-        caught(|| {
-            factory
-                .bind(py)
-                .call1((iterable.bind(py), record, branch))
-                .map(|items| Arc::new(items.unbind()))
-        })
+        caught(|| factory.bind(py).call1((iterable, record, branch)))
     }
 
-    fn next_item(&mut self, node: &Node<Py<PyAny>>, iterator: &Value) -> PyResult<Item<Value>> {
+    fn next_item(
+        &mut self,
+        node: &Node<Py<PyAny>>,
+        iterator: &Value<'py>,
+    ) -> PyResult<Item<Value<'py>>> {
         let py = self.kwargs.py;
-        match caught(|| iterator.bind(py).call_method0(intern!(py, "__next__"))) {
+        match caught(|| iterator.call_method0(intern!(py, "__next__"))) {
             Ok(item) => {
                 if let Some(late) = self.late {
                     let name = keyword(py, self.kwargs.keywords, node.id, &node.name);
@@ -433,7 +490,7 @@ impl Blocks<Py<PyAny>, Value, PyErr> for Caller<'_, '_, '_> {
                             .map(drop)
                     })?;
                 }
-                Ok(Item::Next(Arc::new(item.unbind())))
+                Ok(Item::Next(item))
             }
             Err(error) if error.is_instance_of::<PyStopIteration>(py) => {
                 let value = error.value(py).getattr(intern!(py, "value"))?;
@@ -443,7 +500,7 @@ impl Blocks<Py<PyAny>, Value, PyErr> for Caller<'_, '_, '_> {
                 if !node.declines {
                     return Err(undeclared_absence(&node.name));
                 }
-                Ok(Item::Declined(Arc::new(value.unbind())))
+                Ok(Item::Declined(value))
             }
             Err(error) => Err(error),
         }
@@ -452,15 +509,11 @@ impl Blocks<Py<PyAny>, Value, PyErr> for Caller<'_, '_, '_> {
     fn finish_items(
         &mut self,
         node: &Node<Py<PyAny>>,
-        iterator: &Value,
+        iterator: &Value<'py>,
         exhausted: bool,
-    ) -> PyResult<Value> {
+    ) -> PyResult<Value<'py>> {
         let py = self.kwargs.py;
-        let value = caught(|| {
-            iterator
-                .bind(py)
-                .call_method1(intern!(py, "finish"), (exhausted,))
-        })?;
+        let value = caught(|| iterator.call_method1(intern!(py, "finish"), (exhausted,)))?;
         if let Some(late) = self.late.filter(|_| exhausted) {
             let name = keyword(py, self.kwargs.keywords, node.id, &node.name);
             caught(|| {
@@ -468,18 +521,18 @@ impl Blocks<Py<PyAny>, Value, PyErr> for Caller<'_, '_, '_> {
                     .map(drop)
             })?;
         }
-        Ok(Arc::new(value.unbind()))
+        Ok(value)
     }
 
     fn gather(
         &mut self,
         _consumer: &Node<Py<PyAny>>,
         _source: NodeId,
-        values: Vec<Value>,
-    ) -> PyResult<Value> {
+        values: Vec<Value<'py>>,
+    ) -> PyResult<Value<'py>> {
         let py = self.kwargs.py;
-        let list = PyList::new(py, values.iter().map(|value| value.bind(py)))?;
-        Ok(Arc::new(list.into_any().unbind()))
+        let list = PyList::new(py, &values)?;
+        Ok(list.into_any())
     }
 }
 
@@ -500,8 +553,8 @@ struct ValueHook<'py, 'g> {
     keywords: &'g [Py<PyString>],
 }
 
-impl Observer<Value, PyErr> for ValueHook<'_, '_> {
-    fn post_node(&mut self, node: &str, outcome: Result<&Value, &PyErr>) -> PyResult<()> {
+impl<'py> Observer<Value<'py>, PyErr> for ValueHook<'py, '_> {
+    fn post_node(&mut self, node: &str, outcome: Result<&Value<'py>, &PyErr>) -> PyResult<()> {
         let Ok(value) = outcome else {
             return Ok(());
         };
@@ -512,9 +565,9 @@ impl Observer<Value, PyErr> for ValueHook<'_, '_> {
                     || PyString::intern(py, node),
                     |id| keyword(py, self.keywords, id, node),
                 );
-                caught(|| callback.call1((name, value.bind(py))).map(drop))
+                caught(|| callback.call1((name, value)).map(drop))
             }
-            Sink::Store(keys) => caught(|| keys.get().store(keys.py(), node, value)),
+            Sink::Store(keys) => caught(|| keys.get().store(keys.py(), node, value.as_unbound())),
         }
     }
 }
@@ -527,12 +580,12 @@ struct LateHook<'py, 'g> {
     keywords: &'g [Py<PyString>],
 }
 
-impl Observer<Value, PyErr> for LateHook<'_, '_> {
+impl<'py> Observer<Value<'py>, PyErr> for LateHook<'py, '_> {
     fn post_node_in(
         &mut self,
         node: &str,
         branch: &[usize],
-        outcome: Result<&Value, &PyErr>,
+        outcome: Result<&Value<'py>, &PyErr>,
     ) -> PyResult<()> {
         let Ok(value) = outcome else {
             return Ok(());
@@ -551,14 +604,14 @@ impl Observer<Value, PyErr> for LateHook<'_, '_> {
             self.late
                 .call_method1(
                     intern!(py, "store"),
-                    (name, PyTuple::new(py, branch)?, value.bind(py)),
+                    (name, PyTuple::new(py, branch)?, value),
                 )
                 .map(drop)
         })
     }
 }
 
-impl Caller<'_, '_, '_> {
+impl<'py> Caller<'_, 'py, '_> {
     /// Calls `function`, the payload of `consumer`, with `args` as keyword arguments.
     ///
     /// A `TypeError` when the function returns `fnloom.ABSENT` but `consumer` does not
@@ -567,18 +620,76 @@ impl Caller<'_, '_, '_> {
         &self,
         consumer: &Node<Py<PyAny>>,
         function: &Py<PyAny>,
-        args: &[Arg<'_, Value>],
-    ) -> PyResult<Value> {
-        let kwargs = if self.shared {
-            self.kwargs.for_call(consumer.id, args)?
+        args: &[Arg<'_, Value<'py>>],
+    ) -> PyResult<Value<'py>> {
+        let py = self.kwargs.py;
+        let result = if self.shared {
+            let kwargs = self.kwargs.for_call(consumer.id, args)?;
+            function.bind(py).call((), Some(&kwargs))?
         } else {
-            self.kwargs.build(consumer.id, args)?
+            match self.calls.get(consumer.id.index()) {
+                Some(Some(call)) if call.args.iter().eq(args.iter().map(|arg| &arg.node)) => {
+                    vectorcall(function.bind(py), args, call.names.bind(py))?
+                }
+                // Arguments other than the step's own, as an omitted optional one makes.
+                _ => {
+                    let names = args
+                        .iter()
+                        .map(|arg| keyword_for(py, self.kwargs.graph, consumer.id, arg.node));
+                    vectorcall(function.bind(py), args, &PyTuple::new(py, names)?)?
+                }
+            }
         };
-        let result = function.bind(self.kwargs.py).call((), Some(&kwargs))?;
         if !consumer.declines && result.as_ptr() == self.absent.as_ptr() {
             return Err(undeclared_absence(&consumer.name));
         }
-        Ok(Arc::new(result.unbind()))
+        Ok(result)
+    }
+}
+
+/// The most arguments `vectorcall` passes from the stack rather than a heap vector.
+const INLINE_ARGS: usize = 8;
+
+/// Calls `function` with each of `args` passed under its keyword in `names`, as one
+/// vectorcall: the same call as with a dict of them, without making the dict, nor
+/// `CPython` unpacking it again into exactly these names.
+#[expect(
+    unsafe_code,
+    reason = "PyO3 has no safe call taking keyword names, and the dict it takes instead is \
+              most of a node call's cost; the one block is checked below"
+)]
+fn vectorcall<'py>(
+    function: &Bound<'py, PyAny>,
+    args: &[Arg<'_, Value<'py>>],
+    names: &Bound<'py, PyTuple>,
+) -> PyResult<Bound<'py, PyAny>> {
+    // Slot 0 is spare, so a callee may borrow it to prepend an argument
+    // (`PY_VECTORCALL_ARGUMENTS_OFFSET`), as a bound method or a partial does. A node
+    // with few arguments, the usual one, needs no allocation for them.
+    let mut inline = [ptr::null_mut(); INLINE_ARGS + 1];
+    let mut spilled;
+    let vector: &mut [*mut ffi::PyObject] = if args.len() <= INLINE_ARGS {
+        &mut inline
+    } else {
+        spilled = vec![ptr::null_mut(); args.len() + 1];
+        &mut spilled
+    };
+    for (slot, arg) in vector.iter_mut().skip(1).zip(args) {
+        *slot = arg.value.as_ptr();
+    }
+    // SAFETY: the GIL is held (`function` is bound). `vector` holds one spare slot, then
+    // a borrowed reference per argument, each kept alive by `args` for the whole call;
+    // the callee reads them and may only write the spare slot, which the offset flag
+    // allows. No positional arguments: every one is named by `names`, a tuple of
+    // `args.len()` strings. The result is a new reference, or null with an exception set.
+    unsafe {
+        let result = ffi::PyObject_Vectorcall(
+            function.as_ptr(),
+            vector.as_mut_ptr().add(1),
+            ffi::PY_VECTORCALL_ARGUMENTS_OFFSET,
+            names.as_ptr(),
+        );
+        Bound::from_owned_ptr_or_err(function.py(), result)
     }
 }
 
