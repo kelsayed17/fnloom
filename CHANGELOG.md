@@ -28,9 +28,10 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `before_run` with no nodes, then `after_run` with `ok=False`. A result builder gets an absent output as `ABSENT`,
   and `frame()` refuses one with a `ValueError` naming each. `@extract_fields` and `@extract_columns` take a producer annotated
   `R | Absent`, and every field is absent when it declines. `@check_output*` and `with_output_type_checks()` don't
-  run on `ABSENT` (`NodeEnd.checks` is `()`). A graph with a node that may be absent exports `fnloom.export/2`, each
-  node with `may_be_absent`; any other graph still exports `fnloom.export/1`, byte for byte, and `fnloom diff` reads
-  both. Drawings mark such a node `may be absent`, drawn dashed and named in the legend.
+  run on `ABSENT` (`NodeEnd.checks` is `()`). A graph with a node that may be absent, or with a block, exports
+  `fnloom.export/2`: every node of it carries `may_be_absent` and `block`, its `kind` may be `expand` or `collect`,
+  and every param carries `collect`. Any other graph still exports `fnloom.export/1`, byte for byte, and `fnloom
+  diff` reads both. Drawings mark such a node `may be absent`, drawn dashed and named in the legend.
 - `ObserverBase.skipped(node, *, branch)`, the binding's forward of the core's `Observer::skipped`, sent, like
   `post_expand` and `hit_in`, only to an observer whose class overrides it. An observer whose class overrides neither
   `pre_node` nor `post_node` is sent no node events, so a run makes no keyword arguments for it.
@@ -140,6 +141,14 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Changed
 
+- A bounded `DiskCache` prunes when it opens, then when its own writes take it past `max_bytes` or add a tenth of it,
+  down to nine tenths, rather than to the bound after every 100 writes: a full store prunes about once per tenth of
+  its bound written. A store pickled to a worker process no longer prunes as it loads, but at its first write. With
+  several processes writing, the directory can pass `max_bytes` by up to a tenth of it per other process until the
+  next prune.
+- `build()` of a large graph is about 15% faster: 104 ms rather than 124 for a 10,000-node chain. A graph with no
+  `@pipe_input`, `@pipe_output` or `@mutate` skips the step lowering, the check of `@mutate` targets reads the
+  modules' functions only when one is a mutator, and the edge check writes out only a mismatch's types.
 - A default on a `Collect` parameter whose expand can't decline is refused as a shadowed default, since it is never
   used; one reading a block node that may be absent was accepted before.
 - A parameter with a default that reads a node that may be absent, and doesn't admit `Absent`, is no longer a
@@ -182,6 +191,16 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - `Annotated[Parallelizable[T], ...]` is an expand and `Annotated[Collect[T], ...]` a collect, as metadata never
   changes an answer (Q41, Q166). The first was refused as a generator, or built as a plain node, and the second collected
   nothing.
+- A module file the CLI fails to import is taken off `sys.path` again, so a later load in the same process doesn't find
+  modules beside it.
+- `step(fn, x=group(...))` and `@mutate(apply_to(fn, x=group(...)))` are a `TypeError` naming the parameter: `group()`
+  binds a `@parameterize` row. The step took the `group` object itself as the value.
+- A hand-built `Drawing` whose `blocks` form a cycle is refused by `to_dot()`, `to_mermaid()` and `to_svg()` with a
+  `ValueError` naming the cycle. Its nodes were silently left out. A node in a block named `legend` moves the DOT
+  legend's cluster aside whether or not `blocks` names that block.
+- `to_svg()`, `render(engine="builtin")` and `fnloom draw --engine builtin` lay out a graph whose inputs are read deep
+  in it without a cost growing with the square of its size: a 3,000-node chain with an input per node takes 0.2 s
+  rather than 4.9 s. The drawing is the same, byte for byte.
 - A frozen pydantic model holding a `set` or `frozenset` (in a field, a nested model, a container such as
   `dict[str, frozenset[str]]`, an extra field or a private attribute) is fingerprinted the same on every
   `PYTHONHASHSEED`: each set's members are sorted, as for a code version. Such a model used to key `DiskCache`
@@ -224,6 +243,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
   result. Their keys change, so an existing disk cache misses once for them. A `defaultdict`, whose `default_factory`
   is state, is refused whether or not it holds a set, and a dataclass with an unset `init=False` field holding a set is
   refused as `UnfingerprintableError` rather than a raw `AttributeError`.
+- On a free-threaded build, fingerprinting a `dict` or a `set` that another thread was changing raised a
+  `PanicException` from inside the binding. A `dict`, `set` or `list` is now read whole under its own lock, so the
+  fingerprint is of one state of it.
 - `MemoryCache.put` of a value it cannot size, under a key that already held one, drops the old value. It used to
   keep it, so a later `get` returned the value the put meant to replace.
 - `fnloom diff` of an export whose node has a `kind` that is not a `str`, or `params` that are not a list of entries,

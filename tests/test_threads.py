@@ -325,3 +325,50 @@ def test_a_block_graph_shared_by_threads() -> None:
         done = [pool.submit(work, thread) for thread in range(MIXED_THREADS)]
         assert sum(future.result() for future in done) == MIXED_THREADS * BLOCK_RUNS
     assert len(store) > 0
+
+
+def _mutated(kind: str) -> list[int] | dict[int, int] | set[int]:
+    """A container of `kind` large enough that reading it takes a while."""
+    if kind == "dict":
+        return {i: i for i in range(2000)}
+    if kind == "set":
+        return set(range(2000))
+    return list(range(2000))
+
+
+@pytest.mark.parametrize("kind", ["dict", "set", "list"])
+def test_a_container_changed_by_another_thread_is_fingerprinted_whole(
+    kind: str,
+) -> None:
+    """A container another thread is changing is read whole, never mid-change.
+
+    Without the GIL, reading a dict or a set while another thread resized it panicked
+    inside the binding. Each read now holds the container's lock, so it sees one state.
+    With the GIL there is no race, and the test passes either way.
+    """
+    value = _mutated(kind)
+    stop = threading.Event()
+
+    def mutate() -> None:
+        step = 0
+        while not stop.is_set():
+            step += 1
+            added, dropped = 10_000 + step % 50, 10_000 + (step + 25) % 50
+            if isinstance(value, dict):
+                value[added] = step
+                value.pop(dropped, None)
+            elif isinstance(value, set):
+                value.add(added)
+                value.discard(dropped)
+            else:
+                value.append(added)
+                value.pop(0)
+
+    thread = threading.Thread(target=mutate)
+    thread.start()
+    try:
+        for _ in range(RUNS):
+            assert len(fnloom.fingerprint(value)) == 32  # noqa: PLR2004  # a digest's size
+    finally:
+        stop.set()
+        thread.join()

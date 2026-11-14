@@ -6450,3 +6450,36 @@ def total(double: Collect[int]) -> int:
         )
     )
     assert ours.execute(["total"], inputs={"n": 3}) == {"total": 6}
+
+
+@pytest.mark.deliberate("Q104")
+@pytest.mark.deliberate("Q107")
+def test_q104_a_group_bound_to_a_step_is_refused() -> None:
+    """Hamilton hands the step the `group` object itself; fnloom refuses it."""
+    module = make_module(
+        "q104_group_h",
+        """
+from hamilton.function_modifiers import group, pipe_output, step, value
+
+SEEN = []
+
+def _add(x: int, extra: object) -> int:
+    SEEN.append(type(extra).__name__)
+    return x
+
+@pipe_output(step(_add, extra=group(value(1))))
+def a(x: int) -> int:
+    return x
+""",
+    )
+    built = hamilton_driver.Builder().with_modules(module).build()
+    assert built.execute(["a"], inputs={"x": 1}) == {"a": 1}
+    assert module.SEEN == ["GroupedListDependency"]
+
+    def _add(x: int, extra: list[int]) -> int:
+        return x + sum(extra)
+
+    with pytest.raises(TypeError, match=r"_add: group\(\) binds a parameterize row"):
+        fnloom.step(_add, extra=fnloom.group(fnloom.value(1)))
+    with pytest.raises(TypeError, match=r"_add: group\(\) binds a parameterize row"):
+        fnloom.mutate(fnloom.apply_to(_add, extra=fnloom.group(fnloom.value(1))))(_add)

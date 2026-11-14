@@ -188,6 +188,29 @@ def test_a_rename_of_an_unknown_node_raises_value_error_naming_it() -> None:
         _core.Graph(nodes, {"nowhere": {"a": "x"}, "b": {"zed": "y", "gone": "x"}})
 
 
+@pytest.mark.parametrize(
+    ("renames", "message"),
+    [
+        ({"a": "b"}, "both 'a' and 'b' as keyword 'b'"),
+        ({"a": "k", "b": "k"}, "both 'a' and 'b' as keyword 'k'"),
+    ],
+)
+def test_two_inputs_renamed_to_one_keyword_raise_value_error(
+    renames: dict[str, str], message: str
+) -> None:
+    """A call would bind only one of two inputs passed under one keyword."""
+    node: NodeTuple = (
+        "c",
+        [("a", "required", None), ("b", "required", None)],
+        {},
+        _add_one,
+        False,
+        None,
+    )
+    with pytest.raises(ValueError, match=f"node 'c' would get {message}"):
+        _core.Graph([node], {"c": renames})
+
+
 def test_a_rename_that_is_not_str_to_str_raises_type_error() -> None:
     """Renames are a dict of dicts of `str`; anything else is a `TypeError`."""
     nodes: list[NodeTuple] = [

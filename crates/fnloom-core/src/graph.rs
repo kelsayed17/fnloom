@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::error::{BuildError, PlanError};
-use crate::node::{Dependency, Edge, Node, NodeId, NodeKind, NodeSpec};
+use crate::node::{Dependency, Edge, Node, NodeId, NodeKind, NodeSpec, as_u32};
 
 /// An immutable, acyclic dependency graph whose node ids follow sorted name order.
 #[derive(Debug)]
@@ -275,11 +275,6 @@ fn assign_blocks<P>(nodes: &mut [Node<P>]) -> Result<BlockPaths, BuildError> {
         spans[id.index()] = (as_u32(start), as_u32(paths.len()));
     }
     Ok((paths, spans))
-}
-
-/// `value` as a `u32`: an offset into the packed block paths.
-fn as_u32(value: usize) -> u32 {
-    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 /// A topological order of an acyclic graph, each node after every node it reads; ties

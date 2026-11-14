@@ -639,18 +639,14 @@ impl<'py> Caller<'_, 'py, '_> {
         } else {
             match self.calls.get(consumer.id.index()) {
                 Some(Some(call)) if call.args.iter().eq(args.iter().map(|arg| &arg.node)) => {
-                    vectorcall(function.bind(py), values(args), Some(&call.names))?
+                    vectorcall(function.bind(py), values(args), &call.names)?
                 }
                 // Arguments other than the step's own, as an omitted optional one makes.
                 _ => {
                     let names = args
                         .iter()
                         .map(|arg| keyword_for(py, self.kwargs.graph, consumer.id, arg.node));
-                    vectorcall(
-                        function.bind(py),
-                        values(args),
-                        Some(&Keywords::new(py, names)?),
-                    )?
+                    vectorcall(function.bind(py), values(args), &Keywords::new(py, names)?)?
                 }
             }
         };

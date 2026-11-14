@@ -360,7 +360,7 @@ fnloom diff before.json after.json
 
 | Option | What it gives |
 | --- | --- |
-| `--config KEY=VALUE` | a config entry; `VALUE` is JSON, or else a plain string |
+| `--config KEY=VALUE` | a config entry; `VALUE` is JSON, or else a plain string. `NaN`, `Infinity` and `-Infinity` are floats |
 | `--input KEY=VALUE`, `--override KEY=VALUE` | an input or an override of a run, read the same way |
 | `--outputs a,b` | the outputs of a run |
 | `--context FILE` | a `.json` or `.toml` file with the tables `config`, `inputs` and `overrides` and the list `outputs`; a flag wins over its entry |
