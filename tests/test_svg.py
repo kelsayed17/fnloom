@@ -5,7 +5,7 @@ import random
 import shutil
 import time
 import xml.etree.ElementTree as ET
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, override
 
 import pytest
 from benches.generate import generated
@@ -381,3 +381,71 @@ def test_a_preview_too_large_to_lay_out_is_none(
     monkeypatch.setattr(_svg_module, "PREVIEW_PARTS", 100)  # 30 nodes and 435 edges
     assert dense._repr_svg_() is None  # Jupyter's hook
     assert dense.to_svg().startswith("<?xml")  # asked for, it is drawn
+
+
+class _Reference(_Ranking):
+    """The feasible tree as first written: each round rescans the whole part."""
+
+    def _tight_all(self, part: set[int]) -> None:
+        stack = sorted(part)
+        while stack:
+            v = stack.pop()
+            for e in self.incident[v]:
+                a, b = self.edges[e]
+                other = b if a == v else a
+                if other not in part and self._slack(e) == 0:
+                    part.add(other)
+                    self.tree.add(e)
+                    stack.append(other)
+
+    @override
+    def _feasible_tree(self, root: int) -> set[int]:
+        part = {root}
+        self._tight_all(part)
+        while True:
+            best: int | None = None
+            for v in sorted(part):
+                for e in self.incident[v]:
+                    a, b = self.edges[e]
+                    if (a in part) != (b in part) and (
+                        best is None or self._slack(e) < self._slack(best)
+                    ):
+                        best = e
+            if best is None:
+                return part
+            delta = self._slack(best)
+            if self.edges[best][1] in part:
+                delta = -delta
+            for v in part:
+                self.rank[v] += delta
+            self._tight_all(part)
+
+
+def test_the_feasible_tree_matches_the_rescanning_one() -> None:
+    """The same ranks and tree as rescanning the part each round, on random graphs."""
+    rng = random.Random(7)  # noqa: S311  # random graphs, not secrets
+    for _ in range(300):
+        n = rng.randint(1, 40)
+        density = rng.choice([0.03, 0.1, 0.3])
+        edges = [
+            (a, b) for a in range(n) for b in range(a + 1, n) if rng.random() < density
+        ]
+        edges += rng.sample(edges, len(edges) // 10)  # some edges twice
+        rng.shuffle(edges)
+        fast, slow = _Ranking(n, edges), _Reference(n, edges)
+        assert fast.ranks() == slow.ranks()
+        assert fast.tree == slow.tree
+
+
+def test_a_long_chain_with_an_input_per_node_ranks_at_once() -> None:
+    """Each round costs what changes in it: 3,000 nodes rank in well under a second."""
+    n = 3000
+    # Nodes 0..n-1 a chain, n..2n-1 an input each, in topological order.
+    order = [*range(n, 2 * n), *range(n)]
+    position = {v: i for i, v in enumerate(order)}
+    edges = [(position[i], position[i + 1]) for i in range(n - 1)]
+    edges += [(position[n + i], position[i]) for i in range(n)]
+    started = time.perf_counter()
+    ranks = _Ranking(2 * n, edges).ranks()
+    assert time.perf_counter() - started < 1
+    assert [ranks[position[i]] for i in (0, 1, n - 1)] == [1, 2, n]

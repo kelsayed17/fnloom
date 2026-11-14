@@ -271,7 +271,7 @@ impl<'r, P, T: Clone> Runner<'r, P, T> {
         };
         let branch = self.branch_of(node);
         let iterator = blocks
-            .iterate(node, &slot.value)
+            .iterate(node, &slot.value, branch)
             .map_err(|source| node_error(graph, node, source, branch, Vec::new()))?;
         let Some(block) = self.plan.block_of(step.node) else {
             // Nothing in the request reads the block: pull the items, and keep what the
@@ -832,6 +832,7 @@ mod tests {
         hits: BTreeMap<(String, Vec<usize>), Val>,
         fail: Option<(&'static str, Vec<usize>)>,
         lookup_fails: Option<(&'static str, Vec<usize>)>,
+        iterated: Vec<(String, Vec<usize>)>,
     }
 
     impl Fan {
@@ -901,7 +902,13 @@ mod tests {
     }
 
     impl Blocks<Pay, Val, String> for Fan {
-        fn iterate(&mut self, node: &Node<Pay>, iterable: &Val) -> Result<Val, String> {
+        fn iterate(
+            &mut self,
+            node: &Node<Pay>,
+            iterable: &Val,
+            branch: &[usize],
+        ) -> Result<Val, String> {
+            self.iterated.push((node.name.clone(), branch.to_vec()));
             let (items, end) = match iterable {
                 Val::Gen(items, end) => (items.clone(), *end),
                 List(items) => (items.clone(), End::Done),
@@ -1149,6 +1156,22 @@ mod tests {
         assert_eq!(eval.called("leaf"), [vec![0, 0], vec![0, 1], vec![1, 0]]);
         assert_eq!(eval.called("inner"), [vec![0], vec![1]]);
         assert_eq!(eval.called("inner_sum"), [vec![0], vec![1]]);
+    }
+
+    #[test]
+    fn each_expand_is_iterated_in_its_own_branch_computed_or_hit() {
+        let g = nested();
+        let mut eval = Fan {
+            hits: BTreeMap::from([hit("inner", &[1], items(&[0]))]),
+            ..Fan::default()
+        };
+        run(&g, &["outer_sum"], &[], &mut eval).unwrap();
+        // `inner` runs in branch 0 and is a hit in branch 1, so only branch 0 called it.
+        assert_eq!(eval.called("inner"), [vec![0]]);
+        assert_eq!(
+            eval.iterated,
+            asked(&[("outer", &[]), ("inner", &[0]), ("inner", &[1])])
+        );
     }
 
     #[test]

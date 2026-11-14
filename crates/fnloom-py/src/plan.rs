@@ -90,7 +90,8 @@ impl Plan {
     ///
     /// `on_value(name, value)` is called with each computed node's name and value right
     /// after that node succeeds and every observer has seen its `post_node`, before any
-    /// downstream node runs; never for an input, an override or a skipped optional input.
+    /// downstream node runs; never for an input, an override, a skipped optional input or
+    /// a node in a branch, whose value is one of many and goes to `late.store` instead.
     /// It is driven as one more observer, so an exception from it is raised like an
     /// observer's: as itself, after the closing `post_graph(ok=False)`.
     ///
@@ -179,7 +180,6 @@ impl Plan {
                 absent: absent::singleton(py)?,
                 outputs: self.core.outputs(),
                 calls: &self.calls,
-                expanding: None,
                 late,
             },
             lookup,
@@ -371,8 +371,6 @@ struct Caller<'k, 'py, 'g> {
     outputs: &'k [NodeId],
     /// The keywords of each computed step, by node id.
     calls: &'k [Option<Call>],
-    /// The expand last called in a branch, with that branch: its items are read in it.
-    expanding: Option<(NodeId, Vec<usize>)>,
     /// A cached run's late keys, as `Plan.run`'s `late` describes; `None` uncached.
     late: Option<&'k Bound<'py, PyAny>>,
 }
@@ -410,9 +408,6 @@ impl<'py> Evaluate<Py<PyAny>> for Caller<'_, 'py, '_> {
     ) -> PyResult<Value<'py>> {
         if branch.is_empty() {
             return self.evaluate(node, function, args);
-        }
-        if node.is_expand() {
-            self.expanding = Some((node.id, branch.to_vec()));
         }
         let py = self.kwargs.py;
         let current = branch_variable(py)?.bind(py);
@@ -453,7 +448,12 @@ fn branch_variable(py: Python<'_>) -> PyResult<&'static Py<PyAny>> {
 /// Blocks through Python: an expand's items come from the iterator its node's factory
 /// makes (`fnloom._blocks.Items`), and a collect argument is a `list`.
 impl<'py> Blocks<Py<PyAny>, Value<'py>, PyErr> for Caller<'_, 'py, '_> {
-    fn iterate(&mut self, node: &Node<Py<PyAny>>, iterable: &Value<'py>) -> PyResult<Value<'py>> {
+    fn iterate(
+        &mut self,
+        node: &Node<Py<PyAny>>,
+        iterable: &Value<'py>,
+        branch: &[usize],
+    ) -> PyResult<Value<'py>> {
         let py = self.kwargs.py;
         let Some(factory) = self.kwargs.graph.items(node.id) else {
             return Err(PyRuntimeError::new_err(format!(
@@ -467,10 +467,7 @@ impl<'py> Blocks<Py<PyAny>, Value<'py>, PyErr> for Caller<'_, 'py, '_> {
             record = caught(|| late.call_method1(intern!(py, "records"), (name,)))?.is_truthy()?;
         }
         // A generator's body runs as its items are read, so in the expand's branch.
-        let branch = match self.expanding.take() {
-            Some((id, branch)) if id == node.id => PyTuple::new(py, branch)?,
-            _ => PyTuple::empty(py),
-        };
+        let branch = PyTuple::new(py, branch)?;
         caught(|| factory.bind(py).call1((iterable, record, branch)))
     }
 
@@ -553,6 +550,20 @@ struct ValueHook<'py, 'g> {
 }
 
 impl<'py> Observer<Value<'py>, PyErr> for ValueHook<'py, '_> {
+    /// A node in a branch is left out: its name alone would not say which value it is.
+    fn post_node_in(
+        &mut self,
+        node: &str,
+        branch: &[usize],
+        outcome: Result<&Value<'py>, &PyErr>,
+    ) -> PyResult<()> {
+        if branch.is_empty() {
+            self.post_node(node, outcome)
+        } else {
+            Ok(())
+        }
+    }
+
     fn post_node(&mut self, node: &str, outcome: Result<&Value<'py>, &PyErr>) -> PyResult<()> {
         let Ok(value) = outcome else {
             return Ok(());
@@ -628,18 +639,14 @@ impl<'py> Caller<'_, 'py, '_> {
         } else {
             match self.calls.get(consumer.id.index()) {
                 Some(Some(call)) if call.args.iter().eq(args.iter().map(|arg| &arg.node)) => {
-                    vectorcall(function.bind(py), values(args), Some(&call.names))?
+                    vectorcall(function.bind(py), values(args), &call.names)?
                 }
                 // Arguments other than the step's own, as an omitted optional one makes.
                 _ => {
                     let names = args
                         .iter()
                         .map(|arg| keyword_for(py, self.kwargs.graph, consumer.id, arg.node));
-                    vectorcall(
-                        function.bind(py),
-                        values(args),
-                        Some(&Keywords::new(py, names)?),
-                    )?
+                    vectorcall(function.bind(py), values(args), &Keywords::new(py, names)?)?
                 }
             }
         };

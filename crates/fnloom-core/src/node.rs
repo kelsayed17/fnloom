@@ -14,6 +14,12 @@ impl NodeId {
     }
 }
 
+/// `index` as a `u32`, for an id or an offset; a graph never holds more nodes, nor a
+/// plan more edges, than a `u32` can count.
+pub(crate) fn as_u32(index: usize) -> u32 {
+    u32::try_from(index).unwrap_or(u32::MAX)
+}
+
 /// A tag's value: one string, or several in the order the author wrote them.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TagValue {

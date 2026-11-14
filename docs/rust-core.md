@@ -87,10 +87,10 @@ block: they are computed once, before the expand, and shared by every branch.
   expand supplies its items, and one of a collect cuts its block. `plan.is_late(node)` says whether a step is
   downstream of an expand.
 - **Run.** A plan with an expand step needs an evaluator that opts in to blocks: `Evaluate::blocks` returns a
-  `&mut dyn Blocks`, which `iterate`s an expand's value, gives each `next_item` (`Item::Next`, `Item::Done`, or
-  `Item::Declined` when the iterator declines after yielding), `finish_items` once exhausted or stopped, and
-  `gather`s a collect's argument from the branches' values. The default has none, and such a plan then fails with
-  `RunError::BrokenPlan`.
+  `&mut dyn Blocks`, which `iterate`s an expand's value in the branch the expand ran in, gives each `next_item`
+  (`Item::Next`, `Item::Done`, or `Item::Declined` when the iterator declines after yielding), `finish_items` once
+  exhausted or stopped, and `gather`s a collect's argument from the branches' values. The default has none, and such
+  a plan then fails with `RunError::BrokenPlan`.
 
 Branches run in **reference order**: the outer steps in plan order, and at an expand step, pull item 0, run branch
 0's steps to the end, pull item 1, and so on, then the next outer step. Nested blocks repeat this inside a branch, on
@@ -140,8 +140,9 @@ aborts the run, and `post_graph(false)` still runs so observers can close what t
 - `RunError<E>`: `Node` (a payload failed, with any observer errors raised while handling it, and the branch it
   failed in), `Observers` (the
   first failing event and every error raised in it), `MissingValues` (a map lacked a name the plan reads; raised
-  before any hook fires), or `BrokenPlan` (the plan's own state is inconsistent, which is a bug). Run a plan only on
-  the graph it was prepared from: on another graph it may read the wrong nodes, or panic.
+  before any hook fires), or `BrokenPlan` (the plan's own state is inconsistent, which is a bug). Its message shows a
+  branch as `run::branch_text` writes it, a Python tuple such as `(0, 1)`. Run a plan only on the graph it was
+  prepared from: on another graph it may read the wrong nodes, or panic.
 
 ## Guarantees
 

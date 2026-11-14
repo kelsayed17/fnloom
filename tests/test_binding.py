@@ -1,6 +1,7 @@
 """Tests for the native binding `fnloom._core`: graphs, plans, runs and errors."""
 
 import ast
+import functools
 import gc
 import sys
 import weakref
@@ -11,7 +12,7 @@ from typing import Any, Literal, override
 import blake3
 import pytest
 
-from fnloom import _core
+from fnloom import _blocks, _core
 
 type Kind = Literal["required", "optional", "admits", "admits_optional"]
 type NodeTuple = tuple[
@@ -816,6 +817,31 @@ class _SkipsOnly(_core.ObserverBase):
         self.skips.append((node, branch))
 
 
+class _Counted(_core.ObserverBase):
+    """Overrides `post_node` alone, and counts every hook it is asked for."""
+
+    def __init__(self) -> None:
+        self.asked: list[str] = []
+
+    @override
+    def __getattribute__(self, name: str) -> Any:
+        if name in {"skipped", "post_expand", "hit_in"}:
+            object.__getattribute__(self, "asked").append(name)
+        return object.__getattribute__(self, name)
+
+    @override
+    def post_node(
+        self,
+        node: str,
+        *,
+        ok: bool,
+        value: object,
+        error: BaseException | None,
+        branch: tuple[int, ...] = (),
+    ) -> None:
+        del node, ok, value, error, branch
+
+
 def _declined(**_: object) -> object:
     return _core.ABSENT
 
@@ -833,3 +859,43 @@ def test_an_observer_hears_only_the_events_its_class_overrides() -> None:
     assert plan.run({}, {}, (post, skips))["b"] is _core.ABSENT
     assert post.ended == ["a"]
     assert skips.skips == [("b", ())]
+
+
+def test_a_skip_is_not_sent_to_an_observer_whose_class_does_not_override_it() -> None:
+    """Like `post_expand` and `hit_in`, `skipped` goes only where it is overridden."""
+    graph = _core.Graph(
+        [
+            ("a", [], {}, _declined, True, None),
+            ("b", [("a", "required", None)], {}, _add_one, False, None),
+        ]
+    )
+    counted = _Counted()
+    assert graph.prepare(["b"], [], []).run({}, {}, (counted,))["b"] is _core.ABSENT
+    assert counted.asked == []
+
+
+def _total(sq: list[int]) -> int:
+    return sum(sq)
+
+
+def _items(node: str) -> Callable[..., Any]:
+    return functools.partial(_blocks.Items, node, None)
+
+
+def test_on_value_hears_no_node_in_a_branch() -> None:
+    """A block node has a value per branch, which `on_value` could not tell apart.
+
+    It hears the expand and the collect, which run outside the block, once each.
+    """
+    graph = _core.Graph(
+        [
+            ("xs", [], {}, lambda: [1, 2, 3], False, _items("xs")),
+            ("sq", [("xs", "required", None)], {}, lambda xs: xs * xs, False, None),
+            ("total", [("sq", "required", "all")], {}, _total, False, None),
+        ]
+    )
+    heard: list[str] = []
+    plan = graph.prepare(["total"], [], [])
+    result = plan.run({}, {}, on_value=lambda name, _value: heard.append(name))
+    assert result == {"total": 14}
+    assert heard == ["xs", "total"]
