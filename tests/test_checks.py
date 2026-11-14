@@ -4,6 +4,12 @@ import asyncio
 import contextlib
 import importlib
 import logging
+import os
+import subprocess
+import sys
+import warnings
+from decimal import Decimal
+from fractions import Fraction
 from typing import TYPE_CHECKING, Any, cast, override
 
 import pytest
@@ -14,6 +20,7 @@ from helpers import make_module
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
+    from pathlib import Path
 
 
 # Imported once, here: the helpers forget modules a test imports, and numpy
@@ -284,6 +291,75 @@ def b(x: int) -> int:
         "a: check range does not apply to str\n"
         "b: check contains applies to str, not int"
     )
+
+
+@pytest.mark.parametrize(
+    "returns",
+    ["str | None", "Name | None", "Name", "Literal['a', 'b']", "bytes | None"],
+)
+@pytest.mark.parametrize(
+    "check", ["range=(0, 1)", "allow_nans=False", "max_fraction_nans=0.5"]
+)
+def test_a_number_check_refuses_text_however_it_is_spelt(
+    returns: str, check: str
+) -> None:
+    """Text in a union with `None`, a `NewType` or a `Literal`: refused at build (Q101).
+
+    Such a node built, then failed every run.
+    """
+    source = f"""
+from typing import Literal, NewType
+from fnloom import check_output
+
+Name = NewType("Name", str)
+
+@check_output({check})
+def a(x: int) -> {returns}:
+    return None
+"""
+    name = check.partition("=")[0]
+    with pytest.raises(TypeError, match=f"a: check {name} does not apply to"):
+        _driver(source, "unreadable_text")
+
+
+@pytest.mark.parametrize("returns", ["int | None", "int | str", "Literal[1, 2]"])
+def test_a_number_check_takes_a_union_that_may_be_a_number(returns: str) -> None:
+    """A union with a numeric arm, or a `Literal` of numbers, may pass the check."""
+    source = f"""
+from typing import Literal
+from fnloom import check_output
+
+@check_output(range=(0, 9))
+def a(x: int) -> {returns}:
+    return 1
+"""
+    assert _driver(source, "readable_number").execute(["a"], inputs={"x": 1}) == {
+        "a": 1
+    }
+
+
+@pytest.mark.parametrize("fraction", ["0.5", b"0.5", [0.5], True, float("nan")])
+def test_max_fraction_nans_must_be_a_fraction(fraction: object) -> None:
+    """A text or other non-number is refused as out of range, naming the argument."""
+    with pytest.raises(ValueError, match=r"max_fraction_nans must be in \[0, 1\]"):
+        check_output(max_fraction_nans=fraction)  # ty: ignore[invalid-argument-type]
+
+
+def test_max_fraction_nans_takes_any_number_float_reads() -> None:
+    """A `Decimal` or `Fraction` is read as its float, as before."""
+    for fraction in (Decimal("0.5"), Fraction(1, 2), 1):
+        check_output(max_fraction_nans=fraction)  # ty: ignore[invalid-argument-type]
+
+
+def test_an_annotation_that_raises_names_its_function() -> None:
+    """The build's error carries a note naming the function whose annotation raised."""
+    source = """
+def a(x: int) -> "int | 3":
+    return x
+"""
+    with pytest.raises(TypeError) as caught:
+        _driver(source, "raising_annotation")
+    assert "in the annotations of a" in caught.value.__notes__
 
 
 TEXTUAL = """
@@ -618,6 +694,124 @@ def a(x: int) -> int:
     assert outcome.status == "uncacheable"
     assert outcome.reason is not None
     assert "check Holds" in outcome.reason
+
+
+def test_a_check_whose_version_fails_makes_the_node_uncacheable() -> None:
+    """The cached build goes on, as the uncached one does, and says why."""
+    source = """
+from fnloom import check_output_custom, register_fingerprint
+
+class Broken:
+    pass
+
+def _refuse(value: Broken) -> object:
+    raise ZeroDivisionError("no fingerprint")
+
+register_fingerprint(Broken, _refuse)
+
+def _positive(value: int, limit: Broken = Broken()) -> bool:
+    return value > 0
+
+@check_output_custom(_positive)
+def a(x: int) -> int:
+    return x
+"""
+    module = make_module("failing_check_version", source)
+    with pytest.warns(fnloom.CacheWarning, match="ZeroDivisionError"):
+        driver = (
+            fnloom.Builder()
+            .with_modules(module)
+            .with_cache(fnloom.MemoryCache())
+            .build()
+        )
+    assert driver.execute(["a"], inputs={"x": 1}) == {"a": 1}
+    outcome = driver.explain_cache(["a"], inputs={"x": 1})["a"]
+    assert outcome.status == "uncacheable"
+    assert outcome.reason is not None
+    assert "check _positive" in outcome.reason
+
+
+def test_a_check_whose_version_fails_warns_once_through_a_disable_producer() -> None:
+    """The field keyed through its `disable` producer says nothing twice."""
+    source = """
+from fnloom import cache, check_output_custom, extract_fields, register_fingerprint
+
+class Broken:
+    pass
+
+def _refuse(value: Broken) -> object:
+    raise ZeroDivisionError("no fingerprint")
+
+register_fingerprint(Broken, _refuse)
+
+def _positive(value: dict, limit: Broken = Broken()) -> bool:
+    return bool(value)
+
+@cache(behavior="disable", fields={"total": "default"})
+@extract_fields({"total": int})
+@check_output_custom(_positive)
+def report(x: int) -> dict:
+    return {"total": x}
+"""
+    module = make_module("failing_check_shadow", source)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fnloom.Builder().with_modules(module).with_cache(fnloom.MemoryCache()).build()
+    assert [str(w.message).count("ZeroDivisionError") for w in caught] == [1]
+
+
+VALIDATOR_WITH_A_SET = """
+import sys
+
+from fnloom import Builder, DiskCache, Validator, check_output_custom, extract_fields
+
+class Allowed(Validator):
+    def __init__(self) -> None:
+        super().__init__()
+        self.allowed = {"north", "south", "east", "west"}
+
+    def validate(self, value, inputs):
+        return value in self.allowed
+
+@check_output_custom(Allowed())
+def a(x: str) -> str:
+    return x
+
+@extract_fields({"tags": frozenset}, fill_with=frozenset({"north", "south", "east"}))
+def found(x: str) -> dict:
+    return {}
+
+def b(tags: frozenset) -> int:
+    return len(tags)
+
+if __name__ == "__main__":
+    driver = Builder().with_modules(sys.modules[__name__]).with_cache(
+        DiskCache(sys.argv[1])
+    ).build()
+    explained = driver.explain_cache(["a", "b"], inputs={"x": "north"})
+    print(explained["a"].status, explained["b"].status)
+    driver.execute(["a", "b"], inputs={"x": "north"})
+"""
+
+
+def test_a_check_or_fill_holding_a_set_hits_in_another_process(tmp_path: Path) -> None:
+    """Its attributes are keyed the same on every hash seed, as a `value()` is.
+
+    So is a `fill_with=` holding a set, which keys the node reading its field.
+    """
+    script = tmp_path / "validated.py"
+    script.write_text(VALIDATOR_WITH_A_SET)
+    statuses = [
+        subprocess.run(  # noqa: S603  # runs this interpreter on a fixed script
+            [sys.executable, str(script), str(tmp_path / "cache")],
+            capture_output=True,
+            check=True,
+            text=True,
+            env={**os.environ, "PYTHONHASHSEED": seed},
+        ).stdout.strip()
+        for seed in ("1", "2", "3")
+    ]
+    assert statuses == ["miss miss", "hit hit", "hit hit"]
 
 
 def test_a_failing_node_is_never_checked() -> None:
