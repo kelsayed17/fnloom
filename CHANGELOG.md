@@ -167,6 +167,10 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Fixed
 
+- A module file the CLI fails to import is taken off `sys.path` again, so a later load in the same process doesn't find
+  modules beside it.
+- `step(fn, x=group(...))` and `@mutate(apply_to(fn, x=group(...)))` are a `TypeError` naming the parameter: `group()`
+  binds a `@parameterize` row. The step took the `group` object itself as the value.
 - A frozen pydantic model holding a `set` or `frozenset` (in a field, a nested model, a container such as
   `dict[str, frozenset[str]]`, an extra field or a private attribute) is fingerprinted the same on every
   `PYTHONHASHSEED`: each set's members are sorted, as for a code version. Such a model used to key `DiskCache`

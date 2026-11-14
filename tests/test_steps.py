@@ -957,3 +957,17 @@ def f(a: int) -> int:
     module = make_module("self_read", source)
     with pytest.raises(ValueError, match=r"step 'eu\.a' reads 'a'.*itself, a cycle"):
         fnloom.Builder().with_modules(module, namespace="eu").build()
+
+
+def test_a_group_bound_to_a_step_is_refused() -> None:
+    """`group()` binds a parameterize row; a step or `@mutate` takes it as a mistake."""
+
+    def _join(x: list[int], extra: list[int]) -> list[int]:
+        return x + extra
+
+    with pytest.raises(TypeError, match=r"_join: group\(\) binds a parameterize row"):
+        fnloom.step(_join, extra=fnloom.group(fnloom.value(1)))
+    with pytest.raises(TypeError, match=r"_join: group\(\) binds a parameterize row"):
+        fnloom.mutate(fnloom.apply_to(_join, extra=fnloom.group(fnloom.value(1))))(
+            _join
+        )

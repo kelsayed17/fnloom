@@ -22,7 +22,7 @@ from fnloom._config import (
     matches,
     overlaid,
 )
-from fnloom._decorators import _ATTRIBUTE, RESOLVING, Source, Value, decorations
+from fnloom._decorators import _ATTRIBUTE, RESOLVING, Group, Source, Value, decorations
 from fnloom._extract import extractor
 from fnloom._fingerprint import fingerprint
 from fnloom._namespaces import checked_namespace, qualified
@@ -215,6 +215,14 @@ def _bound(
     ]
     if missing:
         msg = f"step {name}: unbound required parameters: {', '.join(missing)}"
+        raise TypeError(msg)
+    if grouped := sorted(
+        key for key, given in bound.items() if isinstance(given, Group)
+    ):
+        msg = (
+            f"step {name}: group() binds a parameterize row, not a step: "
+            f"{', '.join(grouped)}; give source() or value()"
+        )
         raise TypeError(msg)
     return {
         key: given if isinstance(given, (Source, Value)) else Value(given)

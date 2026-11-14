@@ -1,13 +1,15 @@
 """The `fnloom` command: loading, requests, each command's output, and errors."""
 
 import json
+import math
 import subprocess
 import sys
 import textwrap
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
 
+from fnloom import _cli
 from fnloom._cli import main
 from helpers import fake_dot
 
@@ -672,3 +674,24 @@ def test_outputs_from_a_context_file_make_a_run(
         "inputs": ["x"],
         "overrides": [],
     }
+
+
+def test_nan_and_infinity_are_floats() -> None:
+    """JSON as Python reads it, so a float input can be given one."""
+    found = _cli._pairs(["a=NaN", "b=Infinity", "c=-Infinity", "d=nan"], "-i")  # noqa: SLF001  # the parser itself
+    assert math.isnan(cast("float", found["a"]))
+    assert (found["b"], found["c"], found["d"]) == (math.inf, -math.inf, "nan")
+
+
+def test_a_failed_load_leaves_sys_path_as_it_was(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The file's folder is taken off `sys.path` again when importing it raises."""
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    broken = tmp_path / "broken_flow.py"
+    broken.write_text("raise RuntimeError('cannot load')\n")
+    before = list(sys.path)
+    status, _, err = _run(capsys, "validate", str(broken), "--outputs", "b")
+    assert status == 1
+    assert "cannot load" in err
+    assert sys.path == before

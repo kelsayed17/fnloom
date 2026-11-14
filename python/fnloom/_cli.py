@@ -533,19 +533,28 @@ def _load_file(target: str) -> ModuleType:
         raise _UsageError(msg)
     module = importlib.util.module_from_spec(found)
     # Its folder goes on `sys.path` only now, once the file is accepted.
-    if str(path.parent) not in sys.path:
-        sys.path.insert(0, str(path.parent))
+    folder = str(path.parent)
+    added = folder not in sys.path
+    if added:
+        sys.path.insert(0, folder)
     sys.modules[name] = module
     try:
         found.loader.exec_module(module)
     except BaseException:
+        # A failed load leaves nothing behind for the next one to find.
         del sys.modules[name]
+        if added:
+            sys.path.remove(folder)
         raise
     return module
 
 
 def _pairs(items: Sequence[str], flag: str) -> dict[str, object]:
-    """`KEY=VALUE` items as a dict; each `VALUE` JSON, or else a plain string."""
+    """`KEY=VALUE` items as a dict; each `VALUE` JSON, or else a plain string.
+
+    JSON as Python reads it: `NaN`, `Infinity` and `-Infinity` are floats, so a
+    float input can be given one.
+    """
     found: dict[str, object] = {}
     for item in items:
         key, equals, text = item.partition("=")
