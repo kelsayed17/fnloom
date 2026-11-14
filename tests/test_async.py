@@ -2,8 +2,10 @@
 
 import asyncio
 import copy
+import gc
 import pickle
 import threading
+import weakref
 from typing import TYPE_CHECKING, Any, override
 
 import pytest
@@ -1394,3 +1396,19 @@ def test_alternating_async_drivers_keep_their_plans() -> None:
     )
     assert again[0] is first[0]
     assert again[1] is first[1]
+
+
+def test_async_plans_go_with_the_plans_the_driver_drops() -> None:
+    """Past the plan cache's size, the async plans of dropped plans are freed."""
+    count = fnloom.driver.PLAN_CACHE_SIZE + 50
+    source = "".join(
+        f"def n{i}(x: int) -> int:\n    return x\n\n" for i in range(count)
+    )
+    driver = (
+        fnloom.Builder().with_modules(make_module("async_many", source)).build_async()
+    )
+    made = [
+        weakref.ref(driver.prepare([f"n{i}"], inputs={"x": 1})) for i in range(count)
+    ]
+    gc.collect()
+    assert sum(ref() is not None for ref in made) <= fnloom.driver.PLAN_CACHE_SIZE

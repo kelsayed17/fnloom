@@ -8,7 +8,6 @@ import inspect
 import sys
 import threading
 import typing
-import weakref
 
 # Imported for real, not under TYPE_CHECKING: the public signatures annotate with
 # them, and `inspect.signature` resolves those annotations at run time.
@@ -534,7 +533,9 @@ class PreparedPlan[R = dict[str, object]]:
         self._build: _ResultBuilder[R] | None = None
         # The driver that prepared this plan, which pickling rebuilds it through.
         self._driver: Driver[R] | None = None
-        # This plan as an `AsyncDriver` runs it, made on its first async use.
+        # This plan as each `AsyncDriver` over its driver runs it, made on first
+        # use: kept here, so it goes when the driver drops this plan.
+        self._async: dict[AsyncDriver[R], AsyncPreparedPlan[R]] = {}
 
     @override
     def __reduce__(
@@ -2136,11 +2137,6 @@ class AsyncDriver[R = dict[str, object]]:
         self._nodes = nodes
         self._sync_nodes: Literal["thread", "inline"] = sync_nodes
         self._calls = _async.calls(nodes, sync_nodes)
-        # This driver's async form of each of its `Driver`'s plans, which another
-        # AsyncDriver over the same `Driver` keeps apart; gone with the plan.
-        self._plans: weakref.WeakKeyDictionary[
-            PreparedPlan[R], AsyncPreparedPlan[R]
-        ] = weakref.WeakKeyDictionary()
         # The builder that built this driver, which pickling rebuilds it from.
         self._builder: Builder[R] | None = None
 
@@ -2347,7 +2343,7 @@ class AsyncDriver[R = dict[str, object]]:
         keeps them.
         """
         prepared = self._driver.prepare(final_vars, inputs=inputs, overrides=overrides)
-        plan = self._plans.get(prepared)
+        plan = prepared._async.get(self)  # noqa: SLF001  # this driver's own plan
         if plan is None:
             runnable = prepared._plan  # noqa: SLF001  # this driver's own plan
             schedule: _async.Schedule | _async.CachedSchedule
@@ -2366,7 +2362,7 @@ class AsyncDriver[R = dict[str, object]]:
             else:
                 plan = AsyncPreparedPlan(prepared, self, schedule)
             # Two threads may both get here: either plan will do, and one is kept.
-            self._plans[prepared] = plan
+            prepared._async[self] = plan  # noqa: SLF001  # this driver's own plan
         return plan
 
     def validate(
