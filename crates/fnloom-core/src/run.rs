@@ -479,27 +479,22 @@ impl Plan {
         }
     }
 
-    /// The slot table with every input and override value placed: by step position
-    /// without an expand, so the table is the plan's size; by node id with one.
+    /// The slot table with every input and override value placed, by node id.
     fn seed<P, T: Clone, E>(
         &self,
         graph: &Graph<P>,
         mut lookup: impl FnMut(Action, NodeId) -> Option<T>,
     ) -> Result<Vec<Option<T>>, RunError<E>> {
-        let expands = self.has_expands();
-        let count = if expands {
-            graph.nodes().len()
-        } else {
-            self.steps().len()
-        };
-        let mut slots = vec![None; count];
+        let mut slots = vec![None; graph.nodes().len()];
         let mut missing = Vec::new();
-        for (position, step) in self.steps().iter().enumerate() {
+        for step in self.steps() {
             if !matches!(step.action, Action::UseInput | Action::UseOverride) {
                 continue;
             }
-            let slot = if expands { step.node.index() } else { position };
-            match (lookup(step.action, step.node), slots.get_mut(slot)) {
+            match (
+                lookup(step.action, step.node),
+                slots.get_mut(step.node.index()),
+            ) {
                 (Some(value), Some(slot)) => *slot = Some(value),
                 _ => missing.push(graph.node(step.node).name.clone()),
             }
@@ -527,23 +522,19 @@ impl Plan {
         mut slots: Vec<Option<V::Value>>,
         hooks: &mut Hooks<'_, '_, V::Value, V::Error>,
     ) -> Result<Outputs<V::Value>, RunError<V::Error>> {
-        // Each step's argument and release slots come next in these, as many as it has.
-        let (mut arg_slots, mut release_slots) = (self.arg_slots(), self.release_slots());
-        for (slot, step) in self.steps().iter().enumerate() {
-            let args = next_slots(&mut arg_slots, step.args.len());
+        for step in self.steps() {
             if step.action == Action::Compute {
-                let value = compute(graph, eval, hooks, step, args, &slots)?;
-                store(&mut slots, slot, Some(value));
+                let value = compute(graph, eval, hooks, step, &slots)?;
+                store(&mut slots, step.node, Some(value));
             }
-            for &dead in next_slots(&mut release_slots, step.release.len()) {
-                store(&mut slots, dead as usize, None);
+            for &dead in &step.release {
+                store(&mut slots, dead, None);
             }
         }
         self.outputs()
             .iter()
-            .zip(self.output_slots(self.outputs().len()))
             .map(
-                |(&id, slot)| match slot.and_then(|at| slots.get_mut(at)).and_then(Option::take) {
+                |&id| match slots.get_mut(id.index()).and_then(Option::take) {
                     Some(value) => Ok((id, value)),
                     None => Err(broken(format!(
                         "output '{}' has no value at the end",
@@ -577,12 +568,11 @@ impl Plan {
                 })
             })
             .collect();
-        let (mut arg_slots, mut release_slots) = (self.arg_slots(), self.release_slots());
-        for (position, step) in self.steps().iter().enumerate() {
+        for step in self.steps() {
             let node = graph.node(step.node);
             match step.action {
                 Action::UseOverride if node.may_be_absent => {
-                    if let Some(slot) = slots.get_mut(position).and_then(Option::as_mut) {
+                    if let Some(slot) = slots.get_mut(step.node.index()).and_then(Option::as_mut) {
                         slot.absent = eval.is_absent(&slot.value);
                     }
                 }
@@ -590,8 +580,7 @@ impl Plan {
                     let Some(payload) = node.payload() else {
                         return Err(planned_to_compute(node));
                     };
-                    let args = next_slots(&mut arg_slots, step.args.len());
-                    let slot = match gather_by_rules(graph, step, args, &slots)? {
+                    let slot = match gather_by_rules(graph, step, &slots)? {
                         Gathered::Args(args) => {
                             let value = call(eval, hooks, node, payload, &args)?;
                             let absent = node.declines && eval.is_absent(&value);
@@ -605,19 +594,18 @@ impl Plan {
                             }
                         }
                     };
-                    store(&mut slots, position, Some(slot));
+                    store(&mut slots, step.node, Some(slot));
                 }
                 _ => {}
             }
-            for &dead in next_slots(&mut release_slots, step.release.len()) {
-                store(&mut slots, dead as usize, None);
+            for &dead in &step.release {
+                store(&mut slots, dead, None);
             }
         }
         self.outputs()
             .iter()
-            .zip(self.output_slots(self.outputs().len()))
             .map(
-                |(&id, slot)| match slot.and_then(|at| slots.get_mut(at)).and_then(Option::take) {
+                |&id| match slots.get_mut(id.index()).and_then(Option::take) {
                     Some(slot) => Ok((id, slot.value)),
                     None => Err(broken(format!(
                         "output '{}' has no value at the end",
@@ -647,19 +635,15 @@ enum Gathered<'g, V> {
 fn gather_by_rules<'g, P, T: Clone, E>(
     graph: &'g Graph<P>,
     step: &Step,
-    arg_slots: &[u32],
     slots: &[Option<Slot<T>>],
 ) -> Result<Gathered<'g, T>, RunError<E>> {
     let consumer = graph.node(step.node);
-    if arg_slots.len() != step.args.len() {
-        return Err(short_of_slots(graph, step));
-    }
     // The consumer's edges sorted by input id, made on its first absent argument.
     let mut edges: Option<Vec<(NodeId, Dependency)>> = None;
     let mut args = Vec::with_capacity(step.args.len());
-    for (&id, &at) in step.args.iter().zip(arg_slots) {
+    for &id in &step.args {
         let name = graph.node(id).name.as_str();
-        let Some(slot) = slots.get(at as usize).and_then(Option::as_ref) else {
+        let Some(slot) = slots.get(id.index()).and_then(Option::as_ref) else {
             // A planned argument is always produced earlier and not yet released.
             return Err(broken(format!(
                 "argument '{name}' of node '{}' has no value",
@@ -702,15 +686,6 @@ pub(crate) fn planned_to_compute<P, E>(node: &Node<P>) -> RunError<E> {
     broken(format!("input node '{}' planned to compute", node.name))
 }
 
-/// The `RunError::BrokenPlan` for a step whose packed argument slots run short.
-#[cold]
-fn short_of_slots<P, E>(graph: &Graph<P>, step: &Step) -> RunError<E> {
-    broken(format!(
-        "node '{}' has fewer argument slots than arguments",
-        graph.node(step.node).name
-    ))
-}
-
 /// A `RunError::BrokenPlan` with no observer errors yet; the closing hook adds any.
 pub(crate) const fn broken<E>(detail: String) -> RunError<E> {
     RunError::BrokenPlan {
@@ -719,16 +694,8 @@ pub(crate) const fn broken<E>(detail: String) -> RunError<E> {
     }
 }
 
-/// The next `len` of a plain plan's packed slots, moving `packed` past them; fewer when
-/// it runs short, which a plan never does, and which `gather` then reports.
-fn next_slots<'p>(packed: &mut &'p [u32], len: usize) -> &'p [u32] {
-    let (these, rest) = packed.split_at_checked(len).unwrap_or((packed, &[]));
-    *packed = rest;
-    these
-}
-
-fn store<T>(slots: &mut [Option<T>], at: usize, value: Option<T>) {
-    if let Some(slot) = slots.get_mut(at) {
+fn store<T>(slots: &mut [Option<T>], id: NodeId, value: Option<T>) {
+    if let Some(slot) = slots.get_mut(id.index()) {
         *slot = value;
     }
 }
@@ -744,7 +711,6 @@ fn compute<P, V: Evaluate<P>>(
     eval: &mut V,
     hooks: &mut Hooks<'_, '_, V::Value, V::Error>,
     step: &Step,
-    arg_slots: &[u32],
     slots: &[Option<V::Value>],
 ) -> Result<V::Value, RunError<V::Error>> {
     let node = graph.node(step.node);
@@ -754,7 +720,7 @@ fn compute<P, V: Evaluate<P>>(
             node.name
         )));
     };
-    let args = gather(graph, step, arg_slots, slots)?;
+    let args = gather(graph, step, slots)?;
     call(eval, hooks, node, payload, &args)
 }
 
@@ -808,26 +774,16 @@ fn call<P, V: Evaluate<P>>(
 }
 
 /// The arguments of a step, values cloned from the slot table.
-#[expect(
-    clippy::inline_always,
-    reason = "the instruction-count gate measures the plain loop, which must not gain a call"
-)]
-#[inline(always)]
 fn gather<'g, P, T: Clone, E>(
     graph: &'g Graph<P>,
     step: &Step,
-    arg_slots: &[u32],
     slots: &[Option<T>],
 ) -> Result<Vec<Arg<'g, T>>, RunError<E>> {
-    if arg_slots.len() != step.args.len() {
-        return Err(short_of_slots(graph, step));
-    }
     step.args
         .iter()
-        .zip(arg_slots)
-        .map(|(&id, &at)| {
+        .map(|&id| {
             let name = graph.node(id).name.as_str();
-            match slots.get(at as usize).and_then(Option::as_ref) {
+            match slots.get(id.index()).and_then(Option::as_ref) {
                 Some(value) => Ok(Arg {
                     node: id,
                     name,
@@ -1468,29 +1424,6 @@ mod tests {
     }
 
     #[test]
-    fn a_small_plan_on_a_large_graph_keeps_a_table_of_its_own_size() {
-        let mut specs: Vec<_> = (0..1000)
-            .map(|i| valued(&format!("n{i:04}"), &["x"], 10))
-            .collect();
-        specs.push(valued("picked", &["n0500"], 1));
-        let g = Graph::build(specs).unwrap();
-        let plan = g.prepare(&request(&["picked"], &["x"], &[])).unwrap();
-        // `x`, `n0500` and `picked`: three steps, so three slots, of the graph's 1,002 nodes.
-        let slots = plan.seed::<_, i64, String>(&g, |_, _| Some(5)).unwrap();
-        assert_eq!(slots.len(), 3);
-        let outputs = plan
-            .run(
-                &g,
-                &mut Adder::default(),
-                &map(&[("x", 5)]),
-                &BTreeMap::new(),
-                &mut [],
-            )
-            .unwrap();
-        assert_eq!(outputs, map(&[("picked", 16)]));
-    }
-
-    #[test]
     fn a_chain_of_ten_thousand_nodes_runs_without_stack_overflow() {
         let last = 10_000;
         let specs: Vec<_> = (0..last)
@@ -1642,32 +1575,6 @@ mod tests {
                 .run(&g, &mut eval, &BTreeMap::new(), &BTreeMap::new(), &mut [])
                 .unwrap();
             assert_eq!(out, map(&[("opt", 27), ("req", 17)]));
-        }
-
-        #[test]
-        fn a_skip_leaves_the_next_steps_arguments_in_place() {
-            // `b` is skipped at its first argument, before reading `x`; `c` still gets `y`.
-            let g = Graph::build(vec![
-                declining("a", &[], ABSENT),
-                valued_spec(
-                    "b",
-                    &[("a", Dependency::Required), ("x", Dependency::Required)],
-                    10,
-                ),
-                valued_spec("c", &[("y", Dependency::Required)], 100),
-            ])
-            .unwrap();
-            let plan = g.prepare(&request(&["b", "c"], &["x", "y"], &[])).unwrap();
-            let out = plan
-                .run(
-                    &g,
-                    &mut Marker::default(),
-                    &map(&[("x", 5), ("y", 7)]),
-                    &BTreeMap::new(),
-                    &mut [],
-                )
-                .unwrap();
-            assert_eq!(out, map(&[("b", ABSENT), ("c", 107)]));
         }
 
         #[test]

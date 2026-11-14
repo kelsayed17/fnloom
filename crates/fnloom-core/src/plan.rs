@@ -91,21 +91,6 @@ pub struct Plan {
     /// packed; per node, its step's span in it. Both empty without an expand.
     arg_edges: Vec<u32>,
     arg_spans: Vec<(u32, u32)>,
-    /// Without an expand, a run keeps each step's value in the slot at the step's
-    /// position, so its table is the plan's size, not the graph's: every step's `args`,
-    /// then every step's `release`, as slots, packed in step order, and each output's
-    /// slot. All three empty with an expand, whose run keys its values by node id.
-    arg_slots: Vec<u32>,
-    release_slots: Vec<u32>,
-    output_slots: Vec<u32>,
-}
-
-/// A plain plan's steps and their slots, as `Plan` keeps them.
-struct Slotted {
-    steps: Vec<Step>,
-    arg_slots: Vec<u32>,
-    release_slots: Vec<u32>,
-    output_slots: Vec<u32>,
 }
 
 impl Plan {
@@ -119,22 +104,6 @@ impl Plan {
     #[must_use]
     pub fn outputs(&self) -> &[NodeId] {
         &self.outputs
-    }
-
-    /// The slot of each of a plain plan's `count` outputs, in `outputs` order; `None` past
-    /// the end of the table, which a plan never reaches.
-    pub(crate) fn output_slots(&self, count: usize) -> impl Iterator<Item = Option<usize>> + '_ {
-        (0..count).map(|at| self.output_slots.get(at).map(|&slot| slot as usize))
-    }
-
-    /// A plain plan's argument slots: each step's `args` as slots, packed in step order.
-    pub(crate) fn arg_slots(&self) -> &[u32] {
-        &self.arg_slots
-    }
-
-    /// A plain plan's release slots: each step's `release` as slots, packed in step order.
-    pub(crate) fn release_slots(&self) -> &[u32] {
-        &self.release_slots
     }
 
     /// Whether a planned node's value may be absent (`Node::may_be_absent`), so that the run
@@ -225,9 +194,8 @@ impl<P> Graph<P> {
         }
         let order = self.topological_order(&actions);
         let needs_rules = self.has_absence() && order.iter().any(|&id| self.node(id).may_be_absent);
-        let slotted = self.build_steps(&order, &actions, &resolved.outputs);
         Ok(Plan {
-            steps: slotted.steps,
+            steps: self.build_steps(&order, &actions, &resolved.outputs),
             outputs: resolved.outputs,
             needs_rules,
             blocks: Vec::new(),
@@ -236,9 +204,6 @@ impl<P> Graph<P> {
             late: Vec::new(),
             arg_edges: Vec::new(),
             arg_spans: Vec::new(),
-            arg_slots: slotted.arg_slots,
-            release_slots: slotted.release_slots,
-            output_slots: slotted.output_slots,
         })
     }
 
@@ -412,9 +377,6 @@ impl<P> Graph<P> {
             late,
             arg_edges,
             arg_spans,
-            arg_slots: Vec::new(),
-            release_slots: Vec::new(),
-            output_slots: Vec::new(),
         }
     }
 
@@ -715,11 +677,7 @@ impl<P> Graph<P> {
             if actions[index] != Some(Action::Compute) {
                 continue;
             }
-            for edge in node
-                .inputs
-                .iter()
-                .filter(|edge| !edge.dependency.has_default())
-            {
+            for edge in node.inputs.iter().filter(|edge| !edge.dependency.has_default()) {
                 let Some(at) = position[edge.node.index()] else {
                     continue;
                 };
@@ -796,7 +754,7 @@ impl<P> Graph<P> {
         order: &[NodeId],
         actions: &[Option<Action>],
         outputs: &[NodeId],
-    ) -> Slotted {
+    ) -> Vec<Step> {
         let mut steps: Vec<Step> = order
             .iter()
             .filter_map(|&node| {
@@ -809,19 +767,12 @@ impl<P> Graph<P> {
                 })
             })
             .collect();
-        // For each node passed as an argument, the position of the last step that reads it;
-        // and each step's slot, its position. Steps come in topological order, so an
-        // argument's slot is known by the step that reads it.
-        let count = self.nodes().len();
-        let mut last_use = vec![None; count];
-        let mut slot_of = vec![u32::MAX; count];
-        let mut arg_slots = Vec::with_capacity(steps.len());
+        // For each node passed as an argument, the position of the last step that reads it.
+        let mut last_use = vec![None; self.nodes().len()];
         for (position, step) in steps.iter().enumerate() {
             for &arg in &step.args {
                 last_use[arg.index()] = Some(position);
-                arg_slots.push(slot_of[arg.index()]);
             }
-            slot_of[step.node.index()] = index_u32(position);
         }
         for (node, position) in self.nodes().iter().zip(last_use) {
             if let Some(position) = position {
@@ -830,16 +781,7 @@ impl<P> Graph<P> {
                 }
             }
         }
-        let mut release_slots = Vec::with_capacity(steps.len());
-        for step in &steps {
-            release_slots.extend(step.release.iter().map(|id| slot_of[id.index()]));
-        }
-        Slotted {
-            output_slots: outputs.iter().map(|id| slot_of[id.index()]).collect(),
-            arg_slots,
-            release_slots,
-            steps,
-        }
+        steps
     }
 
     /// The inputs of a computed node that actually receive a value, sorted by id.
