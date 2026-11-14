@@ -191,7 +191,8 @@ pub trait Observer<V, E> {
     }
 
     /// Called instead of the node events when a computed node is skipped, because a
-    /// `Required` argument is absent: the node is then absent too. `branch` is empty.
+    /// `Required` argument is absent: the node is then absent too. `branch` is the branch
+    /// it was skipped in, empty outside every block.
     ///
     /// # Errors
     ///
@@ -321,8 +322,9 @@ impl<E: fmt::Display> fmt::Display for RunError<E> {
     }
 }
 
-/// A branch path as Python writes a tuple: `(2,)`, `(0, 1)`.
-pub(crate) fn branch_text(branch: &[usize]) -> String {
+/// A branch path as Python writes a tuple: `(2,)`, `(0, 1)`, as `RunError` shows it.
+#[must_use]
+pub fn branch_text(branch: &[usize]) -> String {
     if let [only] = branch {
         return format!("({only},)");
     }

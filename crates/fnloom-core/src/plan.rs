@@ -5,7 +5,7 @@ use std::collections::{BTreeSet, BinaryHeap};
 
 use crate::error::{MissingInput, OutputInBlock, PlanError};
 use crate::graph::Graph;
-use crate::node::{Node, NodeId, NodeKind};
+use crate::node::{Node, NodeId, NodeKind, as_u32};
 
 /// What to compute and what the caller supplies.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -303,7 +303,7 @@ impl<P> Graph<P> {
         let mut expands: Vec<NodeId> = Vec::new();
         for node in self.nodes() {
             if entered[node.id.index()] {
-                block_of[node.id.index()] = Some(BlockId(index_u32(expands.len())));
+                block_of[node.id.index()] = Some(BlockId(as_u32(expands.len())));
                 expands.push(node.id);
             }
         }
@@ -345,9 +345,9 @@ impl<P> Graph<P> {
         let mut arg_edges: Vec<u32> = Vec::new();
         let mut arg_spans = vec![(0, 0); count];
         for step in scopes.iter().flatten() {
-            let start = index_u32(arg_edges.len());
+            let start = as_u32(arg_edges.len());
             self.push_edges_of_args(step, &mut arg_edges);
-            arg_spans[step.node.index()] = (start, index_u32(arg_edges.len()));
+            arg_spans[step.node.index()] = (start, as_u32(arg_edges.len()));
         }
         let needs_rules = self.has_absence()
             && self
@@ -388,7 +388,7 @@ impl<P> Graph<P> {
         let mut by_source: Vec<(NodeId, u32)> = inputs
             .iter()
             .enumerate()
-            .map(|(at, edge)| (edge.node, index_u32(at)))
+            .map(|(at, edge)| (edge.node, as_u32(at)))
             .collect();
         by_source.sort_unstable();
         let mut sources = by_source.into_iter().peekable();
@@ -519,7 +519,7 @@ impl<P> Graph<P> {
             let Some((at, position)) = place else {
                 continue;
             };
-            let id = NodeId(index_u32(index));
+            let id = NodeId(as_u32(index));
             if at == 0 && outputs.binary_search(&id).is_ok() {
                 continue;
             }
@@ -791,11 +791,6 @@ impl<P> Graph<P> {
         args.sort_unstable();
         args
     }
-}
-
-/// `index` as a `u32` id; a graph never holds more nodes than ids can count.
-fn index_u32(index: usize) -> u32 {
-    u32::try_from(index).unwrap_or(u32::MAX)
 }
 
 #[cfg(test)]
