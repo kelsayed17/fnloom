@@ -55,7 +55,8 @@ impl Plan {
     ///
     /// `on_value(name, value)` is called with each computed node's name and value right
     /// after that node succeeds and every observer has seen its `post_node`, before any
-    /// downstream node runs; never for an input, an override or a skipped optional input.
+    /// downstream node runs; never for an input, an override, a skipped optional input or
+    /// a node in a branch, whose value is one of many and goes to `late.store` instead.
     /// It is driven as one more observer, so an exception from it is raised like an
     /// observer's: as itself, after the closing `post_graph(ok=False)`.
     ///
@@ -143,7 +144,6 @@ impl Plan {
                 shared,
                 absent: absent::singleton(py)?,
                 outputs: self.plan.outputs(),
-                expanding: None,
                 late,
             },
             lookup,
@@ -314,8 +314,6 @@ struct Caller<'k, 'py, 'g> {
     absent: &'static Py<Absent>,
     /// The plan's outputs, sorted by id: an expand among them records its items.
     outputs: &'k [NodeId],
-    /// The expand last called in a branch, with that branch: its items are read in it.
-    expanding: Option<(NodeId, Vec<usize>)>,
     /// A cached run's late keys, as `Plan.run`'s `late` describes; `None` uncached.
     late: Option<&'k Bound<'py, PyAny>>,
 }
@@ -353,9 +351,6 @@ impl Evaluate<Py<PyAny>> for Caller<'_, '_, '_> {
     ) -> PyResult<Value> {
         if branch.is_empty() {
             return self.evaluate(node, function, args);
-        }
-        if node.is_expand() {
-            self.expanding = Some((node.id, branch.to_vec()));
         }
         let py = self.kwargs.py;
         let current = branch_variable(py)?.bind(py);
@@ -396,7 +391,12 @@ fn branch_variable(py: Python<'_>) -> PyResult<&'static Py<PyAny>> {
 /// Blocks through Python: an expand's items come from the iterator its node's factory
 /// makes (`fnloom._blocks.Items`), and a collect argument is a `list`.
 impl Blocks<Py<PyAny>, Value, PyErr> for Caller<'_, '_, '_> {
-    fn iterate(&mut self, node: &Node<Py<PyAny>>, iterable: &Value) -> PyResult<Value> {
+    fn iterate(
+        &mut self,
+        node: &Node<Py<PyAny>>,
+        iterable: &Value,
+        branch: &[usize],
+    ) -> PyResult<Value> {
         let py = self.kwargs.py;
         let Some(factory) = self.kwargs.graph.items(node.id) else {
             return Err(PyRuntimeError::new_err(format!(
@@ -410,10 +410,7 @@ impl Blocks<Py<PyAny>, Value, PyErr> for Caller<'_, '_, '_> {
             record = caught(|| late.call_method1(intern!(py, "records"), (name,)))?.is_truthy()?;
         }
         // A generator's body runs as its items are read, so in the expand's branch.
-        let branch = match self.expanding.take() {
-            Some((id, branch)) if id == node.id => PyTuple::new(py, branch)?,
-            _ => PyTuple::empty(py),
-        };
+        let branch = PyTuple::new(py, branch)?;
         caught(|| {
             factory
                 .bind(py)
@@ -501,6 +498,20 @@ struct ValueHook<'py, 'g> {
 }
 
 impl Observer<Value, PyErr> for ValueHook<'_, '_> {
+    /// A node in a branch is left out: its name alone would not say which value it is.
+    fn post_node_in(
+        &mut self,
+        node: &str,
+        branch: &[usize],
+        outcome: Result<&Value, &PyErr>,
+    ) -> PyResult<()> {
+        if branch.is_empty() {
+            self.post_node(node, outcome)
+        } else {
+            Ok(())
+        }
+    }
+
     fn post_node(&mut self, node: &str, outcome: Result<&Value, &PyErr>) -> PyResult<()> {
         let Ok(value) = outcome else {
             return Ok(());

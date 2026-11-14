@@ -749,3 +749,13 @@ def test_disk_an_absent_entry_under_another_serializer_is_a_quiet_miss(
         tmp_path, dumps=_identity, loads=_identity_loads, serializer="bytes"
     )
     _quiet_miss(other, _key(1), _entry(tmp_path, _key(1)))
+
+
+def test_memory_drops_the_old_value_when_the_new_one_cannot_be_sized() -> None:
+    """A put replaces what `key` held, even when the new value can't be stored."""
+    store = MemoryCache(max_bytes=1000)
+    store.put(_key(1), 1)
+    with pytest.warns(CacheWarning, match="cannot size a _Unsizable"):
+        store.put(_key(1), _Unsizable())
+    assert store.get(_key(1)) is MISSING
+    assert len(store) == 0

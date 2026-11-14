@@ -202,28 +202,33 @@ impl MemoryStore {
 
     /// Stores `value` under `key`, evicting the least recently used past a bound.
     pub fn store(&self, py: Python<'_>, key: &Digest, value: Py<PyAny>) -> PyResult<()> {
+        // `None` for a value that can't be sized, which is not stored.
         let size = match (&self.sizeof, self.max_bytes) {
             (Some(sizeof), Some(_)) => {
                 let size = sizeof.bind(py).call1((value.bind(py),))?;
                 if size.is_none() {
-                    return Ok(());
+                    None
+                } else {
+                    Some(size.extract::<usize>()?)
                 }
-                size.extract::<usize>()?
             }
-            _ => 0,
+            _ => Some(0),
         };
         // Released after the lock, in case releasing one runs code that uses the store.
         let mut evicted: Vec<Entry> = Vec::new();
         {
             let mut lru = self.lock();
             let key = Key(*key);
+            // Whatever `key` held goes, even when `value` is not stored in its place.
             evicted.extend(lru.remove(&key));
-            // A value over the bound on its own is not stored, and evicts nothing.
-            if self.max_bytes.is_some_and(|bound| size > bound) {
+            // A value that can't be sized, or is over the bound on its own, is not
+            // stored, and evicts nothing else.
+            let Some(size) = size.filter(|&size| self.max_bytes.is_none_or(|bound| size <= bound))
+            else {
                 drop(lru);
                 drop(evicted);
                 return Ok(());
-            }
+            };
             lru.insert(key, value, size);
             while lru.index.len() > self.max_entries
                 || self.max_bytes.is_some_and(|bound| lru.bytes > bound)
