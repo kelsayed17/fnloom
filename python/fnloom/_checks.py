@@ -17,7 +17,6 @@ import contextvars
 import inspect
 import logging
 import math
-import numbers
 import sys
 import types
 import typing
@@ -370,6 +369,16 @@ def _allow_nans(allowed: bool) -> Callable[[object], tuple[bool, str]]:  # noqa:
     return check
 
 
+def _fraction(given: object) -> float | None:
+    """`given` as a float, as `float()` reads a number; `None` for a bool or text."""
+    if isinstance(given, bool | str | bytes):
+        return None
+    try:
+        return float(given)  # ty: ignore[invalid-argument-type]  # whatever float() takes
+    except TypeError, ValueError:
+        return None
+
+
 def _max_fraction_nans(most: float) -> Callable[[object], tuple[bool, str]]:
     def check(value: object) -> tuple[bool, str]:
         nans, size = _nan_count(value)
@@ -624,17 +633,14 @@ def check_output[F: Callable[..., object]](  # noqa: C901, PLR0912, PLR0913, PLR
             _numeric("allow_nans"),
         )
     if max_fraction_nans is not None:
-        if (
-            isinstance(max_fraction_nans, bool)
-            or not isinstance(max_fraction_nans, numbers.Real)
-            or not 0 <= max_fraction_nans <= 1
-        ):
+        fraction = _fraction(max_fraction_nans)
+        if fraction is None or not 0 <= fraction <= 1:
             msg = f"max_fraction_nans must be in [0, 1], got {max_fraction_nans!r}"
             raise ValueError(msg)
         add(
             "max_fraction_nans",
-            float(max_fraction_nans),
-            _max_fraction_nans(float(max_fraction_nans)),
+            fraction,
+            _max_fraction_nans(fraction),
             _numeric("max_fraction_nans"),
         )
     if not checks:

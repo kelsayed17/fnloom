@@ -184,8 +184,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - `@check_output(range=...)`, `allow_nans=` and `max_fraction_nans=` refuse, at build, a node whose values can only be
   text or `None`: a union such as `str | None` or `Name | None`, a `NewType` over `str`, or a `Literal` of strings. Such
   a node built, then failed every run (Q101). A union with a numeric arm, such as `int | str`, still builds.
-- `max_fraction_nans=` that is not a real number, such as `"0.5"`, is refused with the `ValueError` naming the argument
-  that an out-of-range number gets, rather than a bare comparison `TypeError`.
+- `max_fraction_nans=` given text, such as `"0.5"`, or anything `float()` can't read, is refused with the `ValueError`
+  naming the argument that an out-of-range number gets, rather than a bare comparison `TypeError`. A `Decimal` or
+  `Fraction` is still read as its float.
 - An annotation that raises when evaluated, other than for an unknown name, such as `-> "int | 3"`, fails the build
   with a note naming its function. The error named nothing.
 

@@ -4,6 +4,8 @@ import asyncio
 import contextlib
 import importlib
 import logging
+from decimal import Decimal
+from fractions import Fraction
 from typing import TYPE_CHECKING, Any, cast, override
 
 import pytest
@@ -331,12 +333,16 @@ def a(x: int) -> {returns}:
     }
 
 
-@pytest.mark.parametrize("fraction", ["0.5", None, float("nan")])
+@pytest.mark.parametrize("fraction", ["0.5", b"0.5", [0.5], True, float("nan")])
 def test_max_fraction_nans_must_be_a_fraction(fraction: object) -> None:
     """A text or other non-number is refused as out of range, naming the argument."""
-    if fraction is None:
-        fraction = [0.5]
     with pytest.raises(ValueError, match=r"max_fraction_nans must be in \[0, 1\]"):
+        check_output(max_fraction_nans=fraction)  # ty: ignore[invalid-argument-type]
+
+
+def test_max_fraction_nans_takes_any_number_float_reads() -> None:
+    """A `Decimal` or `Fraction` is read as its float, as before."""
+    for fraction in (Decimal("0.5"), Fraction(1, 2), 1):
         check_output(max_fraction_nans=fraction)  # ty: ignore[invalid-argument-type]
 
 
