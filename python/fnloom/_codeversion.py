@@ -30,7 +30,12 @@ from typing import TYPE_CHECKING, Any
 
 from fnloom import _core
 from fnloom._core import UnfingerprintableError
-from fnloom._fingerprint import classes_versioned_by_caller, fingerprint, model_fields
+from fnloom._fingerprint import (
+    classes_versioned_by_caller,
+    fingerprint,
+    fingerprint_form,
+    model_fields,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Container, Iterator, Mapping, Sequence
@@ -396,17 +401,21 @@ def _fingerprint(value: object, what: str) -> bytes:
         raise UncacheableError(msg) from error
 
 
-def _instance_types(value: object, seen: set[int] | None = None) -> Iterator[type]:
+def _instance_types(
+    value: object, seen: dict[int, object] | None = None
+) -> Iterator[type]:
     """The classes of the instances inside a value, as the fingerprint walks it.
 
-    Built-in containers, named tuples, dataclass instances and enum members are
-    looked into; every instance that is not of a built-in type gives its class,
-    whose code (methods, a member's enum class) may run on the value.
+    Built-in containers are looked into, and any other value through the form
+    the fingerprint reads in its place; every instance that is not of a
+    built-in type gives its class, whose code (methods, a member's enum class)
+    may run on the value.
     """
-    seen = set() if seen is None else seen
+    # Each value seen is kept, so a form made and dropped can't lend its id.
+    seen = {} if seen is None else seen
     if id(value) in seen:
         return
-    seen.add(id(value))
+    seen[id(value)] = value
     if type(value).__module__ != "builtins":
         yield type(value)
     for item in _inner(value):
@@ -414,27 +423,25 @@ def _instance_types(value: object, seen: set[int] | None = None) -> Iterator[typ
 
 
 def _inner(value: object) -> Iterator[object]:
-    """The values the fingerprint looks into inside `value`, if any."""
-    if isinstance(value, enum.Enum):
-        yield value.value
-    elif isinstance(value, tuple | list | set | frozenset):
+    """The values the fingerprint looks into inside `value`, if any.
+
+    A built-in container's members. Any other value's canonical form, the one
+    the fingerprint reads: an enum member's value, a record's fields and the
+    state set beyond them, a declared or registered form.
+    """
+    if isinstance(value, tuple | list | set | frozenset):
         yield from value
     elif type(value) is dict:
         for key, item in value.items():
             yield key
             yield item
-    elif dataclasses.is_dataclass(value) and not isinstance(value, type):
-        for field in dataclasses.fields(value):
-            # An unset field (`init=False`, no default) has nothing to walk; the
-            # fingerprint refuses such an instance.
-            item = getattr(value, field.name, _UNSET)
-            if item is not _UNSET:
-                yield item
-    elif model_fields(type(value)) is not None:
-        # A pydantic model's fields and other state, as its fingerprint reads them.
-        yield from vars(value).values()
-        yield getattr(value, "__pydantic_extra__", None)
-        yield getattr(value, "__pydantic_private__", None)
+    elif type(value).__module__ != "builtins":
+        try:
+            form = fingerprint_form(value)
+        except Exception:  # noqa: BLE001  # the fingerprint itself says why
+            return
+        if form is not None:
+            yield form
 
 
 def _is_typeddict(cls: type) -> bool:

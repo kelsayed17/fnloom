@@ -168,6 +168,15 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `str`, a `Literal` of strings, an `Annotated[str, ...]`, or a union with one of them such as `Name | None`. The
   first three, and such unions, were refused as not `str`, and `Annotated` raised an unhelpful `TypeError` about set
   elements.
+- A node's code version counts the classes of everything its defaults' fingerprints read: state set on a dataclass
+  outside its fields, and a `__fnloom_fingerprint__` or registered form. A class reached only that way was left out,
+  so editing its methods kept the version and the cache could return a stale result. Such a node's version changes,
+  so an existing disk cache misses once for it.
+- The fingerprint of a `value()` binding holding a set counts a dataclass's state set beyond its fields, as the plain
+  fingerprint does: two such values differing only there keyed the cache alike, so one could be served the other's
+  result. Their keys change, so an existing disk cache misses once for them. A `defaultdict`, whose `default_factory`
+  is state, is refused whether or not it holds a set, and a dataclass with an unset `init=False` field holding a set is
+  refused as `UnfingerprintableError` rather than a raw `AttributeError`.
 
 ## [0.4.0] - 2026-11-05
 

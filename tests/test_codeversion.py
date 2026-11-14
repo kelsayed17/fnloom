@@ -995,3 +995,68 @@ def test_a_newtype_with_attributes_of_its_own_is_refused() -> None:
     source = "from typing import NewType\nS = NewType('S', int)\nS.extra = 1\n"
     with pytest.raises(UncacheableError, match="global 'S' of 'f' is a NewType"):
         _version(source + "def f(x):\n    return S.extra\n")
+
+
+@pytest.mark.parametrize(
+    "held",
+    [
+        "object.__setattr__(CFG, 'helper', Helper())",
+        "CFG.helper = Helper()",
+    ],
+    ids=["frozen", "not frozen"],
+)
+def test_a_class_held_beyond_a_default_record_fields_counts(held: str) -> None:
+    """State set on a dataclass outside its fields is versioned, as it is fingerprinted.
+
+    A node calling a method of a class it reaches only there runs that code too.
+    """
+    template = """
+        import dataclasses
+
+        @dataclasses.dataclass(frozen=True)
+        class Helper:
+            k: int = 0
+
+            def compute(self):
+                return {v}
+
+        @dataclasses.dataclass(frozen={frozen})
+        class Outer:
+            m: int
+
+        CFG = Outer(1)
+        {held}
+
+        def f(x, cfg=CFG):
+            return x + cfg.helper.compute()
+        """
+    frozen = "object.__setattr__" in held
+    one = _version(textwrap.dedent(template.format(v=1, frozen=frozen, held=held)))
+    two = _version(textwrap.dedent(template.format(v=2, frozen=frozen, held=held)))
+    assert one != two
+
+
+def test_a_class_a_declared_form_holds_counts() -> None:
+    """A `__fnloom_fingerprint__` form is walked for its classes, as it is read."""
+    template = """
+        import dataclasses
+
+        @dataclasses.dataclass(frozen=True)
+        class Helper:
+            k: int = 0
+
+            def compute(self):
+                return {v}
+
+        class Rate:
+            def __init__(self):
+                self.inner = (Helper(),)
+
+            def __fnloom_fingerprint__(self):
+                return self.inner
+
+        def f(x, rate=Rate()):
+            return x + rate.inner[0].compute()
+        """
+    one = _version(textwrap.dedent(template.format(v=1)))
+    assert _version(textwrap.dedent(template.format(v=2))) != one
