@@ -181,6 +181,14 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `str`, a `Literal` of strings, an `Annotated[str, ...]`, or a union with one of them such as `Name | None`. The
   first three, and such unions, were refused as not `str`, and `Annotated` raised an unhelpful `TypeError` about set
   elements.
+- `@check_output(range=...)`, `allow_nans=` and `max_fraction_nans=` refuse, at build, a node whose values can only be
+  text or `None`: a union such as `str | None` or `Name | None`, a `NewType` over `str`, or a `Literal` of strings. Such
+  a node built, then failed every run (Q101). A union with a numeric arm, such as `int | str`, still builds.
+- `max_fraction_nans=` given text, such as `"0.5"`, or anything `float()` can't read, is refused with the `ValueError`
+  naming the argument that an out-of-range number gets, rather than a bare comparison `TypeError`. A `Decimal` or
+  `Fraction` is still read as its float.
+- An annotation that raises when evaluated, other than for an unknown name, such as `-> "int | 3"`, fails the build
+  with a note naming its function. The error named nothing.
 - A `Validator` whose attributes hold a `set`, and an `extract_fields`/`extract_columns` `fill_with=` holding one,
   key the cache the same on every `PYTHONHASHSEED`, as a `value()` binding does. They keyed `DiskCache` differently in
   each process, so the node missed every time (never a stale hit). Their keys change, so an existing disk cache
