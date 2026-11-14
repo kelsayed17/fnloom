@@ -28,9 +28,10 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `before_run` with no nodes, then `after_run` with `ok=False`. A result builder gets an absent output as `ABSENT`,
   and `frame()` refuses one with a `ValueError` naming each. `@extract_fields` and `@extract_columns` take a producer annotated
   `R | Absent`, and every field is absent when it declines. `@check_output*` and `with_output_type_checks()` don't
-  run on `ABSENT` (`NodeEnd.checks` is `()`). A graph with a node that may be absent exports `fnloom.export/2`, each
-  node with `may_be_absent`; any other graph still exports `fnloom.export/1`, byte for byte, and `fnloom diff` reads
-  both. Drawings mark such a node `may be absent`, drawn dashed and named in the legend.
+  run on `ABSENT` (`NodeEnd.checks` is `()`). A graph with a node that may be absent, or with a block, exports
+  `fnloom.export/2`: every node of it carries `may_be_absent` and `block`, its `kind` may be `expand` or `collect`,
+  and every param carries `collect`. Any other graph still exports `fnloom.export/1`, byte for byte, and `fnloom
+  diff` reads both. Drawings mark such a node `may be absent`, drawn dashed and named in the legend.
 - `ObserverBase.skipped(node, *, branch)`, the binding's forward of the core's `Observer::skipped`, sent, like
   `post_expand` and `hit_in`, only to an observer whose class overrides it. An observer whose class overrides neither
   `pre_node` nor `post_node` is sent no node events, so a run makes no keyword arguments for it.
@@ -173,6 +174,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Fixed
 
+- A hand-built `Drawing` whose `blocks` form a cycle is refused by `to_dot()`, `to_mermaid()` and `to_svg()` with a
+  `ValueError` naming the cycle. Its nodes were silently left out. A node in a block named `legend` moves the DOT
+  legend's cluster aside whether or not `blocks` names that block.
 - `to_svg()`, `render(engine="builtin")` and `fnloom draw --engine builtin` lay out a graph whose inputs are read deep
   in it without a cost growing with the square of its size: a 3,000-node chain with an input per node takes 0.2 s
   rather than 4.9 s. The drawing is the same, byte for byte.
