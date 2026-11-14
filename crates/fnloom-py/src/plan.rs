@@ -2,13 +2,11 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
-use std::ptr;
 
 use fnloom_core::node::{Node, NodeId};
 use fnloom_core::plan::{Action, Plan as CorePlan, Step};
 use fnloom_core::run::{Arg, Blocks, Evaluate, Item, Observer};
 use pyo3::exceptions::{PyRuntimeError, PyStopIteration, PyTypeError};
-use pyo3::ffi;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -16,6 +14,7 @@ use pyo3::types::{PyDict, PyList, PyString, PyTuple};
 use pyo3::{PyTraverseError, PyVisit};
 
 use crate::absent::{self, Absent};
+use crate::call::{Keywords, vectorcall};
 use crate::errors::{caught, run_error};
 use crate::graph::Graph;
 use crate::keys::Keys;
@@ -40,8 +39,8 @@ pub struct Plan {
 struct Call {
     /// The step's arguments, the nodes whose values are passed, in order.
     args: Box<[NodeId]>,
-    /// Their keywords, in the same order: the `kwnames` of a vectorcall.
-    names: Py<PyTuple>,
+    /// Their keywords, in the same order.
+    names: Keywords,
 }
 
 impl Plan {
@@ -62,7 +61,7 @@ impl Plan {
                 .map(|&input| keyword_for(py, bound, step.node, input));
             let call = Call {
                 args: step.args.clone().into_boxed_slice(),
-                names: PyTuple::new(py, names)?.unbind(),
+                names: Keywords::new(py, names)?,
             };
             if let Some(slot) = calls.get_mut(step.node.index()) {
                 *slot = Some(call);
@@ -629,14 +628,18 @@ impl<'py> Caller<'_, 'py, '_> {
         } else {
             match self.calls.get(consumer.id.index()) {
                 Some(Some(call)) if call.args.iter().eq(args.iter().map(|arg| &arg.node)) => {
-                    vectorcall(function.bind(py), args, call.names.bind(py))?
+                    vectorcall(function.bind(py), values(args), Some(&call.names))?
                 }
                 // Arguments other than the step's own, as an omitted optional one makes.
                 _ => {
                     let names = args
                         .iter()
                         .map(|arg| keyword_for(py, self.kwargs.graph, consumer.id, arg.node));
-                    vectorcall(function.bind(py), args, &PyTuple::new(py, names)?)?
+                    vectorcall(
+                        function.bind(py),
+                        values(args),
+                        Some(&Keywords::new(py, names)?),
+                    )?
                 }
             }
         };
@@ -647,50 +650,11 @@ impl<'py> Caller<'_, 'py, '_> {
     }
 }
 
-/// The most arguments `vectorcall` passes from the stack rather than a heap vector.
-const INLINE_ARGS: usize = 8;
-
-/// Calls `function` with each of `args` passed under its keyword in `names`, as one
-/// vectorcall: the same call as with a dict of them, without making the dict, nor
-/// `CPython` unpacking it again into exactly these names.
-#[expect(
-    unsafe_code,
-    reason = "PyO3 has no safe call taking keyword names, and the dict it takes instead is \
-              most of a node call's cost; the one block is checked below"
-)]
-fn vectorcall<'py>(
-    function: &Bound<'py, PyAny>,
-    args: &[Arg<'_, Value<'py>>],
-    names: &Bound<'py, PyTuple>,
-) -> PyResult<Bound<'py, PyAny>> {
-    // Slot 0 is spare, so a callee may borrow it to prepend an argument
-    // (`PY_VECTORCALL_ARGUMENTS_OFFSET`), as a bound method or a partial does. A node
-    // with few arguments, the usual one, needs no allocation for them.
-    let mut inline = [ptr::null_mut(); INLINE_ARGS + 1];
-    let mut spilled;
-    let vector: &mut [*mut ffi::PyObject] = if args.len() <= INLINE_ARGS {
-        &mut inline
-    } else {
-        spilled = vec![ptr::null_mut(); args.len() + 1];
-        &mut spilled
-    };
-    for (slot, arg) in vector.iter_mut().skip(1).zip(args) {
-        *slot = arg.value.as_ptr();
-    }
-    // SAFETY: the GIL is held (`function` is bound). `vector` holds one spare slot, then
-    // a borrowed reference per argument, each kept alive by `args` for the whole call;
-    // the callee reads them and may only write the spare slot, which the offset flag
-    // allows. No positional arguments: every one is named by `names`, a tuple of
-    // `args.len()` strings. The result is a new reference, or null with an exception set.
-    unsafe {
-        let result = ffi::PyObject_Vectorcall(
-            function.as_ptr(),
-            vector.as_mut_ptr().add(1),
-            ffi::PY_VECTORCALL_ARGUMENTS_OFFSET,
-            names.as_ptr(),
-        );
-        Bound::from_owned_ptr_or_err(function.py(), result)
-    }
+/// The values of `args`, in order.
+fn values<'a, 'py>(
+    args: &'a [Arg<'_, Value<'py>>],
+) -> impl ExactSizeIterator<Item = &'a Value<'py>> {
+    args.iter().map(|arg| &arg.value)
 }
 
 /// The `TypeError` for `node` returning `fnloom.ABSENT` without declaring it may.
