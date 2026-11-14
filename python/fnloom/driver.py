@@ -2726,18 +2726,31 @@ def _refuse_unread(
 def _refuse_bound_block_nodes(
     bound: Mapping[str, Mapping[str, Source | Value]],
     blocks: Mapping[str, Sequence[str]],
+    nodes: Sequence[NodeDef],
 ) -> None:
-    """`ValueError` for each `bind=` source that is a block node, sorted (§4.4).
+    """`ValueError` for each `bind=` source that is a block node read as one value.
 
-    It has a value per item of its block, and the namespace reads one value.
+    It has a value per item of its block, so only a `Collect` parameter of the
+    namespace may read it (§4.4). Sorted.
+
+    shortcut: a source counts as read plainly when any parameter of the namespace
+    reads it so, bound or by its full name; track readers per key if that misleads.
     """
+    plain = {
+        (node.namespace, p.binding.name)
+        for node in nodes
+        for p in node.params
+        if p.collect is None and isinstance(p.binding, Source)
+    }
     if refused := sorted(
         f"bind={{{key!r}: source({binding.name!r})}} under namespace {namespace!r} "
         f"reads a node computed once per item of {blocks[binding.name][-1]!r}; "
         "bind its collect instead"
         for namespace, bind in bound.items()
         for key, binding in bind.items()
-        if isinstance(binding, Source) and binding.name in blocks
+        if isinstance(binding, Source)
+        and binding.name in blocks
+        and (namespace, binding.name) in plain
     ):
         raise ValueError("; ".join(refused))
 
@@ -3603,7 +3616,7 @@ class Builder[R = dict[str, object]]:
             if absent := _unmatched_edges(nodes, unmatched):
                 raise ValueError(absent)
         blocks, absent = self._blocks_and_absence(nodes)
-        _refuse_bound_block_nodes(self._bound, blocks)
+        _refuse_bound_block_nodes(self._bound, blocks, nodes)
         views = node_views(
             nodes,
             stepped | frozenset(node.name for node in nodes if is_generated(node)),

@@ -428,8 +428,9 @@ nodes, up to the `Collect` parameters that gather them. A block node may also re
   `Parallelizable[T | Absent]`: write `Parallelizable[T] | Absent` for an expand that may decline as a whole.
 - Blocks are named by their expand, namespace included, so two copies of a module given with
   [`namespace=`](#namespaces) have two independent blocks, `eu.picked` and `us.picked`. A namespace's `bind=` to a
-  node outside every block is computed once and shared by its branches. A binding to a block node is refused at
-  build, since that node has a value per item: bind the collect that gathers it instead.
+  node outside every block is computed once and shared by its branches. A block node has a value per item, so a
+  binding to one is refused at build unless only `Collect` parameters read it: bind the collect that gathers it
+  instead, or read it with a `Collect` parameter.
 - Decorators apply to a block node as to any other node, once per item: `@parameterize`, `@config.when*` and
   `@config.matches` (with a namespace's `config=` too), `@tag`, `@check_output*`, steps from `@pipe_input`,
   `@pipe_output` and `@mutate` under any step namespace, `@inject`, `@resolve`, `@cache` and node wrappers. A step of

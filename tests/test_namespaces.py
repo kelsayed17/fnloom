@@ -1086,6 +1086,28 @@ def test_bind_to_another_copys_collect_works() -> None:
     assert driver.execute(["c.used"], inputs={"n": 2, "rate": 3}) == {"c.used": [0, 3]}
 
 
+def test_bind_to_another_copys_block_node_feeds_a_collect() -> None:
+    """A `Collect` parameter bound to a block node gathers it: no cross-block edge."""
+    module = make_module("blocks_bind_gathered", BLOCK)
+    totals = make_module(
+        "blocks_bind_gathered_totals",
+        """
+        from fnloom import Collect
+
+        def total(gross: Collect[int]) -> int:
+            return sum(gross)
+        """,
+    )
+    driver = (
+        fnloom.Builder()
+        .with_modules(module, namespace="a")
+        .with_modules(totals, namespace="c", bind={"gross": fnloom.source("a.details")})
+        .build()
+    )
+    assert driver.nodes["c.total"].kind == "collect"
+    assert driver.execute(["c.total"], inputs={"n": 3, "rate": 10}) == {"c.total": 30}
+
+
 def test_namespace_config_selects_variants_inside_blocks() -> None:
     """Each copy's config picks its block node's variant (Plan 12 PR F)."""
     module = make_module(
