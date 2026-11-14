@@ -309,6 +309,31 @@ fn as_strs(names: &[String]) -> Vec<&str> {
     names.iter().map(String::as_str).collect()
 }
 
+/// `ValueError` when two of `consumer`'s inputs would reach it under one keyword: one
+/// renamed to the other's name, or both to one name. A call would bind only one of them.
+fn refuse_shared_keywords(
+    graph: &PyCoreGraph,
+    consumer: NodeId,
+    renamed: &[(NodeId, Py<PyString>)],
+    py: Python<'_>,
+) -> PyResult<()> {
+    let mut by_keyword: BTreeMap<String, &str> = BTreeMap::new();
+    for edge in &graph.node(consumer).inputs {
+        let input = graph.node(edge.node).name.as_str();
+        let keyword = match renamed.binary_search_by_key(&edge.node, |&(id, _)| id) {
+            Ok(at) => renamed[at].1.bind(py).to_str()?.to_owned(),
+            Err(_) => input.to_owned(),
+        };
+        if let Some(other) = by_keyword.insert(keyword.clone(), input) {
+            return Err(PyValueError::new_err(format!(
+                "node '{}' would get both '{other}' and '{input}' as keyword '{keyword}'",
+                graph.node(consumer).name
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// The renames by consumer id, each sorted by input id.
 ///
 /// `renames` maps each renaming node's name to a dict of input name to the keyword
@@ -340,6 +365,7 @@ fn renamed(graph: &PyCoreGraph, renames: Option<&Bound<'_, PyDict>>) -> PyResult
         entries.sort_by_key(|&(id, _)| id);
         match graph.id_of(consumer) {
             Some(id) => {
+                refuse_shared_keywords(graph, id, &entries, renames.py())?;
                 if let Some(slot) = by_id.get_mut(id.index()) {
                     *slot = entries;
                 }

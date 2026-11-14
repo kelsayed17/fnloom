@@ -190,6 +190,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
   result. Their keys change, so an existing disk cache misses once for them. A `defaultdict`, whose `default_factory`
   is state, is refused whether or not it holds a set, and a dataclass with an unset `init=False` field holding a set is
   refused as `UnfingerprintableError` rather than a raw `AttributeError`.
+- On a free-threaded build, fingerprinting a `dict` or a `set` that another thread was changing raised a
+  `PanicException` from inside the binding. A `dict`, `set` or `list` is now read whole under its own lock, so the
+  fingerprint is of one state of it.
 
 ## [0.4.0] - 2026-11-05
 
