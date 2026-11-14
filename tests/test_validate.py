@@ -747,3 +747,48 @@ def test_validate_lists_both_non_mappings() -> None:
         "inputs must be a mapping of names to values, got list; "
         "overrides must be a mapping of names to values, got int"
     )
+
+
+@pytest.mark.parametrize("given", [["revenue"], [("revenue", 1)], "revenue"])
+def test_execute_refuses_a_non_mapping_as_validate_does(given: object) -> None:
+    """The same `TypeError`, on a fresh driver and on a repeat of a request."""
+    _, driver = _priced("val_execute_mapping")
+    message = f"inputs must be a mapping of names to values, got {type(given).__name__}"
+    with pytest.raises(TypeError, match=f"^{message}$"):
+        driver.execute(["margin"], inputs=given)  # ty: ignore[invalid-argument-type]  # the refusal is the point
+    driver.prepare(["margin"], inputs={"revenue": 1.0, "cost": 0.5, "scale": 1.0})
+    with pytest.raises(TypeError, match=f"^{message}$"):
+        driver.prepare(["margin"], inputs=given)  # ty: ignore[invalid-argument-type]  # the refusal is the point
+
+
+ABSENCE = """
+import fnloom
+
+def b(x: int) -> int:
+    return x
+
+def maybe(x: int) -> int | fnloom.Absent:
+    return x
+
+def c(b: int, maybe: int) -> int:
+    return b + maybe
+"""
+
+
+@pytest.mark.parametrize("checks", [True, False])
+def test_validate_names_an_absent_input_or_override_execute_refuses(
+    checks: bool,  # noqa: FBT001  # one parameter per case
+) -> None:
+    """The lines `execute` raises in its `TypeError`, with or without type checks."""
+    builder = fnloom.Builder().with_modules(make_module("validated_absent", ABSENCE))
+    if not checks:
+        builder = builder.without_input_type_checks()
+    driver = builder.build()
+    inputs = {"x": fnloom.ABSENT}
+    overrides = {"b": fnloom.ABSENT, "maybe": fnloom.ABSENT}
+    with pytest.raises(TypeError) as raised:
+        driver.execute(["c"], inputs=inputs, overrides=overrides)
+    lines = driver.validate(["c"], inputs=inputs, overrides=overrides)
+    assert "; ".join(lines) == str(raised.value)
+    assert lines[0].startswith("input 'x' is fnloom.ABSENT")
+    assert lines[1].startswith("override 'b' is fnloom.ABSENT")

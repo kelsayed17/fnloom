@@ -79,17 +79,26 @@ def _alias_argument(annotation: object, alias: object) -> object | None:
     if isinstance(annotation, type):
         # The common case: a plain class is neither.
         return None
+    # Metadata never changes an answer (Q41), at the top or in a union's member.
+    annotation = _unannotated(annotation)
     parts = (
         typing.get_args(annotation)
         if typing.get_origin(annotation) in {Union, types.UnionType}
         else (annotation,)
     )
-    for part in parts:
+    for part in map(_unannotated, parts):
         if part is alias:
             return typing.Any
         if typing.get_origin(part) is alias:
             return typing.get_args(part)[0]
     return None
+
+
+def _unannotated(annotation: object) -> object:
+    """`annotation` without `Annotated` metadata; a PEP 695 alias left as written."""
+    while typing.get_origin(annotation) is Annotated:
+        annotation = typing.get_args(annotation)[0]
+    return annotation
 
 
 def expanded_type(annotation: object) -> object | None:

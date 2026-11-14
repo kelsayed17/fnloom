@@ -1369,3 +1369,21 @@ def make() -> Odd:
     assert str(error) == str(sync_info.value)
     assert type(error.__cause__).__name__ == "Odd"
     assert type(sync_info.value.__cause__).__name__ == "Odd"
+
+
+def test_two_async_drivers_over_one_driver_keep_their_own_plans() -> None:
+    """Each runs its sync nodes its own way, and pickles as itself."""
+    module = make_module(
+        "async_shared_driver",
+        "import threading\n\ndef a(x: int) -> str:\n"
+        "    return threading.current_thread().name\n",
+    )
+    threaded = fnloom.Builder().with_modules(module).build_async(sync_nodes="thread")
+    inline = fnloom.AsyncDriver(
+        threaded._driver,  # noqa: SLF001  # the one sync driver both run
+        threaded._nodes,  # noqa: SLF001  # the graph's nodes, as build_async gives them
+        sync_nodes="inline",
+    )
+    assert _run(threaded.execute(["a"], inputs={"x": 1}))["a"] != "MainThread"
+    assert _run(inline.execute(["a"], inputs={"x": 1})) == {"a": "MainThread"}
+    assert inline.prepare(["a"], inputs={"x": 1})._driver is inline  # noqa: SLF001  # what a pickle rebuilds

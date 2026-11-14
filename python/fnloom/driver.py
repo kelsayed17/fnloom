@@ -38,7 +38,7 @@ from fnloom import (
     _types,
     _wrappers,
 )
-from fnloom._absence import needs_input, refuse_given
+from fnloom._absence import given_problems, needs_input, refuse_given
 from fnloom._caching import (
     NO_SETTINGS,
     Cache,
@@ -49,7 +49,7 @@ from fnloom._caching import (
 )
 from fnloom._core import ABSENT
 from fnloom._decorators import CacheBehavior, Source, Value
-from fnloom._defaults import default_problems
+from fnloom._defaults import default_problems, same_value
 from fnloom._drawing import Drawing, Mark, display, drawing, with_context
 from fnloom._export import export
 from fnloom._extract import is_generated
@@ -213,9 +213,28 @@ def _names(values: Mapping[str, object] | None) -> frozenset[str]:
     return _NO_NAMES if values is None else frozenset(values)
 
 
-def _keys(values: Mapping[str, object] | None) -> AbstractSet[str]:
-    """The names of `values`, compared with a set without building one."""
-    return _NO_NAMES if values is None else values.keys()
+def _keys(values: object) -> AbstractSet[object] | None:
+    """The names of `values`, compared with a set without building one.
+
+    `None`, which equals no names, for a value that is no mapping: the request
+    is then no repeat, and `_refuse_unmapped` refuses it.
+    """
+    if values is None:
+        return _NO_NAMES
+    if type(values) is dict or isinstance(values, Mapping):
+        return values.keys()
+    return None
+
+
+def _refuse_unmapped(inputs: object, overrides: object) -> None:
+    """`TypeError` for `inputs` or `overrides` that is not a mapping, naming both."""
+    wrong = [
+        f"{kind} must be a mapping of names to values, got {type(values).__name__}"
+        for kind, values in (("inputs", inputs), ("overrides", overrides))
+        if values is not None and not isinstance(values, Mapping)
+    ]
+    if wrong:
+        raise TypeError("; ".join(wrong))
 
 
 def _as_dict(values: Mapping[str, object] | None) -> dict[str, object]:
@@ -1056,6 +1075,7 @@ class Driver[R = dict[str, object]]:
             and _keys(overrides) == last[2]
         ):
             return last[3]
+        _refuse_unmapped(inputs, overrides)
         key = _Request.check(
             final_vars, self._nodes, inputs, overrides, self._unmatched
         )
@@ -1126,13 +1146,14 @@ class Driver[R = dict[str, object]]:
             prepared = PreparedPlan(
                 runnable, outputs, input_names, override_names, checks
             )
-        prepared._absent_overrides = frozenset(  # noqa: SLF001  # the driver's own plan
-            name
-            for name in override_names
-            if name in self._nodes and self._nodes[name].may_be_absent
-        )
+        prepared._absent_overrides = self._may_be_absent(override_names)  # noqa: SLF001  # the driver's own plan
         prepared._driver = self  # noqa: SLF001  # the driver's own plan
         return prepared
+
+    def _may_be_absent(self, names: AbstractSet[str]) -> frozenset[str]:
+        """Those of `names` whose node may be absent, so it may be overridden so."""
+        nodes = self._nodes
+        return frozenset(n for n in names if n in nodes and nodes[n].may_be_absent)
 
     def _reported(self, plan: _core.Plan) -> _hooks.Views:
         """The nodes `plan` computes, in the order it computes them, for its hooks."""
@@ -1244,15 +1265,7 @@ class Driver[R = dict[str, object]]:
         `@config.when*` variant gave, and unknown outputs, inputs and overrides.
         `TypeError` for a malformed request, as `validate` documents.
         """
-        wrong: list[str] = []
-        for kind, values in (("inputs", inputs), ("overrides", overrides)):
-            if values is not None and not isinstance(values, Mapping):
-                wrong.append(
-                    f"{kind} must be a mapping of names to values, "
-                    f"got {type(values).__name__}"
-                )
-        if wrong:
-            raise TypeError("; ".join(wrong))
+        _refuse_unmapped(inputs, overrides)
         outputs, absent_functions = requested(final_vars, self._nodes, self._unmatched)
         key: _PlanKey = (outputs, _names(inputs), _names(overrides))
         _, input_names, override_names = key
@@ -1430,6 +1443,11 @@ class Driver[R = dict[str, object]]:
         if plan is not None and self._strict_overrides:
             refused = self._unsupplied_overrides(plan, input_names, overridden)
             lines += _strict(refused).splitlines() if refused else []
+        lines += given_problems(
+            inputs or _NO_VALUES,
+            overrides or _NO_VALUES,
+            self._may_be_absent(overridden),
+        )
         if self._check_inputs and plan is not None:
             read = sorted(
                 node
@@ -2324,7 +2342,8 @@ class AsyncDriver[R = dict[str, object]]:
         """
         prepared = self._driver.prepare(final_vars, inputs=inputs, overrides=overrides)
         plan = prepared._async  # noqa: SLF001  # this driver's own plan
-        if plan is None:
+        # Another AsyncDriver over the same `Driver` may have kept its own plan.
+        if plan is None or plan._driver is not self:  # noqa: SLF001  # this driver's own plan
             runnable = prepared._plan  # noqa: SLF001  # this driver's own plan
             schedule: _async.Schedule | _async.CachedSchedule
             if isinstance(runnable, CacheRun):
@@ -2827,19 +2846,9 @@ def _overlaid_with(
 
 def _same_overlay(one: Mapping[str, object], other: Mapping[str, object]) -> bool:
     """Whether two `config=` mappings hold the same keys, each the same value."""
-    if one.keys() != other.keys():
-        return False
-    for key in one:
-        a, b = one[key], other[key]
-        if a is b:
-            continue
-        try:
-            same = typing.cast("object", a == b)
-        except Exception:  # noqa: BLE001  # an `==` that raises: not the same
-            return False
-        if not isinstance(same, bool) or not same:
-            return False
-    return True
+    return one.keys() == other.keys() and all(
+        same_value(one[key], other[key]) for key in one
+    )
 
 
 def _shown_config(config: Mapping[str, object]) -> str:

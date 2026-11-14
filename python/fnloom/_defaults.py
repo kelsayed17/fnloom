@@ -110,7 +110,7 @@ def _shadowed(consumer: str, parameter: str, node: str) -> str:
 def _differing(name: str, group: list[tuple[str, str, object]]) -> str | None:
     """The line for input `name` when its consumers' `group` of defaults disagree."""
     first = group[0][2]
-    if all(_same(first, default) for _, _, default in group[1:]):
+    if all(same_value(first, default) for _, _, default in group[1:]):
         return None
     group.sort(key=lambda reader: (reader[0], reader[1]))
     consumers = ", ".join(
@@ -124,8 +124,8 @@ def _differing(name: str, group: list[tuple[str, str, object]]) -> str | None:
     )
 
 
-def _same(left: object, right: object) -> bool:
-    """Whether two defaults are the same; an unclear comparison says no.
+def same_value(left: object, right: object) -> bool:
+    """Whether two values, such as defaults, are the same; an unclear one says no.
 
     The same object is equal to itself, even a numpy array, and two NaNs are
     equal. Otherwise `==` must give a `bool` (or numpy's) and not raise: an
