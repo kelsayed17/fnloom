@@ -35,6 +35,29 @@ def test_aliases_type_check_as_iterable_and_list() -> None:
     assert built.execute(["total"], inputs={"universe": "a,bb,ccc"}) == {"total": 4.0}
 
 
+def test_annotated_metadata_never_hides_an_expand_or_a_collect() -> None:
+    """An `Annotated` expand or collect is one: metadata changes no answer (Q41)."""
+    module = make_module(
+        "blocks_annotated",
+        """
+        from typing import Annotated
+        from fnloom import Collect, Parallelizable
+
+        def items(n: int) -> Annotated[Parallelizable[int], "each item"]:
+            yield from range(n)
+
+        def double(items: int) -> int:
+            return 2 * items
+
+        def total(double: Annotated[Collect[int], "the doubles"]) -> int:
+            return sum(double)
+        """,
+    )
+    built = fnloom.build(module)
+    assert built.nodes["items"].kind == "expand"
+    assert built.execute(["total"], inputs={"n": 3}) == {"total": 6}
+
+
 def test_parallelizable_of_t_or_absent_is_refused() -> None:
     """An item can't be absent: `Parallelizable[T | Absent]` is refused at build."""
     module = make_module(

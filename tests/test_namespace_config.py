@@ -189,6 +189,21 @@ def test_a_second_differing_config_is_refused() -> None:
         builder.with_modules(module, namespace="eu", config={"region": "us"})  # ty: ignore[invalid-argument-type]  # a module from make_module
 
 
+def test_the_same_config_holding_nan_is_the_same_config() -> None:
+    """NaN is the same as NaN here, as for two defaults: no conflict to refuse."""
+    module = _regional()
+    builder = Builder().with_modules(
+        module,  # ty: ignore[invalid-argument-type]  # a module from make_module
+        namespace="eu",
+        config={"region": "eu", "floor": float("nan")},
+    )
+    builder.with_modules(
+        module,  # ty: ignore[invalid-argument-type]  # a module from make_module
+        namespace="eu",
+        config={"region": "eu", "floor": float("nan")},
+    )
+
+
 def test_the_export_records_each_overlay_and_graph_version_sees_it() -> None:
     """`namespace_config` lists each overlay, and it moves `graph_version`."""
     first = _two_regions().build().export()

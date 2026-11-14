@@ -2,6 +2,7 @@
 
 import annotationlib
 import inspect
+import sys
 from typing import TYPE_CHECKING
 
 from fnloom._config import _is_bool
@@ -110,7 +111,7 @@ def _shadowed(consumer: str, parameter: str, node: str) -> str:
 def _differing(name: str, group: list[tuple[str, str, object]]) -> str | None:
     """The line for input `name` when its consumers' `group` of defaults disagree."""
     first = group[0][2]
-    if all(_same(first, default) for _, _, default in group[1:]):
+    if all(same_value(first, default) for _, _, default in group[1:]):
         return None
     group.sort(key=lambda reader: (reader[0], reader[1]))
     consumers = ", ".join(
@@ -124,8 +125,8 @@ def _differing(name: str, group: list[tuple[str, str, object]]) -> str | None:
     )
 
 
-def _same(left: object, right: object) -> bool:
-    """Whether two defaults are the same; an unclear comparison says no.
+def same_value(left: object, right: object) -> bool:
+    """Whether two values, such as defaults, are the same; an unclear one says no.
 
     The same object is equal to itself, even a numpy array, and two NaNs are
     equal. Otherwise `==` must give a `bool` (or numpy's) and not raise: an
@@ -145,9 +146,14 @@ def _same(left: object, right: object) -> bool:
 
 
 def _nan(value: object) -> bool:
-    """Whether `value` is not equal to itself, with a `bool` result: NaN."""
-    unequal = value != value  # noqa: PLR0124  # NaN is the one value unequal to itself
-    return _is_bool(unequal) and bool(unequal)
+    """Whether `value` is a NaN: a `float`, `complex` or numpy float unequal to itself.
+
+    Only these: another value unequal to itself, a `Decimal` NaN or an object
+    whose `==` always says no, is no NaN to take as the same.
+    """
+    numpy = sys.modules.get("numpy")
+    floats = (float, complex) if numpy is None else (float, complex, numpy.inexact)
+    return isinstance(value, floats) and bool(value != value)  # noqa: PLR0124  # NaN is the one value unequal to itself
 
 
 def _shown(default: object) -> str:

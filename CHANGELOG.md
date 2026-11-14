@@ -179,6 +179,18 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Fixed
 
+- Two `AsyncDriver`s made over one `Driver`, such as `AsyncDriver(driver, nodes, sync_nodes="inline")` beside one
+  that runs sync nodes in threads, each run their plans their own way and pickle as themselves. The second used the
+  first's cached plan, with its `sync_nodes`.
+- `validate` names an `fnloom.ABSENT` input, and an `ABSENT` override of a node that can't be absent, with the lines
+  `execute` raises in its `TypeError`. It returned no line for them.
+- `execute` and `prepare` refuse `inputs` or `overrides` that are not a mapping with the `TypeError` `validate` gives.
+  A list raised `AttributeError` or a `ValueError` from `dict()`, and a `str` was read as its characters' names.
+- `with_modules(..., namespace=, config=)` given the same config twice takes it when a value is NaN, as two equal
+  defaults are taken. It was refused as a different config.
+- `Annotated[Parallelizable[T], ...]` is an expand and `Annotated[Collect[T], ...]` a collect, as metadata never
+  changes an answer (Q41, Q166). The first was refused as a generator, or built as a plain node, and the second collected
+  nothing.
 - A module file the CLI fails to import is taken off `sys.path` again, so a later load in the same process doesn't find
   modules beside it.
 - `step(fn, x=group(...))` and `@mutate(apply_to(fn, x=group(...)))` are a `TypeError` naming the parameter: `group()`
