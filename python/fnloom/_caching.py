@@ -13,6 +13,11 @@ from its key, but is never looked up or stored: it runs whenever it is needed,
 and its check with it, and is never served from the store. `explain`
 reports what a run would do with each computed node, running nothing.
 
+A node downstream of an expand has one key per branch, known only once the items
+are: `LateKeys` makes them during the run, as the core asks for each, and stores
+what such a node computes. An item's version is its fingerprint, so a branch's key
+holds no index; an expand stored under its key replays its items as an override.
+
 The cache never fails a run: a store that raises is a miss or a skipped write,
 reported with one `CacheWarning` per node per run. A node's own exception fails the
 run as without the cache, and nothing is stored for that node.
@@ -27,9 +32,9 @@ from collections import abc
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Literal, NamedTuple, Protocol
+from typing import TYPE_CHECKING, Final, Literal, NamedTuple, Protocol
 
-from fnloom import _core, _extract
+from fnloom import _blocks, _core, _extract
 from fnloom._canonical import stable_fingerprint
 from fnloom._codeversion import UncacheableError, class_version, code_version
 from fnloom._config import predicate_name, predicates
@@ -386,6 +391,13 @@ class CacheOutcome(NamedTuple):
             hit or miss has the reason `"policy default (driver)"` or
             `"policy default (decorator)"` when a list or `@cache` gave it that
             behavior, and `None` when the default did.
+
+    An expand outside every block also counts its branches in its reason, over the
+    items its entry holds: `"branches: 2 hit, 1 miss, 0 uncacheable"`. A branch
+    hits when every node a collect reads of it does, and is uncacheable when one of
+    them has no key. With no entry holding its items, the reason says `"the expand
+    node runs, so its branches are known only at run"`. A node inside a block is
+    `"unknown"`, `"keyed per item of 'picked'"`.
     """
 
     status: Literal["hit", "miss", "uncacheable", "unknown", "skipped"]
@@ -844,6 +856,8 @@ class Cache:
         kinds: How each node reads each of its sources (`"required"`,
             `"optional"`, ...), by node name, then source name.
         formats: The `Format` of each node that names one, by name.
+        collects: The sources each node collects, by name.
+        expands: The expand nodes.
     """
 
     store: CacheStore
@@ -851,6 +865,8 @@ class Cache:
     sources: Mapping[str, tuple[str, ...]]
     kinds: Mapping[str, Mapping[str, Kind]]
     formats: Mapping[str, Format]
+    collects: Mapping[str, frozenset[str]]
+    expands: frozenset[str]
 
     @classmethod
     def of(
@@ -870,8 +886,9 @@ class Cache:
             raise ValueError("; ".join(problems))
         # Classes may have been edited since the last build: read them again.
         forget_class_versions()
+        inputs = {n.name: core_inputs(n.params) for n in nodes}
         kinds = {
-            n.name: {s: kind for s, kind, _ in core_inputs(n.params)} for n in nodes
+            name: {s: kind for s, kind, _ in read} for name, read in inputs.items()
         }
         resolved = _resolved(nodes, settings)
         return cls(
@@ -880,6 +897,11 @@ class Cache:
             {name: tuple(read) for name, read in kinds.items()},
             kinds,
             _formats(store, nodes, resolved),
+            {
+                name: frozenset(s for s, _, mode in read if mode is not None)
+                for name, read in inputs.items()
+            },
+            frozenset(n.name for n in nodes if _blocks.expands(n.returns)),
         )
 
 
@@ -903,6 +925,8 @@ class Begun:
         loaded: For a reported run, the hits the store held, in plan order: not
             the values an inner run computed or loaded, which it reported.
         computed: For a reported run, the nodes `plan` computes, in its order.
+        late: The keys of the nodes downstream of an expand, made as the run
+            asks for them; `None` for a plan with no expand.
     """
 
     plan: _core.Plan
@@ -915,10 +939,15 @@ class Begun:
     outcomes: dict[str, CacheOutcome] | None = None
     loaded: tuple[str, ...] = ()
     computed: tuple[str, ...] = ()
+    late: LateKeys | None = None
 
 
 class _Preparer(Protocol):
     """The part of `_core.Graph` a cached run uses."""
+
+    def blocks(self) -> dict[str, list[str]]:
+        """Each block node's block path: its expands, outermost first."""
+        ...
 
     def prepare(
         self, outputs: list[str], inputs: list[str], overrides: list[str]
@@ -975,6 +1004,18 @@ class CacheRun:
         actions = dict(steps)
         computed = [name for name, action in steps if action == "compute"]
         keys = [_planned(cache.keys[name], actions) for name in computed]
+        # With an expand, the nodes downstream of one are keyed per branch, during
+        # the run (`LateKeys`); every other node is keyed as without blocks.
+        # An overridden expand counts: its block runs over the override's items.
+        self._expands = frozenset(n for n, _ in steps if n in cache.expands)
+        self._late: tuple[str, ...] = tuple(plan.late()) if self._expands else ()
+        late = frozenset(self._late)
+        self._paths = (
+            {name: tuple(p) for name, p in graph.blocks().items() if name in late}
+            if late
+            else {}
+        )
+        self._collects = {name: cache.collects[name] for name in self._late}
         # The producer of each `recompute` field this plan, or an enclosing one,
         # computes: never looked up here, so the field reads a value the producer
         # just made, even when a nested run computes the producer (Q147).
@@ -992,24 +1033,40 @@ class CacheRun:
             k.behavior == "default" and k.stored and name not in self._fresh
             for name, k in zip(computed, keys, strict=True)
         ]
+        entries = [
+            (
+                name,
+                k.static,
+                [source for _, source, _ in k.params if source is not None],
+                looked_up,
+                list(cache.sources[name]),
+                _optional(cache, name, k),
+            )
+            for name, k, looked_up in zip(computed, keys, stored, strict=True)
+        ]
+        # A late node has no key before the run, so the walk passes through it to
+        # the expands and the outer nodes its block reads. Each gets a plan of its
+        # own, which keys it from the versions `LateKeys` gives its sources.
+        self._late_plans = {
+            entry[0]: _core.KeyPlan([(*entry[:3], False, [], entry[5])])
+            for entry in entries
+            if entry[0] in late
+        }
         self._key_plan = _core.KeyPlan(
             [
-                (
-                    name,
-                    k.static,
-                    [source for _, source, _ in k.params if source is not None],
-                    looked_up,
-                    list(cache.sources[name]),
-                    _optional(cache, name, k),
-                )
-                for name, k, looked_up in zip(computed, keys, stored, strict=True)
+                (name, None, [], False, sources, [])
+                if name in late
+                else (name, static, reads, looked_up, sources, optional)
+                for name, static, reads, looked_up, sources, optional in entries
             ],
             self._outputs,
         )
         # A plain `MemoryCache` is walked and written in the binding, with no call
         # into Python per node; a subclass may override its methods, so it is not.
+        # Nor is a plan with an expand, whose value is stored as its items.
         store = cache.store
-        self._native = store.native if type(store) is MemoryCache else None
+        native = type(store) is MemoryCache and not self._expands
+        self._native = store.native if native else None
         # In plan order.
         self._node_keys = dict(zip(computed, keys, strict=True))
         self._behaviors = {name: k.behavior for name, k in self._node_keys.items()}
@@ -1035,10 +1092,15 @@ class CacheRun:
         # Only a key parameter needs the version: a parameter that ignores the
         # node reads it as it runs.
         consumed = {source for k in keys for _, source, _ in k.params}
+        # A late one has a result per branch, known only as the branch runs; what
+        # reads an expand is keyed by its items, so the expand runs in the run.
         self._first = tuple(
             name
             for name in computed
-            if self._behaviors[name] == "recompute" and name in consumed
+            if self._behaviors[name] == "recompute"
+            and name in consumed
+            and name not in late
+            and name not in self._expands
         )
         self._nested = None
         self._levels: tuple[CacheRun, ...] = (self,)
@@ -1049,9 +1111,34 @@ class CacheRun:
                 cache, graph, nested, first, input_names, override_names, self._fresh
             )
             self._levels = (self, *self._nested._levels)  # noqa: SLF001  # the same class
+        self._blocks = (
+            _Blocks(
+                self._expands,
+                self._late,
+                self._paths,
+                self._collects,
+                {
+                    name: tuple(
+                        s for _, s, _ in self._node_keys[name].params if s is not None
+                    )
+                    for name in self._late
+                },
+                self._late_plans,
+                self._node_keys,
+                self._stored,
+                _exits(self._late, self._paths, self._collects),
+            )
+            if self._expands
+            else None
+        )
         # Insertion order is recency order: a hit moves its plan to the end.
         self._plans: dict[frozenset[str], _core.Plan] = {}
         self._plans_lock = threading.Lock()
+
+    @property
+    def blocks(self) -> _Blocks | None:
+        """What the plan knows of its late nodes; `None` with no expand."""
+        return self._blocks
 
     @property
     def nested(self) -> CacheRun | None:
@@ -1107,6 +1194,7 @@ class CacheRun:
             on_value=functools.partial(self.finish, begun)
             if on_value is None
             else on_value,
+            late=begun.late,
         )
         if begun.values is not None:
             begun.values.update(begun.hits)
@@ -1167,14 +1255,19 @@ class CacheRun:
         else:
             keys = self._key_plan.keys(versions)
             hits = self._frontier(keys, known, warned)
+        late = LateKeys(self, keys, versions, hits, warned) if self._expands else None
         if reasons is not None:
             return self._reported_begun(
-                overrides, hits, keys, warned, values, reasons, known
+                overrides, hits, keys, warned, values, reasons, known, late
             )
         if not hits:
-            return Begun(self._plan, overrides, hits, keys, pending, warned, values)
+            return Begun(
+                self._plan, overrides, hits, keys, pending, warned, values, late=late
+            )
         plan = self._plan_for(frozenset(hits))
-        return Begun(plan, {**overrides, **hits}, hits, keys, pending, warned, values)
+        return Begun(
+            plan, {**overrides, **hits}, hits, keys, pending, warned, values, late=late
+        )
 
     def _first_versions(
         self, known: Mapping[str, object], warned: set[str], reasons: dict[str, str]
@@ -1202,6 +1295,7 @@ class CacheRun:
         values: dict[str, object] | None,
         reasons: Mapping[str, str],
         known: Mapping[str, object],
+        late: LateKeys | None,
     ) -> Begun:
         """A reported run's `Begun`: its hits, the nodes it computes, their outcomes.
 
@@ -1225,6 +1319,7 @@ class CacheRun:
             reported,
             loaded,
             computed,
+            late,
         )
 
     def versions(
@@ -1327,6 +1422,9 @@ class CacheRun:
         levels = self.reported_levels(inputs, overrides, dispatch, start)
         level, begun = next(levels)
         while True:
+            if begun.late is not None:
+                begun.late.dispatch = dispatch
+                dispatch.late = begun.late
             result = level._finished(  # noqa: SLF001  # the same class
                 begun,
                 inputs,
@@ -1363,8 +1461,13 @@ class CacheRun:
         if begun.values is not None:
             begun.values[name] = value
         key = begun.keys[name]
-        if key is None or not self._stored[name]:
+        # An expand's value is its iterable: its items are stored once read.
+        if key is None or not self._stored[name] or name in self._expands:
             return
+        self.put(key, name, value, begun.warned)
+
+    def put(self, key: bytes, name: str, value: object, warned: set[str]) -> None:
+        """Stores node `name`'s `value` under `key`; a store that raises warns."""
         try:
             if (format_ := self._formats.get(name)) is not None:
                 self._store.put(key, value, format=format_)  # ty: ignore[unknown-argument]  # as in `_get`
@@ -1372,7 +1475,7 @@ class CacheRun:
                 self._store.put(key, value)
         except Exception as error:  # noqa: BLE001  # a store error skips the write
             _warn_once(
-                begun.warned,
+                warned,
                 name,
                 f"cannot store node {name!r} in the cache: {error!r}",
             )
@@ -1395,7 +1498,10 @@ class CacheRun:
         versions.update(dict.fromkeys(self._first))
         keys = self._key_plan.keys(versions)
         absent = {name for name, value in overrides.items() if value is _core.ABSENT}
-        return dict(sorted(self._outcomes(keys, reasons, warned, absent).items()))
+        outcomes = self._outcomes(keys, reasons, warned, absent)
+        if self._expands:
+            LateKeys(self, keys, versions, {}, warned).explain(outcomes)
+        return dict(sorted(outcomes.items()))
 
     def _outcomes(
         self,
@@ -1419,7 +1525,10 @@ class CacheRun:
         # Plan order, so each node's sources have their outcomes already.
         for name, k in self._node_keys.items():
             key = keys[name]
-            if key is None:
+            if name in self._late_plans:
+                # Keyed only during the run: a miss until a branch says otherwise.
+                outcome = _late_outcome(k, b"")
+            elif key is None:
                 outcome = self._keyless(k, reasons, outcomes, ran=warned is None)
             elif name in self._fresh:
                 field = self._fresh[name]
@@ -1428,7 +1537,7 @@ class CacheRun:
                 )
             else:
                 value = (
-                    self._get(key, name, warned)
+                    self.load(key, name, warned)
                     if warned is not None and self._stored[name]
                     else MISSING
                 )
@@ -1540,7 +1649,7 @@ class CacheRun:
                 continue
             key = keys[name]
             if key is not None and self._stored[name]:
-                value = self._get(key, name, warned)
+                value = self.load(key, name, warned)
                 if value is not MISSING:
                     hits[name] = value
                     continue
@@ -1559,7 +1668,7 @@ class CacheRun:
                 del self._plans[next(iter(self._plans))]
         return plan
 
-    def _get(self, key: bytes, name: str, warned: set[str]) -> object:
+    def load(self, key: bytes, name: str, warned: set[str]) -> object:
         """The store's value for `key`; `MISSING` when the store raises."""
         try:
             if (format_ := self._formats.get(name)) is not None:
@@ -1570,6 +1679,482 @@ class CacheRun:
                 warned, name, f"cannot load node {name!r} from the cache: {error!r}"
             )
             return MISSING
+
+
+# A late key not known yet in this run: it chains from the items of an expand that are
+# still to come, and no entry holds them. Never memoised, since the run may learn it.
+_UNKNOWN: Final = object()
+# A late key waiting for another one, which the resolver computes first.
+_PENDING: Final = object()
+
+type _Branch = tuple[int, ...]
+type _Task = tuple[str, _Branch]
+
+
+@dataclass(frozen=True, slots=True)
+class _Blocks:
+    """What a prepared plan with an expand knows of its late nodes, made once.
+
+    Attributes:
+        expands: The expands the plan computes.
+        late: The late nodes, in plan order: each block node, and each outer node
+            reading a collect or another late node.
+        paths: Each block node's block path, its expands outermost first.
+        collects: The sources each late node collects.
+        reads: The sources each late node's key reads, in key order.
+        plans: Each late node's own key plan, over the versions of what it reads.
+        keys: Each computed node's `NodeKey`.
+        stored: Whether each computed node is looked up and stored.
+        exits: Per expand, the block nodes its collects read, sorted.
+    """
+
+    expands: frozenset[str]
+    late: tuple[str, ...]
+    paths: Mapping[str, tuple[str, ...]]
+    collects: Mapping[str, frozenset[str]]
+    reads: Mapping[str, tuple[str, ...]]
+    plans: Mapping[str, _core.KeyPlan]
+    keys: Mapping[str, NodeKey]
+    stored: Mapping[str, bool]
+    exits: Mapping[str, tuple[str, ...]]
+
+
+def _late_outcome(k: NodeKey, key: object) -> CacheOutcome:
+    """A late node's outcome when it runs, given its `key` in that branch.
+
+    A key of `None` is uncacheable; any other key, known or not yet, is a miss.
+    """
+    if k.static is None:
+        return CacheOutcome("uncacheable", k.reason)
+    if key is None:
+        return CacheOutcome("uncacheable", "reads what has no version in its branch")
+    return k.outcome(found=False)
+
+
+class LateKeys:
+    """One cached run's keys of the nodes downstream of an expand, by branch.
+
+    Made per run, never shared. The core asks `lookup` of each late node before it
+    would compute it (in a branch, from the block's exits back), tells `pulled` of
+    each item and `finished` of each exhausted expand, and hands `store` each value
+    a late node computes. It runs one branch at a time, in reference order, so an
+    expand's items arrive in order, and the enclosing branch of an expand being read
+    is the one last asked about.
+
+    A late node's key is its ordinary key, over the versions of what it reads: the
+    item, for an expand it is in the block of; an earlier late node's key, in its
+    branch or the enclosing one; the hash of a collected node's keys in every
+    branch, in branch order; and as for any node, an input's or override's
+    fingerprint, or an outer node's key. An item's version is its fingerprint; an
+    item with none is versioned by its expand's key and its index, but only when the
+    expand's items are stored or were replayed in this run. Otherwise it has no
+    version, and its branch's keys chaining from it are `None`: uncacheable.
+
+    An expand's items are known once it is exhausted, or from the entry its key
+    holds, so a collect inside a block is keyed before its block runs when its
+    expand's items are stored.
+    """
+
+    def __init__(
+        self,
+        run: CacheRun,
+        keys: Mapping[str, bytes | None],
+        versions: Mapping[str, bytes | None],
+        hits: Mapping[str, object],
+        warned: set[str],
+    ) -> None:
+        """The late keys of one run of `run`, whose outer keys and versions are known.
+
+        `hits` are the outer values the run loaded: an expand among them replays
+        its items.
+        """
+        shape = run.blocks
+        if shape is None:
+            msg = "late keys of a plan with no expand"
+            raise RuntimeError(msg)
+        self._shape = shape
+        self._run = run
+        self._keys = keys
+        self._versions = versions
+        self._warned = warned
+        # Set by a hooked run: a value its hooks refused is not stored (R8).
+        self.dispatch: Dispatch | None = None
+        self._memo: dict[_Task, bytes | None] = {}
+        # The replayed items of an expand, by expand and enclosing branch.
+        self._replayed: dict[_Task, list[object]] = {
+            (name, ()): value
+            for name, value in hits.items()
+            if name in shape.expands and isinstance(value, list)
+        }
+        # The item versions of an expand, once exhausted or read from its entry.
+        self._items: dict[_Task, tuple[bytes | None, ...]] = {}
+        # Per expand being read: its enclosing branch, and its item versions so far.
+        self._pulling: dict[str, tuple[_Branch, list[bytes | None]]] = {}
+        # The branch last asked about.
+        self._current: _Branch = ()
+
+    def has(self, name: str) -> bool:
+        """Whether `name` is a late node, keyed per branch."""
+        return name in self._shape.plans
+
+    def records(self, name: str) -> bool:
+        """Whether expand `name`'s items are kept, to be stored once exhausted.
+
+        Not when they were replayed, nor when its key in the branch last asked
+        about is not known: then nothing could store them.
+        """
+        if not self._stores(name):
+            return False
+        prefix = self._current[: len(self._shape.paths.get(name, ()))]
+        if (name, prefix) in self._replayed:
+            return False
+        return isinstance(self._expand_key(name, prefix), bytes)
+
+    def _stores(self, name: str) -> bool:
+        """Whether node `name`'s policy looks it up and stores it."""
+        return self._shape.stored.get(name, False)
+
+    def lookup(self, name: str, branch: _Branch) -> tuple[object] | None:
+        """Late node `name`'s stored value in `branch`, as a 1-tuple; or `None`."""
+        self._current = branch
+        if not self._shape.stored.get(name, False):
+            return None
+        key = self.key(name, branch)
+        if not isinstance(key, bytes):
+            return None
+        value = self._run.load(key, name, self._warned)
+        if value is MISSING:
+            return None
+        if name in self._shape.expands:
+            if not isinstance(value, list):
+                return None
+            self._replayed[name, branch] = value
+        return (value,)
+
+    def store(self, name: str, branch: _Branch, value: object) -> None:
+        """Stores late node `name`'s `value`, just computed in `branch`, under its key.
+
+        An expand's value is its iterable, so `finished` stores its items instead.
+        """
+        dispatch = self.dispatch
+        if dispatch is not None and dispatch.refused:
+            return
+        if name in self._shape.expands or not self._shape.stored.get(name, False):
+            return
+        key = self.key(name, branch)
+        if isinstance(key, bytes):
+            self._run.put(key, name, value, self._warned)
+
+    def pulled(self, name: str, item: object) -> None:
+        """Takes the next item of expand `name`, in the branch last asked about."""
+        prefix = self._current[: len(self._shape.paths.get(name, ()))]
+        pulling = self._pulling.get(name)
+        if pulling is None or pulling[0] != prefix:
+            pulling = (prefix, [])
+            self._pulling[name] = pulling
+        versions = pulling[1]
+        versions.append(self._item_version(name, prefix, len(versions), item))
+
+    def finished(self, name: str, value: object) -> None:
+        """Expand `name` is exhausted: its items are known, and stored when kept."""
+        prefix = self._current[: len(self._shape.paths.get(name, ()))]
+        pulling = self._pulling.pop(name, None)
+        versions = pulling[1] if pulling is not None and pulling[0] == prefix else []
+        self._items[name, prefix] = tuple(versions)
+        if (name, prefix) in self._replayed or not self._stores(name):
+            return
+        key = self._expand_key(name, prefix)
+        if isinstance(key, bytes) and isinstance(value, list):
+            self._run.put(key, name, value, self._warned)
+
+    def outcome(self, name: str, branch: _Branch, *, hit: bool) -> CacheOutcome:
+        """Late node `name`'s cache outcome in `branch`, for its node events."""
+        k = self._shape.keys[name]
+        if hit:
+            return k.outcome(found=True)
+        # Asked again, since a key not known at the walk may be known by now.
+        return _late_outcome(k, self.key(name, branch))
+
+    def key(self, name: str, branch: _Branch) -> object:
+        """Late node `name`'s key in `branch`: `None` uncacheable, `_UNKNOWN` not yet.
+
+        Resolved with an explicit stack, each key once its sources' are known.
+        """
+        task = (name, branch)
+        if task in self._memo:
+            return self._memo[task]
+        unknown: set[_Task] = set()
+        todo = [task]
+        while todo:
+            top = todo[-1]
+            if top in self._memo or top in unknown:
+                todo.pop()
+                continue
+            needed: list[_Task] = []
+            versions = self._read(top, needed, unknown)
+            if needed:
+                todo.extend(needed)
+                continue
+            todo.pop()
+            if versions is None:
+                unknown.add(top)
+            else:
+                node = top[0]
+                self._memo[top] = self._shape.plans[node].keys(versions)[node]
+        return _UNKNOWN if task in unknown else self._memo[task]
+
+    def _dep(self, task: _Task, needed: list[_Task], unknown: set[_Task]) -> object:
+        """`task`'s key if known, `_UNKNOWN` if it can't be yet, else `_PENDING`."""
+        if task in self._memo:
+            return self._memo[task]
+        if task in unknown:
+            return _UNKNOWN
+        needed.append(task)
+        return _PENDING
+
+    def _read(
+        self, task: _Task, needed: list[_Task], unknown: set[_Task]
+    ) -> dict[str, bytes | None] | None:
+        """The versions `task`'s key reads, by source; `None` when one can't be known.
+
+        Each late key it waits for goes to `needed`.
+        """
+        name, branch = task
+        shape = self._shape
+        path = shape.paths.get(name, ())
+        versions: dict[str, bytes | None] = {}
+        for source in shape.reads[name]:
+            if source in shape.collects[name]:
+                version = self._collected(source, branch, needed, unknown)
+            elif source in path:
+                depth = path.index(source)
+                version = self._item(
+                    source, branch[:depth], branch[depth], needed, unknown
+                )
+            elif source in shape.plans:
+                # A late `recompute` node's result is known only once it ran.
+                version = (
+                    None
+                    if shape.keys[source].behavior == "recompute"
+                    else self._dep(
+                        (source, branch[: len(shape.paths.get(source, ()))]),
+                        needed,
+                        unknown,
+                    )
+                )
+            elif source in self._versions:
+                version = self._versions[source]
+            elif source in self._keys:
+                version = self._keys[source]
+            else:
+                # An optional input not supplied.
+                continue
+            if version is _UNKNOWN:
+                return None
+            if version is not _PENDING:
+                versions[source] = typing.cast("bytes | None", version)
+        return versions
+
+    def _item(
+        self,
+        name: str,
+        prefix: _Branch,
+        index: int,
+        needed: list[_Task],
+        unknown: set[_Task],
+    ) -> object:
+        """The version of item `index` of expand `name` in the branch `prefix`."""
+        found = self._items.get((name, prefix))
+        if found is None:
+            pulling = self._pulling.get(name)
+            if pulling is not None and pulling[0] == prefix and index < len(pulling[1]):
+                return pulling[1][index]
+            listed = self._listed(name, prefix, needed, unknown)
+            if not isinstance(listed, tuple):
+                return listed
+            found = typing.cast("tuple[bytes | None, ...]", listed)
+        return found[index] if index < len(found) else _UNKNOWN
+
+    def _collected(
+        self, source: str, branch: _Branch, needed: list[_Task], unknown: set[_Task]
+    ) -> object:
+        """The version of collected node `source` in `branch`: its keys, in order.
+
+        Over every branch of its expand, present or absent; `None` when any is.
+        """
+        expand = self._shape.paths[source][-1]
+        found = self._items.get((expand, branch))
+        if found is None:
+            listed = self._listed(expand, branch, needed, unknown)
+            if not isinstance(listed, tuple):
+                return listed
+            found = typing.cast("tuple[bytes | None, ...]", listed)
+        parts: list[bytes] = []
+        pending = False
+        for index in range(len(found)):
+            version = self._dep((source, (*branch, index)), needed, unknown)
+            if version is _UNKNOWN or version is None:
+                return version
+            if version is _PENDING:
+                pending = True
+            else:
+                parts.append(typing.cast("bytes", version))
+        return _PENDING if pending else _core.hash_parts(parts)
+
+    def _listed(
+        self, name: str, prefix: _Branch, needed: list[_Task], unknown: set[_Task]
+    ) -> object:
+        """Expand `name`'s item versions in `prefix`, from its replayed or stored items.
+
+        `_UNKNOWN` when neither holds them, `_PENDING` while its key is.
+        """
+        key = (
+            self._dep((name, prefix), needed, unknown)
+            if name in self._shape.plans
+            else self._keys.get(name)
+        )
+        if key is _PENDING:
+            return key
+        items = self._replayed.get((name, prefix))
+        if items is None:
+            if not isinstance(key, bytes) or not self._stores(name):
+                return _UNKNOWN
+            value = self._run.load(key, name, self._warned)
+            if not isinstance(value, list):
+                return _UNKNOWN
+            items = typing.cast("list[object]", value)
+        found = tuple(
+            self._item_version(name, prefix, index, item, key)
+            for index, item in enumerate(items)
+        )
+        self._items[name, prefix] = found
+        return found
+
+    def _item_version(
+        self,
+        name: str,
+        prefix: _Branch,
+        index: int,
+        item: object,
+        key: object = _PENDING,
+    ) -> bytes | None:
+        """Item `index`'s version: its fingerprint, else positional when replayable.
+
+        Positional means by expand `name`'s key in `prefix` (`key`, when given: the
+        items are then replayed) and the index: only when its items are stored or
+        replayed, so that key covers exactly what it yielded.
+        """
+        version = _version(item, name, self._warned)
+        if version is not None:
+            return version
+        if key is _PENDING:
+            if (name, prefix) not in self._replayed and not self._stores(name):
+                return None
+            key = self._expand_key(name, prefix)
+        if not isinstance(key, bytes):
+            return None
+        return _core.hash_parts([key, index.to_bytes(8, "big")])
+
+    def _expand_key(self, name: str, prefix: _Branch) -> object:
+        """Expand `name`'s key in its branch `prefix`."""
+        if name in self._shape.plans:
+            return self.key(name, prefix)
+        return self._keys.get(name)
+
+    def explain(self, outcomes: dict[str, CacheOutcome]) -> None:
+        """Sets `explain`'s outcome of every late node and expand in `outcomes`.
+
+        Runs nothing: an expand's items are known only from its entry. A block node
+        is `"unknown"`, keyed per item; an outer late node is looked up when its key
+        is known from stored items; an outer expand counts its branches.
+        """
+        shape = self._shape
+        for name in shape.late:
+            k = shape.keys[name]
+            path = shape.paths.get(name)
+            if path is not None:
+                outcomes[name] = (
+                    _late_outcome(k, None)
+                    if k.static is None
+                    else CacheOutcome("unknown", f"keyed per item of {path[-1]!r}")
+                )
+                continue
+            key = self.key(name, ())
+            if key is _UNKNOWN:
+                outcomes[name] = CacheOutcome(
+                    "unknown", "reads items that are known only at run"
+                )
+            elif not isinstance(key, bytes) or not shape.stored[name]:
+                outcomes[name] = _late_outcome(k, key)
+            else:
+                found = self._run.load(key, name, self._warned) is not MISSING
+                outcomes[name] = k.outcome(found=found)
+        # An overridden expand is no computed node, so it has no outcome.
+        for name in sorted((shape.expands - shape.plans.keys()) & outcomes.keys()):
+            outcome = outcomes[name]
+            branches = self._branches(name)
+            if branches is None:
+                reason = "the expand node runs, so its branches are known only at run"
+                if outcome.reason is not None:
+                    reason = f"{reason}; {outcome.reason}"
+                outcomes[name] = outcome._replace(reason=reason)
+            else:
+                counted = ", ".join(f"{n} {status}" for status, n in branches.items())
+                reason = f"branches: {counted}"
+                if outcome.reason is not None:
+                    reason = f"{outcome.reason}; {reason}"
+                outcomes[name] = outcome._replace(reason=reason)
+
+    def _branches(
+        self, name: str
+    ) -> dict[Literal["hit", "miss", "uncacheable"], int] | None:
+        """How many branches of outer expand `name` hit, miss or are uncacheable.
+
+        `None` when no entry holds its items.
+        """
+        listed = self._listed(name, (), [], set())
+        if not isinstance(listed, tuple):
+            return None
+        counts: dict[Literal["hit", "miss", "uncacheable"], int] = {
+            "hit": 0,
+            "miss": 0,
+            "uncacheable": 0,
+        }
+        exits = self._shape.exits.get(name, ())
+        for index in range(len(listed)):
+            statuses = {self._exit_status(node, (index,)) for node in exits}
+            if "uncacheable" in statuses:
+                counts["uncacheable"] += 1
+            elif statuses <= {"hit"}:
+                counts["hit"] += 1
+            else:
+                counts["miss"] += 1
+        return counts
+
+    def _exit_status(
+        self, name: str, branch: _Branch
+    ) -> Literal["hit", "miss", "uncacheable"]:
+        """Whether block node `name` would hit in `branch`, by the store alone."""
+        key = self.key(name, branch)
+        if key is None:
+            return "uncacheable"
+        if not isinstance(key, bytes) or not self._shape.stored[name]:
+            return "miss"
+        found = self._run.load(key, name, self._warned) is not MISSING
+        return "hit" if found else "miss"
+
+
+def _exits(
+    late: Sequence[str],
+    paths: Mapping[str, tuple[str, ...]],
+    collects: Mapping[str, frozenset[str]],
+) -> dict[str, tuple[str, ...]]:
+    """Per expand, the block nodes its collects read, sorted."""
+    exits: dict[str, set[str]] = {}
+    for name in late:
+        for source in collects[name]:
+            exits.setdefault(paths[source][-1], set()).add(source)
+    return {expand: tuple(sorted(nodes)) for expand, nodes in exits.items()}
 
 
 def _optional(cache: Cache, name: str, key: NodeKey) -> list[str]:

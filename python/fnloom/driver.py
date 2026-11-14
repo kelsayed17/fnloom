@@ -117,6 +117,10 @@ class _Runnable(Protocol):
 class _GraphLike(Protocol):
     """The part of `_core.Graph` the driver uses."""
 
+    def blocks(self) -> dict[str, list[str]]:
+        """Each block node's block path: its expands, outermost first."""
+        ...
+
     def node_names(self) -> list[str]:
         """Returns every node name, sorted."""
         ...
@@ -406,19 +410,20 @@ def _edge_mismatches(
             produced = _absence.without_absent(upstream.type)
             required = p.annotation
             # An expand feeds its block one item at a time, and a block node feeds
-            # a collect's elements (Q127).
+            # a collect's elements (Q127); the line names the types compared.
+            requires = f"requires {inspect.formatannotation(p.annotation)}"
+            returns = f"returns {inspect.formatannotation(upstream.type)}"
             if (collected := _blocks.collect_mode(required)) is not None:
                 required = collected[1]
+                shown_type = inspect.formatannotation(required)
+                requires = f"collects elements of type {shown_type}"
             elif (item := _blocks.expanded_type(upstream.type)) is not None:
                 produced = item
+                returns = f"yields items of type {inspect.formatannotation(item)}"
             if _types.type_matches(produced, required):
                 continue
             shown = p.name if p.slot is None else f"{p.name}[{p.slot!r}]"
-            line = (
-                f"{view.name}.{shown} requires "
-                f"{inspect.formatannotation(p.annotation)} but {upstream.name} "
-                f"returns {inspect.formatannotation(upstream.type)}"
-            )
+            line = f"{view.name}.{shown} {requires} but {upstream.name} {returns}"
             if isinstance(p.annotation, _types.Unresolved) or isinstance(
                 upstream.type, _types.Unresolved
             ):
@@ -1298,26 +1303,28 @@ class Driver[R = dict[str, object]]:
             view = functions.get(name)
             if view is None or view.block is None:
                 continue
-            # Only a collect outside every block can be requested.
-            collects = sorted(
-                repr(consumer.name)
+            collectors = [
+                consumer
                 for consumer in functions.values()
-                if consumer.block is None
-                and any(
+                if any(
                     p.collect is not None
                     and isinstance(p.binding, Source)
                     and p.binding.name == name
                     for p in consumer.params
                 )
-            )
+            ]
+            # Only a collect outside every block can be requested.
+            outside = sorted(repr(c.name) for c in collectors if c.block is None)
+            inside = sorted(repr(c.name) for c in collectors if c.block is not None)
             element = inspect.formatannotation(
                 _absence.without_absent(view.type), view.module
             )
-            tail = (
-                f"request a node that collects it: {', '.join(collects)}"
-                if collects
-                else f"collect it with a parameter annotated Collect[{element}]"
-            )
+            if outside:
+                tail = f"request a node that collects it: {', '.join(outside)}"
+            elif inside:
+                tail = f"it is collected only inside blocks, by {', '.join(inside)}"
+            else:
+                tail = f"collect it with a parameter annotated Collect[{element}]"
             lines.append(
                 f"{name!r} is computed once per item of {view.block!r}, so it is not "
                 f"an output; {tail}"
@@ -3622,16 +3629,10 @@ class Builder[R = dict[str, object]]:
 
         With no expand, there are no blocks, and absence is found here. With one,
         the core finds both, since a collect passes absence on only from an absent
-        expand (§7.4 of the dynamic execution design); a cached driver refuses
-        it, as branches are not keyed yet.
+        expand (§7.4 of the dynamic execution design).
         """
-        expanding = sorted(n.name for n in nodes if _blocks.expands(n.returns))
-        if not expanding:
+        if not any(_blocks.expands(n.returns) for n in nodes):
             return {}, _absence.may_be_absent(nodes)
-        if self._store is not None:
-            listed = ", ".join(f"{name!r}" for name in expanding)
-            msg = f"with_cache() does not cache blocks yet; {listed} expands"
-            raise ValueError(msg)
         found = _graph_of(nodes)
         return found.blocks(), frozenset(found.may_be_absent())
 

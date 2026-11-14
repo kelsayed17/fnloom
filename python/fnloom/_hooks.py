@@ -29,7 +29,7 @@ from fnloom._scan import by_parameter
 from fnloom._view import NodeView, NodeViews
 
 if TYPE_CHECKING:
-    from fnloom._caching import Begun
+    from fnloom._caching import Begun, LateKeys
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -396,6 +396,7 @@ class Dispatch:
         "_started",
         "_token",
         "_views",
+        "late",
         "outcomes",
     )
 
@@ -432,6 +433,8 @@ class Dispatch:
         self._token: contextvars.Token[_checks.Sink | None] | None = None
         # The `(node, branch)` pairs skipped so far, in order, for `RunEnd`.
         self._skipped: list[tuple[str, tuple[int, ...]]] = []
+        # A cached run's late keys, which give a late node's outcome per branch.
+        self.late: LateKeys | None = None
 
     def observers(self) -> tuple[_core.ObserverBase, ...]:
         """What the core run is given: one observer when its events are wanted.
@@ -465,6 +468,25 @@ class Dispatch:
             except BaseException as error:  # noqa: BLE001  # raised once every hook ran
                 found.append(error)
         self._raised(found)
+
+    def outcome(self, name: str, branch: tuple[int, ...]) -> CacheOutcome | None:
+        """Node `name`'s cache outcome as it runs in `branch`; `None` uncached."""
+        late = self.late
+        if late is not None and late.has(name):
+            return late.outcome(name, branch, hit=False)
+        outcomes = self.outcomes
+        return None if outcomes is None else outcomes.get(name)
+
+    def hit(self, name: str, branch: tuple[int, ...], value: object) -> None:
+        """Reports late node `name`, loaded from the store in `branch`, as a hit.
+
+        `before_node` and `after_node`, with no inputs and the loaded value, as
+        `loaded` reports an outer hit (Q85).
+        """
+        late = self.late
+        outcome = None if late is None else late.outcome(name, branch, hit=True)
+        self.node_started(name, None, outcome, branch=branch)
+        self.node_ended(name, None, outcome, value, None, branch=branch)
 
     def skipped(self, name: str, branch: tuple[int, ...]) -> None:
         """Records that node `name` was skipped in `branch`, for `RunEnd.skipped`."""
@@ -698,7 +720,6 @@ class _Forward(_core.ObserverBase):
     def __init__(self, dispatch: Dispatch) -> None:
         """Forwards to `dispatch`."""
         self._dispatch = dispatch
-        self._outcomes = dispatch.outcomes
         self._kwargs: Mapping[str, object] | None = None
 
     @override
@@ -707,12 +728,9 @@ class _Forward(_core.ObserverBase):
     ) -> None:
         # The core runs one node at a time, so its end is the next `post_node`.
         self._kwargs = kwargs
-        outcomes = self._outcomes
-        self._dispatch.node_started(
-            node,
-            kwargs,
-            None if outcomes is None else outcomes.get(node),
-            branch=branch,
+        dispatch = self._dispatch
+        dispatch.node_started(
+            node, kwargs, dispatch.outcome(node, branch), branch=branch
         )
 
     @override
@@ -725,15 +743,19 @@ class _Forward(_core.ObserverBase):
         error: BaseException | None,
         branch: tuple[int, ...] = (),
     ) -> None:
-        outcomes = self._outcomes
-        self._dispatch.node_ended(
+        dispatch = self._dispatch
+        dispatch.node_ended(
             node,
             self._kwargs,
-            None if outcomes is None else outcomes.get(node),
+            dispatch.outcome(node, branch),
             value,
             error,
             branch=branch,
         )
+
+    @override
+    def hit_in(self, node: str, *, branch: tuple[int, ...], value: object) -> None:
+        self._dispatch.hit(node, branch, value)
 
     @override
     def skipped(self, node: str, *, branch: tuple[int, ...]) -> None:

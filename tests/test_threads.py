@@ -263,3 +263,65 @@ def test_one_hook_shared_by_threads_sees_each_run_whole() -> None:
     statuses = [status for run in runs.values() for status in _check_whole(run)]
     # The cache both stored and hit while the threads ran.
     assert {"hit", "miss"} <= set(statuses)
+
+
+BLOCKED = """
+from fnloom import Collect, Parallelizable, current_branch
+
+
+def outer(sizes: list[int]) -> Parallelizable[int]:
+    yield from sizes
+
+
+def inner(outer: int) -> Parallelizable[int]:
+    yield from range(outer)
+
+
+def leaf(inner: int, outer: int, sizes: list[int]) -> int:
+    branch = current_branch()
+    if (sizes[branch[0]], branch[1]) != (outer, inner):
+        raise AssertionError(f"read branch {branch} for item ({outer}, {inner})")
+    return outer * 10 + inner
+
+
+def per_outer(leaf: Collect[int]) -> int:
+    return sum(leaf)
+
+
+def everything(per_outer: Collect[int]) -> list[int]:
+    return list(per_outer)
+"""
+
+BLOCK_RUNS = 60
+
+
+def _everything(sizes: list[int]) -> list[int]:
+    """`everything` in closed form."""
+    return [sum(size * 10 + inner for inner in range(size)) for size in sizes]
+
+
+def test_a_block_graph_shared_by_threads() -> None:
+    """16 threads share one cached driver over a nested fan-out, hits and misses.
+
+    Each result is the single-threaded one, and `current_branch()` inside a node is
+    its own branch: a run's late keys and item iterators, and the branch variable,
+    are its own.
+    """
+    module = make_module("threaded_blocks", BLOCKED)
+    store = fnloom.MemoryCache()
+    driver = fnloom.Builder().with_modules(module).with_cache(store).build()
+    start = threading.Barrier(MIXED_THREADS)
+
+    def work(thread: int) -> int:
+        start.wait()
+        for run in range(BLOCK_RUNS):
+            # Repeats every 12 runs per thread, and overlaps other threads' items.
+            sizes = [(thread + run) % 4 + 1, run % 3 + 1, (thread * run) % 2 + 1]
+            result = driver.execute(["everything"], inputs={"sizes": sizes})
+            assert result == {"everything": _everything(sizes)}, (thread, run)
+        return BLOCK_RUNS
+
+    with ThreadPoolExecutor(MIXED_THREADS) as pool:
+        done = [pool.submit(work, thread) for thread in range(MIXED_THREADS)]
+        assert sum(future.result() for future in done) == MIXED_THREADS * BLOCK_RUNS
+    assert len(store) > 0

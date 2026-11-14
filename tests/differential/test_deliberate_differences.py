@@ -6344,3 +6344,73 @@ def test_q95_a_graph_with_a_block_exports_format_2() -> None:
         "details": ("function", "picked"),
         "summary": ("collect", None),
     }
+
+
+# Caching blocks (Plan 10, task 12).
+
+_ORDERED = """
+def picked(order: list[int]) -> Parallelizable[int]:
+    print("picked")
+    yield from order
+
+
+def details(picked: int) -> int:
+    print("details")
+    return picked * 10
+
+
+def summary(details: Collect[int]) -> list[int]:
+    print("summary")
+    return list(details)
+"""
+
+
+@pytest.mark.deliberate("Q129")
+def test_q129_items_replay_and_a_reordered_collect_misses(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Hamilton reruns the expand and serves a stale collect after a reorder.
+
+    fnloom replays the expand's stored items, and keys the collect by its branches
+    in branch order, so reordered items hit every branch and miss the collect.
+    """
+    hamilton = (
+        hamilton_driver.Builder()
+        .enable_dynamic_execution(allow_experimental_mode=True)
+        .with_local_executor(executors.SynchronousLocalTaskExecutor())
+        .with_modules(block_module("q129_h", _ORDERED, "hamilton"))
+        .with_cache(path=str(tmp_path / "hamilton"))
+        .build()
+    )
+    ours = (
+        fnloom.Builder()
+        .with_modules(block_module("q129_f", _ORDERED, "fnloom"))
+        .with_cache(DiskCache(tmp_path / "fnloom"))
+        .build()
+    )
+
+    def calls() -> list[str]:
+        return capsys.readouterr().out.split()
+
+    for driver in (hamilton, ours):
+        assert driver.execute(["summary"], inputs={"order": [1, 2, 3]}) == {
+            "summary": [10, 20, 30]
+        }
+    calls()
+    assert hamilton.execute(["summary"], inputs={"order": [1, 2, 3]}) == {
+        "summary": [10, 20, 30]
+    }
+    assert calls() == ["picked"]
+    assert ours.execute(["summary"], inputs={"order": [1, 2, 3]}) == {
+        "summary": [10, 20, 30]
+    }
+    assert calls() == []
+    # Reordered: Hamilton's collect sorts its branches, so its stale hit is served.
+    assert hamilton.execute(["summary"], inputs={"order": [3, 1, 2]}) == {
+        "summary": [10, 20, 30]
+    }
+    assert calls() == ["picked"]
+    assert ours.execute(["summary"], inputs={"order": [3, 1, 2]}) == {
+        "summary": [30, 10, 20]
+    }
+    assert calls() == ["picked", "summary"]

@@ -94,8 +94,7 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `Param.collect` is `"present"`, `"all"` or `None`. A generator function is a node when annotated
   `-> Parallelizable[...]`. The build refuses a collect outside a block or of an expand, a node reading two
   unrelated blocks or both a block node and its collect (Q124), `@extract_fields` or `@extract_columns` on an expand,
-  and `Parallelizable[T | Absent]`. `build_async()` refuses a graph with an expand, until Plan 11 (Q132), and so
-  does `with_cache()`, until blocks are cached.
+  and `Parallelizable[T | Absent]`. `build_async()` refuses a graph with an expand, until Plan 11 (Q132).
 - Overrides and outputs around blocks (Q125, Q126). An override of an expand supplies its items, any iterable, read
   lazily, and one of a collect cuts its block. A block node requested as an output is a `ValueError` naming the
   nodes that collect it, or the `Collect[...]` annotation that would; an override of one is a `ValueError` saying
@@ -117,6 +116,15 @@ change the public API; such changes are listed under **Changed** and **Removed**
   with a block exports `fnloom.export/2`: each node says `block`, its `kind` may be `"expand"` or `"collect"`, each
   parameter says `collect`, `graph_version` hashes both, and `diff` compares them, reading a `/1` document's nodes as
   in no block and collecting nothing.
+- Caching blocks (Q129). `with_cache()` caches a graph with blocks. A block node's key is its ordinary key, with the
+  item's fingerprint as the version of its expand and no branch index, so a moved or repeated item hits and an
+  appended one computes one branch; a hit at a block's exit skips its upstream in that branch, and fires
+  `before_node` and `after_node` with `cache` a hit and its `branch`. An expand is stored as the `list` of its
+  items and a hit replays them without running it; a `recompute` or `disable` expand stays lazy and stores
+  nothing. A collect's version hashes its branches' keys in branch order, so reordered items miss it. An item with
+  no fingerprint is keyed by its index only when its expand's items are stored or replayed, else its branch is
+  uncacheable. `explain_cache` reports a block node `unknown` and counts an outer expand's branches, from its
+  stored items, in its reason. `_core.ObserverBase` gains `hit_in(node, *, branch, value)`.
 
 ### Changed
 

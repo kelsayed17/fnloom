@@ -58,10 +58,16 @@ impl Plan {
     /// downstream node runs; never for an input, an override or a skipped optional input.
     /// It is driven as one more observer, so an exception from it is raised like an
     /// observer's: as itself, after the closing `post_graph(ok=False)`.
+    ///
+    /// `late`, for a plan with blocks, keys the steps downstream of an expand during the
+    /// run: `late.lookup(node, branch)` gives a hit as a 1-tuple, or `None`;
+    /// `late.store(node, branch, value)` takes each such step's value once it succeeds;
+    /// `late.pulled(expand, item)` hears of each item, `late.finished(expand, value)` of
+    /// each exhausted expand, and `late.records(expand)` says whether its items are kept.
     // PyO3 renders the `Vec::new()` default as `Ellipsis`, so the signature says `()` itself.
     #[pyo3(
-        signature = (inputs, overrides, observers = Vec::new(), on_value = None),
-        text_signature = "($self, /, inputs, overrides, observers=(), on_value=None)"
+        signature = (inputs, overrides, observers = Vec::new(), on_value = None, late = None),
+        text_signature = "($self, /, inputs, overrides, observers=(), on_value=None, late=None)"
     )]
     fn run<'py>(
         &self,
@@ -70,6 +76,7 @@ impl Plan {
         overrides: &Bound<'py, PyDict>,
         observers: Vec<Bound<'py, ObserverBase>>,
         on_value: Option<Bound<'py, PyAny>>,
+        late: Option<&Bound<'py, PyAny>>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let graph = self.graph.get();
         let keywords = graph.keywords();
@@ -92,11 +99,22 @@ impl Plan {
             graph,
             keywords,
         });
+        let mut late_hook = late.map(|late| LateHook {
+            late,
+            plan: &self.plan,
+            graph,
+            keywords,
+        });
         let mut hooks: Vec<&mut dyn Observer<Value, PyErr>> = adapters
             .iter_mut()
             .map(|adapter| adapter as &mut dyn Observer<Value, PyErr>)
             .chain(
                 value_hook
+                    .as_mut()
+                    .map(|hook| hook as &mut dyn Observer<Value, PyErr>),
+            )
+            .chain(
+                late_hook
                     .as_mut()
                     .map(|hook| hook as &mut dyn Observer<Value, PyErr>),
             )
@@ -126,6 +144,7 @@ impl Plan {
                 absent: absent::singleton(py)?,
                 outputs: self.plan.outputs(),
                 expanding: None,
+                late,
             },
             lookup,
             &mut hooks,
@@ -162,6 +181,18 @@ impl Plan {
             }
         }
         listed
+    }
+
+    /// The computed steps downstream of an expand, whose cache keys are known only
+    /// during the run, in plan order: every block's steps, and each outer step reading
+    /// a collect or another such step.
+    fn late(&self) -> Vec<String> {
+        let graph = self.graph.get().core();
+        self.steps()
+            .into_iter()
+            .filter(|(name, _)| graph.id_of(name).is_some_and(|id| self.plan.is_late(id)))
+            .map(|(name, _)| name)
+            .collect()
     }
 
     /// Each expand whose block the plan runs, with that block's own steps as `(node,
@@ -285,6 +316,8 @@ struct Caller<'k, 'py, 'g> {
     outputs: &'k [NodeId],
     /// The expand last called in a branch, with that branch: its items are read in it.
     expanding: Option<(NodeId, Vec<usize>)>,
+    /// A cached run's late keys, as `Plan.run`'s `late` describes; `None` uncached.
+    late: Option<&'k Bound<'py, PyAny>>,
 }
 
 impl Evaluate<Py<PyAny>> for Caller<'_, '_, '_> {
@@ -332,6 +365,21 @@ impl Evaluate<Py<PyAny>> for Caller<'_, '_, '_> {
         let value = outcome?;
         reset.map(|_| value)
     }
+
+    /// A cache hit from `late.lookup`, which returns a 1-tuple, or `None` for none.
+    fn lookup(&mut self, node: &Node<Py<PyAny>>, branch: &[usize]) -> PyResult<Option<Value>> {
+        let Some(late) = self.late else {
+            return Ok(None);
+        };
+        let py = self.kwargs.py;
+        let name = keyword(py, self.kwargs.keywords, node.id, &node.name);
+        let found =
+            caught(|| late.call_method1(intern!(py, "lookup"), (name, PyTuple::new(py, branch)?)))?;
+        if found.is_none() {
+            return Ok(None);
+        }
+        Ok(Some(Arc::new(found.get_item(0)?.unbind())))
+    }
 }
 
 /// `fnloom._blocks.BRANCH`, the context variable `fnloom.current_branch()` reads.
@@ -356,7 +404,11 @@ impl Blocks<Py<PyAny>, Value, PyErr> for Caller<'_, '_, '_> {
                 node.name
             )));
         };
-        let record = self.outputs.binary_search(&node.id).is_ok();
+        let mut record = self.outputs.binary_search(&node.id).is_ok();
+        if let Some(late) = self.late.filter(|_| !record) {
+            let name = keyword(py, self.kwargs.keywords, node.id, &node.name);
+            record = caught(|| late.call_method1(intern!(py, "records"), (name,)))?.is_truthy()?;
+        }
         // A generator's body runs as its items are read, so in the expand's branch.
         let branch = match self.expanding.take() {
             Some((id, branch)) if id == node.id => PyTuple::new(py, branch)?,
@@ -373,7 +425,16 @@ impl Blocks<Py<PyAny>, Value, PyErr> for Caller<'_, '_, '_> {
     fn next_item(&mut self, node: &Node<Py<PyAny>>, iterator: &Value) -> PyResult<Item<Value>> {
         let py = self.kwargs.py;
         match caught(|| iterator.bind(py).call_method0(intern!(py, "__next__"))) {
-            Ok(item) => Ok(Item::Next(Arc::new(item.unbind()))),
+            Ok(item) => {
+                if let Some(late) = self.late {
+                    let name = keyword(py, self.kwargs.keywords, node.id, &node.name);
+                    caught(|| {
+                        late.call_method1(intern!(py, "pulled"), (name, &item))
+                            .map(drop)
+                    })?;
+                }
+                Ok(Item::Next(Arc::new(item.unbind())))
+            }
             Err(error) if error.is_instance_of::<PyStopIteration>(py) => {
                 let value = error.value(py).getattr(intern!(py, "value"))?;
                 if !value.is(self.absent.bind(py)) {
@@ -390,17 +451,24 @@ impl Blocks<Py<PyAny>, Value, PyErr> for Caller<'_, '_, '_> {
 
     fn finish_items(
         &mut self,
-        _node: &Node<Py<PyAny>>,
+        node: &Node<Py<PyAny>>,
         iterator: &Value,
         exhausted: bool,
     ) -> PyResult<Value> {
         let py = self.kwargs.py;
-        caught(|| {
+        let value = caught(|| {
             iterator
                 .bind(py)
                 .call_method1(intern!(py, "finish"), (exhausted,))
-                .map(|value| Arc::new(value.unbind()))
-        })
+        })?;
+        if let Some(late) = self.late.filter(|_| exhausted) {
+            let name = keyword(py, self.kwargs.keywords, node.id, &node.name);
+            caught(|| {
+                late.call_method1(intern!(py, "finished"), (name, &value))
+                    .map(drop)
+            })?;
+        }
+        Ok(Arc::new(value.unbind()))
     }
 
     fn gather(
@@ -448,6 +516,45 @@ impl Observer<Value, PyErr> for ValueHook<'_, '_> {
             }
             Sink::Store(keys) => caught(|| keys.get().store(keys.py(), node, value)),
         }
+    }
+}
+
+/// Hands each late step's value to `late.store`, as the last observer.
+struct LateHook<'py, 'g> {
+    late: &'g Bound<'py, PyAny>,
+    plan: &'g CorePlan,
+    graph: &'g Graph,
+    keywords: &'g [Py<PyString>],
+}
+
+impl Observer<Value, PyErr> for LateHook<'_, '_> {
+    fn post_node_in(
+        &mut self,
+        node: &str,
+        branch: &[usize],
+        outcome: Result<&Value, &PyErr>,
+    ) -> PyResult<()> {
+        let Ok(value) = outcome else {
+            return Ok(());
+        };
+        let Some(id) = self
+            .graph
+            .core()
+            .id_of(node)
+            .filter(|&id| self.plan.is_late(id))
+        else {
+            return Ok(());
+        };
+        let py = self.late.py();
+        let name = keyword(py, self.keywords, id, node);
+        caught(|| {
+            self.late
+                .call_method1(
+                    intern!(py, "store"),
+                    (name, PyTuple::new(py, branch)?, value.bind(py)),
+                )
+                .map(drop)
+        })
     }
 }
 

@@ -51,6 +51,10 @@ class SpyGraph:
         """Delegates."""
         return self.graph.node_names()
 
+    def blocks(self) -> dict[str, list[str]]:
+        """Delegates."""
+        return self.graph.blocks()
+
     def upstream_of(self, names: list[str]) -> list[str]:
         """Delegates."""
         return self.graph.upstream_of(names)

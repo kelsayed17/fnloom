@@ -152,14 +152,6 @@ def test_build_async_refuses_blocks() -> None:
     )
 
 
-def test_with_cache_refuses_blocks_until_they_are_cached() -> None:
-    """A cached driver can't key a branch yet, so it refuses a graph with blocks."""
-    module = make_module("blocks_cache", PICKED)
-    builder = fnloom.Builder().with_modules(module).with_cache(fnloom.MemoryCache())
-    with pytest.raises(ValueError, match="does not cache blocks yet; 'picked' expands"):
-        builder.build()
-
-
 STR_ITEMS = """
 from fnloom import Collect, Parallelizable
 
@@ -369,6 +361,87 @@ def test_an_uncollected_block_output_says_how_to_collect_it() -> None:
         "'details' is computed once per item of 'picked', so it is not an output; "
         "collect it with a parameter annotated Collect[Detail]"
     )
+
+
+def test_a_nested_block_output_names_its_collectors_inside_blocks() -> None:
+    """A node collected only inside blocks names those collectors, not the fix."""
+    module = make_module(
+        "blocks_nested_output",
+        """
+        from fnloom import Collect, Parallelizable
+
+        def outer() -> Parallelizable[int]:
+            yield 1
+
+        def inner(outer: int) -> Parallelizable[int]:
+            yield outer
+
+        def leaf(inner: int) -> int:
+            return inner
+
+        def per_outer(leaf: Collect[int]) -> int:
+            return sum(leaf)
+
+        def total(per_outer: Collect[int]) -> int:
+            return sum(per_outer)
+        """,
+    )
+    with pytest.raises(ValueError, match="not an output") as info:
+        fnloom.build(module).execute(["leaf"])
+    assert str(info.value) == (
+        "'leaf' is computed once per item of 'inner', so it is not an output; "
+        "it is collected only inside blocks, by 'per_outer'"
+    )
+
+
+MISMATCHED = """
+from fnloom import Collect, Parallelizable
+
+
+def picked() -> Parallelizable[str]:
+    yield "a"
+
+
+def details(picked: int) -> str:
+    return repr(picked)
+
+
+def summary(details: Collect[int]) -> list[int]:
+    return list(details)
+"""
+
+
+def test_block_edge_mismatches_say_what_is_compared() -> None:
+    """Each block edge's refusal names the item or element type it compared."""
+    with pytest.raises(ValueError, match="requires") as info:
+        fnloom.build(make_module("blocks_mismatched", MISMATCHED))
+    assert str(info.value).splitlines() == [
+        "details.picked requires int but picked yields items of type str",
+        "summary.details collects elements of type int but details returns str",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("loose", "refused"),
+    [
+        (("details", "summary"), []),
+        (("details",), ["summary.details"]),
+        (("summary",), ["details.picked"]),
+        (("picked",), ["details.picked", "summary.details"]),
+    ],
+)
+def test_without_edge_type_checks_opts_out_block_edges_per_consumer(
+    loose: tuple[str, ...], refused: list[str]
+) -> None:
+    """Naming a consumer opts out its block edge; naming another node still refuses."""
+    module = make_module(f"blocks_loose_{'_'.join(loose)}", MISMATCHED)
+    builder = fnloom.Builder().with_modules(module).without_edge_type_checks(*loose)
+    if not refused:
+        builder.build()
+        return
+    with pytest.raises(ValueError, match=r"requires|collects") as info:
+        builder.build()
+    assert [line.split()[0] for line in str(info.value).splitlines()] == refused
 
 
 def test_lineage_and_inputs_treat_expand_and_collect_as_ordinary() -> None:

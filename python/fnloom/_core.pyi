@@ -79,8 +79,10 @@ class Plan:
         overrides: dict[str, Any],
         observers: Sequence[ObserverBase] = (),
         on_value: Callable[[str, object], None] | Keys | None = None,
+        late: object | None = None,
     ) -> dict[str, object]: ...
     def steps(self) -> list[tuple[str, str]]: ...
+    def late(self) -> list[str]: ...
     def blocks(self) -> dict[str, list[tuple[str, str]]]: ...
 
 @final
@@ -115,11 +117,25 @@ class MemoryStore:
 class ObserverBase:
     def __new__(cls, *_args: object, **_kwargs: object) -> Self: ...
     def pre_graph(self) -> None: ...
-    # A block node's `pre_node` and `post_node` also get `branch=`, its branch path.
-    def pre_node(self, node: str, kwargs: dict[str, object]) -> None: ...
-    def post_node(
-        self, node: str, *, ok: bool, value: object, error: BaseException | None
+    # A block node's `pre_node` and `post_node` also get `branch=`, its branch path;
+    # a node outside every block is called without it.
+    def pre_node(
+        self,
+        node: str,
+        kwargs: dict[str, object],
+        *,
+        branch: tuple[int, ...] = ...,
     ) -> None: ...
+    def post_node(
+        self,
+        node: str,
+        *,
+        ok: bool,
+        value: object,
+        error: BaseException | None,
+        branch: tuple[int, ...] = ...,
+    ) -> None: ...
+    def hit_in(self, node: str, *, branch: tuple[int, ...], value: object) -> None: ...
     def skipped(self, node: str, *, branch: tuple[int, ...]) -> None: ...
     def post_expand(
         self, node: str, *, branch: tuple[int, ...], items: int
