@@ -759,3 +759,19 @@ def test_memory_drops_the_old_value_when_the_new_one_cannot_be_sized() -> None:
         store.put(_key(1), _Unsizable())
     assert store.get(_key(1)) is MISSING
     assert len(store) == 0
+
+
+def test_memory_drops_the_old_value_when_sizing_the_new_one_raises() -> None:
+    """A put whose sizing raises fails, and leaves nothing under its key."""
+
+    def size(value: object) -> int:
+        if value == "unsizable":
+            msg = "no size"
+            raise RuntimeError(msg)
+        return 8
+
+    store = fnloom._core.MemoryStore(10, 1000, size)  # noqa: SLF001  # the binding's own store
+    store.put(_key(1), 1)
+    with pytest.raises(RuntimeError, match="no size"):
+        store.put(_key(1), "unsizable")
+    assert store.get(_key(1), MISSING) is MISSING
