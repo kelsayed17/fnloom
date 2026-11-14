@@ -139,6 +139,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Changed
 
+- `build()` of a large graph is about 15% faster: 104 ms rather than 124 for a 10,000-node chain. A graph with no
+  `@pipe_input`, `@pipe_output` or `@mutate` skips the step lowering, the check of `@mutate` targets reads the
+  modules' functions only when one is a mutator, and the edge check writes out only a mismatch's types.
 - A default on a `Collect` parameter whose expand can't decline is refused as a shadowed default, since it is never
   used; one reading a block node that may be absent was accepted before.
 - A parameter with a default that reads a node that may be absent, and doesn't admit `Absent`, is no longer a
