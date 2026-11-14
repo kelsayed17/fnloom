@@ -712,8 +712,11 @@ def _checked_orient(orient: object) -> None:
 
 
 # The control characters other than `\n`, which Graphviz copies into an SVG it
-# writes, making it XML no reader takes: each becomes U+FFFD, as in `to_svg()`.
-_DOT_CONTROLS = dict.fromkeys((*range(10), *range(11, 32), 127), "�")
+# writes, making it XML no reader takes, and the lone surrogates, which no file
+# can hold as UTF-8: each becomes U+FFFD, as in `to_svg()`.
+_DOT_CONTROLS = dict.fromkeys(
+    (*range(10), *range(11, 32), 127, *range(0xD800, 0xE000)), "�"
+)
 
 
 def _escaped(text: str) -> str:
@@ -908,8 +911,16 @@ _MERMAID_SHAPES = {
 
 def _mermaid_text(line: str) -> str:
     """`line` for inside a quoted Mermaid label."""
-    # A control character, a line break among them, can't stand in a label.
-    return "".join(" " if ord(c) < 32 else _MERMAID_ESCAPES.get(c, c) for c in line)  # noqa: PLR2004  # the C0 controls
+    # A control character, a line break among them, can't stand in a label, and a
+    # lone surrogate can't be written as UTF-8: it becomes U+FFFD, as in `to_svg()`.
+    return "".join(
+        " "
+        if ord(c) < 32  # noqa: PLR2004  # the C0 controls
+        else "�"
+        if 0xD800 <= ord(c) < 0xE000  # noqa: PLR2004  # the surrogates
+        else _MERMAID_ESCAPES.get(c, c)
+        for c in line
+    )
 
 
 def _mermaid_label(node: DrawnNode, show_types: bool = True) -> str:  # noqa: FBT001, FBT002  # private

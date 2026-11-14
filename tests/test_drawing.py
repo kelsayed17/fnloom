@@ -965,3 +965,13 @@ def test_a_block_named_legend_moves_the_legend_without_blocks_given() -> None:
     node = DrawnNode(name="n", kind="function", type="int", title="n", block="legend")
     dot = Drawing((node,), ()).to_dot()
     assert "subgraph cluster__legend" in dot
+
+
+@pytest.mark.parametrize("suffix", ["dot", "mmd"])
+def test_a_lone_surrogate_is_replaced_in_dot_and_mermaid(
+    tmp_path: Path, suffix: str
+) -> None:
+    """It becomes U+FFFD, as in `to_svg()`, rather than a `UnicodeEncodeError`."""
+    node = DrawnNode(name="a", kind="function", type="int", title="bad\udcff")
+    written = Drawing((node,), ()).render(tmp_path / f"g.{suffix}")
+    assert "bad\ufffd" in written.read_text(encoding="utf-8")
