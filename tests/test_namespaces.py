@@ -983,3 +983,161 @@ def test_unread_or_defined_bind_keys_are_refused_at_build() -> None:
         match=re.escape("bind names 'net' under namespace 'eu', which defines it"),
     ):
         defined.build()
+
+
+# Blocks under namespaces and `bind=` (Plan 10, task 14).
+
+BLOCK = """
+from fnloom import Collect, Parallelizable
+
+
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+def details(picked: int, rate: int) -> int:
+    return picked * rate
+
+
+def summary(details: Collect[int]) -> list[int]:
+    return list(details)
+"""
+
+
+def test_two_copies_of_a_module_have_independent_blocks() -> None:
+    """Each copy's block is named by its namespaced expand, and runs over its items."""
+    module = make_module("blocks_two_copies", BLOCK)
+    driver = (
+        fnloom.Builder()
+        .with_modules(module, namespace="a", bind={"n": fnloom.value(2)})
+        .with_modules(module, namespace="b", bind={"n": fnloom.value(3)})
+        .build()
+    )
+    blocks = {name: view.block for name, view in driver.nodes.items()}
+    assert blocks["a.details"] == "a.picked"
+    assert blocks["b.details"] == "b.picked"
+    assert driver.execute(["a.summary", "b.summary"], inputs={"rate": 10}) == {
+        "a.summary": [0, 10],
+        "b.summary": [0, 10, 20],
+    }
+
+
+def test_bind_to_an_outer_node_is_shared_by_the_copys_branches() -> None:
+    """A bound outer node runs once, and every branch of the copy reads it."""
+    module = make_module("blocks_bind_outer", BLOCK)
+    outer = make_module(
+        "blocks_bind_outer_rate",
+        """
+        calls = []
+
+        def base_rate(seed: int) -> int:
+            calls.append(seed)
+            return seed * 2
+        """,
+    )
+    driver = (
+        fnloom.Builder()
+        .with_modules(outer)
+        .with_modules(module, namespace="a", bind={"rate": fnloom.source("base_rate")})
+        .build()
+    )
+    assert driver.nodes["a.details"].dependencies == ("a.picked", "base_rate")
+    assert driver.nodes["base_rate"].block is None
+    assert driver.execute(["a.summary"], inputs={"n": 3, "seed": 5}) == {
+        "a.summary": [0, 10, 20]
+    }
+    assert outer.calls == [5]
+
+
+USES = """
+def used(gross: object) -> object:
+    return gross
+"""
+
+
+def test_bind_to_another_copys_block_node_is_refused() -> None:
+    """A block node has a value per item; the copy binds the collect instead."""
+    module = make_module("blocks_bind_refused", BLOCK)
+    uses = make_module("blocks_bind_refused_uses", USES)
+    builder = (
+        fnloom.Builder()
+        .with_modules(module, namespace="a")
+        .with_modules(uses, namespace="c", bind={"gross": fnloom.source("a.details")})
+    )
+    with pytest.raises(ValueError, match="bind its collect") as info:
+        builder.build()
+    assert str(info.value) == (
+        "bind={'gross': source('a.details')} under namespace 'c' reads a node "
+        "computed once per item of 'a.picked'; bind its collect instead"
+    )
+
+
+def test_bind_to_another_copys_collect_works() -> None:
+    """The collect is one value, outside the block, so a copy may bind it."""
+    module = make_module("blocks_bind_collect", BLOCK)
+    uses = make_module("blocks_bind_collect_uses", USES)
+    driver = (
+        fnloom.Builder()
+        .with_modules(module, namespace="a")
+        .with_modules(uses, namespace="c", bind={"gross": fnloom.source("a.summary")})
+        .build()
+    )
+    assert driver.nodes["c.used"].block is None
+    assert driver.execute(["c.used"], inputs={"n": 2, "rate": 3}) == {"c.used": [0, 3]}
+
+
+def test_bind_to_another_copys_block_node_feeds_a_collect() -> None:
+    """A `Collect` parameter bound to a block node gathers it: no cross-block edge."""
+    module = make_module("blocks_bind_gathered", BLOCK)
+    totals = make_module(
+        "blocks_bind_gathered_totals",
+        """
+        from fnloom import Collect
+
+        def total(gross: Collect[int]) -> int:
+            return sum(gross)
+        """,
+    )
+    driver = (
+        fnloom.Builder()
+        .with_modules(module, namespace="a")
+        .with_modules(totals, namespace="c", bind={"gross": fnloom.source("a.details")})
+        .build()
+    )
+    assert driver.nodes["c.total"].kind == "collect"
+    assert driver.execute(["c.total"], inputs={"n": 3, "rate": 10}) == {"c.total": 30}
+
+
+def test_namespace_config_selects_variants_inside_blocks() -> None:
+    """Each copy's config picks its block node's variant (Plan 12 PR F)."""
+    module = make_module(
+        "blocks_namespace_config",
+        """
+        from fnloom import Collect, Parallelizable, config
+
+        def picked(n: int) -> Parallelizable[int]:
+            yield from range(1, n + 1)
+
+        @config.when(unit="cents")
+        def price__cents(picked: int) -> int:
+            return picked * 100
+
+        @config.when(unit="units")
+        def price__units(picked: int) -> int:
+            return picked
+
+        def prices(price: Collect[int]) -> list[int]:
+            return list(price)
+        """,
+    )
+    driver = (
+        fnloom.Builder()
+        .with_modules(module, namespace="eu", config={"unit": "cents"})
+        .with_modules(module, namespace="us", config={"unit": "units"})
+        .build()
+    )
+    assert driver.nodes["eu.price"].block == "eu.picked"
+    assert driver.execute(["eu.prices", "us.prices"], inputs={"n": 2}) == {
+        "eu.prices": [100, 200],
+        "us.prices": [1, 2],
+    }
