@@ -6,6 +6,7 @@ a line on stderr, with exit status 1, or 2 for a usage error.
 """
 
 import argparse
+import contextlib
 import dataclasses
 import importlib
 import importlib.util
@@ -544,7 +545,9 @@ def _load_file(target: str) -> ModuleType:
         # A failed load leaves nothing behind for the next one to find.
         del sys.modules[name]
         if added:
-            sys.path.remove(folder)
+            # The module may have taken it off itself: its own error is the one to see.
+            with contextlib.suppress(ValueError):
+                sys.path.remove(folder)
         raise
     return module
 

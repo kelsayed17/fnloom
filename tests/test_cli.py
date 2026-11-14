@@ -708,3 +708,18 @@ def test_a_failed_load_leaves_sys_path_as_it_was(
     assert status == 1
     assert "cannot load" in err
     assert sys.path == before
+
+
+def test_a_failed_load_that_drops_its_own_folder_reports_its_own_error(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The module's error is reported, not one from taking its folder off again."""
+    monkeypatch.setattr(sys, "path", list(sys.path))
+    broken = tmp_path / "dropping_flow.py"
+    broken.write_text(
+        "import pathlib, sys\nsys.path.remove(str(pathlib.Path(__file__).parent))\n"
+        "raise RuntimeError('its own error')\n"
+    )
+    status, _, err = _run(capsys, "validate", str(broken), "--outputs", "b")
+    assert status == 1
+    assert "its own error" in err
