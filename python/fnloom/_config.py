@@ -569,6 +569,11 @@ def _need(condition: Condition) -> str:
     return f"{condition.key} {_OPERATORS[condition.kind]} {shown}"
 
 
+def condition_text(conditions: Sequence[Condition]) -> str:
+    """The `@config.when*` conditions as text: `mode == 'fast'`, joined by `, `."""
+    return ", ".join(map(_need, conditions))
+
+
 def unmatched(
     name: str, config: Mapping[str, object], variants: Sequence[Variant]
 ) -> str:

@@ -17,8 +17,8 @@ from typing import TYPE_CHECKING, Any
 from fnloom._caching import check_parts, with_predicates
 from fnloom._canonical import DEPTH, UnwritableError, stable_fingerprint
 from fnloom._codeversion import UncacheableError, code_version
+from fnloom._config import condition_text
 from fnloom._decorators import Source, Value, decorations
-from fnloom._drawing import condition_text
 from fnloom._types import Unresolved
 
 if TYPE_CHECKING:
