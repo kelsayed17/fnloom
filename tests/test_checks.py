@@ -8,6 +8,8 @@ import os
 import subprocess
 import sys
 import warnings
+from decimal import Decimal
+from fractions import Fraction
 from typing import TYPE_CHECKING, Any, cast, override
 
 import pytest
@@ -289,6 +291,75 @@ def b(x: int) -> int:
         "a: check range does not apply to str\n"
         "b: check contains applies to str, not int"
     )
+
+
+@pytest.mark.parametrize(
+    "returns",
+    ["str | None", "Name | None", "Name", "Literal['a', 'b']", "bytes | None"],
+)
+@pytest.mark.parametrize(
+    "check", ["range=(0, 1)", "allow_nans=False", "max_fraction_nans=0.5"]
+)
+def test_a_number_check_refuses_text_however_it_is_spelt(
+    returns: str, check: str
+) -> None:
+    """Text in a union with `None`, a `NewType` or a `Literal`: refused at build (Q101).
+
+    Such a node built, then failed every run.
+    """
+    source = f"""
+from typing import Literal, NewType
+from fnloom import check_output
+
+Name = NewType("Name", str)
+
+@check_output({check})
+def a(x: int) -> {returns}:
+    return None
+"""
+    name = check.partition("=")[0]
+    with pytest.raises(TypeError, match=f"a: check {name} does not apply to"):
+        _driver(source, "unreadable_text")
+
+
+@pytest.mark.parametrize("returns", ["int | None", "int | str", "Literal[1, 2]"])
+def test_a_number_check_takes_a_union_that_may_be_a_number(returns: str) -> None:
+    """A union with a numeric arm, or a `Literal` of numbers, may pass the check."""
+    source = f"""
+from typing import Literal
+from fnloom import check_output
+
+@check_output(range=(0, 9))
+def a(x: int) -> {returns}:
+    return 1
+"""
+    assert _driver(source, "readable_number").execute(["a"], inputs={"x": 1}) == {
+        "a": 1
+    }
+
+
+@pytest.mark.parametrize("fraction", ["0.5", b"0.5", [0.5], True, float("nan")])
+def test_max_fraction_nans_must_be_a_fraction(fraction: object) -> None:
+    """A text or other non-number is refused as out of range, naming the argument."""
+    with pytest.raises(ValueError, match=r"max_fraction_nans must be in \[0, 1\]"):
+        check_output(max_fraction_nans=fraction)  # ty: ignore[invalid-argument-type]
+
+
+def test_max_fraction_nans_takes_any_number_float_reads() -> None:
+    """A `Decimal` or `Fraction` is read as its float, as before."""
+    for fraction in (Decimal("0.5"), Fraction(1, 2), 1):
+        check_output(max_fraction_nans=fraction)  # ty: ignore[invalid-argument-type]
+
+
+def test_an_annotation_that_raises_names_its_function() -> None:
+    """The build's error carries a note naming the function whose annotation raised."""
+    source = """
+def a(x: int) -> "int | 3":
+    return x
+"""
+    with pytest.raises(TypeError) as caught:
+        _driver(source, "raising_annotation")
+    assert "in the annotations of a" in caught.value.__notes__
 
 
 TEXTUAL = """
