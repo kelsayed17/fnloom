@@ -249,7 +249,7 @@ class Drawing:
             styled = f" [{_listed(attributes)}]" if attributes else ""
             lines.append(f"  {_quoted(dependency)} -> {_quoted(node)}{styled}")
         if legend and self.nodes:
-            lines.extend(_dot_legend(self.nodes, {b for b, _ in self.blocks}))
+            lines.extend(_dot_legend(self.nodes, set(_parents(self))))
         lines.append("}")
         return "\n".join(lines) + "\n"
 
@@ -474,7 +474,19 @@ def edge_labels(drawing: Drawing) -> list[str | None]:
 
 
 def checked_parts(drawing: Drawing) -> None:
-    """`ValueError` for two nodes of one name, or an edge to a node not drawn."""
+    """`ValueError` for two nodes of one name, an edge to no node, or blocks in a cycle.
+
+    A cycle in `blocks` would leave its nodes in no cluster.
+    """
+    parents = dict(drawing.blocks)
+    for block in parents:
+        walked = [block]
+        while (block := parents.get(block)) is not None:
+            if block in walked:
+                cycle = " in ".join(map(repr, [*walked[walked.index(block) :], block]))
+                msg = f"the drawing's blocks form a cycle: {cycle}"
+                raise ValueError(msg)
+            walked.append(block)
     seen: set[str] = set()
     for n in drawing.nodes:
         if n.name in seen:

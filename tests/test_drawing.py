@@ -947,3 +947,21 @@ def test_the_builtin_svg_names_the_block_on_each_member() -> None:
     assert svg.count("for each item of outer") == 2  # noqa: PLR2004  # inner, per_outer
     assert svg.count(">expand</tspan>") == 4  # noqa: PLR2004  # four expand edges
     assert svg.count(">collect</tspan>") == 2  # noqa: PLR2004  # two collect edges
+
+
+def test_a_cycle_of_blocks_is_refused() -> None:
+    """Its nodes would be in no cluster, so every writer refuses it, naming it."""
+    node = DrawnNode(name="n", kind="function", type="int", title="n", block="a")
+    drawing = Drawing((node,), (), blocks=(("a", "b"), ("b", "a")))
+    for write in (drawing.to_dot, drawing.to_mermaid, drawing.to_svg):
+        with pytest.raises(
+            ValueError, match=r"^the drawing's blocks form a cycle: 'a' in 'b' in 'a'$"
+        ):
+            write()
+
+
+def test_a_block_named_legend_moves_the_legend_without_blocks_given() -> None:
+    """A node's own block counts, as `blocks=()` names none."""
+    node = DrawnNode(name="n", kind="function", type="int", title="n", block="legend")
+    dot = Drawing((node,), ()).to_dot()
+    assert "subgraph cluster__legend" in dot

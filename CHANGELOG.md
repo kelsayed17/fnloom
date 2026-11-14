@@ -28,9 +28,10 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `before_run` with no nodes, then `after_run` with `ok=False`. A result builder gets an absent output as `ABSENT`,
   and `frame()` refuses one with a `ValueError` naming each. `@extract_fields` and `@extract_columns` take a producer annotated
   `R | Absent`, and every field is absent when it declines. `@check_output*` and `with_output_type_checks()` don't
-  run on `ABSENT` (`NodeEnd.checks` is `()`). A graph with a node that may be absent exports `fnloom.export/2`, each
-  node with `may_be_absent`; any other graph still exports `fnloom.export/1`, byte for byte, and `fnloom diff` reads
-  both. Drawings mark such a node `may be absent`, drawn dashed and named in the legend.
+  run on `ABSENT` (`NodeEnd.checks` is `()`). A graph with a node that may be absent, or with a block, exports
+  `fnloom.export/2`: every node of it carries `may_be_absent` and `block`, its `kind` may be `expand` or `collect`,
+  and every param carries `collect`. Any other graph still exports `fnloom.export/1`, byte for byte, and `fnloom
+  diff` reads both. Drawings mark such a node `may be absent`, drawn dashed and named in the legend.
 - `ObserverBase.skipped(node, *, branch)`, the binding's forward of the core's `Observer::skipped`. An observer whose
   class overrides neither `pre_node` nor `post_node` is sent no node events, so a run makes no keyword arguments for
   it.
@@ -167,6 +168,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Fixed
 
+- A hand-built `Drawing` whose `blocks` form a cycle is refused by `to_dot()`, `to_mermaid()` and `to_svg()` with a
+  `ValueError` naming the cycle. Its nodes were silently left out. A node in a block named `legend` moves the DOT
+  legend's cluster aside whether or not `blocks` names that block.
 - A frozen pydantic model holding a `set` or `frozenset` (in a field, a nested model, a container such as
   `dict[str, frozenset[str]]`, an extra field or a private attribute) is fingerprinted the same on every
   `PYTHONHASHSEED`: each set's members are sorted, as for a code version. Such a model used to key `DiskCache`
