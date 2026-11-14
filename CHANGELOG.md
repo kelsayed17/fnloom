@@ -211,6 +211,11 @@ change the public API; such changes are listed under **Changed** and **Removed**
   result. Their keys change, so an existing disk cache misses once for them. A `defaultdict`, whose `default_factory`
   is state, is refused whether or not it holds a set, and a dataclass with an unset `init=False` field holding a set is
   refused as `UnfingerprintableError` rather than a raw `AttributeError`.
+- `fnloom diff` of an export whose node has a `kind` that is not a `str`, or `params` that are not a list of entries,
+  exits 2, a bad file (Q98), naming the side. It raised `AttributeError` and exited 1, which says the graphs changed.
+- `to_dot()`, `to_mermaid()`, `render(...)` to `.dot` or `.mmd`, and `fnloom draw` replace a lone surrogate in a label
+  with U+FFFD, as `to_svg()` does. They raised `UnicodeEncodeError`. The preview's Graphviz input gets U+FFFD too,
+  rather than `?`.
 
 ## [0.4.0] - 2026-11-05
 
