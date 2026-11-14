@@ -947,3 +947,13 @@ def test_the_builtin_svg_names_the_block_on_each_member() -> None:
     assert svg.count("for each item of outer") == 2  # noqa: PLR2004  # inner, per_outer
     assert svg.count(">expand</tspan>") == 4  # noqa: PLR2004  # four expand edges
     assert svg.count(">collect</tspan>") == 2  # noqa: PLR2004  # two collect edges
+
+
+@pytest.mark.parametrize("suffix", ["dot", "mmd"])
+def test_a_lone_surrogate_is_replaced_in_dot_and_mermaid(
+    tmp_path: Path, suffix: str
+) -> None:
+    """It becomes U+FFFD, as in `to_svg()`, rather than a `UnicodeEncodeError`."""
+    node = DrawnNode(name="a", kind="function", type="int", title="bad\udcff")
+    written = Drawing((node,), ()).render(tmp_path / f"g.{suffix}")
+    assert "bad\ufffd" in written.read_text(encoding="utf-8")
