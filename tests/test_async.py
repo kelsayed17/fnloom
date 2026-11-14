@@ -1412,3 +1412,19 @@ def test_async_plans_go_with_the_plans_the_driver_drops() -> None:
     ]
     gc.collect()
     assert sum(ref() is not None for ref in made) <= fnloom.driver.PLAN_CACHE_SIZE
+
+
+def test_short_lived_async_drivers_over_one_driver_are_freed() -> None:
+    """An AsyncDriver made per request is freed, though the plan stays hot."""
+    module = make_module("async_per_request", "def a(x: int) -> int:\n    return x\n")
+    first = fnloom.Builder().with_modules(module).build_async()
+    sync, nodes = first._driver, first._nodes  # noqa: SLF001  # the one sync driver
+    made = []
+    for _ in range(1000):
+        driver = fnloom.AsyncDriver(sync, nodes)
+        driver.prepare(["a"], inputs={"x": 1})
+        made.append(weakref.ref(driver))
+    del driver
+    gc.collect()
+    alive = sum(ref() is not None for ref in made)
+    assert alive <= fnloom.driver.ASYNC_PLANS_PER_PLAN

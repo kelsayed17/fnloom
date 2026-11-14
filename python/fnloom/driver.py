@@ -95,6 +95,8 @@ type _Check = tuple[str, object, _types.Classes | None, _types.Matcher]
 
 # How many compiled plans a driver keeps; the least recently used one goes first.
 PLAN_CACHE_SIZE = 128
+# How many AsyncDrivers over one Driver keep their own form of a plan at once.
+ASYNC_PLANS_PER_PLAN = 8
 
 
 class _Runnable(Protocol):
@@ -533,8 +535,8 @@ class PreparedPlan[R = dict[str, object]]:
         self._build: _ResultBuilder[R] | None = None
         # The driver that prepared this plan, which pickling rebuilds it through.
         self._driver: Driver[R] | None = None
-        # This plan as each `AsyncDriver` over its driver runs it, made on first
-        # use: kept here, so it goes when the driver drops this plan.
+        # This plan as each of the last few `AsyncDriver`s over its driver ran it,
+        # made on first use: kept here, so it goes when the driver drops this plan.
         self._async: dict[AsyncDriver[R], AsyncPreparedPlan[R]] = {}
 
     @override
@@ -2362,7 +2364,12 @@ class AsyncDriver[R = dict[str, object]]:
             else:
                 plan = AsyncPreparedPlan(prepared, self, schedule)
             # Two threads may both get here: either plan will do, and one is kept.
-            prepared._async[self] = plan  # noqa: SLF001  # this driver's own plan
+            kept = prepared._async  # noqa: SLF001  # this driver's own plan
+            kept[self] = plan
+            # A few, the oldest dropped: an AsyncDriver made per request over one
+            # long-lived Driver would otherwise stay alive with each hot plan.
+            while len(kept) > ASYNC_PLANS_PER_PLAN:
+                kept.pop(next(iter(kept)), None)
         return plan
 
     def validate(
