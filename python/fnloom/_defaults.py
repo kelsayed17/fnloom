@@ -153,7 +153,7 @@ def _nan(value: object) -> bool:
     """
     numpy = sys.modules.get("numpy")
     floats = (float, complex) if numpy is None else (float, complex, numpy.inexact)
-    return isinstance(value, floats) and value != value  # noqa: PLR0124  # NaN is the one value unequal to itself
+    return isinstance(value, floats) and bool(value != value)  # noqa: PLR0124  # NaN is the one value unequal to itself
 
 
 def _shown(default: object) -> str:
