@@ -185,6 +185,22 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `str`, a `Literal` of strings, an `Annotated[str, ...]`, or a union with one of them such as `Name | None`. The
   first three, and such unions, were refused as not `str`, and `Annotated` raised an unhelpful `TypeError` about set
   elements.
+- `@check_output(range=...)`, `allow_nans=` and `max_fraction_nans=` refuse, at build, a node whose values can only be
+  text or `None`: a union such as `str | None` or `Name | None`, a `NewType` over `str`, or a `Literal` of strings. Such
+  a node built, then failed every run (Q101). A union with a numeric arm, such as `int | str`, still builds.
+- `max_fraction_nans=` given text, such as `"0.5"`, or anything `float()` can't read, is refused with the `ValueError`
+  naming the argument that an out-of-range number gets, rather than a bare comparison `TypeError`. A `Decimal` or
+  `Fraction` is still read as its float.
+- An annotation that raises when evaluated, other than for an unknown name, such as `-> "int | 3"`, fails the build
+  with a note naming its function. The error named nothing.
+- A `Validator` whose attributes hold a `set`, and an `extract_fields`/`extract_columns` `fill_with=` holding one,
+  key the cache the same on every `PYTHONHASHSEED`, as a `value()` binding does. They keyed `DiskCache` differently in
+  each process, so the node missed every time (never a stale hit). Their keys change, so an existing disk cache
+  misses once for them; any other check or fill keeps its key.
+- A check function whose code version can't be read, such as one whose default's registered fingerprint raises, makes
+  its node uncacheable with a `CacheWarning` saying why, as a node's own function does. The cached build raised
+  instead, though the same build without a cache ran. `export()` of such a node warns the same way and leaves its
+  `version` out, saying why in `unversioned`; it raised.
 - A node's code version counts the classes of everything its defaults' fingerprints read: state set on a dataclass
   outside its fields, and a `__fnloom_fingerprint__` or registered form. A class reached only that way was left out,
   so editing its methods kept the version and the cache could return a stale result. Such a node's version changes,
