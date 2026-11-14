@@ -140,8 +140,9 @@ aborts the run, and `post_graph(false)` still runs so observers can close what t
 - `RunError<E>`: `Node` (a payload failed, with any observer errors raised while handling it, and the branch it
   failed in), `Observers` (the
   first failing event and every error raised in it), `MissingValues` (a map lacked a name the plan reads; raised
-  before any hook fires), or `BrokenPlan` (the plan's own state is inconsistent, which is a bug). Run a plan only on
-  the graph it was prepared from: on another graph it may read the wrong nodes, or panic.
+  before any hook fires), or `BrokenPlan` (the plan's own state is inconsistent, which is a bug). Its message shows a
+  branch as `run::branch_text` writes it, a Python tuple such as `(0, 1)`. Run a plan only on the graph it was
+  prepared from: on another graph it may read the wrong nodes, or panic.
 
 ## Guarantees
 
