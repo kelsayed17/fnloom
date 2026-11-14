@@ -9,7 +9,7 @@ from fnloom._decorators import Source, decorations
 from fnloom._scan import core_inputs
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
     from collections.abc import Set as AbstractSet
 
     from fnloom._absence import Kind
@@ -23,7 +23,9 @@ _SHOWN = 40
 
 
 def default_problems(
-    nodes: Sequence[NodeDef], absent: AbstractSet[str] = frozenset()
+    nodes: Sequence[NodeDef],
+    absent: AbstractSet[str],
+    blocks: Mapping[str, Sequence[str]],
 ) -> list[str]:
     """A line for each shadowed default and each input with differing defaults.
 
@@ -36,7 +38,9 @@ def default_problems(
     `optional` is left out, so the consumer's defaults apply (Q135): they are
     used, so not shadowed. Read by `required` too, through a parameter with no
     default, the consumer is skipped instead, and its defaults are still never
-    used.
+    used. A `Collect` parameter is left out only when the block it collects is
+    absent as a whole, so it reads its source's expand, found in `blocks`, each
+    block node's block path.
 
     A consumer that opts out of `differing` is left out of the comparison, so
     opting out every consumer but one settles it: the rest then agree.
@@ -53,7 +57,9 @@ def default_problems(
                 continue
             read = param.binding.name
             if read in computed:
-                if read in absent:
+                # A collect is absent as a whole, when its block's expand is.
+                whole = read if param.collect is None else blocks[read][-1]
+                if whole in absent:
                     # The merged kind, as the core reads the source: only an
                     # `optional` read is left out, and its default used.
                     if kinds is None:
