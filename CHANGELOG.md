@@ -151,6 +151,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - Rust core: `RunError::Node` has two new fields, `branch` and `block`; a pattern naming every field needs them, or
   `..`. `PlanError` has two more variants, `OutputsInBlocks` and
   `OverridesInBlocks`.
+- A run with node hooks is about a third faster: `before_node` and `after_node` cost about 1.7 µs per node rather
+  than 2.6 (a 10,000-node chain). The events are the same `NodeStart` and `NodeEnd` objects.
 
 ### Fixed
 
@@ -168,6 +170,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `str`, a `Literal` of strings, an `Annotated[str, ...]`, or a union with one of them such as `Name | None`. The
   first three, and such unions, were refused as not `str`, and `Annotated` raised an unhelpful `TypeError` about set
   elements.
+- A failed node leads the `ExceptionGroup` with `node '<name>' failed and hooks raised` when only run hooks
+  (`before_run`, `after_run`) watch and one raises, as `build_async()` and a driver with node hooks say. The sync
+  driver said `the run failed and hooks raised`.
 
 ## [0.4.0] - 2026-11-05
 

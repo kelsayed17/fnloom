@@ -9,12 +9,13 @@ import contextvars
 import functools
 import inspect
 import logging
+import re
 import reprlib
 import threading
 import time
 import uuid
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from types import MappingProxyType, ModuleType
 from typing import TYPE_CHECKING, Final, override
 
@@ -145,6 +146,56 @@ class BuildEnd:
     modules: tuple[ModuleType, ...]
 
 
+# A node's two events, made once per node: a frozen dataclass's `__init__` sets each
+# field through `object.__setattr__`, so setting the slots directly makes the same
+# event in under half the time. Each takes its class's fields in order.
+_new = object.__new__
+_START_SLOTS = tuple(getattr(NodeStart, f.name).__set__ for f in fields(NodeStart))
+_END_SLOTS = tuple(getattr(NodeEnd, f.name).__set__ for f in fields(NodeEnd))
+
+
+def _node_start(
+    run_id: str,
+    node: NodeView,
+    inputs: Mapping[str, object] | None,
+    cache: CacheOutcome | None,
+    branch: tuple[int, ...],
+) -> NodeStart:
+    event = _new(NodeStart)
+    a, b, c, d, e = _START_SLOTS
+    a(event, run_id)
+    b(event, node)
+    c(event, inputs)
+    d(event, cache)
+    e(event, branch)
+    return event
+
+
+def _node_end(  # noqa: PLR0913, PLR0917  # `NodeEnd`'s fields, in order, on the hot path
+    run_id: str,
+    node: NodeView,
+    inputs: Mapping[str, object] | None,
+    cache: CacheOutcome | None,
+    ok: bool,  # noqa: FBT001  # a field, in order
+    result: object,
+    error: BaseException | None,
+    checks: tuple[CheckResult, ...],
+    branch: tuple[int, ...],
+) -> NodeEnd:
+    event = _new(NodeEnd)
+    a, b, c, d, e, f, g, h, i = _END_SLOTS
+    a(event, run_id)
+    b(event, node)
+    c(event, inputs)
+    d(event, cache)
+    e(event, ok)
+    f(event, result)
+    g(event, error)
+    h(event, checks)
+    i(event, branch)
+    return event
+
+
 class Hook:
     """Watches a driver: subclass it and override any of its six methods.
 
@@ -248,21 +299,30 @@ def checked(hooks: Sequence[object]) -> tuple[Hook, ...]:
     return tuple(hook for hook in hooks if isinstance(hook, Hook))
 
 
+def _called[E](
+    methods: Sequence[Callable[[E], object]], event: E
+) -> list[BaseException]:
+    """Calls each of `methods` with `event`; what they raised, in order.
+
+    Every method sees the event, whatever an earlier one raised (Q23).
+    """
+    found: list[BaseException] = []
+    for method in methods:
+        try:
+            method(event)
+        except BaseException as error:  # noqa: BLE001  # raised once every hook ran
+            found.append(error)
+    return found
+
+
 def fire_build(hooks: Sequence[Hook], event: BuildEnd) -> None:
     """Calls each hook's `after_build` with `event`, then raises what they raised.
 
     Every hook sees the event. One error is raised as itself, several as one
     group, in hook order (Q23).
     """
-    errors: list[BaseException] = []
-    for hook in hooks:
-        if not _overridden(hook, "after_build"):
-            continue
-        try:
-            hook.after_build(event)
-        except BaseException as error:  # noqa: BLE001  # as every event: raised below, with the others
-            errors.append(error)
-    if errors:
+    methods = [hook.after_build for hook in hooks if _overridden(hook, "after_build")]
+    if errors := _called(methods, event):
         raise _combined(errors, None, failed=False)
 
 
@@ -373,6 +433,18 @@ def _combined(
 
 _NO_VALUES: Final[Mapping[str, object]] = MappingProxyType({})
 
+# The note the core gives a node's error, in a block or not (`errors.rs`).
+_NODE_NOTE = re.compile(r"(?:in node|while computing) '([^']+)'")
+
+
+def _noted_node(error: BaseException) -> str | None:
+    """The node the core noted `error` as raised in, or `None`."""
+    for note in getattr(error, "__notes__", ()):
+        found = _NODE_NOTE.fullmatch(str(note).partition(" for branch ")[0])
+        if found is not None:
+            return str(found[1])
+    return None
+
 
 class Dispatch:
     """One run's events, sent to every hook; made for each run.
@@ -461,13 +533,7 @@ class Dispatch:
             branch=branch,
             items=items,
         )
-        found: list[BaseException] = []
-        for method in methods:
-            try:
-                method(event)
-            except BaseException as error:  # noqa: BLE001  # raised once every hook ran
-                found.append(error)
-        self._raised(found)
+        self._raised(_called(methods, event))
 
     def outcome(self, name: str, branch: tuple[int, ...]) -> CacheOutcome | None:
         """Node `name`'s cache outcome as it runs in `branch`; `None` uncached."""
@@ -548,13 +614,7 @@ class Dispatch:
             nodes=nodes,
         )
         self._start = start
-        found: list[BaseException] = []
-        for method in self._hooks.before_run:
-            try:
-                method(start)
-            except BaseException as error:  # noqa: BLE001  # raised once every hook ran
-                found.append(error)
-        self._raised(found)
+        self._raised(_called(self._hooks.before_run, start))
 
     def _run_id(self) -> str:
         start = self._start
@@ -587,20 +647,14 @@ class Dispatch:
         methods = self._hooks.before_node
         if not methods:
             return
-        event = NodeStart(
-            run_id=self._run_id(),
-            node=self._views.view(name),
-            inputs=self._inputs(name, kwargs),
-            cache=outcome,
-            branch=branch,
+        event = _node_start(
+            self._run_id(),
+            self._views.view(name),
+            self._inputs(name, kwargs),
+            outcome,
+            branch,
         )
-        found: list[BaseException] = []
-        for method in methods:
-            try:
-                method(event)
-            except BaseException as error:  # noqa: BLE001  # raised once every hook ran
-                found.append(error)
-        self._raised(found)
+        self._raised(_called(methods, event))
 
     def node_ended(  # noqa: PLR0913  # the node, its call, its outcome and its branch
         self,
@@ -624,24 +678,18 @@ class Dispatch:
             return
         ok = error is None
         results = self._results
-        event = NodeEnd(
-            run_id=self._run_id(),
-            node=self._views.view(name),
-            inputs=self._inputs(name, kwargs),
-            cache=outcome,
-            ok=ok,
-            result=value if ok else None,
-            error=error,
-            checks=() if results is None else results.pop(name, ()),
-            branch=branch,
+        event = _node_end(
+            self._run_id(),
+            self._views.view(name),
+            self._inputs(name, kwargs),
+            outcome,
+            ok,
+            value if ok else None,
+            error,
+            () if results is None else results.pop(name, ()),
+            branch,
         )
-        found: list[BaseException] = []
-        for method in methods:
-            try:
-                method(event)
-            except BaseException as failure:  # noqa: BLE001  # raised once every hook ran
-                found.append(failure)
-        self._raised(found)
+        self._raised(_called(methods, event))
 
     def _release(self) -> None:
         """Stops collecting check results, in the context the run started in."""
@@ -669,6 +717,11 @@ class Dispatch:
         computed; a failed run passes them only when its result builder raised.
         """
         self._release()
+        if error is not None and self._node_error is None and not self._errors:
+            # No node event was wanted, so the node is read off the core's note.
+            self._failed_node = _noted_node(error)
+            if self._failed_node is not None:
+                self._node_error = error
         lead: list[BaseException] = []
         if self._node_error is not None:
             lead.append(self._node_error)
@@ -702,11 +755,7 @@ class Dispatch:
                 else MappingProxyType(results),
                 skipped=tuple(self._skipped),
             )
-            for method in methods:
-                try:
-                    method(event)
-                except BaseException as failure:  # noqa: BLE001  # raised once every hook ran
-                    found.append(failure)
+            found = _called(methods, event)
         if not found:
             if stopped is not None:
                 raise stopped
