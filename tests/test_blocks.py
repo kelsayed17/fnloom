@@ -776,3 +776,251 @@ def test_a_nested_generator_expand_reads_its_branch_while_yielding() -> None:
         ("inner done", (1,)),
     ]
     assert fnloom.current_branch() == ()
+
+
+# Decorators on expand nodes (task 14).
+
+
+def test_replace_may_replace_an_expand() -> None:
+    """The replacing expand gives the items its block runs over (Plan 12 PR F)."""
+    module = make_module("blocks_replaced", PICKED)
+    evens = make_module(
+        "blocks_replacing",
+        """
+        from fnloom import Parallelizable
+
+        def picked(n: int) -> Parallelizable[int]:
+            return [i * 2 for i in range(n)]
+        """,
+    )
+    driver = (
+        fnloom.Builder()
+        .with_modules(module)
+        .with_modules(evens, replace=("picked",))
+        .build()
+    )
+    assert driver.nodes["picked"].kind == "expand"
+    assert driver.nodes["picked"].replaced == "blocks_replaced"
+    assert driver.execute(["summary"], inputs={"n": 3, "rate": 10}) == {
+        "summary": [0, 20, 40]
+    }
+
+
+def test_parameterize_on_an_expand_makes_one_block_per_row() -> None:
+    """Each row is an expand of its own, so a node reading two rows is refused."""
+    rows = """
+from fnloom import Collect, Parallelizable, parameterize, value
+
+@parameterize(small={"n": value(2)}, large={"n": value(3)})
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+def small_doubled(small: int) -> int:
+    return small * 2
+
+def large_doubled(large: int) -> int:
+    return large * 2
+
+def sums(small_doubled: Collect[int], large_doubled: Collect[int]) -> list[int]:
+    return [sum(small_doubled), sum(large_doubled)]
+"""
+    driver = fnloom.build(make_module("blocks_parameterized", rows))
+    shown = {name: (view.kind, view.block) for name, view in driver.nodes.items()}
+    assert shown == {
+        "large": ("expand", None),
+        "large_doubled": ("function", "large"),
+        "small": ("expand", None),
+        "small_doubled": ("function", "small"),
+        "sums": ("collect", None),
+    }
+    assert driver.execute(["sums"]) == {"sums": [2, 6]}
+    paired = rows + "\ndef both(small: int, large: int) -> int:\n    return small\n"
+    with pytest.raises(ValueError, match="unrelated") as info:
+        fnloom.build(make_module("blocks_parameterized_paired", paired))
+    assert str(info.value) == (
+        "'both' reads blocks of 'large' and 'small', which are unrelated; collect "
+        "both in one node to pair them"
+    )
+
+
+# Absence in blocks (task 15).
+
+DECLINING = """
+from fnloom import ABSENT, Absent, Collect, Parallelizable
+
+
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+def odd(picked: int) -> int | Absent:
+    return picked if picked % 2 else ABSENT
+
+
+def tenfold(odd: int) -> int:
+    return odd * 10
+
+
+def present(tenfold: Collect[int]) -> list[int]:
+    return list(tenfold)
+
+
+def placed(tenfold: Collect[int | Absent]) -> list[object]:
+    return list(tenfold)
+"""
+
+
+class Skips(fnloom.Hook):
+    """The nodes each run skipped, with their branches."""
+
+    def __init__(self) -> None:
+        """Starts with none."""
+        self.skipped: tuple[tuple[str, tuple[int, ...]], ...] = ()
+
+    @override
+    def after_run(self, event: fnloom.RunEnd) -> None:
+        self.skipped = event.skipped
+
+
+def test_collect_drops_declined_branches_in_order() -> None:
+    """`Collect[T]` gathers the branches that gave a value, in item order."""
+    skips = Skips()
+    module = make_module("blocks_declining_present", DECLINING)
+    driver = fnloom.Builder().with_modules(module).with_hooks(skips).build()
+    assert driver.nodes["tenfold"].may_be_absent
+    assert not driver.nodes["present"].may_be_absent
+    assert driver.execute(["present"], inputs={"n": 5}) == {"present": [10, 30]}
+    assert skips.skipped == (("tenfold", (0,)), ("tenfold", (2,)), ("tenfold", (4,)))
+
+
+def test_collect_with_absent_keeps_places() -> None:
+    """`Collect[T | Absent]` has an entry per item, `ABSENT` where a branch declined."""
+    driver = fnloom.build(make_module("blocks_declining_placed", DECLINING))
+    assert driver.execute(["placed"], inputs={"n": 4}) == {
+        "placed": [fnloom.ABSENT, 10, fnloom.ABSENT, 30]
+    }
+
+
+MAYBE_EMPTY = """
+from fnloom import ABSENT, Absent, Collect, Parallelizable
+
+
+def picked(items: list[int] | None) -> Parallelizable[int] | Absent:
+    return ABSENT if items is None else items
+
+
+def doubled(picked: int) -> int:
+    return picked * 2
+
+
+def given(doubled: Collect[int] | Absent) -> list[int] | str:
+    return "absent" if doubled is ABSENT else doubled
+
+
+def defaulted(doubled: Collect[int] = [-1]) -> list[int]:
+    return doubled
+
+
+def plain(doubled: Collect[int]) -> list[int]:
+    return doubled
+"""
+
+
+def test_an_absent_expand_is_not_an_empty_one() -> None:
+    """An empty expand collects `[]`; an absent one, `ABSENT`, a default or a skip."""
+    skips = Skips()
+    module = make_module("blocks_absent_expand", MAYBE_EMPTY)
+    driver = fnloom.Builder().with_modules(module).with_hooks(skips).build()
+    shown = {n: driver.nodes[n].may_be_absent for n in ("given", "defaulted", "plain")}
+    assert shown == {"given": False, "defaulted": False, "plain": True}
+    outputs = ["given", "defaulted", "plain"]
+    assert driver.execute(outputs, inputs={"items": []}) == {
+        "given": [],
+        "defaulted": [],
+        "plain": [],
+    }
+    assert skips.skipped == ()
+    assert driver.execute(outputs, inputs={"items": None}) == {
+        "given": "absent",
+        "defaulted": [-1],
+        "plain": fnloom.ABSENT,
+    }
+    assert skips.skipped == (("plain", ()),)
+
+
+MIDWAY = """
+from fnloom import ABSENT, Absent, Collect, Parallelizable
+
+seen = []
+
+
+def picked() -> Parallelizable[str]{admits}:
+    yield "a"
+    yield "b"
+    return ABSENT
+
+
+def shout(picked: str) -> str:
+    seen.append(picked)
+    return picked.upper()
+
+
+def shouted(shout: Collect[str] | Absent) -> str:
+    return "declined" if shout is ABSENT else ",".join(shout)
+"""
+
+
+def test_items_already_pulled_are_dropped_when_the_expand_declines_midway() -> None:
+    """A generator returning `ABSENT` declines as a whole, after its branches ran."""
+    module = make_module("blocks_midway", MIDWAY.format(admits=" | Absent"))
+    assert fnloom.build(module).execute(["shouted"]) == {"shouted": "declined"}
+    assert module.seen == ["a", "b"]
+    refused = make_module("blocks_midway_refused", MIDWAY.format(admits=""))
+    with pytest.raises(TypeError, match="ABSENT") as info:
+        fnloom.build(refused).execute(["shouted"])
+    assert str(info.value) == (
+        "node 'picked' returned fnloom.ABSENT, but its return annotation does not "
+        "admit fnloom.Absent"
+    )
+
+
+EDGE = """
+from fnloom import ABSENT, Absent, Collect, Parallelizable
+
+
+def picked() -> Parallelizable[int]:
+    yield from range(3)
+
+
+def odd(picked: int) -> int | Absent:
+    return picked if picked % 2 else ABSENT
+
+
+def present(odd: Collect[{element}]) -> list[object]:
+    return list(odd)
+"""
+
+
+def test_edge_check_of_t_or_absent_into_collect_t() -> None:
+    """`T | Absent` feeds `Collect[T]`, its absences dropped; `Absent` isn't `T`."""
+    fits = make_module("blocks_edge_fits", EDGE.format(element="int"))
+    assert fnloom.build(fits).execute(["present"]) == {"present": [1]}
+    misfit = make_module("blocks_edge_misfit", EDGE.format(element="str"))
+    with pytest.raises(ValueError, match="collects elements") as info:
+        fnloom.build(misfit)
+    assert str(info.value) == (
+        "present.odd collects elements of type str but odd returns int | fnloom.Absent"
+    )
+
+
+def test_a_collect_default_is_shadowed_unless_the_expand_may_decline() -> None:
+    """A collect is absent only with its expand: else its default is never used."""
+    shadowed = EDGE.format(element="int").replace(
+        "Collect[int])", "Collect[int] = [-1])"
+    )
+    with pytest.raises(ValueError, match="shadowed default") as info:
+        fnloom.build(make_module("blocks_collect_shadowed", shadowed))
+    assert str(info.value).startswith(
+        "shadowed default: parameter 'odd' of 'present' has a default, but it reads "
+        "the node 'odd'"
+    )

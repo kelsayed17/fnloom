@@ -125,9 +125,22 @@ change the public API; such changes are listed under **Changed** and **Removed**
   no fingerprint is keyed by its index only when its expand's items are stored or replayed, else its branch is
   uncacheable. `explain_cache` reports a block node `unknown` and counts an outer expand's branches, from its
   stored items, in its reason. `_core.ObserverBase` gains `hit_in(node, *, branch, value)`.
+- Blocks across namespaces, `bind=` and decorators. Blocks are named by their namespaced expand, so two copies of a
+  module have independent blocks. A namespace's `bind=` to a node outside every block is shared by its branches. One
+  to a block node feeds a `Collect` parameter, and read any other way is a `ValueError` at build saying to bind its
+  collect instead. Every decorator applies to a block node once per item, `@parameterize` on an expand makes one
+  block per row, and `replace=` may replace an expand.
+- Absence in blocks. `Collect[T]` over a block node that may be absent gathers the present values in item order, and
+  `Collect[T | Absent]` keeps a place per item. An expand annotated `-> Parallelizable[T] | Absent` declines as a
+  whole, a generator too by returning `ABSENT` after yielding; its branches' results are dropped, and each collect
+  of its block gets `ABSENT` (`Collect[T] | Absent`), its default, or is skipped. A declined branch is cached and
+  replayed, so its block consumers skip again without running. A defaulted `Collect` parameter over an expand that
+  may decline is no longer refused as a shadowed default.
 
 ### Changed
 
+- A default on a `Collect` parameter whose expand can't decline is refused as a shadowed default, since it is never
+  used; one reading a block node that may be absent was accepted before.
 - A parameter with a default that reads a node that may be absent, and doesn't admit `Absent`, is no longer a
   shadowed default when every parameter of its node reading that node has a default: its default is used when the
   node declines. One that shares the source with a parameter without a default is still refused, since its node is
