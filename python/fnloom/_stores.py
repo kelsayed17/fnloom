@@ -348,8 +348,9 @@ class DiskCache:
     Args:
         path: The directory, created on the first write.
         max_bytes: The most bytes of entries kept, or None for no bound. When the
-            store opens, and when this process's writes since take it past the
-            bound, the least recently read entries are removed until the rest fit.
+            store opens, the least recently read entries are removed until the
+            rest fit. After that, when this process's writes take it past the
+            bound, or add a tenth of it, they are removed down to nine tenths.
         dumps: Turns a value into bytes.
         loads: Turns those bytes back into the value.
         serializer: The name of the `dumps`/`loads` pair, recorded in every entry.
@@ -403,9 +404,10 @@ class DiskCache:
         self._default = Format(serializer, dumps, loads)
         self._given = tuple(formats)
         self._formats = _formats(self._default, self._given)
-        # The bytes the store is taken to hold: its size at the last prune, and
-        # every entry this process wrote since, a replaced one counted twice.
-        self._held = 0
+        # The store's size at its last prune, or `None` when not yet known; and the
+        # bytes this process wrote since, a replaced entry counted twice.
+        self._held: int | None = 0
+        self._since = 0
         self._lock = threading.Lock()
         if max_bytes is not None:
             self._prune_quietly(max_bytes)
@@ -421,7 +423,7 @@ class DiskCache:
             default.loads,
             default.name,
             self._given,
-            self._held,
+            True,  # `reopened`, by position as pickle passes it
         )
 
     @property
@@ -507,8 +509,9 @@ class DiskCache:
         finally:
             if temporary is not None:
                 self._remove(Path(temporary))
-        if self._max_bytes is not None and self._grown(len(data)):
-            self._prune_quietly(self._max_bytes)
+        if self._max_bytes is not None and self._grown(len(data), self._max_bytes):
+            # Down to a low-water mark, so a full store doesn't prune at each write.
+            self._prune_quietly(self._max_bytes * 9 // 10)
 
     def discard(self, key: bytes) -> None:
         """Removes `key`'s entry, if there is one."""
@@ -558,13 +561,23 @@ class DiskCache:
             Path(file).unlink(missing_ok=True)
             total -= size
         with self._lock:
-            self._held = total
+            self._held, self._since = total, 0
 
-    def _grown(self, written: int) -> bool:
-        """Counts `written` bytes; True when the store is taken to be past its bound."""
+    def _grown(self, written: int, max_bytes: int) -> bool:
+        """Counts `written` bytes; True when it is time to prune again.
+
+        When the store's size is not known, as in a process it was sent to; when
+        it is taken to be past `max_bytes`; and when this process has written a
+        tenth of `max_bytes` since, so other processes' writes are seen too.
+        """
         with self._lock:
-            self._held += written
-            return self._max_bytes is not None and self._held > self._max_bytes
+            self._since += written
+            held = self._held
+            return (
+                held is None
+                or held + self._since > max_bytes
+                or self._since * 10 > max_bytes
+            )
 
     def _prune_quietly(self, max_bytes: int) -> None:
         """Prunes, turning a failure into a warning."""
@@ -726,23 +739,23 @@ def _reopen(  # noqa: PLR0913, PLR0917  # pickle passes the constructor's argume
     loads: Callable[[bytes], object],
     serializer: str,
     formats: tuple[Format, ...] = (),
-    held: int | None = None,
+    reopened: bool = False,  # noqa: FBT001, FBT002  # by position, as pickle passes it
 ) -> DiskCache:
     """Opens a `DiskCache` from the arguments a pickled one was made with.
 
     `formats` defaults to none, so a store pickled before formats existed loads.
-    `held` is the size the pickled store took itself to hold: given, the store
-    starts from it rather than pruning, so each worker a store is sent to does
-    not walk the whole directory as it starts.
+    `reopened` stores open without pruning, their size not yet known: each
+    worker a store is sent to doesn't walk the whole directory as it starts,
+    and prunes at its first write instead.
     """
     store = DiskCache(
         path,
-        max_bytes=None if held is not None else max_bytes,
+        max_bytes=None if reopened else max_bytes,
         dumps=dumps,
         loads=loads,
         serializer=serializer,
         formats=formats,
     )
-    if held is not None:
-        store._max_bytes, store._held = max_bytes, held  # noqa: SLF001  # its own class
+    if reopened:
+        store._max_bytes, store._held = max_bytes, None  # noqa: SLF001  # its own class
     return store

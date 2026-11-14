@@ -562,19 +562,8 @@ def test_disk_prune_removes_stale_temporary_files(tmp_path: Path) -> None:
     assert _entry(tmp_path, _key(1)).exists()
 
 
-def test_disk_bound_prunes_on_open_and_when_its_writes_pass_the_bound(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A bounded store prunes when it opens, and when its own writes pass the bound.
-
-    Writes that stay within the bound walk no directory, however many there are.
-    """
-    size = _fill(DiskCache(tmp_path), 20)
-    DiskCache(tmp_path, max_bytes=5 * size)
-    assert len(_files(tmp_path)) == 5  # noqa: PLR2004  # five entries fit
-
-    other = tmp_path / "other"
-    bounded = DiskCache(other, max_bytes=10 * size)
+def _counting_prunes(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """The `max_bytes` of each prune from here on, in order."""
     pruned: list[int] = []
     prune = DiskCache.prune
 
@@ -583,24 +572,84 @@ def test_disk_bound_prunes_on_open_and_when_its_writes_pass_the_bound(
         prune(store, max_bytes)
 
     monkeypatch.setattr(DiskCache, "prune", counted)
-    _fill(bounded, 10)
-    assert (len(_files(other)), pruned) == (10, [])  # ten fit
-    bounded.put(_key(10), b"x" * 1000)
-    assert (len(_files(other)), pruned) == (10, [10 * size])  # one over
+    return pruned
 
 
-def test_a_reopened_bounded_store_does_not_prune(
+def test_disk_bound_prunes_on_open_and_as_its_writes_grow(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A store sent to a worker starts from the size it was taken to hold."""
+    """A bounded store prunes to its bound as it opens, then past a tenth of it.
+
+    Writes of up to a tenth of the bound walk no directory; the next prunes the
+    store to nine tenths.
+    """
+    size = _fill(DiskCache(tmp_path), 20)
+    DiskCache(tmp_path, max_bytes=5 * size)
+    assert len(_files(tmp_path)) == 5  # noqa: PLR2004  # five entries fit
+
+    other = tmp_path / "other"
+    bounded = DiskCache(other, max_bytes=100 * size)
+    pruned = _counting_prunes(monkeypatch)
+    _fill(bounded, 10)
+    assert pruned == []
+    bounded.put(_key(10), b"x" * 1000)
+    assert pruned == [90 * size]
+
+
+def test_a_full_disk_store_prunes_once_per_tenth_of_its_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """At its bound, it prunes to nine tenths, then not again for a while."""
+    size = _fill(DiskCache(tmp_path), 1)
+    store = DiskCache(tmp_path, max_bytes=100 * size)
+    for n in range(100):
+        store.put(_key(n), b"x" * 1000)
+    pruned = _counting_prunes(monkeypatch)
+    for n in range(100, 400):
+        store.put(_key(n), b"x" * 1000)
+    assert len(pruned) <= 300 // 9  # a tenth of the bound between
+    assert len(_files(tmp_path)) <= 100  # noqa: PLR2004  # within the bound
+
+
+def test_a_reopened_bounded_store_prunes_at_its_first_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A store sent to a worker opens without pruning; its size is learned then."""
     size = _fill(DiskCache(tmp_path), 3)
     store = DiskCache(tmp_path, max_bytes=3 * size)
-    pruned: list[int] = []
-    monkeypatch.setattr(DiskCache, "prune", lambda _, n: pruned.append(n))
+    pruned = _counting_prunes(monkeypatch)
     copy = pickle.loads(pickle.dumps(store))  # noqa: S301  # our own store
     assert pruned == []
     copy.put(_key(3), b"x" * 1000)
-    assert pruned == [3 * size]
+    assert len(pruned) == 1
+
+
+_WORKER = """
+import pickle, sys
+store = pickle.loads(open(sys.argv[1], "rb").read())
+for n in range(int(sys.argv[2]), int(sys.argv[2]) + 700):
+    store.put(n.to_bytes(32, "big"), b"x" * 1000)
+"""
+
+
+def test_writers_in_several_processes_stay_near_the_bound(tmp_path: Path) -> None:
+    """Each process prunes after writing a tenth of the bound: four, 0.7 MB each."""
+    size = _fill(DiskCache(tmp_path / "probe"), 1)
+    bound = 1000 * size
+    pickled = tmp_path / "store.pickle"
+    pickled.write_bytes(pickle.dumps(DiskCache(tmp_path / "cache", max_bytes=bound)))
+    script = tmp_path / "worker.py"
+    script.write_text(_WORKER)
+    workers = [
+        subprocess.Popen(  # noqa: S603  # this interpreter on our own script
+            [sys.executable, str(script), str(pickled), str(start)]
+        )
+        for start in range(0, 2800, 700)
+    ]
+    assert [worker.wait() for worker in workers] == [0, 0, 0, 0]
+    held = sum(path.stat().st_size for path in _files(tmp_path / "cache"))
+    # Each other writer may add a tenth of the bound since this one's last prune.
+    assert held <= bound * 14 // 10
 
 
 def test_disk_clear_and_prune_on_a_new_directory(tmp_path: Path) -> None:

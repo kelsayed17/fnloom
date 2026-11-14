@@ -139,9 +139,10 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Changed
 
-- A bounded `DiskCache` prunes when it opens and when its own writes take it past `max_bytes`, rather than after every
-  100 writes, so writes within the bound never walk the directory. A store pickled to a worker process no longer
-  prunes as it loads: it starts from the size the pickled store held. Writes from other processes are seen at the
+- A bounded `DiskCache` prunes when it opens, then when its own writes take it past `max_bytes` or add a tenth of it,
+  down to nine tenths, rather than to the bound after every 100 writes: a full store prunes about once per tenth of
+  its bound written. A store pickled to a worker process no longer prunes as it loads, but at its first write. With
+  several processes writing, the directory can pass `max_bytes` by up to a tenth of it per other process until the
   next prune.
 - A default on a `Collect` parameter whose expand can't decline is refused as a shadowed default, since it is never
   used; one reading a block node that may be absent was accepted before.
