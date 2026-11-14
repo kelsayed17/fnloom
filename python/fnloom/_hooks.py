@@ -321,8 +321,16 @@ def fire_build(hooks: Sequence[Hook], event: BuildEnd) -> None:
     Every hook sees the event. One error is raised as itself, several as one
     group, in hook order (Q23).
     """
-    methods = [hook.after_build for hook in hooks if _overridden(hook, "after_build")]
-    if errors := _called(methods, event):
+    errors: list[BaseException] = []
+    for hook in hooks:
+        if not _overridden(hook, "after_build"):
+            continue
+        try:
+            # The method is read in here too: one hook's failing read stops no other.
+            hook.after_build(event)
+        except BaseException as error:  # noqa: BLE001  # as every event: raised below, with the others
+            errors.append(error)
+    if errors:
         raise _combined(errors, None, failed=False)
 
 
@@ -438,8 +446,16 @@ _NODE_NOTE = re.compile(r"(?:in node|while computing) '([^']+)'")
 
 
 def _noted_node(error: BaseException) -> str | None:
-    """The node the core noted `error` as raised in, or `None`."""
-    for note in getattr(error, "__notes__", ()):
+    """The node the core noted `error` as raised in, or `None`.
+
+    The newest note is this run's: an error raised inside a nested driver's
+    node, or one object raised on every run, carries older ones first.
+
+    shortcut: the core skips a note the error already carries, so an object
+    raised by node `a`, then `b`, then `a` again names `b`; give the core's error
+    a node attribute when that matters.
+    """
+    for note in reversed(getattr(error, "__notes__", ())):
         found = _NODE_NOTE.fullmatch(str(note).partition(" for branch ")[0])
         if found is not None:
             return str(found[1])
