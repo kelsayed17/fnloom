@@ -118,6 +118,10 @@ impl ObserverBase {
 ///
 /// Values become Python objects here and only here, so a run with no observers converts
 /// nothing for them.
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one flag per kind of event, each sent only to an observer that overrides it"
+)]
 pub struct PyObserver<'py, 's> {
     observer: Bound<'py, ObserverBase>,
     /// Where `pre_node` gets the node's keyword arguments, shared with the call.
@@ -129,6 +133,8 @@ pub struct PyObserver<'py, 's> {
     expands: bool,
     /// Whether the observer's class overrides `hit_in`, which is sent only then.
     hits: bool,
+    /// Whether the observer's class overrides `skipped`, which is sent only then.
+    skips: bool,
 }
 
 impl<'py, 's> PyObserver<'py, 's> {
@@ -137,12 +143,14 @@ impl<'py, 's> PyObserver<'py, 's> {
         let nodes = overrides(&observer, "pre_node") || overrides(&observer, "post_node");
         let expands = overrides(&observer, "post_expand");
         let hits = overrides(&observer, "hit_in");
+        let skips = overrides(&observer, "skipped");
         Self {
             observer,
             kwargs,
             nodes,
             expands,
             hits,
+            skips,
         }
     }
 
@@ -292,6 +300,9 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
     }
 
     fn skipped(&mut self, node: &str, branch: &[usize]) -> PyResult<()> {
+        if !self.skips {
+            return Ok(());
+        }
         let py = self.observer.py();
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "branch"), PyTuple::new(py, branch)?)?;

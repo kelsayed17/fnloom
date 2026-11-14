@@ -3,7 +3,9 @@
 //! Every digest is one *node* in the shared framing ([`Framer`]): a one-byte [`Kind`],
 //! then each part as its length (`u64`, little-endian) and its bytes. A container's parts
 //! are its children's digests, so a fingerprint is a Merkle hash of the value's tree.
-//! `hash_parts` and cache keys use the same framing, both under [`Kind::Parts`].
+//! `hash_parts` uses the same framing, under [`Kind::Parts`]. A cache key does not: it
+//! is BLAKE3 keyed by a node's static part over its sources' 32-byte versions
+//! (`keys.rs`), whose fixed width needs no framing.
 
 use std::fmt::Write as _;
 use std::mem;
@@ -90,9 +92,8 @@ pub(crate) enum Kind {
 
 /// One framed digest under construction: a kind byte, then length-prefixed parts.
 ///
-/// This is the only framing: fingerprints, `hash_parts` and cache keys all use it (cache
-/// keys write the same bytes to one buffer and hash it whole, in `keys.rs`), so a digest
-/// of one kind never equals a digest of another, and parts never run together.
+/// Fingerprints and `hash_parts` both use it, so a digest of one kind never equals a
+/// digest of another, and parts never run together.
 pub(crate) struct Framer(blake3::Hasher);
 
 impl Framer {

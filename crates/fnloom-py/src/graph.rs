@@ -22,7 +22,7 @@ pub type PyCoreGraph = CoreGraph<Py<PyAny>>;
 ///
 /// `kind` is `"required"`, `"optional"`, `"admits"` or `"admits_optional"`; `collect` is
 /// `"present"`, `"all"` or `None`. `items` is `None` for a node that does not expand, and
-/// for an expand the callable making its item iterator, `items(iterable, record)`.
+/// for an expand the callable making its item iterator, `items(iterable, record, branch)`.
 type NodeTuple = (
     String,
     Vec<(String, PyBackedStr, Option<PyBackedStr>)>,
