@@ -1036,27 +1036,33 @@ def test_a_class_held_beyond_a_default_record_fields_counts(held: str) -> None:
     assert one != two
 
 
-def test_a_class_a_declared_form_holds_counts() -> None:
-    """A `__fnloom_fingerprint__` form is walked for its classes, as it is read."""
-    template = """
-        import dataclasses
+@pytest.mark.parametrize(
+    "declared",
+    [
+        "    def __fnloom_fingerprint__(self):\n        return self.inner\n",
+        "fnloom.register_fingerprint(Rate, lambda r: r.inner)\n",
+    ],
+    ids=["__fnloom_fingerprint__", "register_fingerprint"],
+)
+def test_a_class_a_declared_form_holds_counts(declared: str) -> None:
+    """A declared or registered form is walked for its classes, as it is read.
 
-        @dataclasses.dataclass(frozen=True)
-        class Helper:
-            k: int = 0
-
-            def compute(self):
-                return {v}
-
-        class Rate:
-            def __init__(self):
-                self.inner = (Helper(),)
-
-            def __fnloom_fingerprint__(self):
-                return self.inner
-
-        def f(x, rate=Rate()):
-            return x + rate.inner[0].compute()
-        """
-    one = _version(textwrap.dedent(template.format(v=1)))
-    assert _version(textwrap.dedent(template.format(v=2))) != one
+    `Helper` is reached only through the form: no code of `Rate` or `f` names it.
+    """
+    template = (
+        "import dataclasses\n"
+        "import fnloom\n\n"
+        "@dataclasses.dataclass(frozen=True)\n"
+        "class Helper:\n"
+        "    k: int = 0\n\n"
+        "    def compute(self):\n"
+        "        return {v}\n\n"
+        "class Rate:\n"
+        "    def __init__(self, inner):\n"
+        "        self.inner = inner\n\n"
+        f"{declared}\n"
+        "def f(x, rate=Rate((Helper(),))):\n"
+        "    return x + rate.inner[0].compute()\n"
+    )
+    one = _version(template.format(v=1))
+    assert _version(template.format(v=2)) != one

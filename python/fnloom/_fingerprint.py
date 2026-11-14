@@ -147,7 +147,7 @@ def fingerprint_form(value: object) -> object | None:
         # A library value is known to its branch or refused: never read as a bare
         # buffer, which would drop a subclass's state (a masked array's mask, say).
         return library(value)
-    for known in (_stdlib, record_form, _buffer):
+    for known in (stdlib_form, record_form, _buffer):
         form = known(value)
         if form is not None:
             return form
@@ -160,7 +160,7 @@ _PATHS = frozenset(
 )
 
 
-def _stdlib(value: object) -> object | None:  # noqa: PLR0911  # one return per type
+def stdlib_form(value: object) -> object | None:  # noqa: PLR0911  # one return per type
     """The canonical form of a standard-library value, or `None` for anything else.
 
     Types match exactly, since a subclass may hold state the form leaves out; enum

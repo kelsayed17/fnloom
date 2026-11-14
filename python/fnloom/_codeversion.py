@@ -35,6 +35,7 @@ from fnloom._fingerprint import (
     fingerprint,
     fingerprint_form,
     model_fields,
+    stdlib_form,
 )
 
 if TYPE_CHECKING:
@@ -423,19 +424,33 @@ def _instance_types(
 
 
 def _inner(value: object) -> Iterator[object]:
-    """The values the fingerprint looks into inside `value`, if any.
+    """The values inside `value` whose classes' code a node may run, if any.
 
-    A built-in container's members. Any other value's canonical form, the one
-    the fingerprint reads: an enum member's value, a record's fields and the
-    state set beyond them, a declared or registered form.
+    A built-in container's members; an enum member's value; a pydantic model's
+    own state, since its form puts a digest in place of a field holding a set.
+    Any other value is read through the form the fingerprint reads in its place
+    (a record's fields and the state set beyond them, a declared or registered
+    form, an object array's items), unless it can hold no instance of a user
+    class: a datetime, `Decimal` or path, or a numeric array.
     """
-    if isinstance(value, tuple | list | set | frozenset):
+    if isinstance(value, enum.Enum):
+        yield value.value
+    elif isinstance(value, tuple | list | set | frozenset):
         yield from value
     elif type(value) is dict:
         for key, item in value.items():
             yield key
             yield item
-    elif type(value).__module__ != "builtins":
+    elif model_fields(type(value)) is not None:
+        yield from vars(value).values()
+        yield getattr(value, "__pydantic_extra__", None)
+        yield getattr(value, "__pydantic_private__", None)
+    elif (
+        type(value).__module__ != "builtins"
+        and stdlib_form(value) is None
+        # A numeric array's dtype holds no objects: nothing in it has a class's code.
+        and getattr(getattr(value, "dtype", None), "hasobject", True) is not False
+    ):
         try:
             form = fingerprint_form(value)
         except Exception:  # noqa: BLE001  # the fingerprint itself says why
