@@ -91,6 +91,21 @@ pub struct Plan {
     /// packed; per node, its step's span in it. Both empty without an expand.
     arg_edges: Vec<u32>,
     arg_spans: Vec<(u32, u32)>,
+    /// Without an expand, a run keeps each step's value in the slot at the step's
+    /// position, so its table is the plan's size, not the graph's: every step's `args`,
+    /// then every step's `release`, as slots, packed in step order, and each output's
+    /// slot. All three empty with an expand, whose run keys its values by node id.
+    arg_slots: Vec<u32>,
+    release_slots: Vec<u32>,
+    output_slots: Vec<u32>,
+}
+
+/// A plain plan's steps and their slots, as `Plan` keeps them.
+struct Slotted {
+    steps: Vec<Step>,
+    arg_slots: Vec<u32>,
+    release_slots: Vec<u32>,
+    output_slots: Vec<u32>,
 }
 
 impl Plan {
@@ -104,6 +119,22 @@ impl Plan {
     #[must_use]
     pub fn outputs(&self) -> &[NodeId] {
         &self.outputs
+    }
+
+    /// The slot of each of a plain plan's `count` outputs, in `outputs` order; `None` past
+    /// the end of the table, which a plan never reaches.
+    pub(crate) fn output_slots(&self, count: usize) -> impl Iterator<Item = Option<usize>> + '_ {
+        (0..count).map(|at| self.output_slots.get(at).map(|&slot| slot as usize))
+    }
+
+    /// A plain plan's argument slots: each step's `args` as slots, packed in step order.
+    pub(crate) fn arg_slots(&self) -> &[u32] {
+        &self.arg_slots
+    }
+
+    /// A plain plan's release slots: each step's `release` as slots, packed in step order.
+    pub(crate) fn release_slots(&self) -> &[u32] {
+        &self.release_slots
     }
 
     /// Whether a planned node's value may be absent (`Node::may_be_absent`), so that the run
@@ -194,8 +225,9 @@ impl<P> Graph<P> {
         }
         let order = self.topological_order(&actions);
         let needs_rules = self.has_absence() && order.iter().any(|&id| self.node(id).may_be_absent);
+        let slotted = self.build_steps(&order, &actions, &resolved.outputs);
         Ok(Plan {
-            steps: self.build_steps(&order, &actions, &resolved.outputs),
+            steps: slotted.steps,
             outputs: resolved.outputs,
             needs_rules,
             blocks: Vec::new(),
@@ -204,6 +236,9 @@ impl<P> Graph<P> {
             late: Vec::new(),
             arg_edges: Vec::new(),
             arg_spans: Vec::new(),
+            arg_slots: slotted.arg_slots,
+            release_slots: slotted.release_slots,
+            output_slots: slotted.output_slots,
         })
     }
 
@@ -377,6 +412,9 @@ impl<P> Graph<P> {
             late,
             arg_edges,
             arg_spans,
+            arg_slots: Vec::new(),
+            release_slots: Vec::new(),
+            output_slots: Vec::new(),
         }
     }
 
@@ -666,27 +704,39 @@ impl<P> Graph<P> {
         actions: &[Option<Action>],
         resolved: &Resolved,
     ) -> PlanError {
-        let consumers_of = |input: NodeId| {
-            self.nodes()
+        // Each missing input's position, by id, so one pass over the planned nodes' edges
+        // finds every consumer.
+        let mut position: Vec<Option<usize>> = vec![None; self.nodes().len()];
+        for (at, &id) in missing.iter().enumerate() {
+            position[id.index()] = Some(at);
+        }
+        let mut consumers: Vec<Vec<String>> = vec![Vec::new(); missing.len()];
+        for (index, node) in self.nodes().iter().enumerate() {
+            if actions[index] != Some(Action::Compute) {
+                continue;
+            }
+            for edge in node
+                .inputs
                 .iter()
-                .enumerate()
-                .filter(|&(index, node)| {
-                    actions[index] == Some(Action::Compute)
-                        && node
-                            .inputs
-                            .iter()
-                            .any(|edge| edge.node == input && !edge.dependency.has_default())
-                })
-                .map(|(_, node)| node.name.clone())
-                .collect()
-        };
+                .filter(|edge| !edge.dependency.has_default())
+            {
+                let Some(at) = position[edge.node.index()] else {
+                    continue;
+                };
+                // Nodes come in id order, so a node reading one input twice is its last.
+                if consumers[at].last() != Some(&node.name) {
+                    consumers[at].push(node.name.clone());
+                }
+            }
+        }
         PlanError::MissingInputs(
             missing
                 .iter()
-                .map(|&id| MissingInput {
+                .zip(consumers)
+                .map(|(&id, consumers)| MissingInput {
                     name: self.node(id).name.clone(),
-                    requested: resolved.outputs.contains(&id),
-                    consumers: consumers_of(id),
+                    requested: resolved.outputs.binary_search(&id).is_ok(),
+                    consumers,
                 })
                 .collect(),
         )
@@ -746,7 +796,7 @@ impl<P> Graph<P> {
         order: &[NodeId],
         actions: &[Option<Action>],
         outputs: &[NodeId],
-    ) -> Vec<Step> {
+    ) -> Slotted {
         let mut steps: Vec<Step> = order
             .iter()
             .filter_map(|&node| {
@@ -773,7 +823,23 @@ impl<P> Graph<P> {
                 }
             }
         }
-        steps
+        // Each step's slot is its position; every planned node, so every arg, release and
+        // output, has a step.
+        let mut slot_of = vec![u32::MAX; self.nodes().len()];
+        for (position, step) in steps.iter().enumerate() {
+            slot_of[step.node.index()] = index_u32(position);
+        }
+        let slot = |id: &NodeId| slot_of[id.index()];
+        Slotted {
+            arg_slots: steps.iter().flat_map(|step| &step.args).map(slot).collect(),
+            release_slots: steps
+                .iter()
+                .flat_map(|step| &step.release)
+                .map(slot)
+                .collect(),
+            output_slots: outputs.iter().map(slot).collect(),
+            steps,
+        }
     }
 
     /// The inputs of a computed node that actually receive a value, sorted by id.

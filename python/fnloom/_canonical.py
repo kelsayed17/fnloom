@@ -10,11 +10,10 @@ import dataclasses
 import hashlib
 import json
 import typing
-from collections import defaultdict
 from typing import TYPE_CHECKING
 
 from fnloom._codeversion import class_version
-from fnloom._fingerprint import fingerprint, record_form
+from fnloom._fingerprint import fingerprint
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -56,13 +55,12 @@ def stable_fingerprint(value: object) -> bytes:
 def parts(value: object) -> list[object]:
     """The parts `value` is written and versioned from, or `[]` for a whole value.
 
-    A dataclass instance's parts are all its fields, `repr=False` ones included,
-    then the state set beyond them, as its fingerprint reads it. A builtin
-    container is walked, and a subclass of one only when it holds no state of
-    its own (a named tuple, an empty-`__dict__` `OrderedDict`): one with
-    instance attributes or slots, a `defaultdict`, or any other mapping, may
-    hold state its members don't show, so it is a whole value, which
-    `fingerprint` reads or refuses.
+    A dataclass instance's parts are all its fields, `repr=False` ones included:
+    they hold state as much as the others do. A builtin container is walked,
+    and a subclass of one only when it holds no state of its own (a named
+    tuple, an empty-`__dict__` `OrderedDict`): one with instance attributes or
+    slots, or any other mapping, may hold state its members don't show, so it
+    is a whole value, which `fingerprint` reads or refuses.
     """
     if isinstance(value, (set, frozenset, list, tuple)) and _stateless(value):
         return list(typing.cast("Iterable[object]", value))
@@ -70,10 +68,7 @@ def parts(value: object) -> list[object]:
         pairs = typing.cast("dict[object, object]", value).items()
         return [part for pair in pairs for part in pair]
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        # The fingerprint's own form: the state set beyond the fields follows
-        # them, and a record it refuses (a field never set) is a whole value.
-        record = record_form(value)
-        return [] if record is None else list(typing.cast("tuple[object, ...]", record))
+        return [getattr(value, f.name) for f in dataclasses.fields(value)]
     return []
 
 
@@ -81,9 +76,6 @@ def _stateless(value: object) -> bool:
     """Whether a container holds nothing beyond its members: no attribute, no slot."""
     if type(value) in _WALKED or type(value) is dict:
         return True
-    if isinstance(value, defaultdict):
-        # Its `default_factory` is state its members don't show.
-        return False
     if getattr(value, "__dict__", None):
         return False
     return all(

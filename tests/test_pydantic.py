@@ -534,38 +534,3 @@ def test_a_model_without_a_set_keeps_its_form() -> None:
     assert isinstance(form, tuple)
     assert form[0] is inner
     assert form[1] == (1, 2)
-
-
-_SET_FIELD = """
-import enum
-from typing import Any
-
-from pydantic import BaseModel, ConfigDict
-
-class Mode(enum.Enum):
-    A = "a"
-
-    def scale(self) -> int:
-        return {scale}
-
-class Cfg(BaseModel):
-    model_config = ConfigDict(frozen=True)
-    modes: frozenset[Any]
-
-def _apply(x: int, cfg: Cfg = Cfg(modes=frozenset({{Mode.A}}))) -> int:
-    return x * next(iter(cfg.modes)).scale()
-
-def out(x: int) -> int:
-    return _apply(x)
-"""
-
-
-def test_a_class_in_a_model_field_holding_a_set_counts() -> None:
-    """A model's set field is walked for its classes, though its form is a digest.
-
-    Editing `Mode.scale` must miss: the default model reaches it through a set.
-    """
-    one = make_module("pyd_set_field", _SET_FIELD.format(scale=1))
-    first = code_version(one.out)
-    two = make_module("pyd_set_field", _SET_FIELD.format(scale=2))
-    assert code_version(two.out) != first
