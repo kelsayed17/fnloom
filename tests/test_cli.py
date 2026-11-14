@@ -506,7 +506,20 @@ def test_an_at_sign_in_a_folder_is_part_of_the_path(
     assert '"ns.a" [' in out
 
 
-@pytest.mark.parametrize("content", ["[]", '{"format": "fnloom.export/1"}'])
+_NODE = '{"name": "a", "kind": "function", "version": "x", "params": %s}'
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "[]",
+        '{"format": "fnloom.export/1"}',
+        '{"format": "fnloom.export/1", "nodes": [%s]}' % (_NODE % '["oops"]'),
+        '{"format": "fnloom.export/1", "nodes": [%s]}' % (_NODE % '{"x": 1}'),
+        '{"format": "fnloom.export/1", "nodes": [{"name": "a", "kind": []}]}',
+        '{"format": "fnloom.export/1", "nodes": [{"name": "a", "kind": {}}]}',
+    ],
+)
 def test_diff_of_a_malformed_export_is_status_2(
     tmp_path: Path, capsys: pytest.CaptureFixture[str], content: str
 ) -> None:
