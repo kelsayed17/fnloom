@@ -995,3 +995,74 @@ def test_a_newtype_with_attributes_of_its_own_is_refused() -> None:
     source = "from typing import NewType\nS = NewType('S', int)\nS.extra = 1\n"
     with pytest.raises(UncacheableError, match="global 'S' of 'f' is a NewType"):
         _version(source + "def f(x):\n    return S.extra\n")
+
+
+@pytest.mark.parametrize(
+    "held",
+    [
+        "object.__setattr__(CFG, 'helper', Helper())",
+        "CFG.helper = Helper()",
+    ],
+    ids=["frozen", "not frozen"],
+)
+def test_a_class_held_beyond_a_default_record_fields_counts(held: str) -> None:
+    """State set on a dataclass outside its fields is versioned, as it is fingerprinted.
+
+    A node calling a method of a class it reaches only there runs that code too.
+    """
+    template = """
+        import dataclasses
+
+        @dataclasses.dataclass(frozen=True)
+        class Helper:
+            k: int = 0
+
+            def compute(self):
+                return {v}
+
+        @dataclasses.dataclass(frozen={frozen})
+        class Outer:
+            m: int
+
+        CFG = Outer(1)
+        {held}
+
+        def f(x, cfg=CFG):
+            return x + cfg.helper.compute()
+        """
+    frozen = "object.__setattr__" in held
+    one = _version(textwrap.dedent(template.format(v=1, frozen=frozen, held=held)))
+    two = _version(textwrap.dedent(template.format(v=2, frozen=frozen, held=held)))
+    assert one != two
+
+
+@pytest.mark.parametrize(
+    "declared",
+    [
+        "    def __fnloom_fingerprint__(self):\n        return self.inner\n",
+        "fnloom.register_fingerprint(Rate, lambda r: r.inner)\n",
+    ],
+    ids=["__fnloom_fingerprint__", "register_fingerprint"],
+)
+def test_a_class_a_declared_form_holds_counts(declared: str) -> None:
+    """A declared or registered form is walked for its classes, as it is read.
+
+    `Helper` is reached only through the form: no code of `Rate` or `f` names it.
+    """
+    template = (
+        "import dataclasses\n"
+        "import fnloom\n\n"
+        "@dataclasses.dataclass(frozen=True)\n"
+        "class Helper:\n"
+        "    k: int = 0\n\n"
+        "    def compute(self):\n"
+        "        return {v}\n\n"
+        "class Rate:\n"
+        "    def __init__(self, inner):\n"
+        "        self.inner = inner\n\n"
+        f"{declared}\n"
+        "def f(x, rate=Rate((Helper(),))):\n"
+        "    return x + rate.inner[0].compute()\n"
+    )
+    one = _version(template.format(v=1))
+    assert _version(template.format(v=2)) != one

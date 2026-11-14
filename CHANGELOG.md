@@ -189,6 +189,15 @@ change the public API; such changes are listed under **Changed** and **Removed**
   its node uncacheable with a `CacheWarning` saying why, as a node's own function does. The cached build raised
   instead, though the same build without a cache ran. `export()` of such a node warns the same way and leaves its
   `version` out, saying why in `unversioned`; it raised.
+- A node's code version counts the classes of everything its defaults' fingerprints read: state set on a dataclass
+  outside its fields, and a `__fnloom_fingerprint__` or registered form. A class reached only that way was left out,
+  so editing its methods kept the version and the cache could return a stale result. Such a node's version changes,
+  so an existing disk cache misses once for it.
+- The fingerprint of a `value()` binding holding a set counts a dataclass's state set beyond its fields, as the plain
+  fingerprint does: two such values differing only there keyed the cache alike, so one could be served the other's
+  result. Their keys change, so an existing disk cache misses once for them. A `defaultdict`, whose `default_factory`
+  is state, is refused whether or not it holds a set, and a dataclass with an unset `init=False` field holding a set is
+  refused as `UnfingerprintableError` rather than a raw `AttributeError`.
 
 ## [0.4.0] - 2026-11-05
 
