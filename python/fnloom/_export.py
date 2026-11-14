@@ -17,8 +17,8 @@ from typing import TYPE_CHECKING, Any
 from fnloom._caching import check_parts, with_predicates
 from fnloom._canonical import DEPTH, UnwritableError, stable_fingerprint
 from fnloom._codeversion import UncacheableError, code_version
+from fnloom._config import condition_text
 from fnloom._decorators import Source, Value, decorations
-from fnloom._drawing import condition_text
 from fnloom._types import Unresolved
 
 if TYPE_CHECKING:
@@ -26,7 +26,7 @@ if TYPE_CHECKING:
 
     from fnloom._checks import Check
     from fnloom._drawing import Drawing
-    from fnloom._view import InputView, NodeView, Param
+    from fnloom._view import InputView, NodeView, NodeViews, Param
 
 FORMAT = "fnloom.export/1"
 # The format of a document with a node that may be absent (Q135), or a block
@@ -54,7 +54,7 @@ _ABSENT_MARK = "may be absent"
 
 def export(  # noqa: PLR0913  # one argument per part of the document
     drawing: Drawing,
-    views: Mapping[str, NodeView],
+    views: NodeViews,
     *,
     inputs: Mapping[str, InputView],
     config: Mapping[str, object],
@@ -86,8 +86,8 @@ def export(  # noqa: PLR0913  # one argument per part of the document
             views[drawn.name],
             inputs,
             versions,
-            built_from=getattr(views, "built_from", {}).get(drawn.name),
-            checks=getattr(views, "checks", {}).get(drawn.name, ()),
+            built_from=views.built_from.get(drawn.name),
+            checks=views.checks.get(drawn.name, ()),
             second=second,
         )
         for drawn in drawing.nodes

@@ -135,15 +135,7 @@ class _Extractor:
         # Any value with `in` and `[]` will do, as in Hamilton; another is named.
         mapping = typing.cast("Mapping[object, object]", values[self._producer])
         field = self._field
-        try:
-            present = field in mapping
-        except TypeError:
-            msg = (
-                f"{self._producer!r} returned {type(mapping).__name__}, "
-                f"which has no field {field!r}"
-            )
-            raise TypeError(msg) from None
-        if present:
+        if self._holds(mapping):
             found = mapping[field]
         elif self._fill is not MISSING_FILL:
             found = self._fill
@@ -153,6 +145,17 @@ class _Extractor:
             )
             raise ValueError(msg)
         return self._checked(found)
+
+    def _holds(self, value: Mapping[object, object]) -> bool:
+        """Whether the producer's `value` holds the item; `TypeError` if it can't."""
+        try:
+            return self._field in value
+        except TypeError:
+            msg = (
+                f"{self._producer!r} returned {type(value).__name__}, "
+                f"which has no {self.noun} {self._field!r}"
+            )
+            raise TypeError(msg) from None
 
     def _checked(self, found: object) -> object:
         """`found`, when it matches the declared type; `ValueError` otherwise."""
@@ -194,15 +197,7 @@ class _ColumnExtractor(_Extractor):
         """The column; `ValueError` when it is missing or of the wrong type."""
         frame = typing.cast("Mapping[object, object]", values[self._producer])
         column = self._field
-        try:
-            present = column in frame
-        except TypeError:
-            msg = (
-                f"{self._producer!r} returned {type(frame).__name__}, "
-                f"which has no column {column!r}"
-            )
-            raise TypeError(msg) from None
-        if present:
+        if self._holds(frame):
             return self._checked(frame[column])
         if self._fill is MISSING_FILL:
             msg = (
@@ -279,12 +274,12 @@ def column_type(frame_type: object) -> object:
     return series if isinstance(series, type) else Any
 
 
-def _returned(mapping: object) -> str:
-    """The fields `mapping` holds, sorted, for a missing-field error."""
+def _returned(mapping: object, noun: str = "fields") -> str:
+    """The `noun` (its keys) `mapping` holds, sorted, for a missing-item error."""
     keys = getattr(mapping, "keys", None)
     if not callable(keys):
         return f"it returned a {type(mapping).__name__}"
-    return _listed(typing.cast("Iterable[object]", keys()), "fields")
+    return _listed(typing.cast("Iterable[object]", keys()), noun)
 
 
 def _returned_columns(frame: object) -> str:
@@ -292,10 +287,7 @@ def _returned_columns(frame: object) -> str:
     columns = getattr(frame, "columns", None)
     if isinstance(columns, Iterable) and not isinstance(columns, str | bytes):
         return _listed(typing.cast("Iterable[object]", columns), "columns")
-    keys = getattr(frame, "keys", None)
-    if not callable(keys):
-        return f"it returned a {type(frame).__name__}"
-    return _listed(typing.cast("Iterable[object]", keys()), "columns")
+    return _returned(frame, "columns")
 
 
 def _listed(names: Iterable[object], noun: str) -> str:
