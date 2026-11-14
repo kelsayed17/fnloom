@@ -168,6 +168,13 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `str`, a `Literal` of strings, an `Annotated[str, ...]`, or a union with one of them such as `Name | None`. The
   first three, and such unions, were refused as not `str`, and `Annotated` raised an unhelpful `TypeError` about set
   elements.
+- `@check_output(range=...)`, `allow_nans=` and `max_fraction_nans=` refuse, at build, a node whose values can only be
+  text or `None`: a union such as `str | None` or `Name | None`, a `NewType` over `str`, or a `Literal` of strings. Such
+  a node built, then failed every run (Q101). A union with a numeric arm, such as `int | str`, still builds.
+- `max_fraction_nans=` that is not a real number, such as `"0.5"`, is refused with the `ValueError` naming the argument
+  that an out-of-range number gets, rather than a bare comparison `TypeError`.
+- An annotation that raises when evaluated, other than for an unknown name, such as `-> "int | 3"`, fails the build
+  with a note naming its function. The error named nothing.
 
 ## [0.4.0] - 2026-11-05
 
