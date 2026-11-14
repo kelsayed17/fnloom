@@ -214,7 +214,7 @@ impl Graph {
             overrides: overrides.into_iter().collect::<BTreeSet<_>>(),
         };
         let plan = slf.get().core.prepare(&request).map_err(value_error)?;
-        Ok(Plan::new(slf.clone().unbind(), plan))
+        Plan::new(slf.py(), slf.clone().unbind(), plan)
     }
 }
 
