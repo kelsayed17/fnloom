@@ -141,6 +141,11 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Changed
 
+- A bounded `DiskCache` prunes when it opens, then when its own writes take it past `max_bytes` or add a tenth of it,
+  down to nine tenths, rather than to the bound after every 100 writes: a full store prunes about once per tenth of
+  its bound written. A store pickled to a worker process no longer prunes as it loads, but at its first write. With
+  several processes writing, the directory can pass `max_bytes` by up to a tenth of it per other process until the
+  next prune.
 - `build()` of a large graph is about 15% faster: 104 ms rather than 124 for a 10,000-node chain. A graph with no
   `@pipe_input`, `@pipe_output` or `@mutate` skips the step lowering, the check of `@mutate` targets reads the
   modules' functions only when one is a mutator, and the edge check writes out only a mismatch's types.
