@@ -15,6 +15,7 @@ use pyo3::create_exception;
 use pyo3::exceptions::{PyBufferError, PyNotImplementedError, PyTypeError, PyValueError};
 use pyo3::intern;
 use pyo3::prelude::*;
+use pyo3::sync::critical_section::with_critical_section;
 use pyo3::types::{
     PyBool, PyByteArray, PyBytes, PyComplex, PyDict, PyFloat, PyFrozenSet, PyInt, PyList,
     PyMemoryView, PySet, PySlice, PyString, PyTuple,
@@ -384,20 +385,27 @@ fn visit<'py>(
     if let Ok(tuple) = value.cast_exact::<PyTuple>() {
         return Ok(Step::Open(Frame::new(Kind::Tuple, tuple.iter().collect())));
     }
+    // A mutable container's children are copied out first, since the walk calls back into
+    // Python, which may change it; and under the container's lock, since without the GIL
+    // another thread may change it while it is read.
     if let Ok(list) = value.cast_exact::<PyList>() {
-        return Ok(Step::Open(Frame::new(Kind::List, list.iter().collect())));
+        let children = with_critical_section(list, || list.iter().collect());
+        return Ok(Step::Open(Frame::new(Kind::List, children)));
     }
     if let Ok(dict) = value.cast_exact::<PyDict>() {
-        // Copied out first: the walk calls back into Python, which may change the dict.
-        let mut children = Vec::with_capacity(dict.len() * 2);
-        for (key, item) in dict.iter() {
-            children.push(key);
-            children.push(item);
-        }
+        let children = with_critical_section(dict, || {
+            let mut children = Vec::with_capacity(dict.len() * 2);
+            for (key, item) in dict.iter() {
+                children.push(key);
+                children.push(item);
+            }
+            children
+        });
         return Ok(Step::Open(Frame::new(Kind::Dict, children)));
     }
     if let Ok(set) = value.cast_exact::<PySet>() {
-        return Ok(Step::Open(Frame::new(Kind::Set, set.iter().collect())));
+        let children = with_critical_section(set, || set.iter().collect());
+        return Ok(Step::Open(Frame::new(Kind::Set, children)));
     }
     if let Ok(set) = value.cast_exact::<PyFrozenSet>() {
         return Ok(Step::Open(Frame::new(
