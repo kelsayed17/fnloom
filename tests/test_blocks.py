@@ -776,3 +776,68 @@ def test_a_nested_generator_expand_reads_its_branch_while_yielding() -> None:
         ("inner done", (1,)),
     ]
     assert fnloom.current_branch() == ()
+
+
+# Decorators on expand nodes (task 14).
+
+
+def test_replace_may_replace_an_expand() -> None:
+    """The replacing expand gives the items its block runs over (Plan 12 PR F)."""
+    module = make_module("blocks_replaced", PICKED)
+    evens = make_module(
+        "blocks_replacing",
+        """
+        from fnloom import Parallelizable
+
+        def picked(n: int) -> Parallelizable[int]:
+            return [i * 2 for i in range(n)]
+        """,
+    )
+    driver = (
+        fnloom.Builder()
+        .with_modules(module)
+        .with_modules(evens, replace=("picked",))
+        .build()
+    )
+    assert driver.nodes["picked"].kind == "expand"
+    assert driver.nodes["picked"].replaced == "blocks_replaced"
+    assert driver.execute(["summary"], inputs={"n": 3, "rate": 10}) == {
+        "summary": [0, 20, 40]
+    }
+
+
+def test_parameterize_on_an_expand_makes_one_block_per_row() -> None:
+    """Each row is an expand of its own, so a node reading two rows is refused."""
+    rows = """
+from fnloom import Collect, Parallelizable, parameterize, value
+
+@parameterize(small={"n": value(2)}, large={"n": value(3)})
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+def small_doubled(small: int) -> int:
+    return small * 2
+
+def large_doubled(large: int) -> int:
+    return large * 2
+
+def sums(small_doubled: Collect[int], large_doubled: Collect[int]) -> list[int]:
+    return [sum(small_doubled), sum(large_doubled)]
+"""
+    driver = fnloom.build(make_module("blocks_parameterized", rows))
+    shown = {name: (view.kind, view.block) for name, view in driver.nodes.items()}
+    assert shown == {
+        "large": ("expand", None),
+        "large_doubled": ("function", "large"),
+        "small": ("expand", None),
+        "small_doubled": ("function", "small"),
+        "sums": ("collect", None),
+    }
+    assert driver.execute(["sums"]) == {"sums": [2, 6]}
+    paired = rows + "\ndef both(small: int, large: int) -> int:\n    return small\n"
+    with pytest.raises(ValueError, match="unrelated") as info:
+        fnloom.build(make_module("blocks_parameterized_paired", paired))
+    assert str(info.value) == (
+        "'both' reads blocks of 'large' and 'small', which are unrelated; collect "
+        "both in one node to pair them"
+    )

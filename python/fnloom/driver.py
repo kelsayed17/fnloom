@@ -2723,6 +2723,25 @@ def _refuse_unread(
         raise ValueError("; ".join(unread))
 
 
+def _refuse_bound_block_nodes(
+    bound: Mapping[str, Mapping[str, Source | Value]],
+    blocks: Mapping[str, Sequence[str]],
+) -> None:
+    """`ValueError` for each `bind=` source that is a block node, sorted (§4.4).
+
+    It has a value per item of its block, and the namespace reads one value.
+    """
+    if refused := sorted(
+        f"bind={{{key!r}: source({binding.name!r})}} under namespace {namespace!r} "
+        f"reads a node computed once per item of {blocks[binding.name][-1]!r}; "
+        "bind its collect instead"
+        for namespace, bind in bound.items()
+        for key, binding in bind.items()
+        if isinstance(binding, Source) and binding.name in blocks
+    ):
+        raise ValueError("; ".join(refused))
+
+
 def _counted(count: int, noun: str) -> str:
     """`count` and `noun`, plural unless it is one: `1 module`, `2 modules`."""
     return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
@@ -3584,6 +3603,7 @@ class Builder[R = dict[str, object]]:
             if absent := _unmatched_edges(nodes, unmatched):
                 raise ValueError(absent)
         blocks, absent = self._blocks_and_absence(nodes)
+        _refuse_bound_block_nodes(self._bound, blocks)
         views = node_views(
             nodes,
             stepped | frozenset(node.name for node in nodes if is_generated(node)),

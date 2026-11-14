@@ -125,6 +125,11 @@ change the public API; such changes are listed under **Changed** and **Removed**
   no fingerprint is keyed by its index only when its expand's items are stored or replayed, else its branch is
   uncacheable. `explain_cache` reports a block node `unknown` and counts an outer expand's branches, from its
   stored items, in its reason. `_core.ObserverBase` gains `hit_in(node, *, branch, value)`.
+- Blocks across namespaces, `bind=` and decorators. Blocks are named by their namespaced expand, so two copies of a
+  module have independent blocks. A namespace's `bind=` to a node outside every block is shared by its branches, and
+  one to a block node is a `ValueError` at build saying to bind its collect instead. Every decorator applies to a
+  block node once per item, `@parameterize` on an expand makes one block per row, and `replace=` may replace an
+  expand.
 
 ### Changed
 
