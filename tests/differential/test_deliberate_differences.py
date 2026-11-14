@@ -6414,3 +6414,72 @@ def test_q129_items_replay_and_a_reordered_collect_misses(
         "summary": [30, 10, 20]
     }
     assert calls() == ["picked", "summary"]
+
+
+@pytest.mark.deliberate("Q166")
+def test_q166_an_annotated_expand_is_an_expand() -> None:
+    """Hamilton reads an `Annotated` expand as a plain node; fnloom expands it."""
+    body = """
+from typing import Annotated
+
+def items(n: int) -> Annotated[Parallelizable[int], "each item"]:
+    yield from range(n)
+
+def double(items: int) -> int:
+    return 2 * items
+
+def total(double: Collect[int]) -> int:
+    return sum(double)
+"""
+    hamilton_module = make_module(
+        "differential_annotated_expand_h",
+        "from hamilton.htypes import Collect, Parallelizable\n" + body,
+    )
+    with pytest.raises(ValueError, match="double is expecting items"):
+        (
+            hamilton_driver.Builder()
+            .enable_dynamic_execution(allow_experimental_mode=True)
+            .with_local_executor(executors.SynchronousLocalTaskExecutor())
+            .with_modules(hamilton_module)
+            .build()
+        )
+    ours = fnloom.build(
+        make_module(
+            "differential_annotated_expand_f",
+            "from fnloom import Collect, Parallelizable\n" + body,
+        )
+    )
+    assert ours.execute(["total"], inputs={"n": 3}) == {"total": 6}
+
+
+@pytest.mark.deliberate("Q104")
+@pytest.mark.deliberate("Q107")
+def test_q104_a_group_bound_to_a_step_is_refused() -> None:
+    """Hamilton hands the step the `group` object itself; fnloom refuses it."""
+    module = make_module(
+        "q104_group_h",
+        """
+from hamilton.function_modifiers import group, pipe_output, step, value
+
+SEEN = []
+
+def _add(x: int, extra: object) -> int:
+    SEEN.append(type(extra).__name__)
+    return x
+
+@pipe_output(step(_add, extra=group(value(1))))
+def a(x: int) -> int:
+    return x
+""",
+    )
+    built = hamilton_driver.Builder().with_modules(module).build()
+    assert built.execute(["a"], inputs={"x": 1}) == {"a": 1}
+    assert module.SEEN == ["GroupedListDependency"]
+
+    def _add(x: int, extra: list[int]) -> int:
+        return x + sum(extra)
+
+    with pytest.raises(TypeError, match=r"_add: group\(\) binds a parameterize row"):
+        fnloom.step(_add, extra=fnloom.group(fnloom.value(1)))
+    with pytest.raises(TypeError, match=r"_add: group\(\) binds a parameterize row"):
+        fnloom.mutate(fnloom.apply_to(_add, extra=fnloom.group(fnloom.value(1))))(_add)

@@ -2,8 +2,10 @@
 
 import asyncio
 import copy
+import gc
 import pickle
 import threading
+import weakref
 from typing import TYPE_CHECKING, Any, override
 
 import pytest
@@ -1355,3 +1357,74 @@ def make() -> Odd:
     assert str(error) == str(sync_info.value)
     assert type(error.__cause__).__name__ == "Odd"
     assert type(sync_info.value.__cause__).__name__ == "Odd"
+
+
+def test_two_async_drivers_over_one_driver_keep_their_own_plans() -> None:
+    """Each runs its sync nodes its own way, and pickles as itself."""
+    module = make_module(
+        "async_shared_driver",
+        "import threading\n\ndef a(x: int) -> str:\n"
+        "    return threading.current_thread().name\n",
+    )
+    threaded = fnloom.Builder().with_modules(module).build_async(sync_nodes="thread")
+    inline = fnloom.AsyncDriver(
+        threaded._driver,  # noqa: SLF001  # the one sync driver both run
+        threaded._nodes,  # noqa: SLF001  # the graph's nodes, as build_async gives them
+        sync_nodes="inline",
+    )
+    assert _run(threaded.execute(["a"], inputs={"x": 1}))["a"] != "MainThread"
+    assert _run(inline.execute(["a"], inputs={"x": 1})) == {"a": "MainThread"}
+    assert inline.prepare(["a"], inputs={"x": 1})._driver is inline  # noqa: SLF001  # what a pickle rebuilds
+
+
+def test_alternating_async_drivers_keep_their_plans() -> None:
+    """Two AsyncDrivers over one Driver, used in turn, each prepare a request once."""
+    module = make_module("async_alternating", "def a(x: int) -> int:\n    return x\n")
+    threaded = fnloom.Builder().with_modules(module).build_async(sync_nodes="thread")
+    inline = fnloom.AsyncDriver(
+        threaded._driver,  # noqa: SLF001  # the one sync driver both run
+        threaded._nodes,  # noqa: SLF001  # the graph's nodes, as build_async gives them
+        sync_nodes="inline",
+    )
+    first = (
+        threaded.prepare(["a"], inputs={"x": 1}),
+        inline.prepare(["a"], inputs={"x": 1}),
+    )
+    again = (
+        threaded.prepare(["a"], inputs={"x": 1}),
+        inline.prepare(["a"], inputs={"x": 1}),
+    )
+    assert again[0] is first[0]
+    assert again[1] is first[1]
+
+
+def test_async_plans_go_with_the_plans_the_driver_drops() -> None:
+    """Past the plan cache's size, the async plans of dropped plans are freed."""
+    count = fnloom.driver.PLAN_CACHE_SIZE + 50
+    source = "".join(
+        f"def n{i}(x: int) -> int:\n    return x\n\n" for i in range(count)
+    )
+    driver = (
+        fnloom.Builder().with_modules(make_module("async_many", source)).build_async()
+    )
+    made = [
+        weakref.ref(driver.prepare([f"n{i}"], inputs={"x": 1})) for i in range(count)
+    ]
+    gc.collect()
+    assert sum(ref() is not None for ref in made) <= fnloom.driver.PLAN_CACHE_SIZE
+
+
+def test_short_lived_async_drivers_over_one_driver_are_freed() -> None:
+    """An AsyncDriver made per request is freed, though the plan stays hot."""
+    module = make_module("async_per_request", "def a(x: int) -> int:\n    return x\n")
+    first = fnloom.Builder().with_modules(module).build_async()
+    sync, nodes = first._driver, first._nodes  # noqa: SLF001  # the one sync driver
+    made = []
+    for _ in range(1000):
+        driver = fnloom.AsyncDriver(sync, nodes)
+        driver.prepare(["a"], inputs={"x": 1})
+        made.append(weakref.ref(driver))
+    del driver
+    gc.collect()
+    alive = sum(ref() is not None for ref in made)
+    assert alive <= fnloom.driver.ASYNC_PLANS_PER_PLAN

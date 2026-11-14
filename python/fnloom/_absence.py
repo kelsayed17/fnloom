@@ -30,6 +30,7 @@ __all__ = [
     "admits_absent",
     "applied",
     "declines",
+    "given_problems",
     "may_be_absent",
     "merged",
     "needs_input",
@@ -221,10 +222,22 @@ def refuse_given(
 ) -> None:
     """`TypeError` for each `ABSENT` input, and each `ABSENT` override not allowed.
 
+    Every culprit is listed, sorted; see `given_problems`.
+    """
+    if lines := given_problems(inputs, overrides, may_be_absent):
+        raise TypeError("; ".join(lines))
+
+
+def given_problems(
+    inputs: Mapping[str, object],
+    overrides: Mapping[str, object],
+    may_be_absent: AbstractSet[str],
+) -> list[str]:
+    """A line for each `ABSENT` input, and each `ABSENT` override not allowed, sorted.
+
     An input is never absent: leaving it out is how a run says so. An override
     may be `ABSENT` for a node in `may_be_absent`, which forces its skip, and for
     no other. Checked whatever the type checks say, an `Any`-typed node too.
-    Every culprit is listed, sorted.
     """
     lines = [
         f"input {name!r} is fnloom.ABSENT, which an input can't be; leave it out "
@@ -239,5 +252,4 @@ def refuse_given(
         for name, given in overrides.items()
         if given is ABSENT and name not in may_be_absent
     ]
-    if lines:
-        raise TypeError("; ".join(sorted(lines)))
+    return sorted(lines)
