@@ -677,7 +677,11 @@ impl<P> Graph<P> {
             if actions[index] != Some(Action::Compute) {
                 continue;
             }
-            for edge in node.inputs.iter().filter(|edge| !edge.dependency.has_default()) {
+            for edge in node
+                .inputs
+                .iter()
+                .filter(|edge| !edge.dependency.has_default())
+            {
                 let Some(at) = position[edge.node.index()] else {
                     continue;
                 };
