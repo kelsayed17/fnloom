@@ -666,27 +666,39 @@ impl<P> Graph<P> {
         actions: &[Option<Action>],
         resolved: &Resolved,
     ) -> PlanError {
-        let consumers_of = |input: NodeId| {
-            self.nodes()
+        // Each missing input's position, by id, so one pass over the planned nodes' edges
+        // finds every consumer.
+        let mut position: Vec<Option<usize>> = vec![None; self.nodes().len()];
+        for (at, &id) in missing.iter().enumerate() {
+            position[id.index()] = Some(at);
+        }
+        let mut consumers: Vec<Vec<String>> = vec![Vec::new(); missing.len()];
+        for (index, node) in self.nodes().iter().enumerate() {
+            if actions[index] != Some(Action::Compute) {
+                continue;
+            }
+            for edge in node
+                .inputs
                 .iter()
-                .enumerate()
-                .filter(|&(index, node)| {
-                    actions[index] == Some(Action::Compute)
-                        && node
-                            .inputs
-                            .iter()
-                            .any(|edge| edge.node == input && !edge.dependency.has_default())
-                })
-                .map(|(_, node)| node.name.clone())
-                .collect()
-        };
+                .filter(|edge| !edge.dependency.has_default())
+            {
+                let Some(at) = position[edge.node.index()] else {
+                    continue;
+                };
+                // Nodes come in id order, so a node reading one input twice is its last.
+                if consumers[at].last() != Some(&node.name) {
+                    consumers[at].push(node.name.clone());
+                }
+            }
+        }
         PlanError::MissingInputs(
             missing
                 .iter()
-                .map(|&id| MissingInput {
+                .zip(consumers)
+                .map(|(&id, consumers)| MissingInput {
                     name: self.node(id).name.clone(),
-                    requested: resolved.outputs.contains(&id),
-                    consumers: consumers_of(id),
+                    requested: resolved.outputs.binary_search(&id).is_ok(),
+                    consumers,
                 })
                 .collect(),
         )
