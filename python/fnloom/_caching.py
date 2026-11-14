@@ -690,7 +690,7 @@ def _node_key(
     behavior = settled.behavior
     params, reason = _key_params(node, policy.ignore, warn=warn)
     extraction, unkeyed = _extraction_parts(node)
-    checked, unchecked = check_parts(node.checks)
+    checked, unchecked = check_parts(node.checks, warn=warn)
     reason = reason or unkeyed or unchecked
     static = None
     if behavior == "disable":
@@ -725,7 +725,9 @@ def _node_key(
     )
 
 
-def check_parts(checks: Sequence[Check]) -> tuple[list[bytes], str | None]:
+def check_parts(
+    checks: Sequence[Check], *, warn: bool = True
+) -> tuple[list[bytes], str | None]:
     """A node's output checks as key parts, or why one has no version (Plan 8).
 
     Each check is keyed by its name, importance and field, and by what it runs:
@@ -733,6 +735,7 @@ def check_parts(checks: Sequence[Check]) -> tuple[list[bytes], str | None]:
     function by its code version, a `Validator` by its class version and its
     attributes' fingerprint. So adding, removing or changing a check misses, and
     a value stored before a stricter check is never returned unchecked.
+    A check whose version fails warns when `warn` is set.
     """
     parts: list[bytes] = []
     for check in checks:
@@ -755,7 +758,8 @@ def check_parts(checks: Sequence[Check]) -> tuple[list[bytes], str | None]:
         except Exception as error:  # noqa: BLE001  # a failing version: uncacheable
             # Such as a default's fingerprint function raising: as for `_own_code`.
             reason = f"cannot read the version of check {check.name}: {error!r}"
-            _warn_build(reason)
+            if warn:
+                _warn_build(reason)
             return [], reason
         parts += [
             b"check",

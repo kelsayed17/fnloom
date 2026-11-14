@@ -7,6 +7,7 @@ import logging
 import os
 import subprocess
 import sys
+import warnings
 from typing import TYPE_CHECKING, Any, cast, override
 
 import pytest
@@ -657,6 +658,35 @@ def a(x: int) -> int:
     assert outcome.status == "uncacheable"
     assert outcome.reason is not None
     assert "check _positive" in outcome.reason
+
+
+def test_a_check_whose_version_fails_warns_once_through_a_disable_producer() -> None:
+    """The field keyed through its `disable` producer says nothing twice."""
+    source = """
+from fnloom import cache, check_output_custom, extract_fields, register_fingerprint
+
+class Broken:
+    pass
+
+def _refuse(value: Broken) -> object:
+    raise ZeroDivisionError("no fingerprint")
+
+register_fingerprint(Broken, _refuse)
+
+def _positive(value: dict, limit: Broken = Broken()) -> bool:
+    return bool(value)
+
+@cache(behavior="disable", fields={"total": "default"})
+@extract_fields({"total": int})
+@check_output_custom(_positive)
+def report(x: int) -> dict:
+    return {"total": x}
+"""
+    module = make_module("failing_check_shadow", source)
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        fnloom.Builder().with_modules(module).with_cache(fnloom.MemoryCache()).build()
+    assert [str(w.message).count("ZeroDivisionError") for w in caught] == [1]
 
 
 VALIDATOR_WITH_A_SET = """

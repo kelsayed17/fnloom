@@ -187,7 +187,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
   misses once for them; any other check or fill keeps its key.
 - A check function whose code version can't be read, such as one whose default's registered fingerprint raises, makes
   its node uncacheable with a `CacheWarning` saying why, as a node's own function does. The cached build raised
-  instead, though the same build without a cache ran.
+  instead, though the same build without a cache ran. `export()` of such a node warns the same way and leaves its
+  `version` out, saying why in `unversioned`; it raised.
 
 ## [0.4.0] - 2026-11-05
 
