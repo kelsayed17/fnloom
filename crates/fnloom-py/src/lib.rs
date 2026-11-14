@@ -21,20 +21,22 @@ const fn core_version() -> &'static str {
 /// Panics on purpose, so tests can check that a panic surfaces as a Python exception.
 #[cfg(feature = "test-hooks")]
 #[pyfunction]
+#[pyo3(name = "_panic_for_test")]
 #[expect(
     clippy::panic,
     reason = "the deliberate panic is this hook's whole purpose"
 )]
-fn _panic_for_test() {
+fn panic_for_test() {
     panic!("deliberate panic from fnloom._core._panic_for_test");
 }
 
 /// The `fnloom._core` extension module.
 #[pymodule]
-fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
+#[pyo3(name = "_core")]
+fn core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(core_version, module)?)?;
     #[cfg(feature = "test-hooks")]
-    module.add_function(wrap_pyfunction!(_panic_for_test, module)?)?;
+    module.add_function(wrap_pyfunction!(panic_for_test, module)?)?;
     module.add_function(wrap_pyfunction!(fingerprint::fingerprint, module)?)?;
     module.add_function(wrap_pyfunction!(fingerprint::hash_parts, module)?)?;
     module.add(
