@@ -158,14 +158,20 @@ def resolved_hints(owner: object, *, extras: bool = True) -> dict[str, Any]:
     An annotation naming something that does not exist at run time, such as a
     name imported only under `TYPE_CHECKING`, or an alias over one, becomes
     `Unresolved` with its text as written, and the others are evaluated as usual
-    (Q81). `extras` keeps `Annotated` metadata.
+    (Q81). `extras` keeps `Annotated` metadata. Any other error an annotation
+    raises is raised with a note naming `owner`.
     """
     try:
-        hints = typing.get_type_hints(owner, include_extras=extras)
-    except NameError, AttributeError:
-        hints = typing.get_type_hints(
-            owner, include_extras=extras, format=annotationlib.Format.FORWARDREF
-        )
+        try:
+            hints = typing.get_type_hints(owner, include_extras=extras)
+        except NameError, AttributeError:
+            hints = typing.get_type_hints(
+                owner, include_extras=extras, format=annotationlib.Format.FORWARDREF
+            )
+    except Exception as error:
+        shown = getattr(owner, "__qualname__", None) or repr(owner)
+        error.add_note(f"in the annotations of {shown}")
+        raise
     for key, hint in hints.items():
         if unresolvable(hint):
             hints[key] = Unresolved(written(hint))

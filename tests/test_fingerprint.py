@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 from array import array
+from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from decimal import Decimal
@@ -17,6 +18,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from fnloom import UnfingerprintableError, _core, fingerprint, register_fingerprint
+from fnloom._canonical import stable_fingerprint
 
 # Imported up front when installed: the shared fixture forgets the modules a test
 # imports first, and numpy cannot be imported twice in one process.
@@ -602,3 +604,35 @@ def test_numpy_layout_counts() -> None:
     view = np.arange(12).reshape(3, 4)[:, ::2]
     assert fingerprint(view) != fingerprint(np.ascontiguousarray(view))
     assert fingerprint(c_order) == fingerprint(np.arange(6).reshape(2, 3))
+
+
+@dataclass
+class _Holding:
+    """A record holding a set, so its stable fingerprint is read from its parts."""
+
+    names: object
+
+
+@dataclass
+class _Later:
+    """A record with a field no `__init__` sets."""
+
+    names: object
+    later: int = field(init=False)
+
+
+def test_a_stable_fingerprint_counts_state_beyond_a_records_fields() -> None:
+    """Two records with one set field differ by the state set beyond their fields."""
+    plain, tagged = _Holding({1, 2}), _Holding({1, 2})
+    assert stable_fingerprint(plain) == stable_fingerprint(tagged)
+    tagged.extra = "x"  # ty: ignore[unresolved-attribute]
+    assert stable_fingerprint(plain) != stable_fingerprint(tagged)
+
+
+def test_a_stable_fingerprint_refuses_what_the_fingerprint_refuses() -> None:
+    """A record with an unset field, or a `defaultdict`, holding a set or not."""
+    for held in (1, {1}):
+        with pytest.raises(UnfingerprintableError):
+            stable_fingerprint(_Later(held))
+        with pytest.raises(UnfingerprintableError):
+            stable_fingerprint(defaultdict[str, object](list, {"a": held}))
