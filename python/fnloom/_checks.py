@@ -369,6 +369,16 @@ def _allow_nans(allowed: bool) -> Callable[[object], tuple[bool, str]]:  # noqa:
     return check
 
 
+def _fraction(given: object) -> float | None:
+    """`given` as a float, as `float()` reads a number; `None` for a bool or text."""
+    if isinstance(given, bool | str | bytes):
+        return None
+    try:
+        return float(given)  # ty: ignore[invalid-argument-type]  # whatever float() takes
+    except TypeError, ValueError:
+        return None
+
+
 def _max_fraction_nans(most: float) -> Callable[[object], tuple[bool, str]]:
     def check(value: object) -> tuple[bool, str]:
         nans, size = _nan_count(value)
@@ -425,11 +435,6 @@ _ONE_SHOT = (
 _NOT_NUMBERS = (str, bytes, bytearray, Mapping)
 
 
-def _origin(declared: object) -> object:
-    stripped = _types.stripped(declared)
-    return typing.get_origin(stripped) or stripped
-
-
 def _one_shot(declared: object) -> bool:
     """Whether `declared`, or any arm of it if a union, is a one-shot iterator."""
     stripped = _types.stripped(declared)
@@ -440,8 +445,21 @@ def _one_shot(declared: object) -> bool:
 
 
 def _textual(declared: object) -> bool:
-    origin = _origin(declared)
-    return isinstance(origin, type) and issubclass(origin, _NOT_NUMBERS)
+    """Whether no value of `declared` but `None` is a number: text, bytes or a mapping.
+
+    So is a union of such arms and `None`, such as `str | None`, and a `str`
+    subclass, `NewType` or `Literal` of text, as `_could_be_text` reads them.
+    """
+    declared = _types.stripped(declared)
+    if typing.get_origin(declared) in {typing.Union, types.UnionType}:
+        arms = [arm for arm in typing.get_args(declared) if arm is not types.NoneType]
+        return bool(arms) and all(_textual(arm) for arm in arms)
+    origin = typing.get_origin(declared) or declared
+    if isinstance(origin, type) and issubclass(origin, _NOT_NUMBERS):
+        return True
+    return not _types.checks_everything(declared) and (
+        _types.type_matches(declared, str) or _types.type_matches(declared, bytes)
+    )
 
 
 def _reads_items(_: str) -> Callable[[object], str | None]:
@@ -615,13 +633,14 @@ def check_output[F: Callable[..., object]](  # noqa: C901, PLR0912, PLR0913, PLR
             _numeric("allow_nans"),
         )
     if max_fraction_nans is not None:
-        if isinstance(max_fraction_nans, bool) or not 0 <= max_fraction_nans <= 1:
+        fraction = _fraction(max_fraction_nans)
+        if fraction is None or not 0 <= fraction <= 1:
             msg = f"max_fraction_nans must be in [0, 1], got {max_fraction_nans!r}"
             raise ValueError(msg)
         add(
             "max_fraction_nans",
-            float(max_fraction_nans),
-            _max_fraction_nans(float(max_fraction_nans)),
+            fraction,
+            _max_fraction_nans(fraction),
             _numeric("max_fraction_nans"),
         )
     if not checks:
