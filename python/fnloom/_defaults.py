@@ -2,6 +2,7 @@
 
 import annotationlib
 import inspect
+import sys
 from typing import TYPE_CHECKING
 
 from fnloom._config import _is_bool
@@ -145,9 +146,14 @@ def same_value(left: object, right: object) -> bool:
 
 
 def _nan(value: object) -> bool:
-    """Whether `value` is not equal to itself, with a `bool` result: NaN."""
-    unequal = value != value  # noqa: PLR0124  # NaN is the one value unequal to itself
-    return _is_bool(unequal) and bool(unequal)
+    """Whether `value` is a NaN: a `float`, `complex` or numpy float unequal to itself.
+
+    Only these: another value unequal to itself, a `Decimal` NaN or an object
+    whose `==` always says no, is no NaN to take as the same.
+    """
+    numpy = sys.modules.get("numpy")
+    floats = (float, complex) if numpy is None else (float, complex, numpy.inexact)
+    return isinstance(value, floats) and value != value  # noqa: PLR0124  # NaN is the one value unequal to itself
 
 
 def _shown(default: object) -> str:

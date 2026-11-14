@@ -177,7 +177,7 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - `with_modules(..., namespace=, config=)` given the same config twice takes it when a value is NaN, as two equal
   defaults are taken. It was refused as a different config.
 - `Annotated[Parallelizable[T], ...]` is an expand and `Annotated[Collect[T], ...]` a collect, as metadata never
-  changes an answer (Q41). The first was refused as a generator, or built as a plain node, and the second collected
+  changes an answer (Q41, Q166). The first was refused as a generator, or built as a plain node, and the second collected
   nothing.
 - A frozen pydantic model holding a `set` or `frozenset` (in a field, a nested model, a container such as
   `dict[str, frozenset[str]]`, an extra field or a private attribute) is fingerprinted the same on every

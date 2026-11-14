@@ -181,6 +181,7 @@ differential test before it is relied on. Source line numbers are deliberately o
 | Q157 | `lifecycle.default.GracefulErrorAdapter` runs past a failure, giving its dependents a sentinel; `TaskExecutionHook` and its kin hook dynamic execution's tasks. | DEFER | A failing node fails the run, and fnloom has no task hooks. Both are designed in the [dynamic execution design](design/2026-10-28-dynamic-execution-design.md), for Plans 10 and 11. |
 | Q158 | `Builder().with_cache(path=...)` stores results under a folder and serves the next run from it. | KEEP / FIX | `Builder().with_cache(fnloom.DiskCache(path))`, or `fnloom.MemoryCache()`; the second run is served from the store. |
 | Q159 | The cache's log reports `get_cache_key: hit` for a node even on an empty cache, so a log of hits doesn't say what was served. | FIX | `driver.explain_cache(...)` gives each node's outcome (`hit`, `miss`, `uncacheable` and so on) and its reason, without running anything. |
+| Q166 | A return annotated `Annotated[Parallelizable[T], ...]` is a plain node: the check for an expand compares the origin with `Parallelizable` only, so its block's reader fails the build with `double is expecting items:<class 'int'>, but found items:typing.Annotated[...]`. | FIX | Metadata never changes an answer (Q41): `Annotated[Parallelizable[T], ...]` is an expand and `Annotated[Collect[T], ...]` a collect, at the top or as a union's member. |
 
 ## Not yet decided
 

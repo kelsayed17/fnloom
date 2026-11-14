@@ -792,3 +792,41 @@ def test_validate_names_an_absent_input_or_override_execute_refuses(
     assert "; ".join(lines) == str(raised.value)
     assert lines[0].startswith("input 'x' is fnloom.ABSENT")
     assert lines[1].startswith("override 'b' is fnloom.ABSENT")
+
+
+BLOCKED = """
+from fnloom import Collect, Parallelizable
+
+def items(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+def double(items: int) -> int:
+    return 2 * items
+
+def total(double: Collect[int]) -> int:
+    return sum(double)
+"""
+
+
+@pytest.mark.parametrize(
+    ("source", "outputs", "inputs", "overrides"),
+    [
+        (ABSENCE, ["c"], {"x": 1}, {"zzz": fnloom.ABSENT}),
+        (ABSENCE, ["c"], {"x": 1, "zzz": fnloom.ABSENT}, {}),
+        (BLOCKED, ["total"], {"n": 2}, {"double": fnloom.ABSENT}),
+    ],
+    ids=["unknown override", "unknown input", "block node override"],
+)
+def test_validate_says_only_what_execute_raises_for_an_absent_value(
+    source: str,
+    outputs: list[str],
+    inputs: dict[str, object],
+    overrides: dict[str, object],
+) -> None:
+    """An `ABSENT` under a name `execute` refuses first is not named twice."""
+    driver = fnloom.build(make_module("validated_absent_names", source))
+    with pytest.raises(ValueError, match=r".") as raised:
+        driver.execute(outputs, inputs=inputs, overrides=overrides)
+    assert driver.validate(outputs, inputs=inputs, overrides=overrides) == [
+        str(raised.value)
+    ]

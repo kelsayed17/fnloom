@@ -1373,3 +1373,24 @@ def test_two_async_drivers_over_one_driver_keep_their_own_plans() -> None:
     assert _run(threaded.execute(["a"], inputs={"x": 1}))["a"] != "MainThread"
     assert _run(inline.execute(["a"], inputs={"x": 1})) == {"a": "MainThread"}
     assert inline.prepare(["a"], inputs={"x": 1})._driver is inline  # noqa: SLF001  # what a pickle rebuilds
+
+
+def test_alternating_async_drivers_keep_their_plans() -> None:
+    """Two AsyncDrivers over one Driver, used in turn, each prepare a request once."""
+    module = make_module("async_alternating", "def a(x: int) -> int:\n    return x\n")
+    threaded = fnloom.Builder().with_modules(module).build_async(sync_nodes="thread")
+    inline = fnloom.AsyncDriver(
+        threaded._driver,  # noqa: SLF001  # the one sync driver both run
+        threaded._nodes,  # noqa: SLF001  # the graph's nodes, as build_async gives them
+        sync_nodes="inline",
+    )
+    first = (
+        threaded.prepare(["a"], inputs={"x": 1}),
+        inline.prepare(["a"], inputs={"x": 1}),
+    )
+    again = (
+        threaded.prepare(["a"], inputs={"x": 1}),
+        inline.prepare(["a"], inputs={"x": 1}),
+    )
+    assert again[0] is first[0]
+    assert again[1] is first[1]

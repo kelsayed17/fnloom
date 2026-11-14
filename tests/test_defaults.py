@@ -2,12 +2,14 @@
 
 import inspect
 import re
+from decimal import Decimal
 from typing import override
 
 import pytest
 
 import fnloom
 from fnloom import _decorators
+from fnloom._defaults import same_value
 from helpers import make_module
 
 _SHADOWED = """
@@ -578,3 +580,21 @@ def test_a_value_bound_name_is_refused_unless_read_elsewhere() -> None:
     }
     assert driver.inputs()["p"].consumers == ("g",)
     assert driver.execute(["r1"], inputs={"src": 1, "p": 99}) == {"r1": 2}
+
+
+def test_only_a_float_nan_is_the_same_as_itself() -> None:
+    """Two float NaNs are the same; a `Decimal` NaN, or an unequal object, is not."""
+
+    class Unequal:
+        @override
+        def __eq__(self, other: object) -> bool:
+            return False
+
+        __hash__ = object.__hash__
+
+    nan = float("nan")
+    assert same_value(nan, float("nan"))
+    assert same_value(complex(nan, 0), complex(nan, 0))
+    assert not same_value(Decimal("NaN"), Decimal("NaN"))
+    assert not same_value(nan, Decimal("NaN"))
+    assert not same_value(Unequal(), Unequal())
