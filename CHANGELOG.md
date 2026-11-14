@@ -141,6 +141,11 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Changed
 
+- A pandas `RangeIndex`, the default index of every frame and series, is fingerprinted by its start, stop and step
+  rather than by building every value: a 10-million-row one takes 0.1 ms rather than 1.1 s, and a 1-million-row
+  frame half the time. Two ranges of equal values but another `stop`, such as `range(0, 4, 2)` and `range(0, 3, 2)`,
+  now differ, as a node may read `.stop`. The fingerprint of every such frame, series and index changes, so an
+  existing disk cache misses once for them.
 - A bounded `DiskCache` prunes when it opens, then when its own writes take it past `max_bytes` or add a tenth of it,
   down to nine tenths, rather than to the bound after every 100 writes: a full store prunes about once per tenth of
   its bound written. A store pickled to a worker process no longer prunes as it loads, but at its first write. With

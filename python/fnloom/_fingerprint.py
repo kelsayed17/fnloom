@@ -391,6 +391,10 @@ def _pandas(value: object) -> object | None:  # noqa: PLR0911  # one return per 
                 _pandas_values(value),
                 value.attrs,
             )
+        case pd.RangeIndex():
+            # By its start, stop and step, never built in full to hash: exactly,
+            # since a node may read `.stop`, which equal values don't show.
+            return (value.name, "range", value.start, value.stop, value.step)
         case pd.MultiIndex():
             dtypes = [_pandas_dtype(dtype) for dtype in value.dtypes]
             return (list(value.names), dtypes, value.to_numpy())
