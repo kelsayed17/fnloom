@@ -170,6 +170,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Fixed
 
+- `to_svg()`, `render(engine="builtin")` and `fnloom draw --engine builtin` lay out a graph whose inputs are read deep
+  in it without a cost growing with the square of its size: a 3,000-node chain with an input per node takes 0.2 s
+  rather than 4.9 s. The drawing is the same, byte for byte.
 - A frozen pydantic model holding a `set` or `frozenset` (in a field, a nested model, a container such as
   `dict[str, frozenset[str]]`, an extra field or a private attribute) is fingerprinted the same on every
   `PYTHONHASHSEED`: each set's members are sorted, as for a code version. Such a model used to key `DiskCache`
