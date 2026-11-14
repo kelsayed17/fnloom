@@ -537,3 +537,62 @@ def test_explain_cache_counts_branches_and_runs_nothing(
     assert after["summary"] == CacheOutcome("hit", None)
     grown = driver.explain_cache(["summary"], inputs={"order": [1, 2, 3], "rate": 10})
     assert grown["picked"] == CacheOutcome("miss", unknown)
+
+
+DECLINED = """
+from fnloom import ABSENT, Absent, Collect, Parallelizable
+
+
+def picked(order: list[int]) -> Parallelizable[int]:
+    yield from order
+
+
+def odd(picked: int) -> int | Absent:
+    print(f"odd {picked}")
+    return picked if picked % 2 else ABSENT
+
+
+def tenfold(odd: int) -> int:
+    print(f"tenfold {odd}")
+    return odd * 10
+
+
+def summary(tenfold: Collect[int | Absent]) -> list[object]:
+    print("summary")
+    return list(tenfold)
+"""
+
+
+def test_a_declined_branch_is_cached_and_replayed(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A branch's `ABSENT` is stored under its key, and a hit gives it back."""
+    store = CountingCache()
+    driver = _cached(make_module("cached_blocks_declined", DECLINED), store)
+    assert driver.execute(["summary"], inputs={"order": [1, 2]}) == {
+        "summary": [10, fnloom.ABSENT]
+    }
+    assert _called(capsys) == ["odd 1", "tenfold 1", "odd 2", "summary"]
+    assert [value for _, value in store.puts].count(fnloom.ABSENT) == 1
+    store.forget_calls()
+    assert driver.execute(["summary"], inputs={"order": [2]}) == {
+        "summary": [fnloom.ABSENT]
+    }
+    assert _called(capsys) == ["summary"]
+    assert any(value is fnloom.ABSENT for _, value in store.gets)
+
+
+def test_a_replayed_declined_branch_skips_its_consumers(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A hit on a declined branch node skips its block consumers without running."""
+    driver = _cached(
+        make_module("cached_blocks_replayed", DECLINED), recompute=["tenfold"]
+    )
+    driver.execute(["summary"], inputs={"order": [2, 3]})
+    _called(capsys)
+    assert driver.execute(["summary"], inputs={"order": [2, 3]}) == {
+        "summary": [fnloom.ABSENT, 30]
+    }
+    # `odd` replays 2's absence, so `tenfold` runs for 3 only; the collect hits.
+    assert _called(capsys) == ["tenfold 3"]

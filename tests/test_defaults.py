@@ -445,9 +445,9 @@ def test_the_checks_run_once_at_build(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[int] = []
     real = fnloom.driver.default_problems
 
-    def counting(nodes: object, absent: frozenset[str]) -> list[str]:
+    def counting(nodes: object, absent: frozenset[str], blocks: object) -> list[str]:
         calls.append(1)
-        return real(nodes, absent)  # ty: ignore[invalid-argument-type]  # the builder's nodes
+        return real(nodes, absent, blocks)  # ty: ignore[invalid-argument-type]  # the builder's nodes and blocks
 
     monkeypatch.setattr(fnloom.driver, "default_problems", counting)
     module = make_module("defaults_once", _DIFFERING.replace("= 2", "= 1"))
