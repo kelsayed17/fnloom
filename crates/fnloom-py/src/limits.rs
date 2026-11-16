@@ -26,7 +26,7 @@ use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
-use pyo3::types::PyTuple;
+use pyo3::types::{PyList, PyTuple};
 
 use crate::graph::Graph;
 
@@ -69,7 +69,10 @@ struct Granted<'a, 'py> {
 
 impl Drop for Granted<'_, '_> {
     fn drop(&mut self) {
-        self.caps.release(self.py, self.node);
+        // A call that forked returns here in the child too, which locks nothing it inherited.
+        if self.caps.pid == std::process::id() {
+            self.caps.release(self.py, self.node);
+        }
     }
 }
 
@@ -96,20 +99,20 @@ impl Caps {
         self.pid
     }
 
-    /// The `HELD` entry for a slot of `node`: these caps, and the node.
-    fn entry<'py>(&self, py: Python<'py>, node: NodeId) -> PyResult<Bound<'py, PyTuple>> {
-        let id = std::ptr::from_ref(self) as usize;
-        PyTuple::new(py, [id, node.index()])
-    }
-
-    /// `held`, the `HELD` value of the calling context, with `node`'s slot added.
+    /// `held`, the `HELD` value of the calling context, with an entry for `node`'s slot
+    /// added: these caps, the node, and a flag, `[True]` while the slot is held. A thread
+    /// or task started inside the call may inherit the entry and outlive the slot, so
+    /// `release_held` clears the flag, and `reentered` counts only live entries.
     pub fn holding<'py>(
         &self,
         held: &Bound<'py, PyAny>,
         node: NodeId,
-    ) -> PyResult<Bound<'py, PyAny>> {
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyList>)> {
         let py = held.py();
-        held.add(PyTuple::new(py, [self.entry(py, node)?])?)
+        let id = std::ptr::from_ref(self) as usize;
+        let live = PyList::new(py, [true])?;
+        let entry = (id, node.index(), live.clone()).into_pyobject(py)?;
+        Ok((held.add(PyTuple::new(py, [entry])?)?, live))
     }
 
     fn wake(&self) -> MutexGuard<'_, u64> {
@@ -190,10 +193,12 @@ impl Caps {
         let me = std::ptr::from_ref(self) as usize;
         let (mut own, mut grouped) = (0, 0);
         for entry in held?.try_iter().ok()?.flatten() {
-            let Ok((caps, index)) = entry.extract::<(usize, usize)>() else {
+            let Ok((caps, index, live)) = entry.extract::<(usize, usize, Bound<'_, PyAny>)>()
+            else {
                 continue;
             };
-            if caps != me {
+            let live = live.get_item(0).and_then(|live| live.is_truthy());
+            if caps != me || !live.unwrap_or(false) {
                 continue;
             }
             if index == node.index() {
@@ -276,10 +281,13 @@ impl Caps {
             node,
             py,
         };
-        let token = variable.call_method1(intern!(py, "set"), (self.holding(&held, node)?,))?;
+        let (holding, live) = self.holding(&held, node)?;
+        let token = variable.call_method1(intern!(py, "set"), (holding,))?;
         let result = call();
         drop(granted);
+        let cleared = live.set_item(0, false);
         let reset = variable.call_method1(intern!(py, "reset"), (token,));
+        cleared?;
         let value = result?;
         reset.map(|_| value)
     }

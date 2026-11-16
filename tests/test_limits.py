@@ -599,3 +599,81 @@ def test_a_limited_generator_takes_its_slot_for_each_item(threads: int | None) -
     joined(started(run, run, run))
     assert results == [{"summary": sum(range(200))}] * 3
     assert module.MOST[0] == 1
+
+
+STALE = """
+import contextvars
+
+from fnloom import limit
+
+# A copy of each call's context, kept after the call returned: as a thread or a task
+# started inside the call would keep it.
+CONTEXTS = []
+
+
+@limit(1)
+def gate(x: int, events: object) -> int:
+    CONTEXTS.append(contextvars.copy_context())
+    started, release = events
+    started.set()
+    if not release.wait(5):
+        raise TimeoutError("never released")
+    return x
+"""
+
+
+@THREADS
+def test_a_context_kept_past_its_call_holds_no_slot(threads: int | None) -> None:
+    """A run started from a context that outlived a limited call waits, not raises."""
+    module = make_module(f"limit_stale_{threads}", STALE)
+    builder = fnloom.Builder().with_modules(module)
+    if threads is not None:
+        builder = builder.with_threads(threads)
+    driver = builder.build()
+    free = (threading.Event(), threading.Event())
+    free[1].set()
+    assert driver.execute(["gate"], inputs={"x": 1, "events": free}) == {"gate": 1}
+    held = (threading.Event(), threading.Event())
+    holder = started(lambda: driver.execute(["gate"], inputs={"x": 2, "events": held}))
+    try:
+        assert held[0].wait(5)
+        timer = threading.Timer(0.2, held[1].set)
+        timer.start()
+        again = (threading.Event(), threading.Event())
+        again[1].set()
+        stale = module.CONTEXTS[0]
+        result = stale.run(driver.execute, ["gate"], inputs={"x": 3, "events": again})
+        assert result == {"gate": 3}
+        timer.join(5)
+    finally:
+        held[1].set()
+        joined(holder)
+
+
+class RunsBefore(fnloom.Hook):
+    """In `before_node` of `alone`, runs `alone` in another run, once."""
+
+    def __init__(self) -> None:
+        """Not run yet."""
+        self.driver: fnloom.Driver | None = None
+        self.ran = False
+        self.errors: list[str] = []
+
+    @override
+    def before_node(self, event: fnloom.NodeStart) -> None:
+        if event.node.name == "alone" and self.driver is not None and not self.ran:
+            self.ran = True
+            try:
+                self.driver.execute(["alone"], inputs={"x": 7, "pause": 0.0})
+            except RuntimeError as error:
+                self.errors.append(str(error).splitlines()[0])
+
+
+def test_a_before_node_hook_needing_its_nodes_slot_is_refused_under_threads() -> None:
+    """Under threads a node's slot is held through `before_node`: its run is refused."""
+    hook = RunsBefore()
+    driver, _ = counted("limit_before_node", 2, hooks=(hook,))
+    hook.driver = driver
+    assert driver.execute(["alone"], inputs={"x": 1, "pause": 0.0}) == {"alone": 1}
+    refused = "'alone' is limited to 1 call at a time, and the runs that called"
+    assert hook.errors == [f"{refused} this one hold it"]

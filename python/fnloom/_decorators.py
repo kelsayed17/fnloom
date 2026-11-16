@@ -801,9 +801,9 @@ def limit[F: Callable[..., object]](
     `n` caps the node's own calls; `group` puts it in a group whose members share
     one cap, sized by `Builder.with_limits({group: size})`. Give either or both:
     a call then needs a slot of each. Every driver honours it, with or without
-    `with_threads`: a call waits until a slot is free. The slots are taken for the
-    call alone and given back as it returns, before its hooks run; a generator's
-    are taken for each item it yields. Only records the policy, so it stacks with
+    `with_threads`: a call waits until a slot is free. The slots are given back
+    as the call returns, before its `after_node` hooks run; a generator's are
+    taken for each item it yields. Only records the policy, so it stacks with
     the other decorators in either order.
 
     `TypeError` for an `n` that is no `int` (a `bool` included) or a `group`

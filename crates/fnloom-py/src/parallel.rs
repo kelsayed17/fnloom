@@ -275,10 +275,13 @@ impl<'py> Copied<'py> {
         let variable = held_variable(py)?.bind(py);
         let held = self.run.call1((variable.getattr(intern!(py, "get"))?,))?;
         let set = variable.getattr(intern!(py, "set"))?;
-        let token = self.run.call1((set, caps.holding(&held, node)?))?;
+        let (holding, live) = caps.holding(&held, node)?;
+        let token = self.run.call1((set, holding))?;
         let result = call();
+        let cleared = live.set_item(0, false);
         let reset = variable.getattr(intern!(py, "reset"))?;
         let reset = self.run.call1((reset, token));
+        cleared?;
         let value = result?;
         reset.map(|_| value)
     }
@@ -753,8 +756,34 @@ fn land(
     }
 }
 
+/// A compute's arguments, bound: a gathered collect argument as a `list`, an omitted
+/// one left out.
+fn bound_args<'g, 'py>(
+    py: Python<'py>,
+    graph: &'g Graph,
+    args: Vec<(NodeId, ArgValue<Shared>)>,
+) -> PyResult<Vec<Arg<'g, Value<'py>>>> {
+    let mut built = Vec::with_capacity(args.len());
+    for (input, arg) in args {
+        let value = match arg {
+            ArgValue::One(value) => value.bind(py).clone(),
+            ArgValue::Gather(values) => {
+                PyList::new(py, values.iter().map(|value| value.bind(py)))?.into_any()
+            }
+            ArgValue::Omitted => continue,
+        };
+        built.push(Arg {
+            node: input,
+            name: graph.core().node(input).name.as_str(),
+            value,
+        });
+    }
+    Ok(built)
+}
+
 /// Runs a compute: a late step's lookup, its hooks, its node's call in the task's context,
-/// `on_value` and `late.store`, and an expand's iterator.
+/// `on_value` and `late.store`, and an expand's iterator. `HELD` records a limited node's
+/// slots around its `pre_node` hooks too, since they are held from the hand-out.
 #[expect(
     clippy::too_many_arguments,
     reason = "the task's parts, as the scheduler gives them, and its slots"
@@ -786,24 +815,10 @@ fn compute<'py>(
             Ok(None) => {}
         }
     }
-    let mut built: Vec<Arg<'_, Value<'py>>> = Vec::with_capacity(args.len());
-    for (input, arg) in args {
-        let value = match arg {
-            ArgValue::One(value) => value.bind(py).clone(),
-            ArgValue::Gather(values) => {
-                match PyList::new(py, values.iter().map(|value| value.bind(py))) {
-                    Ok(list) => list.into_any(),
-                    Err(error) => return Landed::failed(error),
-                }
-            }
-            ArgValue::Omitted => continue,
-        };
-        built.push(Arg {
-            node: input,
-            name: graph.core().node(input).name.as_str(),
-            value,
-        });
-    }
+    let built = match bound_args(py, graph, args) {
+        Ok(built) => built,
+        Err(error) => return Landed::failed(error),
+    };
     let Some(payload) = node.payload() else {
         return Landed::failed(PyRuntimeError::new_err(format!(
             "broken plan: input node '{}' planned to compute",
@@ -816,9 +831,13 @@ fn compute<'py>(
         Err(error) => return Landed::failed(error),
     };
     let lent = Kwargs::lending(py, plan, graph, node.id, Some(kwargs.clone()));
-    let errors = run.hooked(py, calls, &lent, |hook| {
-        hook.pre_node_in(&node.name, branch, &built)
-    });
+    let errors = calls
+        .holding(slots.caps(), node.id, || {
+            Ok(run.hooked(py, calls, &lent, |hook| {
+                hook.pre_node_in(&node.name, branch, &built)
+            }))
+        })
+        .unwrap_or_else(|error| vec![error]);
     if !errors.is_empty() {
         return Landed::hooks(py, "pre_node", errors);
     }

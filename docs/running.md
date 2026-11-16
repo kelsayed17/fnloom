@@ -845,9 +845,10 @@ Here at most four `details` calls, and six calls of `details` and `reviews` toge
 
 - **Every driver honours limits**, with or without `with_threads`. A driver shared by several threads runs a
   `@limit(1)` node one call at a time: a call waits until a slot is free, and `Ctrl-C` ends the wait.
-- **A slot is held for the call alone.** It is taken as the node's call starts and given back as it returns, before its
-  hooks run or its value is stored, waking whoever waits for it. A generator node takes its slots for each item it
-  yields.
+- **A slot is held while the node runs.** It is given back as the node's call returns, before its `after_node` hooks
+  run or its value is stored, waking whoever waits for it. Without threads it is taken as the call starts; under
+  `with_threads`, as the node is handed to a worker, so its `before_node` hooks run holding it. A generator node takes
+  its slots for each item it yields.
 - **Each driver has its own counters.** A copy, a rebuilt or an unpickled driver starts with every slot free, and so
   does a forked child. Two drivers never share a slot, even over the same modules.
 - **Checked at build**, on every driver: a group a node is in that has no size, or a size of a group no node is in, is
