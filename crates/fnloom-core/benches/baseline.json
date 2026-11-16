@@ -21,5 +21,9 @@
   "core::engine::run_blocks.fan_out_100": 94006,
   "core::engine::run_blocks.fan_out_10000": 8668795,
   "core::engine::run_blocks.wide_1000": 2455041,
-  "core::engine::run_skips.skip_chain_200": 102876
+  "core::engine::run_skips.skip_chain_200": 102876,
+  "core::engine::schedule.chain_1000": 673892,
+  "core::engine::schedule.chain_10000": 6702578,
+  "core::engine::schedule.layered_1000": 813642,
+  "core::engine::schedule.layered_10000": 8103964
 }

@@ -3,7 +3,7 @@
 //! 200-node chain whose first node declines (`skip_chain_200`), and `Plan::run` on a block run
 //! once per item of 1, 100 and 10,000 items (`fan_out_1` and so on), and over 10 items whose
 //! block reads 1,000 outer inputs (`wide_1000`). `schedule` runs the chain and layered shapes
-//! on the `Scheduler` with one worker; its rows have no baseline yet, so they are reported.
+//! on the `Scheduler` with one worker; CI also holds its layered rows to at most twice `run`'s.
 //!
 //! Wall-clock time is too noisy on shared CI runners to gate on, so the regression gate
 //! compares instruction counts measured under callgrind (see `scripts/bench_gate.py`).
@@ -522,7 +522,7 @@ mod suite {
     type Laid = (Graph<()>, Plan, Arc<Layout>, BTreeMap<String, u64>);
 
     // The scheduler with one worker on the shapes `run` measures: what it adds per node.
-    // Reported, not gated, until its baseline is committed (Plan 11, Task 13).
+    // `bench_gate.py --ratio` holds `schedule.layered_*` to at most 2.0 times `run.layered_*`.
     #[library_benchmark]
     #[bench::chain_1000(args = (Shape::Chain, 1_000), setup = laid_out)]
     #[bench::chain_10000(args = (Shape::Chain, 10_000), setup = laid_out)]
