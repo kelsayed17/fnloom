@@ -2177,8 +2177,8 @@ class _HookedAsyncPlan[R](AsyncPreparedPlan[R]):
         dispatch = _hooks.Dispatch(
             hooks, views, {} if cached else None, checks_owner=owner
         )
-        # Its nodes overlap between their start and their end.
-        dispatch.parallel = True
+        # Its nodes overlap between their start and their end, unless all run inline.
+        dispatch.parallel = not self._driver._runner.sequential  # noqa: SLF001  # its own
         error: BaseException | None = None
         try:
             if mismatches:

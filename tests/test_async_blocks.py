@@ -509,3 +509,179 @@ def test_async_block_events_equal_the_sync_drivers_with_one_worker() -> None:
     assert async_events.seen == sync_events.seen
     assert ("expand", "picked", (), (1,)) in sync_events.seen
     assert sync_events.seen[-1] == ("run", True, (("tenfold", (0,)), ("tenfold", (2,))))
+
+
+HOOKED_BRANCHES = """
+from fnloom import Collect, Parallelizable
+
+
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+def doubled(picked: int) -> int:
+    return picked * 2
+
+
+def total(doubled: Collect[int]) -> int:
+    return sum(doubled)
+"""
+
+
+class _Branches(fnloom.Hook):
+    """Each block node event's branch, and `current_branch()` as its hook runs."""
+
+    def __init__(self) -> None:
+        """None yet."""
+        self.seen: list[tuple[str, tuple[int, ...], tuple[int, ...]]] = []
+
+    @override
+    def before_node(self, event: fnloom.NodeStart) -> None:
+        if event.branch:
+            self.seen.append(("before", event.branch, fnloom.current_branch()))
+
+    @override
+    def after_node(self, event: fnloom.NodeEnd) -> None:
+        if event.branch:
+            self.seen.append(("after", event.branch, fnloom.current_branch()))
+
+
+@pytest.mark.parametrize(
+    ("sync_nodes", "threads"),
+    [("inline", None), ("thread", None), ("thread", 2)],
+    ids=["inline", "executor", "pool"],
+)
+def test_hooks_run_in_the_context_their_block_node_runs_in(
+    sync_nodes: Literal["thread", "inline"], threads: int | None
+) -> None:
+    """A block node's hooks see its branch, as on `Driver.with_threads`."""
+    hook = _Branches()
+    builder = fnloom.Builder().with_modules(
+        make_module(f"async_hooked_branches_{sync_nodes}_{threads}", HOOKED_BRANCHES)
+    )
+    if threads is not None:
+        builder = builder.with_threads(threads)
+    driver = builder.with_hooks(hook).build_async(sync_nodes=sync_nodes)
+    assert _run(driver.execute(["total"], inputs={"n": 2})) == {"total": 2}
+    assert sorted(hook.seen) == [
+        ("after", (0,), (0,)),
+        ("after", (1,), (1,)),
+        ("before", (0,), (0,)),
+        ("before", (1,), (1,)),
+    ]
+
+
+CLOSED_OFF_LOOP = """
+import itertools
+import threading
+
+from fnloom import Collect, Parallelizable
+
+CLOSED_ON = []
+
+
+def picked(n: int) -> Parallelizable[int]:
+    try:
+        yield from itertools.count()
+    finally:
+        CLOSED_ON.append(threading.current_thread().name)
+
+
+def checked(picked: int) -> int:
+    if picked == 1:
+        raise KeyError(picked)
+    return picked
+
+
+def every(checked: Collect[int]) -> list[int]:
+    return checked
+"""
+
+
+def test_a_sync_generator_is_closed_off_the_loop_with_sync_nodes_thread() -> None:
+    """Its `finally` runs in a thread, where its node runs: never on the loop."""
+    module = make_module("async_closed_off_loop", CLOSED_OFF_LOOP)
+    driver = fnloom.Builder().with_modules(module).build_async()
+    with pytest.raises(KeyError):
+        _run(driver.execute(["every"], inputs={"n": 2}))
+    (closed_on,) = module.CLOSED_ON
+    assert closed_on != threading.current_thread().name
+
+
+BOTH_KINDS = """
+from fnloom import Collect, Parallelizable
+
+
+class Both:
+    def __iter__(self):
+        return iter([1, 2])
+
+    def __aiter__(self):
+        raise AssertionError("read as an async iterable")
+
+
+def picked() -> Parallelizable[int]:
+    return Both()
+
+
+def kept(picked: int) -> int:
+    return picked
+
+
+def every(kept: Collect[int]) -> list[int]:
+    return kept
+"""
+
+
+@pytest.mark.parametrize("driver_kind", ["sync", "async"])
+def test_an_expand_both_sync_and_async_iterable_is_read_as_a_sync_one(
+    driver_kind: str,
+) -> None:
+    """An object with both `__iter__` and `__aiter__` is read with `__iter__`."""
+    module = make_module(f"async_both_kinds_{driver_kind}", BOTH_KINDS)
+    builder = fnloom.Builder().with_modules(module)
+    if driver_kind == "sync":
+        assert builder.build().execute(["every"]) == {"every": [1, 2]}
+    else:
+        assert _run(builder.build_async().execute(["every"])) == {"every": [1, 2]}
+
+
+IN_FLIGHT = """
+import asyncio
+import threading
+
+from fnloom import Collect, Parallelizable
+
+LOCK = threading.Lock()
+NOW = [0]
+MOST = [0]
+
+
+async def picked(n: int) -> Parallelizable[int]:
+    for item in range(n):
+        yield item
+
+
+async def slow(picked: int) -> int:
+    with LOCK:
+        NOW[0] += 1
+        MOST[0] = max(MOST[0], NOW[0])
+    await asyncio.sleep(0.01)
+    with LOCK:
+        NOW[0] -= 1
+    return picked
+
+
+def every(slow: Collect[int]) -> list[int]:
+    return slow
+"""
+
+
+def test_the_in_flight_bound_caps_overlapping_async_branches() -> None:
+    """Under `with_threads(1)`, at most `2 * max_workers` async branches overlap."""
+    module = make_module("async_in_flight", IN_FLIGHT)
+    driver = fnloom.Builder().with_modules(module).with_threads(1).build_async()
+    assert _run(driver.execute(["every"], inputs={"n": 12})) == {
+        "every": list(range(12))
+    }
+    assert module.MOST == [2]

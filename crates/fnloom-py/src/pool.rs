@@ -113,18 +113,23 @@ impl Pool {
     /// Waits, detached, until the generation is no longer `generation`, or at most `IDLE`:
     /// a grant that refused a task and gave its slots back woke no one, so an idle thread
     /// looks for work again now and then.
-    fn wait(&self, py: Python<'_>, generation: u64) {
+    ///
+    /// A thread that waited stays counted idle until its next `snapshot`, so a job queued
+    /// while it wakes is not given a new thread too. Whether it was counted.
+    fn wait(&self, py: Python<'_>, generation: u64) -> bool {
         py.detach(|| {
             let mut state = self.locked();
-            if state.generation == generation && !self.stopping.load(Ordering::Acquire) {
-                state.idle += 1;
-                let (mut state, _) = self
-                    .wake
-                    .wait_timeout(state, IDLE)
-                    .unwrap_or_else(PoisonError::into_inner);
-                state.idle -= 1;
+            if state.generation != generation || self.stopping.load(Ordering::Acquire) {
+                return false;
             }
-        });
+            state.idle += 1;
+            drop(
+                self.wake
+                    .wait_timeout(state, IDLE)
+                    .unwrap_or_else(PoisonError::into_inner),
+            );
+            true
+        })
     }
 
     /// Waits, detached, at most `slice`, until the generation is no longer `generation`:
@@ -133,11 +138,14 @@ impl Pool {
         py.detach(|| {
             let state = self.locked();
             if state.generation == generation {
-                drop(
-                    self.wake
-                        .wait_timeout(state, slice)
-                        .unwrap_or_else(PoisonError::into_inner),
-                );
+                let (state, _) = self
+                    .wake
+                    .wait_timeout(state, slice)
+                    .unwrap_or_else(PoisonError::into_inner);
+                // `submit` wakes one waiter, which may be this one: pass it on to a worker.
+                if !state.jobs.is_empty() && state.idle > 0 {
+                    self.wake.notify_one();
+                }
             }
         });
     }
@@ -248,32 +256,40 @@ impl Pool {
 
     /// The runs that want work, the generation, whether the pool is stopping, and the
     /// oldest submitted call, taken.
-    fn snapshot(&self, py: Python<'_>) -> (u64, bool, Vec<Arc<Run>>, Option<Job>) {
-        let (generation, runs, job) = self.with_state(py, |state| {
+    /// A thread that `wait` counted idle (`idle`) is counted busy again here.
+    fn snapshot(&self, py: Python<'_>, idle: bool) -> (u64, bool, Vec<Arc<Run>>, Option<Job>) {
+        let (generation, runs, job) = self.with_state(py, move |state| {
+            if idle {
+                state.idle -= 1;
+            }
             let job = state.jobs.pop_front();
             (state.generation, state.runs.clone(), job)
         });
         (generation, self.stopping.load(Ordering::Acquire), runs, job)
     }
 
-    /// Queues `job`, starting a thread when no idle one is left to take it: an async
-    /// run's calls are capped by its worker slots, not by the threads started so far.
+    /// Queues `job`, starting a thread when no idle one is left to take it, up to
+    /// `max_workers`: an async run's calls are capped by its worker slots, so that many
+    /// threads always take them.
     ///
     /// When no thread can be started to take it, the job is taken back, unless a thread
     /// took it meanwhile, and the error raised, so its future is never left unresolved.
     fn submit(self: &Arc<Self>, py: Python<'_>, job: Job) -> PyResult<()> {
         let stopping = self.stopping.load(Ordering::Acquire);
         let future = job.future.clone_ref(py);
+        let most = self.max_workers;
         let spawn = self.with_state(py, move |state| {
             state.jobs.push_back(job);
             state.generation += 1;
-            let spawn = !stopping && state.jobs.len() > state.idle;
+            let alive = state.started - state.exited;
+            let spawn = !stopping && state.jobs.len() > state.idle && alive < most;
             if spawn {
                 state.started += 1;
             }
             spawn
         });
-        self.wake.notify_all();
+        // One job wants one thread: the others stay asleep, and counted idle.
+        self.wake.notify_one();
         if !spawn {
             return Ok(());
         }
@@ -310,10 +326,12 @@ impl Pool {
 fn work(py: Python<'_>, pool: &Arc<Pool>) {
     let forked = (|| {
         let mut report = Report::default();
+        // Whether `wait` counted this thread idle, until its next snapshot.
+        let mut idle = false;
         loop {
-            let (generation, stopping, runs, job) = pool.snapshot(py);
+            let (generation, stopping, runs, job) = pool.snapshot(py, std::mem::take(&mut idle));
             if let Some(job) = job {
-                job.run(py);
+                job.run(py, pool.pid);
                 // The call forked: as for a node's, this child's one thread ends here.
                 if std::process::id() != pool.pid {
                     return true;
@@ -345,7 +363,7 @@ fn work(py: Python<'_>, pool: &Arc<Pool>) {
             }
             drop(runs);
             if !worked {
-                pool.wait(py, generation);
+                idle = pool.wait(py, generation);
             }
         }
     })();
@@ -450,7 +468,7 @@ struct Job {
 impl Job {
     /// Runs the call unless its future was cancelled, and sets its outcome, a panic as a
     /// `PanicException`. What setting the outcome raises is dropped: the future is done.
-    fn run(self, py: Python<'_>) {
+    fn run(self, py: Python<'_>, pid: u32) {
         let future = self.future.bind(py);
         let started = future
             .call_method0(intern!(py, "set_running_or_notify_cancel"))
@@ -461,6 +479,11 @@ impl Job {
         let context = self.context.bind(py);
         let outcome =
             caught(|| context.call_method1(intern!(py, "run"), (self.function.bind(py),)));
+        // The call forked: a child sets nothing, which would lock the future and wake the
+        // parent's loop.
+        if std::process::id() != pid {
+            return;
+        }
         drop(match outcome {
             Ok(value) => future.call_method1(intern!(py, "set_result"), (value,)),
             Err(error) => future.call_method1(intern!(py, "set_exception"), (error.value(py),)),

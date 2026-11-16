@@ -1063,9 +1063,15 @@ asyncio.run(streamed.execute(["summary"], inputs={"items": ["chair", "desk"]}))
 # -> {'summary': ['CHAIR', 'DESK']}
 ```
 
-A sync generator's items are read where its node would run: in a thread, on the pool, or on the loop. A generator
-keeps one context from its first item to its last. When a branch fails, every running node and every pending read of
-an async generator is cancelled once, and the generator is closed once, after any read of it in a thread returns.
+A sync generator's items are read, and it is closed, where its node would run: in a thread, on the pool, or on the
+loop. A generator keeps one context from its first item to its last. When a branch fails, every running node and
+every pending read of an async generator is cancelled once, and the generator is closed once, after any read of it in
+a thread returns.
+
+An expand is read only while fewer than `2 * max_workers` of its branches are unfinished, or `2 *
+os.process_cpu_count()` without `with_threads`, as on the sync driver ([Threads](#threads)). That bounds how many
+branches overlap, `async def` ones too: under `with_threads(1)` two at a time. Give a fan-out of slow `async def`
+branches enough workers for the overlap you want.
 
 **When a node fails,** the run cancels every node still running, waits for each `async def` node to stop, and raises
 the failed node's own exception, with the same note naming the node as the sync driver adds. There's no

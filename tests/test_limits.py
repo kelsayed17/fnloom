@@ -8,17 +8,19 @@ is the last resort. Every counter is updated under a lock.
 import _thread
 import asyncio
 import copy
+import gc
 import pickle
 import sys
 import threading
 import time
-from typing import TYPE_CHECKING, override
+import weakref
+from typing import TYPE_CHECKING, Any, override
 
 import pytest
 
 import fnloom
 import picklable_limited
-from fnloom import _core
+from fnloom import _async, _core
 from helpers import make_module
 
 if TYPE_CHECKING:
@@ -30,6 +32,7 @@ pytestmark = pytest.mark.threads
 COUNTED = """
 import threading
 import time
+import weakref
 
 from fnloom import Collect, Parallelizable, limit
 
@@ -556,6 +559,7 @@ def test_a_waker_on_a_closed_loop_does_not_fail_the_releasing_run() -> None:
 GENERATOR = """
 import threading
 import time
+import weakref
 
 from fnloom import Collect, Parallelizable, limit
 
@@ -685,6 +689,7 @@ def test_a_before_node_hook_may_run_its_own_node(threads: int | None) -> None:
 SIBLINGS = """
 import contextvars
 import time
+import weakref
 
 from fnloom import limit
 
@@ -1092,6 +1097,7 @@ ABANDONED = """
 import asyncio
 import threading
 import time
+import weakref
 
 from fnloom import limit
 
@@ -1105,7 +1111,7 @@ def slow(x: int) -> int:
         OVERLAPS.append(x)
         return x
     try:
-        time.sleep(0.3)
+        time.sleep(1.0)
     finally:
         ALONE.release()
     return x
@@ -1136,6 +1142,92 @@ def test_a_sync_node_its_failed_run_abandons_keeps_its_slot_until_it_returns(
         return raised, await driver.execute(["slow"], inputs={"x": 2})
 
     raised, result = asyncio.run(asyncio.wait_for(scenario(), 10))
-    assert raised < 0.25  # noqa: PLR2004  # well before the abandoned call returns
+    assert raised < 0.6  # noqa: PLR2004  # well before the abandoned call returns, at 1 s
     assert result == {"slow": 2}
     assert module.OVERLAPS == []
+
+
+WOKEN = """
+import asyncio
+import contextvars
+import threading
+
+from fnloom import limit
+
+SEEN = contextvars.ContextVar("seen", default="unset")
+HOLDING = threading.Event()
+RELEASE = threading.Event()
+
+
+@limit(group="db")
+async def load(x: int) -> str:
+    if x < 0:
+        HOLDING.set()
+        while not RELEASE.is_set():
+            await asyncio.sleep(0.01)
+    return SEEN.get()
+"""
+
+
+def _holder(
+    driver: fnloom.AsyncDriver[dict[str, object]], module: types.ModuleType
+) -> threading.Thread:
+    """A thread whose run holds `db`, in a context of its own, until `RELEASE`."""
+
+    def hold() -> None:
+        module.SEEN.set("the other thread")
+        asyncio.run(driver.execute(["load"], inputs={"x": -1}))
+
+    thread = threading.Thread(target=hold)
+    thread.start()
+    assert module.HOLDING.wait(5)
+    return thread
+
+
+def test_a_run_woken_by_another_threads_release_keeps_its_own_context() -> None:
+    """The wake runs in the waiting run's context, not the releasing thread's."""
+    module = make_module("async_woken_context", WOKEN)
+    driver = fnloom.Builder().with_modules(module).with_limits({"db": 1}).build_async()
+    holder = _holder(driver, module)
+
+    async def waiting() -> object:
+        module.SEEN.set("the caller")
+        run = asyncio.ensure_future(driver.execute(["load"], inputs={"x": 1}))
+        await asyncio.sleep(0.05)
+        module.RELEASE.set()
+        return await asyncio.wait_for(run, 5)
+
+    try:
+        assert asyncio.run(waiting()) == {"load": "the caller"}
+    finally:
+        module.RELEASE.set()
+        holder.join(5)
+
+
+def test_a_run_that_ends_before_its_wake_is_not_kept_alive_by_its_waker(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run cancelled while it waits for a slot is freed, though no release came."""
+    module = make_module("async_waker_leak", WOKEN)
+    driver = fnloom.Builder().with_modules(module).with_limits({"db": 1}).build_async()
+    holder = _holder(driver, module)
+    runs: list[weakref.ref[object]] = []
+    made = _async._Run.__init__  # noqa: SLF001  # watched, to see the run freed
+
+    def watched(self: _async._Run, *args: Any) -> None:  # noqa: ANN401  # as made
+        made(self, *args)
+        runs.append(weakref.ref(self))
+
+    monkeypatch.setattr(_async._Run, "__init__", watched)  # noqa: SLF001  # watched
+    try:
+        with pytest.raises(TimeoutError):
+            asyncio.run(
+                asyncio.wait_for(driver.execute(["load"], inputs={"x": 1}), 0.1)
+            )
+    finally:
+        monkeypatch.undo()
+        gc.collect()
+        freed = [run() for run in runs]
+        module.RELEASE.set()
+        holder.join(5)
+    assert freed == [None]

@@ -30,6 +30,7 @@ import functools
 import inspect
 import os
 import threading
+import weakref
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from fnloom import _extract
@@ -115,7 +116,7 @@ def calls(nodes: Mapping[str, NodeDef], sync_nodes: SyncNodes) -> dict[str, Call
 class Runner:
     """How a driver's runs step: its calls, its pool and limits, its in-flight bound."""
 
-    __slots__ = ("_in_flight", "_pooled", "_workers", "calls")
+    __slots__ = ("_in_flight", "_pooled", "_workers", "calls", "sequential")
 
     def __init__(self, calls: Mapping[str, Call], workers: Workers | None) -> None:
         """Runs each node by `calls`, granted slots by `workers`, if given.
@@ -134,6 +135,11 @@ class Runner:
         )
         count = workers.max_workers if workers is not None else None
         self._in_flight = 2 * (count or os.process_cpu_count() or 1)
+        # Every node is called on the loop, start to end, and none waits parked for a
+        # slot, so no two nodes overlap between their start and their end.
+        self.sequential = workers is None and all(
+            call.kind == "inline" for call in calls.values()
+        )
 
     async def run(  # noqa: PLR0913, PLR0917  # a run's parts, as `_core.Plan.run` takes them
         self,
@@ -162,7 +168,9 @@ class Runner:
             pooled=self._pooled,
             in_flight=self._in_flight,
         )
-        return await _Run(stepper, self.calls, threads, limits).wait()
+        # A run inside a pooled task pools nothing: its own loop's executor runs them.
+        pool = threads if stepper.pooling else None
+        return await _Run(stepper, self.calls, pool, limits).wait()
 
 
 class Schedule:
@@ -395,6 +403,7 @@ class _Run:
     """
 
     __slots__ = (
+        "__weakref__",
         "_calls",
         "_factory",
         "_finished",
@@ -494,7 +503,7 @@ class _Run:
         if self._stepper.complete(task, kind, value):
             self._halted = True
 
-    def _start(self, handed: _core.Handed) -> None:  # noqa: C901, PLR0912  # one path per work
+    def _start(self, handed: _core.Handed) -> None:  # noqa: C901, PLR0912, PLR0915  # per work
         """Starts one task, where its work runs; a call on the loop completes here.
 
         A compute on the loop is run here, its frame saved: the hot path.
@@ -517,6 +526,17 @@ class _Run:
                     return
                 if kind == "await":
                     future = self._task(function(**payload), context)
+                    # Not a cancelled one: `result()` would use up its own error.
+                    if future.done() and not self._halted and not future.cancelled():
+                        # Eagerly done, a node that never suspended: the hot path.
+                        try:
+                            value = future.result()
+                        except BaseException:  # noqa: BLE001, S110  # `_settle` reads it below
+                            pass
+                        else:
+                            if self._stepper.complete(task, "value", value):
+                                self._halted = True
+                            return
                 else:
                     call = functools.partial(function, **payload)
                     if self._limits is not None:
@@ -531,10 +551,17 @@ class _Run:
                     else payload.afinish(work == "finish")
                 )
                 future = self._task(awaited, context)
-            elif work == "pull" and kind != "inline":
-                future = self._threaded(functools.partial(_next, payload), context)
+            elif kind != "inline":
+                # A sync iterator's reads and its end run where its node would, so a
+                # `finally` that blocks never stalls the loop.
+                call = (
+                    functools.partial(_next, payload)
+                    if work == "pull"
+                    else functools.partial(payload.finish, work == "finish")
+                )
+                future = self._threaded(call, context)
             else:
-                # An iterator's end, and an inline expand's pull, run on the loop.
+                # An inline expand's reads and its end run on the loop.
                 self._on_loop(task, work, payload, cast("contextvars.Context", context))
                 return
         except _STOPPING:
@@ -694,16 +721,22 @@ class _Run:
         """Wakes the run at the next release of a slot of the driver's limits.
 
         A release between the refusal and the registration woke no one, so the
-        run looks again once registered.
+        run looks again once registered. The wake runs in the run's own context,
+        not the releasing thread's, and holds the run only weakly: a run that ends
+        first leaves nothing behind for its waker to keep alive.
         """
         limits = self._limits
         if limits is None:
             return
         self._waking = True
         loop = self._loop
+        context = contextvars.copy_context()
+        woken = weakref.WeakMethod(self._woken)
 
         def wake() -> None:
-            loop.call_soon_threadsafe(self._woken)
+            method = woken()
+            if method is not None:
+                loop.call_soon_threadsafe(method, context=context)
 
         limits.add_waker(wake)
         self._drain()

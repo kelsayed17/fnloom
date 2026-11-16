@@ -1394,3 +1394,147 @@ def test_a_panic_in_the_stepper_fails_the_run_and_frees_its_slots() -> None:
     module.MEET.reset()
     result = _async_run(driver.execute(["both"], inputs={"x": 1}))
     assert result["both"][2] == "unset"
+
+
+def _wide(name: str, count: int, body: str = "return x") -> types.ModuleType:
+    """`count` independent sync nodes `n0`... reading `x`."""
+    lines = [f"def n{i}(x: int) -> int:\n    {body}\n" for i in range(count)]
+    return make_module(name, "import time\n\n" + "\n".join(lines))
+
+
+def test_async_runs_never_grow_the_pool_past_max_workers() -> None:
+    """Twenty runs of fifty sync nodes on `with_threads(2)`: two threads at most."""
+    before = _core.live_workers()
+    module = _wide("async_pool_growth", 50)
+    driver = fnloom.Builder().with_modules(module).with_threads(2).build_async()
+    outputs = [f"n{i}" for i in range(50)]
+    for _ in range(20):
+        assert _async_run(driver.execute(outputs, inputs={"x": 1})) == dict.fromkeys(
+            outputs, 1
+        )
+    assert _core.live_workers() - before <= 2  # noqa: PLR2004  # max_workers
+
+
+NESTED_WIDE = """
+import asyncio
+import time
+
+DRIVER = []
+WIDE = [f"n{{i}}" for i in range({count})]
+
+
+def outer(x: int) -> int:
+    return sum(asyncio.run(DRIVER[0].execute(WIDE, inputs={{"x": x}})).values())
+
+
+{nodes}
+"""
+
+
+def test_a_nested_async_run_inside_a_pooled_node_starts_no_pool_threads() -> None:
+    """Its sync nodes go to its own loop's executor: the pool stays at `max_workers`."""
+    before = _core.live_workers()
+    nodes = "\n".join(
+        f"def n{i}(x: int) -> int:\n    time.sleep(0.005)\n    return x\n"
+        for i in range(60)
+    )
+    module = make_module("async_nested_wide", NESTED_WIDE.format(count=60, nodes=nodes))
+    driver = fnloom.Builder().with_modules(module).with_threads(2).build_async()
+    module.DRIVER.append(driver)
+    assert _async_run(driver.execute(["outer"], inputs={"x": 1})) == {"outer": 60}
+    assert _core.live_workers() - before <= 2  # noqa: PLR2004  # max_workers
+
+
+DETACHED = """
+import asyncio
+import threading
+import time
+
+from fnloom import limit
+
+DRIVER = []
+INNER = []
+DONE = threading.Event()
+
+
+@limit(group="db")
+def held(n: int) -> int:
+    time.sleep(0.3)
+    try:
+        run = DRIVER[0].execute(["inner"], inputs={{"n": n}})
+        return asyncio.run(asyncio.wait_for(run, 5))["inner"]
+    except BaseException as error:
+        INNER.append(type(error).__name__)
+        raise
+    finally:
+        DONE.set()
+
+
+async def fail(n: int) -> int:
+    await asyncio.sleep(0.05)
+    raise ValueError("sibling fails")
+
+
+{inner}
+def inner(n: int) -> int:
+    return n
+"""
+
+
+@pytest.mark.parametrize(
+    ("threads", "inner", "seen"),
+    [(1, "", []), (None, '@limit(group="db")', ["RuntimeError"])],
+    ids=["worker-slot", "group-slot"],
+)
+def test_an_abandoned_call_running_its_driver_sees_the_slot_it_still_holds(
+    threads: int | None, inner: str, seen: list[str]
+) -> None:
+    """The abandoned call's slots stay its ancestry: its inner run never waits on them.
+
+    On the worker slot, the inner run takes no worker; on its group, it is refused.
+    Later runs then get every slot back.
+    """
+    module = make_module(f"async_detached_{threads}", DETACHED.format(inner=inner))
+    builder = fnloom.Builder().with_modules(module).with_limits({"db": 1})
+    if threads is not None:
+        builder = builder.with_threads(threads)
+    driver = builder.build_async()
+    module.DRIVER.append(driver)
+    with pytest.raises(ValueError, match="sibling fails"):
+        _async_run(driver.execute(["fail", "held"], inputs={"n": 1}))
+    assert module.DONE.wait(5)
+    assert seen == module.INNER
+    assert _async_run(driver.execute(["inner"], inputs={"n": 2})) == {"inner": 2}
+
+
+POOLED_FORK = """
+import os
+
+
+def forked(x: int) -> int:
+    pid = os.fork()
+    # The child returns into the pool's worker, which ends it, setting nothing.
+    return pid
+"""
+
+
+@forks
+@pytest.mark.filterwarnings(
+    "ignore:This process .* is multi-threaded:DeprecationWarning"
+)
+def test_a_fork_inside_a_pooled_async_node_ends_the_child_quietly() -> None:
+    """A pooled sync node's fork child sets no result and ends; the parent goes on."""
+    assert sys.platform != "win32"
+    module = make_module("async_pooled_fork", POOLED_FORK)
+    driver = fnloom.Builder().with_modules(module).with_threads(2).build_async()
+    child = _async_run(driver.execute(["forked"], inputs={"x": 1}))["forked"]
+    assert child > 0
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        done, _ = os.waitpid(child, os.WNOHANG)
+        if done:
+            break
+        time.sleep(0.05)
+    else:
+        os.kill(child, 9)
+        pytest.fail("the forked child did not end")

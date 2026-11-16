@@ -71,7 +71,7 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - Blocks on the async driver (Q132). `build_async()` runs fan-outs as `build()` does, with a block's branches
   overlapping on the loop and each `Collect` in item order, and an `async def` generator annotated
   `-> Parallelizable[T]` is an expand there, its items awaited on the loop and checked as a sync expand's are (Q32).
-  A sync generator's items are read where its node runs. A generator keeps one context across its items. A failing
+  A sync generator's items are read, and it is closed, where its node runs. A generator keeps one context across its items. A failing
   branch cancels every running node and pending read once, and the generator is closed once. `build()` refuses an
   async generator expand, saying to use `build_async()`.
 

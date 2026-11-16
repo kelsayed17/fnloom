@@ -338,8 +338,9 @@ def items(  # noqa: PLR0913, PLR0917  # the factory's two, then the binding's fo
 ) -> Items:
     """The item iterator of one run of expand `node`, `Items` or `AsyncItems`.
 
-    `AsyncItems` over an async iterable, which only the async driver reads.
+    `AsyncItems` over an async iterable that is not also a sync one, which only the
+    async driver reads; an object that is both is read as `Items`, on either driver.
     """
-    if isinstance(iterable, AsyncIterable):
+    if isinstance(iterable, AsyncIterable) and not isinstance(iterable, Iterable):
         return AsyncItems(node, check, iterable, record, branch, late)
     return Items(node, check, iterable, record, branch, late)

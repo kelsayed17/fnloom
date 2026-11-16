@@ -98,6 +98,9 @@ struct Running {
     live: Vec<Py<PyList>>,
     /// A parked compute's keyword arguments, until it is handed out.
     kwargs: Option<Py<PyDict>>,
+    /// The context a compute runs in, and its hooks and stores with it; `None` for the
+    /// caller's own.
+    context: Option<Py<PyAny>>,
 }
 
 /// What a running task does.
@@ -179,6 +182,11 @@ fn copy_context(py: Python<'_>) -> PyResult<Bound<'_, PyAny>> {
         )
     })?;
     copy.bind(py).call0()
+}
+
+/// The `run` method of `context`, which calls into it.
+fn context_run<'py>(context: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    context.getattr(intern!(context.py(), "run"))
 }
 
 /// A copy of the caller's context, with `fnloom.current_branch()` set to `branch`.
@@ -402,20 +410,34 @@ impl Stepper {
                 pool.notify(py);
             }
         }
-        self.fire(py, &report);
+        self.fire(py, &report, running.context.as_ref(), &running.branch);
         // The values no step reads any more are dropped here, attached.
         report.clear();
         self.report = report;
     }
 
-    /// Fires what a report settled, hits, then expands, then skips, as `Report` says. The
-    /// first event an observer raised in stops the run.
-    fn fire(&mut self, py: Python<'_>, report: &Report<Shared>) {
+    /// Fires what a report settled, hits, then expands, then skips, as `Report` says, in
+    /// `context`, the completed task's, or else a fresh copy in its `branch`, as the
+    /// parallel path does. The first event an observer raised in stops the run.
+    fn fire(
+        &mut self,
+        py: Python<'_>,
+        report: &Report<Shared>,
+        context: Option<&Py<PyAny>>,
+        branch: &[usize],
+    ) {
         let quiet =
             report.hits.is_empty() && report.expanded.is_empty() && report.skipped.is_empty();
         if quiet || !self.observers.any() {
             return;
         }
+        let made = match context {
+            Some(context) => Some(context.bind(py).clone()),
+            None if !branch.is_empty() => in_branch(py, branch).ok(),
+            None => None,
+        };
+        let run = made.as_ref().and_then(|context| context_run(context).ok());
+        let run = run.as_ref();
         let plan = self.plan.get();
         let graph = plan.graph().get();
         let core = graph.core();
@@ -425,7 +447,7 @@ impl Stepper {
         let mut failed = None;
         for (node, branch, value) in &report.hits {
             let name = &core.node(*node).name;
-            let errors = self.observers.fire(py, &kwargs, None, |hook| {
+            let errors = self.observers.fire(py, &kwargs, run, |hook| {
                 hook.hit_in(name, branch, value.bind(py))
             });
             if !errors.is_empty() {
@@ -436,7 +458,7 @@ impl Stepper {
         if failed.is_none() {
             for (node, branch, items) in &report.expanded {
                 let name = &core.node(*node).name;
-                let errors = self.observers.fire(py, &kwargs, None, |hook| {
+                let errors = self.observers.fire(py, &kwargs, run, |hook| {
                     hook.post_expand(name, branch, *items)
                 });
                 if !errors.is_empty() {
@@ -450,7 +472,7 @@ impl Stepper {
                 let name = &core.node(*node).name;
                 let errors = self
                     .observers
-                    .fire(py, &kwargs, None, |hook| hook.skipped(name, branch));
+                    .fire(py, &kwargs, run, |hook| hook.skipped(name, branch));
                 if !errors.is_empty() {
                     failed = Some((key.clone(), "skipped", errors));
                     break;
@@ -483,7 +505,7 @@ impl Stepper {
         let held = running.slots.then_some(running.node);
         let mut live = Vec::new();
         let context = match context {
-            Some(context) if running.doing == Doing::Pull => self
+            Some(context) if running.doing != Doing::Finish => self
                 .hold(&context, running.worker, held, &mut live)
                 .map(|()| Some(context)),
             Some(context) => Ok(Some(context)),
@@ -505,6 +527,10 @@ impl Stepper {
                 return None;
             }
         };
+        if running.doing == Doing::Compute {
+            // Its `after_node` hooks and stores run where it ran.
+            running.context = context.as_ref().map(|context| context.clone().unbind());
+        }
         let graph = self.plan.get().graph().get();
         let name = keyword(
             py,
@@ -574,7 +600,8 @@ impl Stepper {
                 .take()
                 .map_or_else(|| PyDict::new(py), |kwargs| kwargs.into_bound(py));
             let work = work_name(py, Doing::Compute, false);
-            if let Some(handed) = self.hand_out(py, running, work, kwargs.into_any(), None) {
+            let context = running.context.take().map(|context| context.into_bound(py));
+            if let Some(handed) = self.hand_out(py, running, work, kwargs.into_any(), context) {
                 return Some(handed);
             }
         }
@@ -614,6 +641,7 @@ impl Stepper {
             slots: false,
             live: Vec::new(),
             kwargs: None,
+            context: None,
         };
         match work {
             Work::Iterate { iterable } => {
@@ -692,11 +720,31 @@ impl Stepper {
                         return None;
                     }
                 };
+                let mut context = None;
                 if self.observers.any() {
                     // Never held across a hook, which may start a run needing them.
                     self.give_back(py, &mut running);
+                    // The hooks run in the context the node will run in, when it has one.
+                    let own = !running.branch.is_empty()
+                        || (self.caps.is_some() && (running.worker || limited));
+                    if own {
+                        match in_branch(py, &running.branch) {
+                            Ok(made) => context = Some(made),
+                            Err(error) => {
+                                self.failed(py, running, error);
+                                return None;
+                            }
+                        }
+                    }
+                    let run = match context.as_ref().map(context_run).transpose() {
+                        Ok(run) => run,
+                        Err(error) => {
+                            self.failed(py, running, error);
+                            return None;
+                        }
+                    };
                     let lent = Kwargs::lending(py, plan, graph, node, Some(kwargs.clone()));
-                    let errors = self.observers.fire(py, &lent, None, |hook| {
+                    let errors = self.observers.fire(py, &lent, run.as_ref(), |hook| {
                         hook.pre_node_in(&target.name, &running.branch, &[])
                     });
                     if !errors.is_empty() {
@@ -718,6 +766,7 @@ impl Stepper {
                             return None;
                         }
                         running.kwargs = Some(kwargs.unbind());
+                        running.context = context.map(Bound::unbind);
                         let index = self.put(running);
                         self.parked.push_back(index);
                         return None;
@@ -725,7 +774,7 @@ impl Stepper {
                     running.slots = limited;
                 }
                 let work = work_name(py, Doing::Compute, false);
-                self.hand_out(py, running, work, kwargs.into_any(), None)
+                self.hand_out(py, running, work, kwargs.into_any(), context)
             }
             Work::Pull { iterator } => {
                 running.doing = Doing::Pull;
@@ -789,13 +838,18 @@ impl Stepper {
         });
         let mut errors = Vec::new();
         if !self.observers.quiet() {
+            // In the context the node ran in, when it had one of its own.
+            let run = running
+                .context
+                .as_ref()
+                .and_then(|context| context_run(context.bind(py)).ok());
             let kwargs = Kwargs::new(py, plan, graph);
-            errors = self.observers.fire(py, &kwargs, None, |hook| {
+            errors = self.observers.fire(py, &kwargs, run.as_ref(), |hook| {
                 hook.post_node_in(&node.name, &running.branch, result.as_ref())
             });
             errors.extend(self.observers.stored(
                 py,
-                None,
+                run.as_ref(),
                 plan.core(),
                 graph,
                 &node.name,
@@ -981,9 +1035,9 @@ impl Stepper {
         let Some(mut running) = self.take(task) else {
             return Ok(None);
         };
-        for flag in running.live.drain(..) {
-            drop(flag.bind(py).set_item(0, false));
-        }
+        // Its `HELD` entries stay live as long as `held` keeps their slots: a run the call
+        // starts still sees it holds them.
+        let live = std::mem::take(&mut running.live);
         let held = self
             .caps
             .as_ref()
@@ -994,6 +1048,7 @@ impl Stepper {
                 node: running.node,
                 slots: running.slots,
                 worker: running.worker,
+                live,
                 released: AtomicBool::new(false),
                 pid: self.pid,
             });
@@ -1004,6 +1059,14 @@ impl Stepper {
         }
         self.settle(py, &running, dropped(py), None, false);
         Ok(held)
+    }
+
+    /// Whether the run's sync nodes run on the driver's pool, holding worker slots: not for
+    /// a run started inside a task holding one, whose sync nodes go to its own loop's
+    /// executor instead, so it never waits for, nor grows, the pool its caller is on.
+    #[getter]
+    fn pooling(&self) -> bool {
+        self.pool.is_some() && self.pooled.contains(&true)
     }
 
     /// Stops the run: no compute, pull or probe is handed out any more, and each open
@@ -1070,8 +1133,8 @@ pub fn start(
     let held = held_variable(py)?
         .bind(py)
         .call_method0(intern!(py, "get"))?;
-    // A run started inside a task holding one of these worker slots runs its sync nodes on
-    // the pool without slots of their own, so it never waits for the slot its caller holds.
+    // A run started inside a task holding one of these worker slots pools nothing: its sync
+    // nodes go to its own loop's executor, so it never waits for the slot its caller holds.
     let nested = caps.as_ref().is_some_and(|caps| caps.works(&held));
     let mut flags = vec![false; graph.core().nodes().len()];
     if caps.is_some() && !nested {
@@ -1113,7 +1176,7 @@ pub fn start(
         observers: SharedObservers::new(observers, on_value, late),
         pid,
     };
-    stepper.fire(py, &report);
+    stepper.fire(py, &report, None, &[]);
     report.clear();
     stepper.report = report;
     Ok(stepper)
@@ -1170,6 +1233,8 @@ pub struct Held {
     node: NodeId,
     slots: bool,
     worker: bool,
+    /// The live flags of the call's `HELD` entries, cleared as the slots go back.
+    live: Vec<Py<PyList>>,
     released: AtomicBool,
     pid: u32,
 }
@@ -1180,6 +1245,11 @@ impl Held {
         if std::process::id() != self.pid || self.released.swap(true, Ordering::AcqRel) {
             return;
         }
+        let _ = Python::try_attach(|py| {
+            for flag in &self.live {
+                drop(flag.bind(py).set_item(0, false));
+            }
+        });
         release_all(
             &self.caps,
             self.pool.as_ref(),
