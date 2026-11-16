@@ -476,6 +476,7 @@ class Dispatch:
         "_failed_node",
         "_hooks",
         "_kwargs",
+        "_later_errors",
         "_node_error",
         "_owner",
         "_results",
@@ -513,6 +514,9 @@ class Dispatch:
         self._errors: list[BaseException] = []
         self._node_error: BaseException | None = None
         self._failed_node: str | None = None
+        # Node errors after the first, which a parallel run sees: the core raises the
+        # one first in reference order, which leads instead.
+        self._later_errors: list[tuple[BaseException, str]] = []
         # The last node started and its inputs, so its end needn't key them again.
         self._kwargs: Mapping[str, object] | None = None
         self._started: Mapping[str, object] | None = None
@@ -687,8 +691,11 @@ class Dispatch:
         Records the error, if any, as the run's node error first. `branch` is the
         branch it ran in.
         """
-        if error is not None and self._node_error is None:
-            self._node_error, self._failed_node = error, name
+        if error is not None:
+            if self._node_error is None:
+                self._node_error, self._failed_node = error, name
+            else:
+                self._later_errors.append((error, name))
         methods = self._hooks.after_node
         if not methods:
             return
@@ -718,6 +725,16 @@ class Dispatch:
             # Ended in another context than it started in: just stop collecting.
             _checks.RESULTS.set(None)
 
+    def _lead_with(self, error: BaseException | None) -> None:
+        """Makes `error` the run's node error, when it is a later one seen.
+
+        A parallel run sees several node errors in the order they happen; the core
+        raises the one first in reference order, which then leads.
+        """
+        for later, name in self._later_errors:
+            if later is error:
+                self._node_error, self._failed_node = later, name
+
     def end(
         self,
         ok: bool,  # noqa: FBT001  # the dispatcher's own interface
@@ -733,6 +750,7 @@ class Dispatch:
         computed; a failed run passes them only when its result builder raised.
         """
         self._release()
+        self._lead_with(error)
         if error is not None and self._node_error is None and not self._errors:
             # No node event was wanted, so the node is read off the core's note.
             self._failed_node = _noted_node(error)

@@ -743,9 +743,30 @@ These are safe to call from several threads at once:
 
 An `AsyncDriver`'s synchronous methods, `prepare`, `validate` and inspection, are the `Driver`'s, and as safe.
 
-A run itself stays on the thread that called it, one node at a time, blocks included: a
-[fan-out](#fan-out-and-fan-in) runs its items one after another. Running one run's nodes and branches on several
-threads is *Planned*, with `with_threads`, in Plan 11; until then, the default is the only mode.
+By default a run stays on the thread that called it, one node at a time, blocks included: a
+[fan-out](#fan-out-and-fan-in) runs its items one after another.
+
+`Builder.with_threads(max_workers=None)` runs each run's nodes in parallel instead, on the driver's own pool of
+`max_workers` workers, `os.process_cpu_count()` by default. The calling thread is one of them, so the pool starts
+`max_workers - 1` threads at the first run, named `fnloom-worker-<n>`, and `with_threads(1)` runs on the calling
+thread alone. Independent nodes and a block's branches overlap, handed out in reference order as workers free up:
+
+```python
+threaded = fnloom.Builder().with_modules(catalog_api).with_threads(8).build()
+threaded.execute(["summary"], inputs={"category": "furniture", "endpoint": endpoint})
+# -> {'summary': ['https://api.test/chair', 'https://api.test/desk', 'https://api.test/lamp']}
+```
+
+- **Results never depend on the worker count.** Values, `Collect` orders and the exception raised are the same with
+  one worker, eight, or none.
+- **Contexts.** Each node's call runs in its own copy of the context the run started in: a `ContextVar` you set
+  before `execute` is seen by every node, and one a node sets is seen by no other node.
+- **Hooks.** A run's hooks are called one at a time, each on the thread that ran its node.
+- **Failures.** After a failure no new node starts; the run waits for the running ones, then raises the failure
+  that comes first in reference order, as one exception.
+- **The GIL build.** On `3.14`, nodes that release the GIL (I/O, `time.sleep`, many C extensions) overlap, and pure
+  Python nodes take turns; on `3.14t` they all run at once.
+- An `AsyncDriver` built from such a builder ignores the setting for now.
 
 fnloom can't make your own code safe:
 

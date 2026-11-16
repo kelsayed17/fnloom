@@ -1,0 +1,137 @@
+"""Executor equivalence: results never depend on the worker count (Plan 11, task 3).
+
+A program with a nested fan-out, a node that declines and a node that may fail runs
+without `with_threads` and with 1, 2 and 8 workers, over drawn inputs. Its values,
+`Collect` orders, exception class, skipped nodes and cache keys are the same on all.
+"""
+
+import os
+import threading
+from typing import Any, override
+
+import pytest
+from hypothesis import given, settings
+from hypothesis import strategies as st
+
+import fnloom
+from helpers import make_module
+
+pytestmark = pytest.mark.threads
+
+PROGRAM = """
+from fnloom import ABSENT, Absent, Collect, Parallelizable
+
+
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+def inner(picked: int) -> Parallelizable[int]:
+    yield from range(picked % 3)
+
+
+def leaf(inner: int, picked: int, fail_at: int) -> int:
+    if picked * 10 + inner == fail_at:
+        raise KeyError(fail_at)
+    return picked * 10 + inner
+
+
+def per_outer(leaf: Collect[int]) -> list[int]:
+    return list(leaf)
+
+
+def maybe(picked: int, absent_at: int, fail_at: int) -> int | Absent:
+    if picked == absent_at:
+        return ABSENT
+    if picked == -fail_at:
+        raise ValueError(picked)
+    return picked
+
+
+def shown(maybe: int) -> str:
+    return f"#{maybe}"
+
+
+def everything(per_outer: Collect[list[int]]) -> list[list[int]]:
+    return list(per_outer)
+
+
+def present(shown: Collect[str]) -> list[str]:
+    return list(shown)
+
+
+def total(everything: list[list[int]], present: list[str]) -> int:
+    return sum(map(sum, everything)) + len(present)
+"""
+
+WORKERS: tuple[int | None, ...] = (None, 1, 2, 8)
+# The CI `stress` job sets HYPOTHESIS_PROFILE=stress for many more examples.
+EXAMPLES = 500 if os.environ.get("HYPOTHESIS_PROFILE") == "stress" else 50
+OUTPUTS = ("everything", "present", "total")
+
+
+class Keys(fnloom.MemoryCache):
+    """A memory store that records every key written to it."""
+
+    def __init__(self) -> None:
+        """An empty store."""
+        super().__init__()
+        self.keys: list[bytes] = []
+        self.lock = threading.Lock()
+
+    @override
+    def put(self, key: bytes, value: object) -> None:
+        with self.lock:
+            self.keys.append(key)
+        super().put(key, value)
+
+
+class Skips(fnloom.Hook):
+    """Keeps each run's `RunEnd.skipped`."""
+
+    def __init__(self) -> None:
+        """No run yet."""
+        self.skipped: tuple[tuple[str, tuple[int, ...]], ...] = ()
+
+    @override
+    def after_run(self, event: fnloom.RunEnd) -> None:
+        self.skipped = event.skipped
+
+
+def outcome(workers: int | None, inputs: dict[str, int], outputs: list[str]) -> Any:  # noqa: ANN401  # one comparable record
+    """One run's values, skipped nodes and sorted cache keys; or its exception class.
+
+    A failed run is only its exception class: which other branches ran before the
+    run stopped depends on timing with several workers, as Hamilton's does.
+    """
+    store, hook = Keys(), Skips()
+    builder = (
+        fnloom.Builder()
+        .with_modules(make_module("equivalence", PROGRAM))
+        .with_cache(store)
+        .with_hooks(hook)
+    )
+    if workers is not None:
+        builder = builder.with_threads(workers)
+    try:
+        result = builder.build().execute(outputs, inputs=inputs)
+    except Exception as error:  # noqa: BLE001  # the exception class is compared
+        return type(error).__name__
+    return result, sorted(hook.skipped), sorted(store.keys)
+
+
+@settings(max_examples=EXAMPLES, deadline=None)
+@given(
+    n=st.integers(0, 6),
+    absent_at=st.integers(-1, 6),
+    fail_at=st.sampled_from([-99, 1, 21, 40, 51, -3]),
+    outputs=st.lists(st.sampled_from(OUTPUTS), min_size=1, max_size=3, unique=True),
+)
+def test_results_are_equal_over_worker_counts(
+    n: int, absent_at: int, fail_at: int, outputs: list[str]
+) -> None:
+    """The same inputs give the same record without threads and with 1, 2 and 8."""
+    inputs = {"n": n, "absent_at": absent_at, "fail_at": fail_at}
+    reference = outcome(None, inputs, outputs)
+    for workers in WORKERS[1:]:
+        assert outcome(workers, inputs, outputs) == reference

@@ -35,7 +35,9 @@ from harness import (
     nodes_fnloom,
     nodes_hamilton,
     run_fnloom,
+    run_fnloom_blocks,
     run_hamilton,
+    run_hamilton_blocks,
 )
 from test_semantics import (
     DELIBERATE,
@@ -6079,6 +6081,18 @@ def test_q122_nested_blocks_gather_per_outer_branch() -> None:
     assert ours.execute(["everything"]) == {"everything": [[10], [20, 21]]}
 
 
+@pytest.mark.deliberate("Q122")
+@pytest.mark.threads
+def test_q122_nested_blocks_gather_per_outer_branch_in_parallel() -> None:
+    """Hamilton's default executors never return either; eight workers gather it."""
+    assert (
+        hamilton_blocks_in_subprocess(_NESTED, ["everything"], 5.0, "default") is None
+    )
+    module = block_module("q122_threads_f", _NESTED, "fnloom")
+    ours = fnloom.Builder().with_modules(module).with_threads(8).build()
+    assert ours.execute(["everything"]) == {"everything": [[10], [20, 21]]}
+
+
 _TWO_COLLECTS = """
 def picked() -> Parallelizable[int]:
     yield from [1, 2]
@@ -6101,6 +6115,11 @@ def count(details: Collect[int]) -> int:
 def test_q123_two_collects_of_one_block() -> None:
     """Hamilton's two groups clash in its cache; fnloom collects a block twice."""
     hamilton, ours = both_blocks(_TWO_COLLECTS, ["total", "count"], {})
+    assert hamilton == Outcome(None, "KeyError")
+    assert ours == Outcome({"total": 3, "count": 2}, None)
+    hamilton, ours = both_blocks(
+        _TWO_COLLECTS, ["total", "count"], {}, "default", threads=8
+    )
     assert hamilton == Outcome(None, "KeyError")
     assert ours == Outcome({"total": 3, "count": 2}, None)
 
@@ -6219,6 +6238,120 @@ def test_q137_no_executor_settings() -> None:
         "enable_dynamic_execution",
     ):
         assert not hasattr(fnloom.Builder, name)
+
+
+# Threads (Plan 11, task 3). "At once" is a barrier that passes only when every party
+# waits on it together; "one at a time" is a lock never found held.
+_FOUR_BRANCHES = """
+import threading
+import time
+
+MEET = threading.Barrier(4, timeout=5)
+ALONE = threading.Lock()
+OVERLAPPED = []
+
+
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+def met(picked: int) -> int:
+    MEET.wait()
+    return picked
+
+
+def alone(picked: int) -> int:
+    if not ALONE.acquire(blocking=False):
+        OVERLAPPED.append(picked)
+        return picked
+    try:
+        time.sleep(0.02)
+    finally:
+        ALONE.release()
+    return picked
+
+
+def all_met(met: Collect[int]) -> list[int]:
+    return list(met)
+
+
+def all_alone(alone: Collect[int]) -> list[int]:
+    return list(alone)
+"""
+
+
+@pytest.mark.deliberate("Q134")
+@pytest.mark.threads
+def test_q134_branches_overlap_only_with_threads() -> None:
+    """Hamilton's default executor runs branches at once; fnloom only with threads."""
+    inputs = {"n": 4}
+    hamilton = block_module("q134_h", _FOUR_BRANCHES, "hamilton")
+    assert run_hamilton_blocks(
+        hamilton, ["all_met"], inputs, executor="default"
+    ) == Outcome({"all_met": [0, 1, 2, 3]}, None)
+    plain = block_module("q134_plain_f", _FOUR_BRANCHES, "fnloom")
+    assert run_fnloom_blocks([plain], ["all_alone"], inputs) == Outcome(
+        {"all_alone": [0, 1, 2, 3]}, None
+    )
+    assert plain.OVERLAPPED == []
+    threaded = block_module("q134_threads_f", _FOUR_BRANCHES, "fnloom")
+    assert run_fnloom_blocks([threaded], ["all_met"], inputs, threads=4) == Outcome(
+        {"all_met": [0, 1, 2, 3]}, None
+    )
+
+
+_TWO_SLOW = """
+import threading
+import time
+
+MEET = threading.Barrier(2, timeout=5)
+ALONE = threading.Lock()
+OVERLAPPED = []
+
+
+def _alone(n: int) -> int:
+    if not ALONE.acquire(blocking=False):
+        OVERLAPPED.append(n)
+        return n
+    try:
+        time.sleep(0.05)
+    finally:
+        ALONE.release()
+    return n
+
+
+def left(n: int) -> int:
+    return _alone(n)
+
+
+def right(n: int) -> int:
+    return _alone(n)
+
+
+def met_left(n: int) -> int:
+    MEET.wait()
+    return n
+
+
+def met_right(n: int) -> int:
+    MEET.wait()
+    return n
+"""
+
+
+@pytest.mark.deliberate("Q169")
+@pytest.mark.threads
+def test_q169_nodes_outside_blocks_overlap_with_threads() -> None:
+    """Hamilton runs nodes outside blocks one at a time; fnloom's threads don't."""
+    hamilton = block_module("q169_h", _TWO_SLOW, "hamilton")
+    assert run_hamilton_blocks(
+        hamilton, ["left", "right"], {"n": 1}, executor="default"
+    ) == Outcome({"left": 1, "right": 1}, None)
+    assert hamilton.OVERLAPPED == []
+    ours = block_module("q169_f", _TWO_SLOW, "fnloom")
+    assert run_fnloom_blocks(
+        [ours], ["met_left", "met_right"], {"n": 1}, threads=2
+    ) == Outcome({"met_left": 1, "met_right": 1}, None)
 
 
 # Overrides and outputs around blocks (Plan 10, task 9).

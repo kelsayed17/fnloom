@@ -7,14 +7,18 @@ __all__ = [
     "Graph",
     "KeyPlan",
     "Keys",
+    "Limits",
     "MemoryStore",
     "ObserverBase",
     "Plan",
+    "Threads",
     "UnfingerprintableError",
     "_panic_for_test",
+    "arm_worker_panic",
     "core_version",
     "fingerprint",
     "hash_parts",
+    "live_workers",
 ]
 
 def core_version() -> str: ...
@@ -44,6 +48,8 @@ type CollectMode = Literal["present", "all"]
 
 # Compiled only with the `test-hooks` feature, which release builds never enable.
 def _panic_for_test() -> None: ...
+def live_workers() -> int: ...
+def arm_worker_panic() -> None: ...
 
 @final
 class Graph:
@@ -80,10 +86,23 @@ class Plan:
         observers: Sequence[ObserverBase] = (),
         on_value: Callable[[str, object], None] | Keys | None = None,
         late: object | None = None,
+        *,
+        threads: Threads | None = None,
     ) -> dict[str, object]: ...
     def steps(self) -> list[tuple[str, str]]: ...
     def late(self) -> list[str]: ...
     def blocks(self) -> dict[str, list[tuple[str, str]]]: ...
+
+@final
+class Limits:
+    def __new__(cls, max_workers: int | None = None) -> Self: ...
+
+@final
+class Threads:
+    def __new__(cls, limits: Limits, max_workers: int) -> Self: ...
+    @property
+    def max_workers(self) -> int: ...
+    def close(self) -> None: ...
 
 @final
 class KeyPlan:

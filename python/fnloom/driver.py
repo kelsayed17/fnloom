@@ -35,6 +35,7 @@ from fnloom import (
     _core,
     _hooks,
     _steps,
+    _threads,
     _types,
     _wrappers,
 )
@@ -115,6 +116,29 @@ class _Runnable(Protocol):
         `observers` see each node the core computes.
         """
         ...
+
+
+class _Threaded:
+    """A native plan whose runs run on a driver's pool (`Builder.with_threads`)."""
+
+    __slots__ = ("_plan", "_workers")
+
+    def __init__(self, plan: _core.Plan, workers: _threads.Workers) -> None:
+        """Runs `plan` on `workers`' pool."""
+        self._plan = plan
+        self._workers = workers
+
+    def run(
+        self,
+        inputs: dict[str, Any],
+        overrides: dict[str, Any],
+        observers: Sequence[_core.ObserverBase] = (),
+        /,
+    ) -> dict[str, object]:
+        """Runs as the native plan does, its tasks on the pool and the caller."""
+        return self._plan.run(
+            inputs, overrides, observers, threads=self._workers.threads()
+        )
 
 
 class _GraphLike(Protocol):
@@ -941,6 +965,7 @@ class Driver[R = dict[str, object]]:
         hooks: Sequence[Hook] = (),
         result_builder: _ResultBuilder[R] | None = None,
         value_checks: Sequence[ValueCheck] = (),
+        threads: int | None = None,
     ) -> None:
         """Wraps a native graph; `Builder` is the way to make one from modules.
 
@@ -954,9 +979,12 @@ class Driver[R = dict[str, object]]:
         `Builder.with_result_builder` sets it. `value_checks` admit an input or
         override the default check refuses, as `Builder.with_value_check` adds
         them; the output checks and extracted fields' checks are in the graph's
-        payloads already.
+        payloads already. `threads`, when given, is `Builder.with_threads`'
+        `max_workers`: each run's tasks run on this driver's own pool.
         """
         self._graph = graph
+        # This driver's own pool, started at its first run; `None` runs `Plan::run`.
+        self._workers = None if threads is None else _threads.Workers(threads)
         # The modules it was built from, each once: `Builder` sets them.
         self._modules: tuple[ModuleType, ...] = ()
         # Made on first use and kept: a graph with many inputs pays only if asked.
@@ -1053,6 +1081,7 @@ class Driver[R = dict[str, object]]:
             hooks=self._hook_list,
             result_builder=self._build,
             value_checks=self._value_checks,
+            threads=None if self._workers is None else self._workers.max_workers,
         )
         copied._modules = self._modules
         copied._builder = self._builder
@@ -1146,10 +1175,19 @@ class Driver[R = dict[str, object]]:
             raise ValueError(_strict(refused))
         checks = self._checks(plan, override_names) if self._check_inputs else ((), ())
         runnable: _Runnable = plan
+        workers = self._workers
         if self._cache is not None:
             runnable = CacheRun(
-                self._cache, self._graph, plan, outputs, input_names, override_names
+                self._cache,
+                self._graph,
+                plan,
+                outputs,
+                input_names,
+                override_names,
+                workers=workers,
             )
+        elif workers is not None:
+            runnable = _Threaded(plan, workers)
         build = self._build
         prepared: PreparedPlan[R]
         if self._hooks is not None:
@@ -2981,6 +3019,7 @@ class _Changes(TypedDict, total=False):
     node_wrappers: tuple[NodeWrapper, ...]
     edge_checks: bool
     loose_edges: tuple[str, ...]
+    threads: int | None
 
 
 class _Settings(TypedDict):
@@ -3002,6 +3041,7 @@ class _Settings(TypedDict):
     node_wrappers: tuple[NodeWrapper, ...]
     edge_checks: bool
     loose_edges: tuple[str, ...]
+    threads: int | None
 
 
 class Builder[R = dict[str, object]]:
@@ -3040,6 +3080,7 @@ class Builder[R = dict[str, object]]:
         replaces: Sequence[Sequence[str]] = (),
         edge_checks: bool = True,
         loose_edges: Sequence[str] = (),
+        threads: int | None = None,
     ) -> None:
         """Starts with the given modules (none by default), checking input types.
 
@@ -3058,7 +3099,8 @@ class Builder[R = dict[str, object]]:
         `without_override_type_checks`, `with_strict_overrides`,
         `with_declared_inputs`, `with_deep_type_checks`,
         `with_numeric_widening`, `with_hooks`, `with_result_builder`,
-        `with_output_type_checks`, `with_value_check` and `with_node_wrappers`.
+        `with_output_type_checks`, `with_value_check`, `with_node_wrappers` and
+        `with_threads`, whose `max_workers` `threads` is, `None` for none.
         `TypeError` when an item of `modules` is not a module, or of
         `declared_inputs` is not a `str`; see `with_functions` for the errors
         `functions` raises, `with_hooks` for those of `hooks`,
@@ -3083,6 +3125,9 @@ class Builder[R = dict[str, object]]:
         self._output_type_checks = output_type_checks
         self._value_checks = _checked_value_checks(value_checks)
         self._wrappers = _wrappers.checked(node_wrappers)
+        self._threads = (
+            None if threads is None else _threads.checked_max_workers(threads)
+        )
         self._store = store
         self._cache_settings = cache_settings
         # Never changed once made: `with_config` makes a new dict.
@@ -3152,6 +3197,7 @@ class Builder[R = dict[str, object]]:
             "node_wrappers": self._wrappers,
             "edge_checks": self._edge_checks,
             "loose_edges": self._loose_edges,
+            "threads": self._threads,
         }
 
     def _edge_setting(self) -> str | list[str]:
@@ -3471,6 +3517,29 @@ class Builder[R = dict[str, object]]:
         checked = _wrappers.checked(wrappers)
         return self._with(node_wrappers=(*self._wrappers, *checked))
 
+    def with_threads(self, max_workers: int | None = None) -> Builder[R]:
+        """Returns a new builder whose driver runs each run's nodes in parallel.
+
+        Each driver has its own pool of `max_workers` workers, `None` meaning
+        `os.process_cpu_count() or 1`: `max_workers - 1` threads, started at its
+        first run, and the run's calling thread, which works too, so
+        `with_threads(1)` runs every node on the calling thread. Nodes run in
+        reference order as workers free up, independent nodes and a block's
+        branches at once; results never depend on the worker count (Q134).
+
+        Each node's call runs in its own copy of the context the run started in,
+        so a `ContextVar` the caller set is seen, and one a node sets is seen by
+        no other node. A run's hooks are called one at a time, each on the thread
+        that ran its node. On a failure no new node starts: the run waits for the
+        running ones, then raises the failure that comes first in reference order
+        (Q128). On the GIL build nodes that release the GIL overlap, and pure
+        Python nodes take turns; on the free-threaded build they all overlap.
+
+        A `bool` or another non-`int` is a `TypeError`, and a value under 1 a
+        `ValueError`. An `AsyncDriver` built from it ignores the setting for now.
+        """
+        return self._with(threads=_threads.checked_max_workers(max_workers))
+
     def with_result_builder[T](self, build: _ResultBuilder[T]) -> Builder[T]:
         """Returns a new builder whose drivers' `execute` returns `build(outputs)`.
 
@@ -3602,7 +3671,9 @@ class Builder[R = dict[str, object]]:
             else Cache.of(self._store, nodes, self._cache_settings)
         )
         built = AsyncDriver(
-            self._driver(graph, views, unmatched, left_out, cache, owner),
+            self._driver(
+                graph, views, unmatched, left_out, cache, owner, threaded=False
+            ),
             {node.name: node for node in nodes},
             sync_nodes=checked,
         )
@@ -3737,8 +3808,10 @@ class Builder[R = dict[str, object]]:
         left_out: LeftOut,
         cache: Cache | None,
         owner: object,
+        *,
+        threaded: bool = True,
     ) -> Driver[R]:
-        """This builder's driver over a scanned graph."""
+        """This builder's driver over a scanned graph; on its pool when `threaded`."""
         driver = Driver(
             graph,
             views,
@@ -3751,6 +3824,7 @@ class Builder[R = dict[str, object]]:
             hooks=self._hooks,
             result_builder=self._result_builder,
             value_checks=self._value_checks,
+            threads=self._threads if threaded else None,
         )
         driver._modules = tuple(dict.fromkeys(self._modules))  # noqa: SLF001  # the builder's own driver
         driver._unmatched = unmatched  # noqa: SLF001  # the builder's own driver

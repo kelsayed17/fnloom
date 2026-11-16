@@ -21,6 +21,7 @@ from fnloom._types import Rules, ValueCheck, admitting, checks_of
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from fnloom._caching import LateKeys
     from fnloom._scan import NodeDef
 
 __all__ = [
@@ -201,19 +202,25 @@ class Items(Iterator[object]):
     value is then the `list` of them (Q121); otherwise none is held.
     """
 
-    __slots__ = ("_branch", "_check", "_index", "_items", "_iterator", "_node")
+    __slots__ = ("_branch", "_check", "_index", "_items", "_iterator", "_late", "_node")
 
-    def __init__(
+    def __init__(  # noqa: PLR0913, PLR0917  # the factory's two, then the binding's four
         self,
         node: str,
         check: Callable[[object], str | None] | None,
         iterable: Iterable[object],
         record: bool,  # noqa: FBT001  # the binding passes it by position
         branch: tuple[int, ...] = (),
+        late: LateKeys | None = None,
     ) -> None:
-        """Iterates `iterable`, the items of `node`, which runs in `branch`."""
+        """Iterates `iterable`, the items of `node`, which runs in `branch`.
+
+        `late`, a cached run's late keys, hears of each item and of the end, with
+        `branch`, so branches read at once each key their own items.
+        """
         self._node = node
         self._branch = branch
+        self._late = late
         self._check = check
         self._iterator = iter(iterable)
         self._index = 0
@@ -236,6 +243,8 @@ class Items(Iterator[object]):
             raise TypeError(msg)
         if self._items is not None:
             self._items.append(item)
+        if self._late is not None:
+            self._late.pulled(self._node, self._branch, item)
         return item
 
     def close(self) -> None:
@@ -263,4 +272,6 @@ class Items(Iterator[object]):
         """Ends the iteration, closing it unless `exhausted`; the items, if recorded."""
         if not exhausted:
             self.close()
+        elif self._late is not None:
+            self._late.finished(self._node, self._branch, self._items)
         return self._items

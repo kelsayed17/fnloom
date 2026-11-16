@@ -118,39 +118,61 @@ impl ObserverBase {
 ///
 /// Values become Python objects here and only here, so a run with no observers converts
 /// nothing for them.
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "one flag per kind of event, each sent only to an observer that overrides it"
-)]
 pub struct PyObserver<'py, 's> {
     observer: Bound<'py, ObserverBase>,
     /// Where `pre_node` gets the node's keyword arguments, shared with the call.
     kwargs: &'s Kwargs<'py, 's>,
-    /// Whether the observer's class overrides `pre_node` or `post_node`: when it overrides
-    /// neither, node events are not sent, so its keyword arguments are never made.
+    /// The hooks its class overrides.
+    flags: Flags,
+}
+
+/// Which hooks an observer's class overrides, found once per observer.
+#[derive(Clone, Copy, Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one flag per kind of event, each sent only to an observer that overrides it"
+)]
+pub struct Flags {
+    /// Whether the class overrides `pre_node` or `post_node`: when it overrides neither,
+    /// node events are not sent, so its keyword arguments are never made.
     nodes: bool,
-    /// Whether the observer's class overrides `post_expand`, which is sent only then.
+    /// Whether the class overrides `post_expand`, which is sent only then.
     expands: bool,
-    /// Whether the observer's class overrides `hit_in`, which is sent only then.
+    /// Whether the class overrides `hit_in`, which is sent only then.
     hits: bool,
-    /// Whether the observer's class overrides `skipped`, which is sent only then.
+    /// Whether the class overrides `skipped`, which is sent only then.
     skips: bool,
+}
+
+impl Flags {
+    /// The hooks `observer`'s class overrides.
+    pub fn of(observer: &Bound<'_, ObserverBase>) -> Self {
+        Self {
+            nodes: overrides(observer, "pre_node") || overrides(observer, "post_node"),
+            expands: overrides(observer, "post_expand"),
+            hits: overrides(observer, "hit_in"),
+            skips: overrides(observer, "skipped"),
+        }
+    }
 }
 
 impl<'py, 's> PyObserver<'py, 's> {
     /// Wraps a Python observer for one run.
     pub fn new(observer: Bound<'py, ObserverBase>, kwargs: &'s Kwargs<'py, 's>) -> Self {
-        let nodes = overrides(&observer, "pre_node") || overrides(&observer, "post_node");
-        let expands = overrides(&observer, "post_expand");
-        let hits = overrides(&observer, "hit_in");
-        let skips = overrides(&observer, "skipped");
+        let flags = Flags::of(&observer);
+        Self::flagged(observer, kwargs, flags)
+    }
+
+    /// Wraps a Python observer whose `flags` are already known, for one event.
+    pub const fn flagged(
+        observer: Bound<'py, ObserverBase>,
+        kwargs: &'s Kwargs<'py, 's>,
+        flags: Flags,
+    ) -> Self {
         Self {
             observer,
             kwargs,
-            nodes,
-            expands,
-            hits,
-            skips,
+            flags,
         }
     }
 
@@ -232,7 +254,7 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
     }
 
     fn pre_node(&mut self, node: &str, args: &[Arg<'_, Value<'py>>]) -> PyResult<()> {
-        if !self.nodes {
+        if !self.flags.nodes {
             return Ok(());
         }
         let py = self.observer.py();
@@ -253,7 +275,7 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
         if branch.is_empty() {
             return self.pre_node(node, args);
         }
-        if !self.nodes {
+        if !self.flags.nodes {
             return Ok(());
         }
         let py = self.observer.py();
@@ -269,7 +291,7 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
         branch: &[usize],
         outcome: Result<&Value<'py>, &PyErr>,
     ) -> PyResult<()> {
-        if !self.nodes {
+        if !self.flags.nodes {
             return Ok(());
         }
         let py = self.observer.py();
@@ -278,7 +300,7 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
     }
 
     fn post_expand(&mut self, node: &str, branch: &[usize], items: usize) -> PyResult<()> {
-        if !self.expands {
+        if !self.flags.expands {
             return Ok(());
         }
         let py = self.observer.py();
@@ -289,7 +311,7 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
     }
 
     fn hit_in(&mut self, node: &str, branch: &[usize], value: &Value<'py>) -> PyResult<()> {
-        if !self.hits {
+        if !self.flags.hits {
             return Ok(());
         }
         let py = self.observer.py();
@@ -300,7 +322,7 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
     }
 
     fn skipped(&mut self, node: &str, branch: &[usize]) -> PyResult<()> {
-        if !self.skips {
+        if !self.flags.skips {
             return Ok(());
         }
         let py = self.observer.py();

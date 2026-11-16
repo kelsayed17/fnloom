@@ -16,6 +16,7 @@ from hamilton import lifecycle
 from hamilton.function_modifiers.base import InvalidDecoratorException
 from harness import (
     EXECUTORS,
+    THREADS,
     Direction,
     Executor,
     Nodes,
@@ -27,6 +28,7 @@ from harness import (
     nodes_fnloom,
     nodes_hamilton,
     run_fnloom,
+    run_fnloom_blocks,
     run_hamilton,
     run_hamilton_blocks,
 )
@@ -1718,15 +1720,20 @@ def summary(details: Collect[int]) -> list[int]:
 """
 
 
-def both_blocks(
+def both_blocks(  # noqa: PLR0913  # the program, its request, and where each runs
     source: str,
     outputs: list[str],
     inputs: Mapping[str, object],
     executor: Executor = "synchronous",
     overrides: Mapping[str, object] | None = None,
+    *,
+    threads: int | None = None,
 ) -> tuple[Outcome, Outcome]:
-    """Hamilton's outcome and fnloom's, for one block program."""
-    name = f"blocks_{executor}_{len(sys.modules)}"
+    """Hamilton's outcome and fnloom's, for one block program.
+
+    fnloom's driver is built `with_threads(threads)` when it is given.
+    """
+    name = f"blocks_{len(sys.modules)}"
     hamilton = run_hamilton_blocks(
         block_module(f"{name}_h", source, "hamilton"),
         outputs,
@@ -1734,26 +1741,62 @@ def both_blocks(
         overrides,
         executor=executor,
     )
-    ours = run_fnloom(
-        [block_module(f"{name}_f", source, "fnloom")], outputs, inputs, overrides
+    ours = run_fnloom_blocks(
+        [block_module(f"{name}_f", source, "fnloom")],
+        outputs,
+        inputs,
+        overrides,
+        threads=threads,
     )
     return hamilton, ours
 
 
+# Each item sleeps longer the earlier it is, so in parallel branches finish in reverse.
+REVERSED = """
+import time
+
+
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+def details(picked: int, n: int, rate: int) -> int:
+    time.sleep((n - picked) * 0.01)
+    return picked * rate
+
+
+def summary(details: Collect[int]) -> list[int]:
+    return list(details)
+"""
+
+threads_of = pytest.mark.parametrize("threads", THREADS, ids=str)
+executors_of = pytest.mark.parametrize("executor", EXECUTORS, ids=str)
+
+
 @pytest.mark.keeps("Q119")
-@pytest.mark.parametrize("executor", EXECUTORS)
-def test_q119_collect_receives_branches_in_item_order(executor: Executor) -> None:
-    """Both collect in yield order, on either Hamilton executor."""
-    hamilton, ours = both_blocks(PICKED, ["summary"], {"n": 5, "rate": 3}, executor)
+@executors_of
+@threads_of
+def test_q119_collect_receives_branches_in_item_order(
+    executor: Executor, threads: int | None
+) -> None:
+    """Both collect in yield order, on every executor, whatever finishes first."""
+    hamilton, ours = both_blocks(
+        REVERSED, ["summary"], {"n": 5, "rate": 3}, executor, threads=threads
+    )
     assert hamilton == Outcome({"summary": [0, 3, 6, 9, 12]}, None)
     assert ours == hamilton
 
 
 @pytest.mark.keeps("Q120")
-@pytest.mark.parametrize("executor", EXECUTORS)
-def test_q120_an_empty_expand_gives_an_empty_collect(executor: Executor) -> None:
+@executors_of
+@threads_of
+def test_q120_an_empty_expand_gives_an_empty_collect(
+    executor: Executor, threads: int | None
+) -> None:
     """An expand that yields nothing gives its collect `[]`."""
-    hamilton, ours = both_blocks(PICKED, ["summary"], {"n": 0, "rate": 3}, executor)
+    hamilton, ours = both_blocks(
+        PICKED, ["summary"], {"n": 0, "rate": 3}, executor, threads=threads
+    )
     assert hamilton == Outcome({"summary": []}, None)
     assert ours == hamilton
 
@@ -1773,16 +1816,21 @@ def summary(details: Collect[int]) -> list[int]:
 
 
 @pytest.mark.keeps("Q121")
-@pytest.mark.parametrize("executor", EXECUTORS)
+@executors_of
+@threads_of
 def test_q121_an_expand_may_return_a_list_and_is_output_as_one(
-    executor: Executor,
+    executor: Executor, threads: int | None
 ) -> None:
     """A list is iterated like a generator, and the expand as an output is a list."""
-    hamilton, ours = both_blocks(LISTED, ["summary"], {"n": 3}, executor)
+    hamilton, ours = both_blocks(
+        LISTED, ["summary"], {"n": 3}, executor, threads=threads
+    )
     assert hamilton == Outcome({"summary": [1, 2, 3]}, None)
     assert ours == hamilton
     for source in (LISTED, PICKED):
-        hamilton, ours = both_blocks(source, ["picked"], {"n": 3}, executor)
+        hamilton, ours = both_blocks(
+            source, ["picked"], {"n": 3}, executor, threads=threads
+        )
         assert hamilton == Outcome({"picked": [0, 1, 2]}, None)
         assert ours == hamilton
         assert ours.values is not None
@@ -1818,9 +1866,12 @@ def summary(details: Collect[str]) -> int:
 
 @pytest.mark.keeps("Q127")
 @pytest.mark.parametrize("source", [EXPAND_EDGE, COLLECT_EDGE])
-def test_q127_block_edges_are_checked_at_build(source: str) -> None:
+@threads_of
+def test_q127_block_edges_are_checked_at_build(
+    source: str, threads: int | None
+) -> None:
     """An expand feeds `T`, a block node a collect's element: both refuse a mismatch."""
-    hamilton, ours = both_blocks(source, ["summary"], {})
+    hamilton, ours = both_blocks(source, ["summary"], {}, threads=threads)
     assert hamilton == Outcome(None, "ValueError")
     assert ours == hamilton
 
@@ -1856,14 +1907,19 @@ def joined(left_sum: int, right_sum: int, k: int) -> list[int]:
 
 
 @pytest.mark.keeps("Q138")
-@pytest.mark.parametrize("executor", EXECUTORS)
-def test_q138_two_independent_blocks_share_their_inputs(executor: Executor) -> None:
+@executors_of
+@threads_of
+def test_q138_two_independent_blocks_share_their_inputs(
+    executor: Executor, threads: int | None
+) -> None:
     """Two blocks joined downstream run; an input is shared by every branch."""
-    hamilton, ours = both_blocks(TWO_BLOCKS, ["joined"], {"n": 3, "k": 2}, executor)
+    hamilton, ours = both_blocks(
+        TWO_BLOCKS, ["joined"], {"n": 3, "k": 2}, executor, threads=threads
+    )
     assert hamilton == Outcome({"joined": [6, 24, 2]}, None)
     assert ours == hamilton
     hamilton, ours = both_blocks(
-        TWO_BLOCKS, ["joined"], {"n": 3, "k": 2}, executor, {"k": 10}
+        TWO_BLOCKS, ["joined"], {"n": 3, "k": 2}, executor, {"k": 10}, threads=threads
     )
     assert hamilton == Outcome({"joined": [30, 120, 10]}, None)
     assert ours == hamilton
@@ -1886,9 +1942,57 @@ def summary(details: Collect[int]) -> list[int]:
 
 
 @pytest.mark.keeps("Q128")
-@pytest.mark.parametrize("executor", EXECUTORS)
-def test_q128_a_failing_branch_raises_its_own_exception(executor: Executor) -> None:
+@executors_of
+@threads_of
+def test_q128_a_failing_branch_raises_its_own_exception(
+    executor: Executor, threads: int | None
+) -> None:
     """Both raise the branch's own exception class, unwrapped, and return nothing."""
-    hamilton, ours = both_blocks(FAILING_BRANCH, ["summary"], {"n": 4}, executor)
+    hamilton, ours = both_blocks(
+        FAILING_BRANCH, ["summary"], {"n": 4}, executor, threads=threads
+    )
     assert hamilton == Outcome(None, "KeyError")
     assert ours == hamilton
+
+
+# Branch 1 fails at once while branch 0 sleeps: both runtimes raise only after it ends.
+FAILING_FAST = """
+import time
+
+FINISHED = []
+
+
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+def details(picked: int) -> int:
+    if picked == 1:
+        raise KeyError(picked)
+    time.sleep(0.3)
+    FINISHED.append(picked)
+    return picked
+
+
+def summary(details: Collect[int]) -> list[int]:
+    return list(details)
+"""
+
+
+@pytest.mark.keeps("Q128")
+@pytest.mark.threads
+@pytest.mark.parametrize(
+    ("executor", "threads"), [("synchronous", None), ("default", 8)], ids=str
+)
+def test_q128_a_failure_raises_once_running_branches_finish(
+    executor: Executor, threads: int | None
+) -> None:
+    """No branch is still running when either runtime raises the failure."""
+    hamilton_module = block_module(f"q128_wait_h_{executor}", FAILING_FAST, "hamilton")
+    ours_module = block_module(f"q128_wait_f_{executor}", FAILING_FAST, "fnloom")
+    hamilton = run_hamilton_blocks(
+        hamilton_module, ["summary"], {"n": 2}, executor=executor
+    )
+    ours = run_fnloom_blocks([ours_module], ["summary"], {"n": 2}, threads=threads)
+    assert hamilton == ours == Outcome(None, "KeyError")
+    assert hamilton_module.FINISHED == ours_module.FINISHED == [0]

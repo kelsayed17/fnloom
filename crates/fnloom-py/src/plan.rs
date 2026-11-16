@@ -2,11 +2,13 @@
 
 use std::cell::RefCell;
 use std::collections::BTreeMap;
+use std::sync::{Arc, OnceLock};
 
 use fnloom_core::node::{Node, NodeId};
 use fnloom_core::plan::{Action, Plan as CorePlan, Step};
 use fnloom_core::run::{Arg, Blocks, Evaluate, Item, Observer};
-use pyo3::exceptions::{PyRuntimeError, PyStopIteration, PyTypeError};
+use fnloom_core::schedule::Layout;
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -19,6 +21,9 @@ use crate::errors::{caught, run_error};
 use crate::graph::Graph;
 use crate::keys::Keys;
 use crate::observer::{ObserverBase, PyObserver};
+use crate::parallel;
+use crate::pool::Threads;
+use crate::task::{Direct, Scope, undeclared_absence};
 
 /// A value flowing along an edge: a strong reference, held under the GIL a run holds
 /// throughout, so cloning it for an argument is one reference-count increment.
@@ -33,6 +38,9 @@ pub struct Plan {
     core: CorePlan,
     /// By node id, the keywords each computed step passes its arguments under.
     calls: Vec<Option<Call>>,
+    /// What every parallel run of this plan starts from, made by the first one, so a plan
+    /// that never runs in parallel never makes it.
+    layout: OnceLock<Arc<Layout>>,
 }
 
 /// The keywords a computed step's function is called with, made when the plan is.
@@ -71,41 +79,30 @@ impl Plan {
             graph,
             core: plan,
             calls,
+            layout: OnceLock::new(),
         })
     }
-}
 
-#[pymethods]
-impl Plan {
-    /// Lets the cyclic GC follow this plan's reference to its graph.
-    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
-        visit.call(&self.graph)
+    /// The graph the plan was prepared from.
+    pub fn graph(&self) -> &Py<Graph> {
+        &self.graph
     }
 
-    /// Runs the plan and returns exactly the requested outputs, keyed by name, sorted.
-    ///
-    /// Each value is read from `inputs` or `overrides` by its node's interned name, and
-    /// each output is keyed by it, so a run makes no name strings. Extra keys are ignored.
-    /// Every observer sees every event, in sequence order. The GIL is held throughout.
-    ///
-    /// `on_value(name, value)` is called with each computed node's name and value right
-    /// after that node succeeds and every observer has seen its `post_node`, before any
-    /// downstream node runs; never for an input, an override, a skipped optional input or
-    /// a node in a branch, whose value is one of many and goes to `late.store` instead.
-    /// It is driven as one more observer, so an exception from it is raised like an
-    /// observer's: as itself, after the closing `post_graph(ok=False)`.
-    ///
-    /// `late`, for a plan with blocks, keys the steps downstream of an expand during the
-    /// run: `late.lookup(node, branch)` gives a hit as a 1-tuple, or `None`;
-    /// `late.store(node, branch, value)` takes each such step's value once it succeeds;
-    /// `late.pulled(expand, item)` hears of each item, `late.finished(expand, value)` of
-    /// each exhausted expand, and `late.records(expand)` says whether its items are kept.
-    // PyO3 renders the `Vec::new()` default as `Ellipsis`, so the signature says `()` itself.
-    #[pyo3(
-        signature = (inputs, overrides, observers = Vec::new(), on_value = None, late = None),
-        text_signature = "($self, /, inputs, overrides, observers=(), on_value=None, late=None)"
-    )]
-    fn run<'py>(
+    /// The core plan.
+    pub const fn core(&self) -> &CorePlan {
+        &self.core
+    }
+
+    /// The plan's scheduler layout, made on first use.
+    pub fn layout(&self) -> Arc<Layout> {
+        Arc::clone(
+            self.layout
+                .get_or_init(|| Arc::new(Layout::new(&self.core, self.graph.get().core()))),
+        )
+    }
+
+    /// `run` on the calling thread, by `Plan::run`: the default path.
+    fn run_here<'py>(
         &self,
         py: Python<'py>,
         inputs: &Bound<'py, PyDict>,
@@ -116,12 +113,7 @@ impl Plan {
     ) -> PyResult<Bound<'py, PyDict>> {
         let graph = self.graph.get();
         let keywords = graph.keywords();
-        let kwargs = Kwargs {
-            py,
-            graph,
-            keywords,
-            pending: RefCell::new(None),
-        };
+        let kwargs = Kwargs::new(py, graph);
         let mut adapters: Vec<PyObserver<'py, '_>> = observers
             .into_iter()
             .map(|observer| PyObserver::new(observer, &kwargs))
@@ -196,6 +188,62 @@ impl Plan {
         }
         Ok(result)
     }
+}
+
+#[pymethods]
+impl Plan {
+    /// Lets the cyclic GC follow this plan's reference to its graph.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.graph)
+    }
+
+    /// Runs the plan and returns exactly the requested outputs, keyed by name, sorted.
+    ///
+    /// Each value is read from `inputs` or `overrides` by its node's interned name, and
+    /// each output is keyed by it, so a run makes no name strings. Extra keys are ignored.
+    /// Every observer sees every event, in sequence order. The GIL is held throughout.
+    ///
+    /// `on_value(name, value)` is called with each computed node's name and value right
+    /// after that node succeeds and every observer has seen its `post_node`, before any
+    /// downstream node runs; never for an input, an override, a skipped optional input or
+    /// a node in a branch, whose value is one of many and goes to `late.store` instead.
+    /// It is driven as one more observer, so an exception from it is raised like an
+    /// observer's: as itself, after the closing `post_graph(ok=False)`.
+    ///
+    /// `late`, for a plan with blocks, keys the steps downstream of an expand during the
+    /// run: `late.lookup(node, branch)` gives a hit as a 1-tuple, or `None`;
+    /// `late.store(node, branch, value)` takes each such step's value once it succeeds;
+    /// `late.pulled(expand, item)` hears of each item, `late.finished(expand, value)` of
+    /// each exhausted expand, and `late.records(expand)` says whether its items are kept.
+    ///
+    /// With `threads`, the run is on the core scheduler, its tasks on `threads`' pool and
+    /// on the calling thread, each call in its own copy of the caller's context, and its
+    /// hooks one at a time, each on the thread that ran its node (`parallel`).
+    // PyO3 renders the `Vec::new()` default as `Ellipsis`, so the signature says `()` itself.
+    #[pyo3(
+        signature = (inputs, overrides, observers = Vec::new(), on_value = None, late = None, *, threads = None),
+        text_signature = "($self, /, inputs, overrides, observers=(), on_value=None, late=None, *, threads=None)"
+    )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Python's keyword arguments, one per part of a run"
+    )]
+    fn run<'py>(
+        slf: &Bound<'py, Self>,
+        py: Python<'py>,
+        inputs: &Bound<'py, PyDict>,
+        overrides: &Bound<'py, PyDict>,
+        observers: Vec<Bound<'py, ObserverBase>>,
+        on_value: Option<Bound<'py, PyAny>>,
+        late: Option<&Bound<'py, PyAny>>,
+        threads: Option<&Bound<'py, Threads>>,
+    ) -> PyResult<Bound<'py, PyDict>> {
+        if let Some(threads) = threads {
+            return parallel::run(slf, inputs, overrides, observers, on_value, late, threads);
+        }
+        let this = slf.get();
+        this.run_here(py, inputs, overrides, observers, on_value, late)
+    }
 
     /// The steps in execution order, as `(node, action)` pairs.
     ///
@@ -264,7 +312,7 @@ const fn action_name(action: Action) -> &'static str {
 
 /// The interned name of node `id`, called `name`, interned when the graph was built;
 /// interned now only if the table lacks it, which a plan run on its own graph rules out.
-fn keyword<'py>(
+pub fn keyword<'py>(
     py: Python<'py>,
     keywords: &[Py<PyString>],
     id: NodeId,
@@ -278,7 +326,7 @@ fn keyword<'py>(
 
 /// The keyword `consumer` takes `input`'s value under: a `@parameterize` row's own
 /// name for it, else `input`'s interned name.
-fn keyword_for<'py>(
+pub fn keyword_for<'py>(
     py: Python<'py>,
     graph: &Graph,
     consumer: NodeId,
@@ -299,15 +347,37 @@ pub struct Kwargs<'py, 'g> {
     py: Python<'py>,
     /// The graph, for the keywords a `@parameterize` row renames.
     graph: &'g Graph,
-    /// The graph's interned node names, by node id.
-    keywords: &'g [Py<PyString>],
     /// The dict built for the observers of the node about to run, until its call.
     pending: RefCell<Option<(NodeId, Bound<'py, PyDict>)>>,
 }
 
+impl<'py, 'g> Kwargs<'py, 'g> {
+    /// The keyword arguments of a run over `graph`, none built yet.
+    pub fn new(py: Python<'py>, graph: &'g Graph) -> Self {
+        Self {
+            py,
+            graph,
+            pending: RefCell::new(None),
+        }
+    }
+
+    /// The keyword arguments of one parallel task: `kwargs`, already built for `consumer`,
+    /// lent to its observers.
+    pub fn lending(
+        py: Python<'py>,
+        graph: &'g Graph,
+        consumer: NodeId,
+        kwargs: Option<Bound<'py, PyDict>>,
+    ) -> Self {
+        let this = Self::new(py, graph);
+        *this.pending.borrow_mut() = kwargs.map(|kwargs| (consumer, kwargs));
+        this
+    }
+}
+
 impl<'py> Kwargs<'py, '_> {
     /// A new dict of `args`, keyed as `consumer`'s function takes them.
-    fn build(
+    pub fn build(
         &self,
         consumer: NodeId,
         args: &[Arg<'_, Value<'py>>],
@@ -420,22 +490,27 @@ impl<'py> Evaluate<Py<PyAny>> for Caller<'_, 'py, '_> {
 
     /// A cache hit from `late.lookup`, which returns a 1-tuple, or `None` for none.
     fn lookup(&mut self, node: &Node<Py<PyAny>>, branch: &[usize]) -> PyResult<Option<Value<'py>>> {
-        let Some(late) = self.late else {
-            return Ok(None);
-        };
-        let py = self.kwargs.py;
-        let name = keyword(py, self.kwargs.keywords, node.id, &node.name);
-        let found =
-            caught(|| late.call_method1(intern!(py, "lookup"), (name, PyTuple::new(py, branch)?)))?;
-        if found.is_none() {
+        if self.late.is_none() {
             return Ok(None);
         }
-        Ok(Some(found.get_item(0)?))
+        self.scope().lookup(&Direct, node, branch)
+    }
+}
+
+impl<'k, 'py> Caller<'k, 'py, '_> {
+    /// What `task.rs` needs of this run.
+    fn scope(&self) -> Scope<'k, 'py> {
+        Scope {
+            graph: self.kwargs.graph,
+            outputs: self.outputs,
+            late: self.late,
+            absent: self.absent.bind(self.kwargs.py),
+        }
     }
 }
 
 /// `fnloom._blocks.BRANCH`, the context variable `fnloom.current_branch()` reads.
-fn branch_variable(py: Python<'_>) -> PyResult<&'static Py<PyAny>> {
+pub fn branch_variable(py: Python<'_>) -> PyResult<&'static Py<PyAny>> {
     static BRANCH: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
     BRANCH.get_or_try_init(py, || {
         Ok(py
@@ -454,21 +529,7 @@ impl<'py> Blocks<Py<PyAny>, Value<'py>, PyErr> for Caller<'_, 'py, '_> {
         iterable: &Value<'py>,
         branch: &[usize],
     ) -> PyResult<Value<'py>> {
-        let py = self.kwargs.py;
-        let Some(factory) = self.kwargs.graph.items(node.id) else {
-            return Err(PyRuntimeError::new_err(format!(
-                "broken plan: expand '{}' has no item iterator",
-                node.name
-            )));
-        };
-        let mut record = self.outputs.binary_search(&node.id).is_ok();
-        if let Some(late) = self.late.filter(|_| !record) {
-            let name = keyword(py, self.kwargs.keywords, node.id, &node.name);
-            record = caught(|| late.call_method1(intern!(py, "records"), (name,)))?.is_truthy()?;
-        }
-        // A generator's body runs as its items are read, so in the expand's branch.
-        let branch = PyTuple::new(py, branch)?;
-        caught(|| factory.bind(py).call1((iterable, record, branch)))
+        self.scope().iterate(&Direct, node, iterable, branch)
     }
 
     fn next_item(
@@ -476,48 +537,16 @@ impl<'py> Blocks<Py<PyAny>, Value<'py>, PyErr> for Caller<'_, 'py, '_> {
         node: &Node<Py<PyAny>>,
         iterator: &Value<'py>,
     ) -> PyResult<Item<Value<'py>>> {
-        let py = self.kwargs.py;
-        match caught(|| iterator.call_method0(intern!(py, "__next__"))) {
-            Ok(item) => {
-                if let Some(late) = self.late {
-                    let name = keyword(py, self.kwargs.keywords, node.id, &node.name);
-                    caught(|| {
-                        late.call_method1(intern!(py, "pulled"), (name, &item))
-                            .map(drop)
-                    })?;
-                }
-                Ok(Item::Next(item))
-            }
-            Err(error) if error.is_instance_of::<PyStopIteration>(py) => {
-                let value = error.value(py).getattr(intern!(py, "value"))?;
-                if !value.is(self.absent.bind(py)) {
-                    return Ok(Item::Done);
-                }
-                if !node.declines {
-                    return Err(undeclared_absence(&node.name));
-                }
-                Ok(Item::Declined(value))
-            }
-            Err(error) => Err(error),
-        }
+        self.scope().next_item(&Direct, node, iterator)
     }
 
     fn finish_items(
         &mut self,
-        node: &Node<Py<PyAny>>,
+        _node: &Node<Py<PyAny>>,
         iterator: &Value<'py>,
         exhausted: bool,
     ) -> PyResult<Value<'py>> {
-        let py = self.kwargs.py;
-        let value = caught(|| iterator.call_method1(intern!(py, "finish"), (exhausted,)))?;
-        if let Some(late) = self.late.filter(|_| exhausted) {
-            let name = keyword(py, self.kwargs.keywords, node.id, &node.name);
-            caught(|| {
-                late.call_method1(intern!(py, "finished"), (name, &value))
-                    .map(drop)
-            })?;
-        }
-        Ok(value)
+        self.scope().finish_items(&Direct, iterator, exhausted)
     }
 
     fn gather(
@@ -533,7 +562,7 @@ impl<'py> Blocks<Py<PyAny>, Value<'py>, PyErr> for Caller<'_, 'py, '_> {
 }
 
 /// Where each computed node's value goes.
-enum Sink<'py> {
+pub enum Sink<'py> {
     /// A Python callable, called with the node's name and value.
     Call(Bound<'py, PyAny>),
     /// A run's keys, from `KeyPlan.walk`: stored in its memory store with no Python call.
@@ -541,12 +570,12 @@ enum Sink<'py> {
 }
 
 /// Hands each computed node's name and value to `on_value`, as the last observer.
-struct ValueHook<'py, 'g> {
-    sink: Sink<'py>,
+pub struct ValueHook<'py, 'g> {
+    pub sink: Sink<'py>,
     /// The graph, to find a node's id by name.
-    graph: &'g Graph,
+    pub graph: &'g Graph,
     /// The graph's interned node names, by node id.
-    keywords: &'g [Py<PyString>],
+    pub keywords: &'g [Py<PyString>],
 }
 
 impl<'py> Observer<Value<'py>, PyErr> for ValueHook<'py, '_> {
@@ -583,11 +612,11 @@ impl<'py> Observer<Value<'py>, PyErr> for ValueHook<'py, '_> {
 }
 
 /// Hands each late step's value to `late.store`, as the last observer.
-struct LateHook<'py, 'g> {
-    late: &'g Bound<'py, PyAny>,
-    plan: &'g CorePlan,
-    graph: &'g Graph,
-    keywords: &'g [Py<PyString>],
+pub struct LateHook<'py, 'g> {
+    pub late: &'g Bound<'py, PyAny>,
+    pub plan: &'g CorePlan,
+    pub graph: &'g Graph,
+    pub keywords: &'g [Py<PyString>],
 }
 
 impl<'py> Observer<Value<'py>, PyErr> for LateHook<'py, '_> {
@@ -662,13 +691,4 @@ fn values<'a, 'py>(
     args: &'a [Arg<'_, Value<'py>>],
 ) -> impl ExactSizeIterator<Item = &'a Value<'py>> {
     args.iter().map(|arg| &arg.value)
-}
-
-/// The `TypeError` for `node` returning `fnloom.ABSENT` without declaring it may.
-#[cold]
-fn undeclared_absence(node: &str) -> PyErr {
-    PyTypeError::new_err(format!(
-        "node '{node}' returned fnloom.ABSENT, but its return annotation does not admit \
-         fnloom.Absent"
-    ))
 }

@@ -27,6 +27,16 @@ change the public API; such changes are listed under **Changed** and **Removed**
   running compute has waits for it and completes as a hit. A failure or `stop()` hands out only the finishes of open
   iterators, innermost first, an iterator whose pull is in flight once the pull returns, and `finish` returns the
   lowest key's failure. `blocked()` names the node a run waits for, and `lend()` gives it one lent seat.
+- `Builder.with_threads(max_workers=None)` runs each run's nodes in parallel, on the driver's own pool of
+  `max_workers` workers, `os.process_cpu_count()` by default (Q134). The calling thread is one of them, so the pool
+  starts `max_workers - 1` threads, named `fnloom-worker-<n>`, at the driver's first run, and `with_threads(1)` runs
+  on the calling thread alone. Independent nodes, outside blocks too (Q169), and a block's branches overlap, handed
+  out in reference order; values, `Collect` orders and the exception raised never depend on the worker count. Each
+  node's call runs in its own copy of the context the run started in, and a run's hooks are called one at a time. A
+  failure starts no new node: the run waits for the running ones, then raises the failure first in reference order,
+  once (Q66, Q128). The setting survives pickling, `copy`, `rebuild()` and `build_async()`, each driver with a pool of
+  its own, and a forked child makes a new one; an `AsyncDriver` ignores it for now. A driver without it runs exactly
+  as before.
 
 ## [0.5.0] - 2026-11-15
 
