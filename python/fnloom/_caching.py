@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from fnloom._config import Condition
     from fnloom._hooks import Dispatch
     from fnloom._scan import NodeDef
+    from fnloom._threads import Workers
 
 # fnloom's own files, which a build warning points past.
 _PACKAGE = f"{Path(__file__).parent}{os.sep}"
@@ -989,12 +990,16 @@ class CacheRun:
         input_names: frozenset[str],
         override_names: frozenset[str],
         fresh: Mapping[str, str] | None = None,
+        *,
+        workers: Workers | None = None,
     ) -> None:
         """Holds the request's plan, compiled with no hits, and its key plan.
 
         `fresh` holds the producers an enclosing run's `recompute` fields need
         fresh, so a nested run computing one never looks it up either.
+        `workers`, when given, is the driver's pool, which every core run uses.
         """
+        self._workers = workers
         self._store = cache.store
         self._formats = cache.formats
         self._graph = graph
@@ -1110,7 +1115,14 @@ class CacheRun:
             first = list(self._first)
             nested = graph.prepare(first, self._inputs, sorted(override_names))
             self._nested = CacheRun(
-                cache, graph, nested, first, input_names, override_names, self._fresh
+                cache,
+                graph,
+                nested,
+                first,
+                input_names,
+                override_names,
+                self._fresh,
+                workers=workers,
             )
             self._levels = (self, *self._nested._levels)  # noqa: SLF001  # the same class
         self._blocks = (
@@ -1136,6 +1148,11 @@ class CacheRun:
         # Insertion order is recency order: a hit moves its plan to the end.
         self._plans: dict[frozenset[str], _core.Plan] = {}
         self._plans_lock = threading.Lock()
+
+    @property
+    def threaded(self) -> bool:
+        """Whether its core runs are on a driver's pool."""
+        return self._workers is not None
 
     @property
     def blocks(self) -> _Blocks | None:
@@ -1189,15 +1206,22 @@ class CacheRun:
         """
         if on_value is None:
             on_value = begun.pending
-        result = begun.plan.run(
-            inputs,
-            begun.overrides,
-            observers,
-            on_value=functools.partial(self.finish, begun)
-            if on_value is None
-            else on_value,
-            late=begun.late,
-        )
+        if on_value is None:
+            on_value = functools.partial(self.finish, begun)
+        workers = self._workers
+        if workers is None:
+            result = begun.plan.run(
+                inputs, begun.overrides, observers, on_value=on_value, late=begun.late
+            )
+        else:
+            result = begun.plan.run(
+                inputs,
+                begun.overrides,
+                observers,
+                on_value=on_value,
+                late=begun.late,
+                threads=workers.threads(),
+            )
         if begun.values is not None:
             begun.values.update(begun.hits)
             begun.values.update(result)
@@ -1736,12 +1760,13 @@ def _late_outcome(k: NodeKey, key: object) -> CacheOutcome:
 class LateKeys:
     """One cached run's keys of the nodes downstream of an expand, by branch.
 
-    Made per run, never shared. The core asks `lookup` of each late node before it
-    would compute it (in a branch, from the block's exits back), tells `pulled` of
-    each item and `finished` of each exhausted expand, and hands `store` each value
-    a late node computes. It runs one branch at a time, in reference order, so an
-    expand's items arrive in order, and the enclosing branch of an expand being read
-    is the one last asked about.
+    Made per run, never shared between runs, but safe for one run's workers. The
+    core asks `lookup` of each late node before it would compute it (in a branch,
+    from the block's exits back) and hands `store` each value a late node computes;
+    each expand's item iterator tells `pulled` of each item and `finished` of its
+    end. Every call names its branch, an expand's being the branch it ran in, so
+    branches may run at once; one iterator's items still arrive in order. The tables
+    are guarded by one lock, and no store call or fingerprint is made under it.
 
     A late node's key is its ordinary key, over the versions of what it reads: the
     item, for an expand it is in the block of; an earlier late node's key, in its
@@ -1790,24 +1815,24 @@ class LateKeys:
         }
         # The item versions of an expand, once exhausted or read from its entry.
         self._items: dict[_Task, tuple[bytes | None, ...]] = {}
-        # Per expand being read: its enclosing branch, and its item versions so far.
-        self._pulling: dict[str, tuple[_Branch, list[bytes | None]]] = {}
-        # The branch last asked about.
-        self._current: _Branch = ()
+        # Per expand being read, by expand and its branch: its item versions so far.
+        self._pulling: dict[_Task, list[bytes | None]] = {}
+        # Guards the tables above, for the workers of a parallel run.
+        self._lock = threading.Lock()
 
     def has(self, name: str) -> bool:
         """Whether `name` is a late node, keyed per branch."""
         return name in self._shape.plans
 
-    def records(self, name: str) -> bool:
-        """Whether expand `name`'s items are kept, to be stored once exhausted.
+    def records(self, name: str, branch: _Branch) -> bool:
+        """Whether expand `name`'s items in `branch` are kept, to be stored at the end.
 
-        Not when they were replayed, nor when its key in the branch last asked
-        about is not known: then nothing could store them.
+        Not when they were replayed, nor when its key in `branch`, the branch it
+        ran in, is not known: then nothing could store them.
         """
         if not self._stores(name):
             return False
-        prefix = self._current[: len(self._shape.paths.get(name, ()))]
+        prefix = tuple(branch)
         if (name, prefix) in self._replayed:
             return False
         return isinstance(self._expand_key(name, prefix), bytes)
@@ -1818,7 +1843,6 @@ class LateKeys:
 
     def lookup(self, name: str, branch: _Branch) -> tuple[object] | None:
         """Late node `name`'s stored value in `branch`, as a 1-tuple; or `None`."""
-        self._current = branch
         if not self._shape.stored.get(name, False):
             return None
         key = self.key(name, branch)
@@ -1830,7 +1854,8 @@ class LateKeys:
         if name in self._shape.expands:
             if not isinstance(value, list):
                 return None
-            self._replayed[name, branch] = value
+            with self._lock:
+                self._replayed[name, branch] = value
         return (value,)
 
     def store(self, name: str, branch: _Branch, value: object) -> None:
@@ -1847,22 +1872,27 @@ class LateKeys:
         if isinstance(key, bytes):
             self._run.put(key, name, value, self._warned)
 
-    def pulled(self, name: str, item: object) -> None:
-        """Takes the next item of expand `name`, in the branch last asked about."""
-        prefix = self._current[: len(self._shape.paths.get(name, ()))]
-        pulling = self._pulling.get(name)
-        if pulling is None or pulling[0] != prefix:
-            pulling = (prefix, [])
-            self._pulling[name] = pulling
-        versions = pulling[1]
-        versions.append(self._item_version(name, prefix, len(versions), item))
+    def pulled(self, name: str, branch: _Branch, item: object) -> None:
+        """Takes the next item of expand `name`, which runs in `branch`.
 
-    def finished(self, name: str, value: object) -> None:
-        """Expand `name` is exhausted: its items are known, and stored when kept."""
-        prefix = self._current[: len(self._shape.paths.get(name, ()))]
-        pulling = self._pulling.pop(name, None)
-        versions = pulling[1] if pulling is not None and pulling[0] == prefix else []
-        self._items[name, prefix] = tuple(versions)
+        One iterator's items arrive one at a time, so the index is known before
+        the lock; the version, which may run a registered fingerprint, is made
+        outside it.
+        """
+        prefix = tuple(branch)
+        with self._lock:
+            versions = self._pulling.setdefault((name, prefix), [])
+            index = len(versions)
+        version = self._item_version(name, prefix, index, item)
+        with self._lock:
+            versions.append(version)
+
+    def finished(self, name: str, branch: _Branch, value: object) -> None:
+        """Expand `name` in `branch` is exhausted: its items are known, and stored."""
+        prefix = tuple(branch)
+        with self._lock:
+            versions = self._pulling.pop((name, prefix), [])
+            self._items[name, prefix] = tuple(versions)
         if (name, prefix) in self._replayed or not self._stores(name):
             return
         key = self._expand_key(name, prefix)
@@ -1902,7 +1932,9 @@ class LateKeys:
                 unknown.add(top)
             else:
                 node = top[0]
-                self._memo[top] = self._shape.plans[node].keys(versions)[node]
+                found = self._shape.plans[node].keys(versions)[node]
+                with self._lock:
+                    self._memo[top] = found
         return _UNKNOWN if task in unknown else self._memo[task]
 
     def _dep(self, task: _Task, needed: list[_Task], unknown: set[_Task]) -> object:
@@ -1968,9 +2000,9 @@ class LateKeys:
         """The version of item `index` of expand `name` in the branch `prefix`."""
         found = self._items.get((name, prefix))
         if found is None:
-            pulling = self._pulling.get(name)
-            if pulling is not None and pulling[0] == prefix and index < len(pulling[1]):
-                return pulling[1][index]
+            pulling = self._pulling.get((name, prefix))
+            if pulling is not None and index < len(pulling):
+                return pulling[index]
             listed = self._listed(name, prefix, needed, unknown)
             if not isinstance(listed, tuple):
                 return listed
@@ -2029,7 +2061,8 @@ class LateKeys:
             self._item_version(name, prefix, index, item, key)
             for index, item in enumerate(items)
         )
-        self._items[name, prefix] = found
+        with self._lock:
+            self._items[name, prefix] = found
         return found
 
     def _item_version(

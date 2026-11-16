@@ -1,6 +1,7 @@
 //! Run observers: the subclassable Python base class and its adapter to the core trait.
 
 use fnloom_core::run::{Arg, Observer};
+use pyo3::BoundObject;
 use pyo3::call::PyCallArgs;
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -118,40 +119,85 @@ impl ObserverBase {
 ///
 /// Values become Python objects here and only here, so a run with no observers converts
 /// nothing for them.
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "one flag per kind of event, each sent only to an observer that overrides it"
-)]
 pub struct PyObserver<'py, 's> {
     observer: Bound<'py, ObserverBase>,
     /// Where `pre_node` gets the node's keyword arguments, shared with the call.
     kwargs: &'s Kwargs<'py, 's>,
-    /// Whether the observer's class overrides `pre_node` or `post_node`: when it overrides
-    /// neither, node events are not sent, so its keyword arguments are never made.
+    /// The hooks its class overrides.
+    flags: Flags,
+    /// The `run` method of the context the hooks are called in; `None` for the current one.
+    context: Option<Bound<'py, PyAny>>,
+}
+
+/// Which hooks an observer's class overrides, found once per observer.
+#[derive(Clone, Copy, Debug)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one flag per kind of event, each sent only to an observer that overrides it"
+)]
+pub struct Flags {
+    /// Whether the class overrides `pre_node` or `post_node`: when it overrides neither,
+    /// node events are not sent, so its keyword arguments are never made.
     nodes: bool,
-    /// Whether the observer's class overrides `post_expand`, which is sent only then.
+    /// Whether the class overrides `post_expand`, which is sent only then.
     expands: bool,
-    /// Whether the observer's class overrides `hit_in`, which is sent only then.
+    /// Whether the class overrides `hit_in`, which is sent only then.
     hits: bool,
-    /// Whether the observer's class overrides `skipped`, which is sent only then.
+    /// Whether the class overrides `skipped`, which is sent only then.
     skips: bool,
+    /// Whether the class sets `orders = True`: its node, expand and skip events then get
+    /// `order`, the step's order key, as a tuple.
+    orders: bool,
+}
+
+impl Flags {
+    /// The hooks `observer`'s class overrides.
+    pub fn of(observer: &Bound<'_, ObserverBase>) -> Self {
+        Self {
+            nodes: overrides(observer, "pre_node") || overrides(observer, "post_node"),
+            expands: overrides(observer, "post_expand"),
+            hits: overrides(observer, "hit_in"),
+            skips: overrides(observer, "skipped"),
+            orders: observer
+                .get_type()
+                .getattr(intern!(observer.py(), "orders"))
+                .and_then(|orders| orders.is_truthy())
+                .unwrap_or(false),
+        }
+    }
 }
 
 impl<'py, 's> PyObserver<'py, 's> {
     /// Wraps a Python observer for one run.
     pub fn new(observer: Bound<'py, ObserverBase>, kwargs: &'s Kwargs<'py, 's>) -> Self {
-        let nodes = overrides(&observer, "pre_node") || overrides(&observer, "post_node");
-        let expands = overrides(&observer, "post_expand");
-        let hits = overrides(&observer, "hit_in");
-        let skips = overrides(&observer, "skipped");
+        let flags = Flags::of(&observer);
+        Self::flagged(observer, kwargs, flags, None)
+    }
+
+    /// Wraps a Python observer whose `flags` are already known, for one event, its hooks
+    /// called through `context`, a `Context.run`, when given.
+    pub const fn flagged(
+        observer: Bound<'py, ObserverBase>,
+        kwargs: &'s Kwargs<'py, 's>,
+        flags: Flags,
+        context: Option<Bound<'py, PyAny>>,
+    ) -> Self {
         Self {
             observer,
             kwargs,
-            nodes,
-            expands,
-            hits,
-            skips,
+            flags,
+            context,
         }
+    }
+
+    /// Adds `order`, `node`'s order key in `branch`, to `kwargs`, for an observer that
+    /// wants it.
+    fn ordered(&self, kwargs: &Bound<'py, PyDict>, node: &str, branch: &[usize]) -> PyResult<()> {
+        if self.flags.orders {
+            let py = self.observer.py();
+            kwargs.set_item(intern!(py, "order"), self.kwargs.order(node, branch)?)?;
+        }
+        Ok(())
     }
 
     /// `post_node`'s keyword arguments, with `branch` when it is not empty.
@@ -179,7 +225,8 @@ impl<'py, 's> PyObserver<'py, 's> {
         Ok(kwargs)
     }
 
-    /// Calls the hook `name` with `args` and the keyword arguments `kwargs`.
+    /// Calls the hook `name` with `args` and the keyword arguments `kwargs`, in the
+    /// observer's context, if it has one.
     fn call<A>(
         &self,
         name: &Bound<'py, PyString>,
@@ -187,13 +234,19 @@ impl<'py, 's> PyObserver<'py, 's> {
         kwargs: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<()>
     where
-        A: PyCallArgs<'py>,
+        A: PyCallArgs<'py> + IntoPyObject<'py, Target = PyTuple>,
     {
+        let hook = self.observer.as_any();
+        let Some(run) = &self.context else {
+            // Called in place, so a Rust tuple goes by vectorcall, as before contexts.
+            return caught(|| hook.call_method(name, args, kwargs).map(drop));
+        };
+        let py = self.observer.py();
+        let args = args.into_pyobject(py).map_err(Into::into)?.into_bound();
         caught(|| {
-            self.observer
-                .as_any()
-                .call_method(name, args, kwargs)
-                .map(drop)
+            let mut all = vec![hook.getattr(name)?];
+            all.extend(args.iter());
+            run.call(PyTuple::new(py, all)?, kwargs).map(drop)
         })
     }
 
@@ -232,11 +285,16 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
     }
 
     fn pre_node(&mut self, node: &str, args: &[Arg<'_, Value<'py>>]) -> PyResult<()> {
-        if !self.nodes {
+        if !self.flags.nodes {
             return Ok(());
         }
         let py = self.observer.py();
         let kwargs = self.kwargs.for_observers(node, args)?;
+        if self.flags.orders {
+            let keywords = PyDict::new(py);
+            self.ordered(&keywords, node, &[])?;
+            return self.call(intern!(py, "pre_node"), (node, kwargs), Some(&keywords));
+        }
         self.call(intern!(py, "pre_node"), (node, kwargs), None)
     }
 
@@ -253,13 +311,14 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
         if branch.is_empty() {
             return self.pre_node(node, args);
         }
-        if !self.nodes {
+        if !self.flags.nodes {
             return Ok(());
         }
         let py = self.observer.py();
         let kwargs = self.kwargs.for_observers(node, args)?;
         let keywords = PyDict::new(py);
         keywords.set_item(intern!(py, "branch"), PyTuple::new(py, branch)?)?;
+        self.ordered(&keywords, node, branch)?;
         self.call(intern!(py, "pre_node"), (node, kwargs), Some(&keywords))
     }
 
@@ -269,43 +328,47 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
         branch: &[usize],
         outcome: Result<&Value<'py>, &PyErr>,
     ) -> PyResult<()> {
-        if !self.nodes {
+        if !self.flags.nodes {
             return Ok(());
         }
         let py = self.observer.py();
         let kwargs = self.outcome(branch, outcome)?;
+        self.ordered(&kwargs, node, branch)?;
         self.call(intern!(py, "post_node"), (node,), Some(&kwargs))
     }
 
     fn post_expand(&mut self, node: &str, branch: &[usize], items: usize) -> PyResult<()> {
-        if !self.expands {
+        if !self.flags.expands {
             return Ok(());
         }
         let py = self.observer.py();
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "branch"), PyTuple::new(py, branch)?)?;
         kwargs.set_item(intern!(py, "items"), items)?;
+        self.ordered(&kwargs, node, branch)?;
         self.call(intern!(py, "post_expand"), (node,), Some(&kwargs))
     }
 
     fn hit_in(&mut self, node: &str, branch: &[usize], value: &Value<'py>) -> PyResult<()> {
-        if !self.hits {
+        if !self.flags.hits {
             return Ok(());
         }
         let py = self.observer.py();
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "branch"), PyTuple::new(py, branch)?)?;
         kwargs.set_item(intern!(py, "value"), value)?;
+        self.ordered(&kwargs, node, branch)?;
         self.call(intern!(py, "hit_in"), (node,), Some(&kwargs))
     }
 
     fn skipped(&mut self, node: &str, branch: &[usize]) -> PyResult<()> {
-        if !self.skips {
+        if !self.flags.skips {
             return Ok(());
         }
         let py = self.observer.py();
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "branch"), PyTuple::new(py, branch)?)?;
+        self.ordered(&kwargs, node, branch)?;
         self.call(intern!(py, "skipped"), (node,), Some(&kwargs))
     }
 

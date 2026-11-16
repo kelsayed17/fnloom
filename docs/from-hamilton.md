@@ -119,7 +119,7 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | A `StaticValidator`, refusing a node or the graph at build | `run_to_validate_node` and `run_to_validate_graph` | An `after_build` hook that raises refuses the build, with every problem in one error, carried through `rebuild()` ([`StaticValidator`](#staticvalidator), Q117) |
 | `NodeExecutionMethod` (`run_to_execute_node`) | Replaces how a node is called; one per driver | `with_node_wrappers(*wrappers)`: any number, an ordered chain, each `wrapper(node, call, inputs)` ([Node wrappers](running.md#node-wrappers), Q111) |
 | `lifecycle.default.GracefulErrorAdapter` | Keeps running past a failure, skipping what depends on it | Not yet: on the [roadmap](plans/2026-10-28-roadmap-ahead-of-hamilton.md). A failing node fails the run, and `after_node` sees its error and inputs (Q157) |
-| `Parallelizable[T]` and `Collect[T]` from `hamilton.htypes` | Need `enable_dynamic_execution(allow_experimental_mode=True)` and an executor setting | The same names from `fnloom`, with no flag and no executor setting (Q118, Q137). Items run one after another, in item order; an empty expand gives `[]`, and an expand requested as an output gives its items as a `list` (Q119 to Q121, Q138). Not on `build_async()` until Plan 11 (Q132) ([Fan-out and fan-in](running.md#fan-out-and-fan-in)) |
+| `Parallelizable[T]` and `Collect[T]` from `hamilton.htypes` | Need `enable_dynamic_execution(allow_experimental_mode=True)` and an executor setting | The same names from `fnloom`, with no flag and no executor setting (Q118, Q137). Items run one after another, or at once with `Builder.with_threads` (Q134), and collect in item order either way; an empty expand gives `[]`, and an expand requested as an output gives its items as a `list` (Q119 to Q121, Q138). Not on `build_async()` until Plan 11 (Q132) ([Fan-out and fan-in](running.md#fan-out-and-fan-in)) |
 | `TaskExecutionHook` and the other task hooks | Hooks on dynamic execution's tasks | None: `NodeStart.branch` and `NodeEnd.branch` name a block node's branch, and `Hook.after_expand` gets each expand's item count ([The events](hooks.md#the-events), Q130) |
 | `display_all_functions()`, `display_upstream_of(*names)`, `display_downstream_of(*names)` | A `graphviz.Digraph`, or `None` and a logged traceback without the graphviz package; node order follows `PYTHONHASHSEED` | `draw()`, `draw_upstream_of(*names)`, `draw_downstream_of(*names)`: a `fnloom.Drawing`, whose `to_dot()`, `to_mermaid()` and `to_svg()` need nothing installed and give the same text every run ([Drawing](drawing.md), Q90, Q94, Q146) |
 | `visualize_path_between(a, b, strict_path_visualization=True)` | The path, and its nodes' parents unless strict | `draw_path_between(a, b, context=False)`; with `context=True`, the parents are drawn and marked `context` (Q90) |
@@ -470,8 +470,8 @@ CLI, `@check_output` validators, step injection, `@inject`, `@resolve`, node wra
 sequential fan-out and fan-in (`Parallelizable` and `Collect`) are done. These Hamilton features come next, roughly in
 this order:
 
-1. **The parallel executor**: a block runs its items one after another, on the caller's thread, and not yet on the
-   async driver.
+1. **The rest of the parallel executor**: `Builder.with_threads` runs a run's nodes and branches on a pool, but there
+   are no per-node limits, deadlines or `run_many` yet, and the async driver doesn't run blocks.
 2. **`GracefulErrorAdapter`**. Node wrappers can change how a node is called, but a run still stops at the first
    failure.
 
