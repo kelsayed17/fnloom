@@ -63,6 +63,8 @@ enum Op {
     Sum,
     /// Its one gathered argument.
     Keep,
+    /// The sum of its arguments, modulo a prime: a node of a plan without blocks.
+    Add,
 }
 
 fn compute(op: Op, args: &[Val]) -> Val {
@@ -72,6 +74,7 @@ fn compute(op: Op, args: &[Val]) -> Val {
         Op::Leaf => Val::Num(num(&args[0]) + 10 * num(&args[1])),
         Op::Sum => Val::Num(num(&args[0])),
         Op::Keep => args[0].clone(),
+        Op::Add => Val::Num(args.iter().map(num).sum::<i64>() % 1_000_003),
     }
 }
 
@@ -326,23 +329,63 @@ fn work(
 /// Runs the nested fan-out of `items` on eight threads under `grant`, and checks its outputs
 /// against `Plan::run`'s.
 fn eight_threads(items: i64, grant: &dyn Grant) -> Watch {
-    let graph = nested(items);
+    on_eight_threads(&nested(items), &["outer_sum"], &[], grant)
+}
+
+/// Rows of ten `Add` nodes, each reading two of the row above, the first row reading the
+/// input `seed`: a plan without blocks, which the scheduler runs flat.
+fn layered(n: usize) -> Graph<Op> {
+    let specs = (0..n).map(|i| {
+        let (row, column) = (i / 10, i % 10);
+        let name = format!("l{row}_{column}");
+        if row == 0 {
+            return spec(&name, &[("seed", false)], Op::Add);
+        }
+        let left = format!("l{}_{column}", row - 1);
+        let right = format!("l{}_{}", row - 1, (column + 1) % 10);
+        spec(&name, &[(&left, false), (&right, false)], Op::Add)
+    });
+    Graph::build(specs.collect()).unwrap_or_else(|error| unreachable!("the graph builds: {error}"))
+}
+
+/// Runs `outputs` of `graph` from `inputs` on eight threads under `grant`, and checks its
+/// outputs against `Plan::run`'s.
+fn on_eight_threads(
+    graph: &Graph<Op>,
+    outputs: &[&str],
+    inputs: &[(&str, i64)],
+    grant: &dyn Grant,
+) -> Watch {
     let plan = graph
         .prepare(&Request {
-            outputs: vec!["outer_sum".to_owned()],
-            inputs: BTreeSet::new(),
+            outputs: outputs.iter().map(|&name| name.to_owned()).collect(),
+            inputs: inputs.iter().map(|&(name, _)| name.to_owned()).collect(),
             overrides: BTreeSet::new(),
         })
         .unwrap_or_else(|error| unreachable!("the request plans: {error}"));
+    let value_of = |id: NodeId| {
+        let name = &graph.node(id).name;
+        let found = inputs.iter().find(|(input, _)| input == name);
+        found.map(|&(_, value)| Val::Num(value))
+    };
     let want = plan
-        .run_by_id(&graph, &mut Sequential, |_, _| None, &mut [])
+        .run_by_id(graph, &mut Sequential, |_, id| value_of(id), &mut [])
         .unwrap_or_else(|error| unreachable!("the reference run succeeds: {error}"));
 
-    let seeded: Vec<Option<Slot<Val>>> = vec![None; graph.nodes().len()];
+    let seeded: Vec<Option<Slot<Val>>> = graph
+        .nodes()
+        .iter()
+        .map(|node| {
+            value_of(node.id).map(|value| Slot {
+                value,
+                absent: false,
+            })
+        })
+        .collect();
     let scheduler = Scheduler::new(
         &plan,
-        &graph,
-        Arc::new(Layout::new(&plan, &graph)),
+        graph,
+        Arc::new(Layout::new(&plan, graph)),
         seeded,
         Options::default(),
         &mut Report::default(),
@@ -352,14 +395,14 @@ fn eight_threads(items: i64, grant: &dyn Grant) -> Watch {
     let watch = Watch::default();
     thread::scope(|scope| {
         for _ in 0..8 {
-            scope.spawn(|| work(&plan, &graph, grant, &shared, deadline, &watch));
+            scope.spawn(|| work(&plan, graph, grant, &shared, deadline, &watch));
         }
     });
     let scheduler = lock(&shared)
         .take()
         .unwrap_or_else(|| unreachable!("the scheduler is still there"));
     let got = scheduler
-        .finish(&plan, &graph)
+        .finish(&plan, graph)
         .unwrap_or_else(|error| unreachable!("the run succeeds: {error}"));
     assert_eq!(got, want);
     watch
@@ -386,5 +429,25 @@ fn eight_threads_never_exceed_their_limits() {
     let watch = eight_threads(300, &limits);
     assert!(watch.most.load(Ordering::Acquire) <= 3);
     assert!(watch.most_leaves.load(Ordering::Acquire) <= 2);
+    assert_eq!(limits.held(Resource::Worker), 0);
+}
+
+#[test]
+fn eight_threads_run_a_plan_without_blocks_within_its_limits() {
+    let graph = layered(2_000);
+    let last: Vec<String> = (0..10).map(|column| format!("l199_{column}")).collect();
+    let outputs: Vec<&str> = last.iter().map(String::as_str).collect();
+    let watch = on_eight_threads(&graph, &outputs, &[("seed", 1)], &Unlimited);
+    assert_eq!(watch.ran.load(Ordering::Relaxed), 2_000);
+    assert!(watch.most.load(Ordering::Acquire) > 1);
+    // A worker cap, and a node cap of one.
+    let capped = graph
+        .id_of("l5_5")
+        .unwrap_or_else(|| unreachable!("the graph has l5_5"));
+    let mut caps = vec![None; graph.nodes().len()];
+    caps[capped.index()] = NonZeroUsize::new(1);
+    let limits = Limits::new(NonZeroUsize::new(3), caps, Vec::new(), Vec::new());
+    let watch = on_eight_threads(&graph, &outputs, &[("seed", 1)], &limits);
+    assert!(watch.most.load(Ordering::Acquire) <= 3);
     assert_eq!(limits.held(Resource::Worker), 0);
 }

@@ -177,6 +177,12 @@ workers keeps it behind one lock. `Plan::run` stays the reference it is tested a
 The ready set is a heap of entry ids whose keys are compared in place, never stored: an `OrderKey` is built only for a
 task handed out, and one of up to five parts (`OrderKey::new`, `as_slice`) is held inline, with no allocation.
 
+A plan without an expand or absence rules runs **flat**: it has one scope, no probe, no single-flight key and no skip,
+so its steps live in one table by position, the ready set is a heap of positions, and a task's id is its step's
+position. With one worker that costs about 1.8 times `Plan::run`'s instructions per node, which the
+[instruction-count gate](benchmarks.md#the-instruction-count-gate) holds under 2. Every other plan runs on the general
+path above. Neither changes what a caller sees: the same tasks, keys, reports and outputs.
+
 An order key (`OrderKey`, also given by `Plan::order_key(node, branch)`) is the (step position, branch index) pairs of
 the expands whose blocks hold a step, outermost first, then the step's position. Keys compare lexicographically, so
 handing out the lowest ready one reproduces reference order: with one worker, stepping one task at a time gives the
