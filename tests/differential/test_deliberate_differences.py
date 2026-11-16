@@ -2194,8 +2194,8 @@ def test_q13_the_deprecation_warning_is_hamiltons() -> None:
 
 
 # A sync node that waits for an async sibling to tick, and says whether it did.
-# The ticker ticks only after the sync node has started, so a tick can reach it
-# only while it runs, and only if the loop runs the ticker meanwhile.
+# The clock ticks only after the sync node has started, so a tick can reach it
+# only while it runs, and only if the loop runs the clock meanwhile.
 _TICKING = """
 import asyncio
 import threading
@@ -2209,7 +2209,7 @@ def waits_for_tick(x: int) -> bool:
     return TICKED.wait({patience})
 
 
-async def ticker(x: int) -> int:
+async def clock(x: int) -> int:
     await asyncio.to_thread(STARTED.wait, 10.0)
     TICKED.set()
     return x
@@ -2223,10 +2223,10 @@ _BLOCKED_PATIENCE = 0.1
 def test_q65_sync_nodes_run_off_the_loop() -> None:
     """Hamilton's sync node stops the loop, so no tick reaches it; fnloom's doesn't.
 
-    By order of events: the node sees the tick only if the loop ran the ticker
+    By order of events: the node sees the tick only if the loop ran the clock
     while the node waited, however long it waits.
     """
-    request = ["waits_for_tick", "ticker"]
+    request = ["waits_for_tick", "clock"]
     hamilton_module = make_module(
         "differential_q65_h", _TICKING.format(patience=_BLOCKED_PATIENCE)
     )
@@ -2235,7 +2235,7 @@ def test_q65_sync_nodes_run_off_the_loop() -> None:
         built = await _hamilton_async(hamilton_module)
         return await built.execute(request, inputs={"x": 1})
 
-    assert asyncio.run(hamilton()) == {"waits_for_tick": False, "ticker": 1}
+    assert asyncio.run(hamilton()) == {"waits_for_tick": False, "clock": 1}
     for sync_nodes, patience, ticked in (
         ("thread", 10.0, True),
         ("inline", _BLOCKED_PATIENCE, False),
@@ -2248,7 +2248,7 @@ def test_q65_sync_nodes_run_off_the_loop() -> None:
         )
         assert asyncio.run(driver.execute(request, inputs={"x": 1})) == {
             "waits_for_tick": ticked,
-            "ticker": 1,
+            "clock": 1,
         }, sync_nodes
 
 

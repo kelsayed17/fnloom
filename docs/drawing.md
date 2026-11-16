@@ -143,7 +143,7 @@ class Totals(TypedDict):
     tax: float
 
 
-@tag(owner=["sales", "finance"], stage="raw")
+@tag(owner=["sales", "support"], stage="raw")
 def order_total(price: float, quantity: int) -> Totals:
     """The order's net and tax."""
     net = price * quantity
@@ -158,7 +158,7 @@ shown = orders_driver.draw(show_tags=("owner",), show_schema=True, hide_inputs=T
 [node.name for node in shown.nodes]
 # -> ['order_total']
 shown.to_mermaid().splitlines()[1]
-# -> '  n0["order_total<br>orders.Totals<br>owner=sales, finance<br>net: float<br>tax: float"]'
+# -> '  n0["order_total<br>orders.Totals<br>owner=sales, support<br>net: float<br>tax: float"]'
 orders_driver.draw(show_types=False, hide_inputs=True).to_mermaid().splitlines()[1]
 # -> '  n0["order_total"]'
 ```

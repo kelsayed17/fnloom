@@ -194,8 +194,8 @@ behind); **n/a** (fnloom has no such feature yet; the plan builds it without the
 
 These are problems Hamilton has no answer to at all. They need a design of their own before any plan:
 
-- **Incremental and streaming execution.** One appended bar re-runs every node; re-running per new row is O(n).
-- **Panel and sweep execution.** Running one graph over many entities, or over a grid of `value()`s, is a Python
+- **Incremental and streaming execution.** One appended record re-runs every node; re-running per new row is O(n).
+- **Batch and sweep execution.** Running one graph over many entities, or over a grid of `value()`s, is a Python
   loop of `execute` calls today.
 - **Graphs that carry I/O and failure.** An async node that fails can degrade to a declared empty answer, so a fan-out
   returns partial results rather than one exception.

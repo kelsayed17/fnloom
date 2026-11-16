@@ -2,9 +2,20 @@
 
 This page takes about five minutes: install fnloom, write a small graph and run it.
 
+## Install
+
+fnloom needs Python 3.14 or newer; the free-threaded `3.14t` works too. Install it from PyPI:
+
+```bash
+pip install fnloom
+```
+
+PyPI has wheels for Linux (glibc and musl) on x86_64 and aarch64, macOS on arm64 and x86_64, and Windows on x86_64,
+so you don't need a Rust toolchain.
+
 ## Install from source
 
-fnloom isn't on PyPI yet, so you build it from a clone. You need:
+To build fnloom from a clone instead, for example to work on fnloom itself, you need:
 
 - Python 3.14 or newer (the free-threaded `3.14t` works too)
 - [uv](https://docs.astral.sh/uv/)
