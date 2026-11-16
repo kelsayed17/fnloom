@@ -7,6 +7,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-15
+
 ### Added
 
 - Typed absence (Q135). A node annotated `-> T | fnloom.Absent` may return `fnloom.ABSENT`, a final singleton
@@ -151,6 +153,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Changed
 
+- **Breaking:** `CacheOutcome.status` is widened: its `Literal` gains `"skipped"`, so an exhaustive `match` on it
+  needs an arm.
 - A pandas `RangeIndex`, the default index of every frame and series, is fingerprinted by its start, stop and step
   rather than by building every value: a 10-million-row one takes 0.1 ms rather than 1.1 s, and a 1-million-row
   frame half the time. Two ranges of equal values but another `stop`, such as `range(0, 4, 2)` and `range(0, 3, 2)`,
@@ -176,7 +180,6 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `None`, follows `declines`, and the third of each input is its collect mode, `"present"`, `"all"` or `None`.
   `_core.Graph.blocks()` gives each block node's block path, `_core.Plan.blocks()` each block's steps, and
   `_core.Plan.steps()` lists a block's steps after its expand's.
-- `CacheOutcome.status` is widened: its `Literal` gains `"skipped"`, so an exhaustive `match` on it needs an arm.
 - The native `_core.KeyPlan` takes each node entry with a sixth element, the sources the node reads by an
   `optional` edge. Its marker for an optional input not supplied is now named `NOT_SUPPLIED` in the binding; its
   bytes, and so every cache key, are unchanged.
@@ -744,7 +747,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - The type stub `fnloom/_core.pyi` matches the extension: `Graph`, `KeyPlan` and `ObserverBase` construct through `__new__`,
   and `Plan.run`'s `observers` defaults to `()` in its runtime signature too.
 
-[Unreleased]: https://github.com/kelsayed17/fnloom/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/kelsayed17/fnloom/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/kelsayed17/fnloom/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/kelsayed17/fnloom/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/kelsayed17/fnloom/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/kelsayed17/fnloom/compare/v0.2.0...v0.3.0
