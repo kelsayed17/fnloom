@@ -1,6 +1,6 @@
 //! The Python `Plan`, and the evaluator that calls each node's Python function.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
@@ -200,6 +200,7 @@ impl Plan {
                 calls: &self.calls,
                 late,
                 limits,
+                absent_on: Cell::new(false),
             },
             lookup,
             &mut hooks,
@@ -583,6 +584,10 @@ struct Caller<'k, 'py, 'g> {
     /// The driver's limits, granting each limited node's call; `None` for a driver with
     /// none, whose calls test nothing more.
     limits: Option<&'k Caps>,
+    /// Whether the last call or pull that failed raised an error its node is absent on
+    /// (`Graph::absent_on`): the core asks `absent_on_error` right after, of that node.
+    /// Only the error the node's own code raised counts, never one fnloom made.
+    absent_on: Cell<bool>,
 }
 
 impl<'py> Evaluate<Py<PyAny>> for Caller<'_, 'py, '_> {
@@ -601,6 +606,13 @@ impl<'py> Evaluate<Py<PyAny>> for Caller<'_, 'py, '_> {
     /// Whether `value` is `fnloom.ABSENT`, by identity.
     fn is_absent(&self, value: &Value<'py>) -> bool {
         value.as_ptr() == self.absent.as_ptr()
+    }
+
+    /// `fnloom.ABSENT` when the error just raised is one the node is absent on.
+    fn absent_on_error(&mut self, _node: &Node<Py<PyAny>>, _error: &PyErr) -> Option<Value<'py>> {
+        self.absent_on
+            .take()
+            .then(|| self.absent.bind(self.kwargs.py).clone().into_any())
     }
 
     fn blocks(&mut self) -> Option<&mut dyn Blocks<Py<PyAny>, Value<'py>, PyErr>> {
@@ -678,12 +690,13 @@ impl<'py> Blocks<Py<PyAny>, Value<'py>, PyErr> for Caller<'_, 'py, '_> {
         iterator: &Value<'py>,
     ) -> PyResult<Item<Value<'py>>> {
         // A generator's body runs as its items are read, so its pulls are its calls.
-        match self.limits.filter(|limits| limits.limited(node.id)) {
+        let pulled = match self.limits.filter(|limits| limits.limited(node.id)) {
             Some(limits) => limits.around(self.kwargs.py, node.id, || {
                 self.scope().next_item(&Direct, node, iterator)
             }),
             None => self.scope().next_item(&Direct, node, iterator),
-        }
+        }?;
+        pulled.inspect_err(|error| self.raised(node, error))
     }
 
     fn finish_items(
@@ -809,6 +822,16 @@ impl<'py> Observer<Value<'py>, PyErr> for LateHook<'py, '_> {
 }
 
 impl<'py> Caller<'_, 'py, '_> {
+    /// Notes whether `error`, raised by `node`'s own code, is one `node` is absent on.
+    #[cold]
+    fn raised(&self, node: &Node<Py<PyAny>>, error: &PyErr) {
+        if node.absent_on_error {
+            let py = self.kwargs.py;
+            self.absent_on
+                .set(self.kwargs.graph.absent_on(py, node.id, error));
+        }
+    }
+
     /// Calls `function`, the payload of `consumer`, with `args` as keyword arguments,
     /// inside its grant when `consumer` is limited.
     fn call(
@@ -836,23 +859,24 @@ impl<'py> Caller<'_, 'py, '_> {
         args: &[Arg<'_, Value<'py>>],
     ) -> PyResult<Value<'py>> {
         let py = self.kwargs.py;
-        let result = if self.shared {
+        let called = if self.shared {
             let kwargs = self.kwargs.for_call(consumer.id, args)?;
-            function.bind(py).call((), Some(&kwargs))?
+            function.bind(py).call((), Some(&kwargs))
         } else {
             match self.calls.get(consumer.id.index()) {
                 Some(Some(call)) if call.args.iter().eq(args.iter().map(|arg| &arg.node)) => {
-                    vectorcall(function.bind(py), values(args), &call.names)?
+                    vectorcall(function.bind(py), values(args), &call.names)
                 }
                 // Arguments other than the step's own, as an omitted optional one makes.
                 _ => {
                     let names = args
                         .iter()
                         .map(|arg| keyword_for(py, self.kwargs.graph, consumer.id, arg.node));
-                    vectorcall(function.bind(py), values(args), &Keywords::new(py, names)?)?
+                    vectorcall(function.bind(py), values(args), &Keywords::new(py, names)?)
                 }
             }
         };
+        let result = called.inspect_err(|error| self.raised(consumer, error))?;
         if !consumer.declines && result.as_ptr() == self.absent.as_ptr() {
             return Err(undeclared_absence(&consumer.name));
         }

@@ -92,6 +92,26 @@ change the public API; such changes are listed under **Changed** and **Removed**
   or else raises a `RuntimeError`, which the outer run never raises in place of the failure that stopped it.
 - `Ctrl-C` ends a parallel run at once, abandoning its running nodes as a deadline does, so a node hung on a worker
   thread no longer keeps the run waiting. A `KeyboardInterrupt` a node raises does the same.
+- Partial results (Q133; resolves Q157). `@fnloom.absent_on(*errors)` makes a node absent, instead of failing the
+  run, when its call raises one of `errors` or a subclass, and `Builder.with_absent_on(*errors, tags=None)` does the
+  same for every node of a driver, or the nodes a `tagged` query matches. Each consumer then follows the absence
+  rules, so a `Collect[T]` over a fan-out gets the branches that succeeded and `Collect[T | Absent]` keeps each
+  branch's place; an expand absent on an error, before or while it yields, has no branches. An `@absent_on` node's
+  return annotation must admit `Absent`, checked at build, naming the node, and an unresolved one is refused; a node
+  covered only by `with_absent_on` may be absent whatever its annotation. Only `Exception` subclasses may be listed,
+  so an interrupt, an exit, a generator's close or a cancellation is never absorbed, and neither is fnloom's own
+  `TypeError` for a value nor a stopped inner run's `StoppedError`. `after_node` still reports `ok=False` with the
+  error, so `LogFailures` logs it, and `RunEnd.absent_errors` lists each as `(node, branch, error)`, sorted by order
+  key on every driver (amends Q84). An error absence is no failure: the run's error is still the first real failure
+  in reference order. It is never stored, nothing computed from it in that run is either, and single-flight never
+  shares it, so the next run tries again. It holds on `Driver`, with `with_threads` and on `AsyncDriver`, and the
+  setting survives pickling, `copy`, `rebuild()` and `build_async()`.
+- Rust core: error absences. `NodeSpec.absent_on_error` makes a node may-be-absent without letting it return an
+  absent value itself; `Evaluate::absent_on_error` gives the value its failed call takes, asked only of such a node,
+  and `Observer::absent_error` reports it after `post_node`, in `Plan::run` and in the `Scheduler` through
+  `Outcome::ErrorAbsent`. A plan with no such node runs exactly as before.
+- `ObserverBase.absent_error(node, *, branch, error)`, the binding's forward of `Observer::absent_error`, sent only
+  to an observer whose class overrides it; `_core.Graph(..., absent_on=)` takes each node's exception classes.
 
 ### Fixed
 

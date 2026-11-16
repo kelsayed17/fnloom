@@ -301,8 +301,8 @@ fn topological<P>(nodes: &[Node<P>]) -> Vec<NodeId> {
     order
 }
 
-/// Sets `may_be_absent` on every node that declines or reads, by a `Required` edge, a node
-/// that may be absent.
+/// Sets `may_be_absent` on every node that declines, is absent on an error, or reads, by a
+/// `Required` edge, a node that may be absent.
 ///
 /// Blocks change two edges. A collect edge passes on the absence of the collected block's
 /// expand, not of the node it reads: a block node that is absent in a branch is dropped or
@@ -314,7 +314,10 @@ fn topological<P>(nodes: &[Node<P>]) -> Vec<NodeId> {
 /// node declines costs one scan. Returns whether any node may be absent.
 fn mark_may_be_absent<P>(nodes: &mut [Node<P>]) -> bool {
     let mut work: Vec<NodeId> = Vec::new();
-    for node in nodes.iter_mut().filter(|node| node.declines) {
+    for node in nodes
+        .iter_mut()
+        .filter(|node| node.declines || node.absent_on_error)
+    {
         node.may_be_absent = true;
         work.push(node.id);
     }
@@ -392,6 +395,7 @@ fn make_node<P>(
             },
             tags: spec.tags,
             declines: spec.declines,
+            absent_on_error: spec.absent_on_error,
             may_be_absent: false,
             block: None,
         },
@@ -402,6 +406,7 @@ fn make_node<P>(
             inputs: Vec::new(),
             tags: BTreeMap::new(),
             declines: false,
+            absent_on_error: false,
             may_be_absent: false,
             block: None,
         },
@@ -611,6 +616,7 @@ mod tests {
             payload: (),
             declines: false,
             expands: false,
+            absent_on_error: false,
         };
         let err = Graph::build(vec![spec(Dependency::Optional)]).unwrap_err();
         assert_eq!(
@@ -667,6 +673,7 @@ mod tests {
                 payload: (),
                 declines: false,
                 expands: false,
+                absent_on_error: false,
             }
         };
         // `x03` conflicts before `x07` does, in input order.
@@ -766,6 +773,41 @@ mod tests {
                 ("d", false, false),
             ]
         );
+    }
+
+    #[test]
+    fn an_absent_on_error_node_may_be_absent() {
+        let graph = Graph::build(vec![
+            NodeSpec {
+                absent_on_error: true,
+                ..spec("a", &[])
+            },
+            spec("b", &[("a", Dependency::Required)]),
+            spec("c", &[("a", Dependency::Optional)]),
+        ])
+        .unwrap();
+        let flags: Vec<(&str, bool, bool, bool)> = graph
+            .nodes()
+            .iter()
+            .map(|n| {
+                (
+                    n.name.as_str(),
+                    n.declines,
+                    n.absent_on_error,
+                    n.may_be_absent,
+                )
+            })
+            .collect();
+        // It may be absent, though it doesn't decline: it may not return an absent value.
+        assert_eq!(
+            flags,
+            [
+                ("a", false, true, true),
+                ("b", false, false, true),
+                ("c", false, false, false),
+            ]
+        );
+        assert!(graph.has_absence());
     }
 
     #[test]

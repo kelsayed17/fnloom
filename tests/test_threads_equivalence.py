@@ -1,8 +1,9 @@
 """Executor equivalence: results never depend on the worker count (Plan 11, task 3).
 
-A program with a nested fan-out, a node that declines and a node that may fail runs
-without `with_threads` and with 1, 2 and 8 workers, over drawn inputs. Its values,
-`Collect` orders, exception class, skipped nodes and cache keys are the same on all.
+A program with a nested fan-out, a node that declines, a node an error makes absent
+and a node that may fail runs without `with_threads` and with 1, 2 and 8 workers,
+over drawn inputs. Its values, `Collect` orders, exception class, skipped nodes, error
+absences and cache keys are the same on all.
 """
 
 import gc
@@ -22,7 +23,7 @@ from helpers import make_module
 pytestmark = pytest.mark.threads
 
 PROGRAM = """
-from fnloom import ABSENT, Absent, Collect, Parallelizable
+from fnloom import ABSENT, Absent, Collect, Parallelizable, absent_on
 
 
 def picked(n: int) -> Parallelizable[int]:
@@ -65,12 +66,21 @@ def present(shown: Collect[str]) -> list[str]:
 
 def total(everything: list[list[int]], present: list[str]) -> int:
     return sum(map(sum, everything)) + len(present)
+
+
+@absent_on(ArithmeticError)
+def ratio(picked: int, absent_at: int) -> int | Absent:
+    return 100 // (picked - absent_at)
+
+
+def ratios(ratio: Collect[int | Absent]) -> list[object]:
+    return list(ratio)
 """
 
 WORKERS: tuple[int | None, ...] = (None, 1, 2, 8)
 # The CI `stress` job sets HYPOTHESIS_PROFILE=stress for many more examples.
 EXAMPLES = 500 if os.environ.get("HYPOTHESIS_PROFILE") == "stress" else 50
-OUTPUTS = ("everything", "present", "total")
+OUTPUTS = ("everything", "present", "total", "ratios")
 
 
 class Keys(fnloom.MemoryCache):
@@ -90,19 +100,21 @@ class Keys(fnloom.MemoryCache):
 
 
 class Skips(fnloom.Hook):
-    """Keeps each run's `RunEnd.skipped`."""
+    """Keeps each run's `RunEnd.skipped` and `RunEnd.absent_errors`."""
 
     def __init__(self) -> None:
         """No run yet."""
         self.skipped: tuple[tuple[str, tuple[int, ...]], ...] = ()
+        self.absent: list[tuple[str, tuple[int, ...], str]] = []
 
     @override
     def after_run(self, event: fnloom.RunEnd) -> None:
         self.skipped = event.skipped
+        self.absent = [(n, b, repr(e)) for n, b, e in event.absent_errors]
 
 
 def outcome(workers: int | None, inputs: dict[str, int], outputs: list[str]) -> Any:  # noqa: ANN401  # one comparable record
-    """One run's values, skipped nodes and the keys it wrote; or its exception class.
+    """One run's values, skipped nodes, error absences, the keys it wrote; or its error.
 
     A failed run is only its exception class: which other branches ran before the
     run stopped depends on timing with several workers, as Hamilton's does. The keys
@@ -129,7 +141,8 @@ def outcome(workers: int | None, inputs: dict[str, int], outputs: list[str]) -> 
         pool = None if driver._workers is None else driver._workers.threads()  # noqa: SLF001  # the driver's own pool
         if pool is not None:
             pool.close()
-    return result, sorted(hook.skipped), sorted(set(store.keys))
+    # In order, unsorted: every driver lists them in reference order already.
+    return result, sorted(hook.skipped), hook.absent, sorted(set(store.keys))
 
 
 @settings(max_examples=EXAMPLES, deadline=None)

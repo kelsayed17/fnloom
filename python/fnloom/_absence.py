@@ -3,32 +3,40 @@
 A node whose return annotation admits `fnloom.Absent` may return `fnloom.ABSENT`.
 Each parameter reading a node that may be absent decides by its own signature:
 annotated to admit `Absent`, it receives `ABSENT`; with a default, it is left out
-and the default applies; otherwise its node is skipped, and absent too.
+and the default applies; otherwise its node is skipped, and absent too. A node
+`@absent_on` or `Builder.with_absent_on` covers is absent when its call raises
+one of the errors listed (Q133).
 """
 
 import functools
 import operator
 import types
 import typing
+from collections.abc import Mapping
 from typing import TYPE_CHECKING, Any, Literal, Union
 
 from fnloom._core import ABSENT, Absent
-from fnloom._decorators import Source
-from fnloom._types import stripped
+from fnloom._decorators import Source, checked_errors, decorations
+from fnloom._tags import checked_query, tag_matches
+from fnloom._types import Unresolved, stripped
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, Sequence
+    from collections.abc import Iterable, Sequence
     from collections.abc import Set as AbstractSet
 
     from fnloom._scan import NodeDef
+    from fnloom._tags import _Any
     from fnloom._view import Param
 
 __all__ = [
     "ABSENT",
     "Absent",
+    "AbsentOn",
     "Kind",
     "admits_absent",
     "applied",
+    "checked_absent_on",
+    "covered",
     "declines",
     "given_problems",
     "may_be_absent",
@@ -36,10 +44,17 @@ __all__ = [
     "needs_input",
     "refuse_given",
     "refuse_mixed",
+    "refuse_unadmitted",
     "without_absent",
 ]
 
 type Kind = Literal["required", "optional", "admits", "admits_optional"]
+
+# One `with_absent_on` call: its errors, and its tag query, `None` for every node.
+type AbsentOn = tuple[
+    tuple[type[Exception], ...],
+    tuple[tuple[str, str | tuple[str, ...] | _Any], ...] | None,
+]
 
 # The kinds whose consumer needs an input supplied: they have no default.
 _NEEDS_INPUT: frozenset[str] = frozenset({"required", "admits"})
@@ -103,6 +118,80 @@ def declines(node: NodeDef) -> bool:
     return admits_absent(node.returns)
 
 
+def checked_absent_on(
+    errors: tuple[object, ...], tags: Mapping[str, object] | None
+) -> AbsentOn:
+    """One `with_absent_on` call, checked: its errors as `absent_on`'s, its tag query.
+
+    `tags` is a query in `NodeViews.tagged`'s form (Q141), each value checked as
+    `tagged` checks it; `None` covers every node. `TypeError` naming the culprit.
+    """
+    checked = checked_errors(errors, "with_absent_on")
+    if tags is None:
+        return checked, None
+    if not isinstance(tags, Mapping):
+        msg = f"with_absent_on tags must be a mapping of tag queries, not {tags!r}"
+        raise TypeError(msg)
+    query = tuple(
+        (key, checked_query(key, value))
+        for key, value in sorted(tags.items(), key=lambda item: str(item[0]))
+    )
+    return checked, query
+
+
+def covered(
+    nodes: Sequence[NodeDef], rules: Sequence[AbsentOn], others: AbstractSet[str]
+) -> dict[str, tuple[type[Exception], ...]]:
+    """The errors each node is absent on, by node: its `@absent_on` and `rules`' union.
+
+    A node in `others`, such as an extracted field or a `@pipe_output` relay, takes
+    no `@absent_on` of its function: the node calling the function does, and what
+    reads an absent node is absent too. A rule covers each node its tag query
+    matches, those included.
+    """
+    found: dict[str, tuple[type[Exception], ...]] = {}
+    for node in nodes:
+        errors = () if node.name in others else decorations(node.origin).absent_on
+        for listed, query in rules:
+            if query is None or all(
+                tag_matches(node.tags, key, value) for key, value in query
+            ):
+                errors = (*errors, *listed)
+        if errors:
+            found[node.name] = tuple(dict.fromkeys(errors))
+    return found
+
+
+def refuse_unadmitted(nodes: Sequence[NodeDef], others: AbstractSet[str]) -> None:
+    """`ValueError` for each `@absent_on` node whose return annotation lacks `Absent`.
+
+    The type then says what can happen (O11). Checked at build, once annotations
+    resolve: an annotation that did not (Q81) is refused too, since whether it
+    admits `Absent` can't be told. A node covered only by `with_absent_on` needs
+    no such annotation, and nor does a node in `others`, as for `covered`. Every
+    culprit is listed, sorted.
+    """
+    lines: list[str] = []
+    for node in nodes:
+        if node.name in others or not decorations(node.origin).absent_on:
+            continue
+        if admits_absent(node.returns):
+            continue
+        if isinstance(node.returns, Unresolved):
+            lines.append(
+                f"node {node.name!r} is @absent_on, but its return annotation "
+                f"{node.returns.name!r} did not resolve, so fnloom can't tell whether "
+                "it admits fnloom.Absent; import what it names at run time"
+            )
+        else:
+            lines.append(
+                f"node {node.name!r} is @absent_on, so it may be absent, but its "
+                "return annotation does not admit fnloom.Absent; add `| Absent`"
+            )
+    if lines:
+        raise ValueError("\n".join(sorted(lines)))
+
+
 def merged(params: Sequence[Param]) -> Kind:
     """The one kind of a source read by every parameter of `params`.
 
@@ -132,13 +221,16 @@ def _sources(params: Iterable[Param]) -> dict[str, list[Param]]:
     return by_source
 
 
-def may_be_absent(nodes: Sequence[NodeDef]) -> frozenset[str]:
+def may_be_absent(
+    nodes: Sequence[NodeDef], errors: AbstractSet[str] = frozenset()
+) -> frozenset[str]:
     """The nodes whose value may be absent: they decline, or read one by `required`.
 
-    The same set the core computes at build (`Graph.may_be_absent`), known here
-    before the graph is, for the views. A reachability, found with a worklist.
+    A node in `errors`, absent on an error, counts as one that declines. The same
+    set the core computes at build (`Graph.may_be_absent`), known here before the
+    graph is, for the views. A reachability, found with a worklist.
     """
-    declining = [node.name for node in nodes if declines(node)]
+    declining = [node.name for node in nodes if declines(node) or node.name in errors]
     if not declining:
         return frozenset[str]()
     defined = {node.name for node in nodes}

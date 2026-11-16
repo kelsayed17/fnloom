@@ -8,7 +8,7 @@ use fnloom_core::plan::Request;
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
-use pyo3::types::{PyDict, PyString};
+use pyo3::types::{PyDict, PyString, PyTuple};
 use pyo3::{PyTraverseError, PyVisit};
 
 use crate::errors::value_error;
@@ -63,6 +63,10 @@ pub struct Graph {
     renames: RenamesById,
     /// By node id, an expand's item iterator factory; `None` for any other node.
     items: Vec<Option<Py<PyAny>>>,
+    /// By node id, the exception classes that make the node absent instead of failing the
+    /// run (`fnloom.absent_on`, `Builder.with_absent_on`); `None` for a node with none.
+    /// Empty for a graph where no node has any.
+    absent_on: Vec<Option<Py<PyTuple>>>,
 }
 
 /// Renamed inputs by consumer id, each consumer's sorted by input id.
@@ -80,25 +84,52 @@ impl Graph {
     /// `items`, when not `None`, makes the node an expand whose value it iterates.
     ///
     /// `renames` maps a node to the inputs it is passed under another keyword: input
-    /// name to keyword. Raises `ValueError` naming the culprits for a duplicate name or a
-    /// cycle, a rename of a node or input the graph does not have, or an unknown kind.
+    /// name to keyword. `absent_on` maps a node to the tuple of exception classes that
+    /// make it absent when its call raises one, instead of failing the run. Raises
+    /// `ValueError` naming the culprits for a duplicate name or a cycle, a rename of a
+    /// node or input the graph does not have, or an unknown kind.
     #[new]
-    #[pyo3(signature = (nodes, renames = None))]
+    #[pyo3(signature = (nodes, renames = None, absent_on = None))]
     fn new(
         py: Python<'_>,
         nodes: Vec<NodeTuple>,
         renames: Option<&Bound<'_, PyDict>>,
+        absent_on: Option<BTreeMap<String, Py<PyTuple>>>,
     ) -> PyResult<Self> {
+        let mut absent_on = absent_on.unwrap_or_default();
         let mut factories = Vec::new();
+        let mut errors = Vec::new();
         let mut specs = Vec::with_capacity(nodes.len());
         for (name, params, tags, function, declines, items) in nodes {
             let expands = items.is_some();
             if let Some(items) = items {
                 factories.push((name.clone(), items));
             }
-            specs.push(node_spec(name, params, tags, function, declines, expands)?);
+            let mut spec = node_spec(name, params, tags, function, declines, expands)?;
+            if let Some(classes) = absent_on.remove(&spec.name) {
+                spec.absent_on_error = true;
+                errors.push((spec.name.clone(), classes));
+            }
+            specs.push(spec);
+        }
+        if let Some(name) = absent_on.keys().next() {
+            return Err(PyValueError::new_err(format!(
+                "absent_on names '{name}', which is no node"
+            )));
         }
         let graph = CoreGraph::build(specs).map_err(value_error)?;
+        let mut absent_on = Vec::new();
+        if !errors.is_empty() {
+            absent_on.resize_with(graph.nodes().len(), || None);
+            for (name, classes) in errors {
+                if let Some(slot) = graph
+                    .id_of(&name)
+                    .and_then(|id| absent_on.get_mut(id.index()))
+                {
+                    *slot = Some(classes);
+                }
+            }
+        }
         let mut items: Vec<Option<Py<PyAny>>> = Vec::new();
         items.resize_with(graph.nodes().len(), || None);
         for (name, factory) in factories {
@@ -117,6 +148,7 @@ impl Graph {
             keywords,
             renames,
             items,
+            absent_on,
         })
     }
 
@@ -128,6 +160,9 @@ impl Graph {
         }
         for factory in self.items.iter().flatten() {
             visit.call(factory)?;
+        }
+        for classes in self.absent_on.iter().flatten() {
+            visit.call(classes)?;
         }
         Ok(())
     }
@@ -141,13 +176,23 @@ impl Graph {
             .collect()
     }
 
-    /// The nodes whose value may be absent: each that declines, and each reading one of
-    /// them by a required edge, transitively; sorted.
+    /// The nodes whose value may be absent: each that declines or is absent on an error,
+    /// and each reading one of them by a required edge, transitively; sorted.
     fn may_be_absent(&self) -> Vec<String> {
         self.core
             .nodes()
             .iter()
             .filter(|node| node.may_be_absent)
+            .map(|node| node.name.clone())
+            .collect()
+    }
+
+    /// The nodes some errors make absent (`absent_on`), sorted.
+    fn absent_on_nodes(&self) -> Vec<String> {
+        self.core
+            .nodes()
+            .iter()
+            .filter(|node| node.absent_on_error)
             .map(|node| node.name.clone())
             .collect()
     }
@@ -237,6 +282,17 @@ impl Graph {
         renames.get(found).map(|(_, keyword)| keyword)
     }
 
+    /// Whether `error`, raised by node `id`'s own call or one of its items, makes the node
+    /// absent: it is an instance of one of the node's `absent_on` classes, and no
+    /// `StoppedError`, which only says that the run that started this one stopped.
+    pub fn absent_on(&self, py: Python<'_>, id: NodeId, error: &PyErr) -> bool {
+        let Some(classes) = self.absent_on.get(id.index()).and_then(Option::as_ref) else {
+            return false;
+        };
+        error.matches(py, classes.bind(py)).unwrap_or(false)
+            && !error.is_instance_of::<crate::parallel::StoppedError>(py)
+    }
+
     /// The item iterator factory of expand `id`; `None` for any other node.
     pub fn items(&self, id: NodeId) -> Option<&Py<PyAny>> {
         self.items.get(id.index()).and_then(Option::as_ref)
@@ -288,6 +344,7 @@ fn node_spec(
         payload: function,
         declines,
         expands,
+        absent_on_error: false,
     })
 }
 

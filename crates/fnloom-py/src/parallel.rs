@@ -1131,12 +1131,26 @@ fn land(
             slots.release();
             item
         }) {
-            Ok(item) => Landed::done(Outcome::Item(match item {
+            Ok(Ok(item)) => Landed::done(Outcome::Item(match item {
                 Item::Next(value) => Item::Next(shared(value)),
                 Item::Declined(value) => Item::Declined(shared(value)),
                 Item::Done => Item::Done,
             })),
-            Err(error) => Landed::failed(error),
+            Ok(Err(error)) if graph.absent_on(py, id, &error) => {
+                // The expand is absent, its branches so far dropped, as if it declined.
+                let lent = Kwargs::new(py, plan, graph);
+                let errors = run.hooked(py, calls, &lent, |hook| {
+                    hook.absent_error(&node.name, branch, &error)
+                });
+                if errors.is_empty() {
+                    Landed::done(Outcome::Item(Item::Declined(shared(
+                        scope.absent.clone().into_any(),
+                    ))))
+                } else {
+                    Landed::hooks(py, "absent_error", errors)
+                }
+            }
+            Ok(Err(error)) | Err(error) => Landed::failed(error),
         },
         Work::Finish {
             iterator,
@@ -1286,9 +1300,15 @@ fn compute<'py>(
     if run.abandoned.load(Ordering::SeqCst) {
         return Landed::failed(abandoned());
     }
+    // Only what the node's own call raises may make it absent, never a check of fnloom's.
+    let mut absent_on = false;
     let result = calls
         .holding(slots.caps(), node.id, || {
-            caught(|| calls.call(payload.bind(py), Vec::new(), Some(&kwargs)))
+            let called = caught(|| calls.call(payload.bind(py), Vec::new(), Some(&kwargs)));
+            if let Err(error) = &called {
+                absent_on = graph.absent_on(py, node.id, error);
+            }
+            called
         })
         .and_then(|value| scope.checked(node, value));
     if std::process::id() != run.pid {
@@ -1301,8 +1321,13 @@ fn compute<'py>(
     }
     // A limit counts concurrent calls, and a hook may start a run needing this slot.
     slots.release();
+    // An error absence's two events fire together, so its `post_node` is never seen alone.
     let mut errors = run.hooked(py, calls, &lent, |hook| {
-        hook.post_node_in(&node.name, branch, result.as_ref())
+        let ended = hook.post_node_in(&node.name, branch, result.as_ref());
+        match &result {
+            Err(error) if absent_on => ended.and(hook.absent_error(&node.name, branch, error)),
+            _ => ended,
+        }
     });
     // Abandoned while its hooks ran: nothing is stored.
     if run.abandoned.load(Ordering::SeqCst) {
@@ -1317,7 +1342,34 @@ fn compute<'py>(
         branch,
         result.as_ref(),
     ));
+    landed(
+        py, scope, calls, node, branch, expands, result, absent_on, errors,
+    )
+}
+
+/// What a compute's call gave becomes, once its hooks and stores heard of it: an error
+/// absence when `absent_on`, its node's own error being one it is absent on.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the task's parts, and what its call and hooks gave"
+)]
+fn landed<'py>(
+    py: Python<'py>,
+    scope: &Scope<'_, 'py>,
+    calls: &Copied<'py>,
+    node: &Node<Py<PyAny>>,
+    branch: &[usize],
+    expands: bool,
+    result: PyResult<Bound<'py, PyAny>>,
+    absent_on: bool,
+    errors: Vec<PyErr>,
+) -> Landed {
     match result {
+        Err(_) if absent_on && !errors.is_empty() => Landed::hooks(py, "post_node", errors),
+        // Never stored, and never shared with a step of an equal key.
+        Err(_) if absent_on => Landed::done(Outcome::ErrorAbsent(shared(
+            scope.absent.clone().into_any(),
+        ))),
         Err(error) => Landed {
             outcome: Outcome::Failed(error),
             failure: Some(Failure::Task(errors)),

@@ -137,8 +137,9 @@ dispatch.
 **Yes, if** you compute many derived values from a few inputs (features, metrics, pricing, signals), want each step
 to be a small function you can test on its own, and run the same graph many times in one process.
 
-**Not yet, if** you need a fan-out's items run in parallel, or partial results past a failure, as
-`GracefulErrorAdapter` gives. They're on the [roadmap](#status). fnloom is also not a scheduler. It doesn't retry,
+**Not yet, if** you need a fan-out's items run in parallel. It's on the [roadmap](#status). Partial results past
+a failure, as `GracefulErrorAdapter` gives, are
+[`@fnloom.absent_on`](https://kelsayed17.github.io/fnloom/writing-nodes/#partial-results). fnloom is also not a scheduler. It doesn't retry,
 distribute or schedule work, so pair it with an orchestrator if you need that.
 
 ## Install
@@ -180,7 +181,9 @@ uv run maturin develop --release
   feature left out
 - ✅ [Fan-out and fan-in](https://kelsayed17.github.io/fnloom/running/#fan-out-and-fan-in) with `Parallelizable` and
   `Collect`, one item after another, and [typed absence](https://kelsayed17.github.io/fnloom/running/#absence)
-- 🔜 The parallel executor and partial results
+- ✅ [Partial results](https://kelsayed17.github.io/fnloom/writing-nodes/#partial-results): `@absent_on` turns
+  chosen errors into absence, so a `Collect` gets the branches that succeeded
+- 🔜 The parallel executor
 
 The [design](https://kelsayed17.github.io/fnloom/design/2026-10-26-fnloom-design/) has the full plan. The name is
 provisional, pending a trademark check before the first release.

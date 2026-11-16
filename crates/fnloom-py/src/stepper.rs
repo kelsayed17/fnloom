@@ -800,6 +800,7 @@ impl Stepper {
         py: Python<'_>,
         running: &Running,
         result: PyResult<Bound<'_, PyAny>>,
+        raised: bool,
     ) -> (Out, Option<Failure>, bool) {
         let plan = self.plan.get();
         let graph = plan.graph().get();
@@ -812,6 +813,11 @@ impl Stepper {
                 false,
             );
         };
+        // Only what the node itself raised may make it absent, never a check of fnloom's.
+        let absent_on = raised
+            && result
+                .as_ref()
+                .is_err_and(|error| graph.absent_on(py, node.id, error));
         let result = result.and_then(|value| {
             if !node.declines && value.is(absent) {
                 return Err(undeclared_absence(&node.name));
@@ -832,7 +838,13 @@ impl Stepper {
                 kwargs.reuse_order(&node.name, &running.branch, order.bind(py).clone());
             }
             errors = self.observers.fire(py, &kwargs, run.as_ref(), |hook| {
-                hook.post_node_in(&node.name, &running.branch, result.as_ref())
+                let ended = hook.post_node_in(&node.name, &running.branch, result.as_ref());
+                match &result {
+                    Err(error) if absent_on => {
+                        ended.and(hook.absent_error(&node.name, &running.branch, error))
+                    }
+                    _ => ended,
+                }
             });
             errors.extend(self.observers.stored(
                 py,
@@ -845,7 +857,22 @@ impl Stepper {
             ));
         }
         match result {
-            Err(error) => (Outcome::Failed(error), Some(Failure::Task(errors)), false),
+            Err(error) if !absent_on => {
+                (Outcome::Failed(error), Some(Failure::Task(errors)), false)
+            }
+            Err(_) if errors.is_empty() => (
+                // Never stored, and never shared with a step of an equal key.
+                Outcome::ErrorAbsent(shared(absent.bind(py).clone().into_any())),
+                None,
+                false,
+            ),
+            Err(_) => {
+                let failure = Failure::Run(RunError::Observers {
+                    event: "post_node",
+                    errors,
+                });
+                (dropped(py), Some(failure), true)
+            }
             Ok(_) if !errors.is_empty() => {
                 let failure = Failure::Run(RunError::Observers {
                     event: "post_node",
@@ -867,29 +894,69 @@ impl Stepper {
         }
     }
 
-    /// What a pull's outcome becomes: its item, its iterator's end, or its failure.
+    /// What a pull's outcome becomes: its item, its iterator's end, or its failure; or the
+    /// expand's absence, for an error it is absent on.
     fn pulled(
         &self,
         py: Python<'_>,
         running: &Running,
         kind: &str,
         value: Bound<'_, PyAny>,
-    ) -> (Out, Option<Failure>) {
-        let failed = |error: PyErr| (Outcome::Failed(error), Some(Failure::Task(Vec::new())));
+    ) -> (Out, Option<Failure>, bool) {
+        let failed = |error: PyErr| {
+            (
+                Outcome::Failed(error),
+                Some(Failure::Task(Vec::new())),
+                false,
+            )
+        };
         match kind {
-            "value" => (Outcome::Item(Item::Next(shared(value))), None),
+            "value" => (Outcome::Item(Item::Next(shared(value))), None, false),
+            "error" => {
+                let error = PyErr::from_value(value);
+                let plan = self.plan.get();
+                let graph = plan.graph().get();
+                if !graph.absent_on(py, running.node, &error) {
+                    return failed(error);
+                }
+                let Ok(absent) = absent::singleton(py) else {
+                    return failed(PyRuntimeError::new_err("fnloom.ABSENT is missing"));
+                };
+                let declined =
+                    Outcome::Item(Item::Declined(shared(absent.bind(py).clone().into_any())));
+                if !self.observers.any() {
+                    return (declined, None, false);
+                }
+                // In a fresh copy in its branch, as a pull's report is.
+                let made = in_branch(py, &running.branch).ok();
+                let run = made.as_ref().and_then(|context| context_run(context).ok());
+                let kwargs = Kwargs::new(py, plan, graph);
+                let node = &graph.core().node(running.node).name;
+                let errors = self.observers.fire(py, &kwargs, run.as_ref(), |hook| {
+                    hook.absent_error(node, &running.branch, &error)
+                });
+                if errors.is_empty() {
+                    (declined, None, false)
+                } else {
+                    let failure = Failure::Run(RunError::Observers {
+                        event: "absent_error",
+                        errors,
+                    });
+                    (Outcome::Item(Item::Done), Some(failure), true)
+                }
+            }
             "done" => {
                 let Ok(absent) = absent::singleton(py) else {
                     return failed(PyRuntimeError::new_err("fnloom.ABSENT is missing"));
                 };
                 if !value.is(absent) {
-                    return (Outcome::Item(Item::Done), None);
+                    return (Outcome::Item(Item::Done), None, false);
                 }
                 let node = self.plan.get().graph().get().core().node(running.node);
                 if !node.declines {
                     return failed(undeclared_absence(&node.name));
                 }
-                (Outcome::Item(Item::Declined(shared(value))), None)
+                (Outcome::Item(Item::Declined(shared(value))), None, false)
             }
             _ => failed(PyErr::from_value(value)),
         }
@@ -994,9 +1061,11 @@ impl Stepper {
     }
 
     /// Takes back task `task`'s outcome: `kind` `"value"` with its value, `"error"` with
-    /// its exception, `"done"` for a pull that found the iterator exhausted, with the
-    /// value it returned, or `"dropped"` for a task whose outcome no longer counts, which
-    /// stops the run. A task already completed is ignored. Whether the run is stopping.
+    /// its exception, `"refused"` with an exception fnloom raised for a compute's value,
+    /// which no `absent_on` matches, `"done"` for a pull that found the iterator
+    /// exhausted, with the value it returned, or `"dropped"` for a task whose outcome no
+    /// longer counts, which stops the run. A task already completed is ignored. Whether
+    /// the run is stopping.
     fn complete(
         &mut self,
         py: Python<'_>,
@@ -1023,17 +1092,15 @@ impl Stepper {
         }
         let (outcome, failure, stop) = match running.doing {
             Doing::Compute => {
-                let result = if kind == "error" {
+                let raised = kind == "error";
+                let result = if raised || kind == "refused" {
                     Err(PyErr::from_value(value))
                 } else {
                     Ok(value)
                 };
-                self.computed(py, &running, result)
+                self.computed(py, &running, result, raised)
             }
-            Doing::Pull => {
-                let (outcome, failure) = self.pulled(py, &running, kind, value);
-                (outcome, failure, false)
-            }
+            Doing::Pull => self.pulled(py, &running, kind, value),
             Doing::Finish if kind == "error" => (
                 Outcome::Failed(PyErr::from_value(value)),
                 Some(Failure::Task(Vec::new())),

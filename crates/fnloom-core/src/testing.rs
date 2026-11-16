@@ -22,6 +22,7 @@ pub fn valued_spec<P>(name: &str, deps: &[(&str, Dependency)], payload: P) -> No
         payload,
         declines: false,
         expands: false,
+        absent_on_error: false,
     }
 }
 
@@ -181,6 +182,15 @@ pub mod blocks {
         }
     }
 
+    /// `spec`, absent on an error: `Fan` makes every error of its absent, unless it
+    /// `refuses`.
+    pub fn absent_on(spec: NodeSpec<Pay>) -> NodeSpec<Pay> {
+        NodeSpec {
+            absent_on_error: true,
+            ..spec
+        }
+    }
+
     /// The sum of the arguments, times ten.
     #[expect(clippy::unnecessary_wraps, reason = "a payload returns a `Result`")]
     pub fn tens(args: &[Val]) -> Result<Val, String> {
@@ -219,6 +229,8 @@ pub mod blocks {
         pub iterated: Vec<(String, Vec<usize>)>,
         /// Single-flight keys by node and branch, which a probe gives the scheduler.
         pub keys: BTreeMap<(String, Vec<usize>), String>,
+        /// Whether `absent_on_error` refuses every error, as an error not listed.
+        pub refuses: bool,
     }
 
     impl Fan {
@@ -269,6 +281,10 @@ pub mod blocks {
 
         fn blocks(&mut self) -> Option<&mut dyn Blocks<Pay, Val, String>> {
             Some(self)
+        }
+
+        fn absent_on_error(&mut self, _node: &Node<Pay>, _error: &String) -> Option<Val> {
+            (!self.refuses).then_some(Absent)
         }
 
         fn lookup(&mut self, node: &Node<Pay>, branch: &[usize]) -> Result<Option<Val>, String> {
@@ -395,6 +411,19 @@ pub mod blocks {
         fn skipped(&mut self, node: &str, branch: &[usize]) -> Result<(), String> {
             self.events.push(format!("skipped:{node}:{branch:?}"));
             Ok(())
+        }
+        fn absent_error(
+            &mut self,
+            node: &str,
+            branch: &[usize],
+            error: &String,
+        ) -> Result<(), String> {
+            let event = format!("absent:{node}:{branch:?}:{error}");
+            self.events.push(event.clone());
+            match self.fail_on {
+                Some(prefix) if event.starts_with(prefix) => Err(event),
+                _ => Ok(()),
+            }
         }
     }
 

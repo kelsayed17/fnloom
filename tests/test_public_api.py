@@ -97,4 +97,6 @@ def test_the_regressed_callables_are_covered() -> None:
         "limit",
         "Builder.with_limits",
         "cancelled",
+        "absent_on",
+        "Builder.with_absent_on",
     }

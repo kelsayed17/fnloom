@@ -64,6 +64,15 @@ that wasn't supplied, since an input is never absent. The build marks each node 
 reads a node that may be absent by a `Required` edge. A requested output that is absent is returned as its absent
 value. A plan where nothing may be absent (`Plan::needs_rules` is false) runs the plain loop, at no extra cost.
 
+A node with `absent_on_error: true` may be absent on an error instead: when its payload fails, or for an expand a
+pull of its items, the core asks `Evaluate::absent_on_error(node, &error)`, whose default is `None`. `Some(value)`
+makes the node absent, holding `value`, after `post_node` reported the error, and observers then see
+`absent_error(node, branch, &error)`; an expand absent while it yields drops its branches, as `Item::Declined` does.
+`None` fails the run as before. Such a node may be absent, so its consumers follow the rules above, but it doesn't
+decline: an absent value it returns itself is still yours to refuse. A `Scheduler` takes such an outcome as
+`Outcome::ErrorAbsent(value)`, or for a pull `Outcome::Item(Item::Declined(value))`, and single-flight never shares
+it: a step waiting on its key runs itself.
+
 ## Blocks
 
 An expand (`expands: true`) is computed like a function, and its value is then iterated: each item runs the

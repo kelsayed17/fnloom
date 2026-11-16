@@ -775,7 +775,7 @@ def test_q145_graph_construction_hook_against_build_end() -> None:
 
 @pytest.mark.deliberate("Q157")
 def test_q157_graceful_errors_are_hamilton_only() -> None:
-    """`GracefulErrorAdapter` skips a failure's dependents; fnloom fails the run."""
+    """`GracefulErrorAdapter` skips a failure's dependents; fnloom fails, or absents."""
     body = """
 def b(a: int) -> int:
     raise ValueError("no")
@@ -797,6 +797,12 @@ def d(a: int) -> int:
     fnloom_module = make_module("rows_grace_f", body)
     with pytest.raises(ValueError, match="no"):
         fnloom.build(fnloom_module).execute(["c", "d"], inputs={"a": 1})
+    # With `with_absent_on`, its dependents are absent instead (Q133).
+    covered = fnloom.Builder().with_modules(fnloom_module).with_absent_on(ValueError)
+    assert covered.build().execute(["c", "d"], inputs={"a": 1}) == {
+        "c": fnloom.ABSENT,
+        "d": 1,
+    }
 
 
 @pytest.mark.deliberate("Q139")
