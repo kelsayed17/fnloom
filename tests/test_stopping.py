@@ -482,7 +482,14 @@ def after(poll: int) -> int:
 
 
 def outer(x: int) -> int:
-    return INNER[0].execute(["after"], inputs={"x": x})["after"]
+    try:
+        return INNER[0].execute(["after"], inputs={"x": x})["after"]
+    except Exception as error:
+        RAISED.append(type(error))
+        raise
+
+
+RAISED = []
 """
 
 
@@ -508,6 +515,86 @@ def test_a_run_inside_a_stopping_run_sees_it_cancelled(inner: str) -> None:
     # A sequential inner run goes on to `after`; a parallel one stopped.
     went_on = module.AFTER
     assert went_on == ([-1] if inner == "sequential" else [])
+    # A parallel one, missing `after`, raised `StoppedError`, a `RuntimeError`.
+    raised = module.RAISED
+    assert raised == ([] if inner == "sequential" else [_core.StoppedError])
+    assert issubclass(_core.StoppedError, RuntimeError)
+
+
+# Branch 0, first in key order, runs a run of its own; branch 1 fails meanwhile.
+# `slow` sleeps through the stop; `finishing` returns its value as it sees it.
+MASKED = """
+import time
+
+import fnloom
+from fnloom import Collect, Parallelizable
+
+INNER = []
+OUTPUT = ["slow"]
+RETURNED = []
+
+
+def slow(x: int) -> int:
+    time.sleep(0.4)
+    return x
+
+
+def finishing(x: int) -> int:
+    start = time.monotonic()
+    while not fnloom.cancelled() and time.monotonic() - start < 5:
+        time.sleep(0.001)
+    return x
+
+
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+def detail(picked: int) -> int:
+    if picked == 0:
+        value = INNER[0].execute(OUTPUT, inputs={"x": 7})[OUTPUT[0]]
+        RETURNED.append(value)
+        return value
+    time.sleep(0.05)
+    raise ValueError(f"the real failure, in branch {picked}")
+
+
+def summary(detail: Collect[int]) -> list[int]:
+    return list(detail)
+"""
+
+
+@pytest.mark.parametrize("inner", ["threaded", "sequential"])
+def test_a_stopped_inner_run_never_hides_the_failure_that_stopped_it(
+    inner: str,
+) -> None:
+    """The later branch's `ValueError` is raised, not the inner run's `StoppedError`."""
+    module = make_module(f"stop_masked_{inner}", MASKED)
+    builder = fnloom.Builder().with_modules(module)
+    module.INNER.append(
+        builder.with_threads(2).build() if inner == "threaded" else builder.build()
+    )
+    driver = builder.with_threads(4).build()
+    for _ in range(3):
+        with pytest.raises(ValueError, match="the real failure, in branch 1") as raised:
+            driver.execute(["summary"], inputs={"n": 2})
+        assert raised.value.__notes__ == [
+            "while computing 'detail' for branch (1,) of 'picked'"
+        ]
+
+
+def test_an_inner_run_that_finished_before_its_stop_returns_its_values() -> None:
+    """Every node done when its next step sees the stop: it returns, failing nothing."""
+    module = make_module("stop_finished", MASKED)
+    module.OUTPUT[:] = ["finishing"]
+    builder = fnloom.Builder().with_modules(module)
+    # One worker: the inner caller runs the node, so no other thread steps meanwhile.
+    module.INNER.append(builder.with_threads(1).build())
+    driver = builder.with_threads(4).build()
+    with pytest.raises(ValueError, match="the real failure, in branch 1"):
+        driver.execute(["summary"], inputs={"n": 2})
+    returned = module.RETURNED
+    assert returned == [7]
 
 
 def test_a_store_after_a_hook_the_deadline_outlasted_is_dropped() -> None:

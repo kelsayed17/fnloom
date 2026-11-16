@@ -65,7 +65,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
   inside a node lends that node's worker to its own nodes. Without `with_threads`, `timeout=` is a `TypeError`.
 - `fnloom.cancelled()` tells a node whether its parallel run is stopping, by its deadline, another node's failure or
   an interrupt, so it can return early; `False` outside one. A run started inside a node of a stopping run, on any
-  driver, sees it too, and a parallel one stops starting nodes.
+  driver, sees it too, and a parallel one stops starting nodes. It then returns its outputs if they were all computed,
+  or else raises a `RuntimeError`, which the outer run never raises in place of the failure that stopped it.
 - `Ctrl-C` ends a parallel run at once, abandoning its running nodes as a deadline does, so a node hung on a worker
   thread no longer keeps the run waiting. A `KeyboardInterrupt` a node raises does the same.
 

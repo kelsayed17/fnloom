@@ -12,6 +12,7 @@ __all__ = [
     "ObserverBase",
     "Plan",
     "Stop",
+    "StoppedError",
     "Threads",
     "UnfingerprintableError",
     "_panic_for_test",
@@ -32,6 +33,10 @@ def fingerprint(
     value: object, fallback: Callable[[object], object | None]
 ) -> bytes: ...
 def hash_parts(parts: Sequence[bytes]) -> bytes: ...
+
+class StoppedError(RuntimeError):
+    # A parallel run stopped because the run that started it stopped or ended.
+    ...
 
 class UnfingerprintableError(TypeError):
     path: str

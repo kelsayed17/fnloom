@@ -83,6 +83,8 @@ pub struct Run {
     /// The stop flags of the runs that started this one, innermost first: once one is
     /// set, this run stops too.
     ancestors: Vec<Arc<AtomicBool>>,
+    /// Set once the run stopped because one of its ancestors did (`follow`).
+    followed: AtomicBool,
 }
 
 /// What the scheduler's lock guards.
@@ -168,22 +170,57 @@ fn cancelled_variable(py: Python<'_>) -> PyResult<&'static Py<PyAny>> {
     })
 }
 
-/// Stops `scheduler` once a run that started this one is stopping: it hands out no new
-/// task, and the run fails once its running ones return. Checked under the scheduler's
-/// lock before every hand-out, so no task starts after it.
-fn follow(run: &Run, scheduler: &mut Sched, failures: &mut Vec<(OrderKey, Failure)>) {
+pyo3::create_exception!(
+    fnloom,
+    StoppedError,
+    PyRuntimeError,
+    "A parallel run stopped because the run that started it stopped or ended.\n\n\
+     The run that started it, should a node of it raise this, raises the failure that \
+     stopped it instead, when it has one."
+);
+
+/// The `StoppedError` a run raises when it stopped for the run that started it.
+fn stopped() -> PyErr {
+    StoppedError::new_err("the run that started this one has stopped or ended, so this one stopped")
+}
+
+/// Stops `scheduler` once a run that started this one has stopped: it hands out no new
+/// task. Checked under the scheduler's lock before every hand-out, so no task starts
+/// after it. It records no failure: a run whose outputs were all computed returns them,
+/// and one missing some raises `StoppedError` (`ended`).
+fn follow(run: &Run, scheduler: &mut Sched) {
     if run.ancestors.is_empty() || scheduler.is_stopping() || !stopping(&run.ancestors) {
         return;
     }
-    let error =
-        PyRuntimeError::new_err("the run that started this one is stopping, so this one stopped");
-    let failure = RunError::Observers {
-        event: "the run",
-        errors: vec![error],
-    };
-    failures.push((OrderKey::default(), Failure::Run(failure)));
     scheduler.stop();
+    run.followed.store(true, Ordering::Release);
     run.stop.store(true, Ordering::Release);
+}
+
+/// A task whose node raised `StoppedError`, as a run it started does once this one stops: its
+/// failure is keyed after every step, so the failure that stopped this run is raised, and
+/// the scheduler, stopped, drops the task's outcome instead of keeping it as a failure.
+fn demoted(
+    py: Python<'_>,
+    outcome: Out,
+    failure: Option<(OrderKey, Failure)>,
+    stop: bool,
+) -> (Out, Option<(OrderKey, Failure)>, bool) {
+    match outcome {
+        Outcome::Failed(error) if error.is_instance_of::<StoppedError>(py) => {
+            let failure = RunError::Observers {
+                event: "the run",
+                errors: vec![error],
+            };
+            let dropped = Outcome::Value {
+                value: Arc::new(py.None()),
+                absent: false,
+            };
+            let last = OrderKey::new(&[u32::MAX]);
+            (dropped, Some((last, Failure::Run(failure))), true)
+        }
+        outcome => (outcome, failure, stop),
+    }
 }
 
 /// The slots of a limited task of `node` just handed out, held, and kept in `limited` for
@@ -558,6 +595,7 @@ impl Run {
             done: AtomicBool::new(false),
             lends: AtomicBool::new(lends),
             ancestors,
+            followed: AtomicBool::new(false),
         }
     }
 
@@ -790,11 +828,11 @@ pub fn step(
         state_armed();
         let State {
             scheduler,
-            failures,
             running,
             taking,
             limited,
             abandons,
+            ..
         } = state;
         // Once the run abandoned its tasks, only its caller takes any: the finishes it runs.
         let Some(scheduler) = scheduler
@@ -803,7 +841,7 @@ pub fn step(
         else {
             return (Next::Done, None, None, 0);
         };
-        follow(run, scheduler, failures);
+        follow(run, scheduler);
         let next = scheduler.next(core, graph, limits, seat);
         let mut held = None;
         if let Next::Task(task) = &next {
@@ -941,6 +979,7 @@ fn perform(
         };
         (at, failure)
     });
+    let (outcome, failure, stop) = demoted(py, outcome, failure, stop);
     #[cfg(feature = "test-hooks")]
     assert!(
         !PERFORM_ARMED.swap(false, Ordering::AcqRel),
@@ -1608,7 +1647,16 @@ fn ended<'py>(slf: &Bound<'py, Plan>, run: &Run, broke: bool) -> PyResult<Bound<
         drop(closing);
         return Err(broken());
     };
-    let outcome = outcome_of(scheduler.finish(core, graph.core()), failures);
+    let outcome = match outcome_of(scheduler.finish(core, graph.core()), failures) {
+        // Stopped for its ancestor before every output was in: no failure of its own.
+        Err(RunError::BrokenPlan { .. }) if run.followed.load(Ordering::Acquire) => {
+            Err(RunError::Observers {
+                event: "the run",
+                errors: vec![stopped()],
+            })
+        }
+        outcome => outcome,
+    };
     match outcome {
         Ok(outputs) => {
             let errors = run

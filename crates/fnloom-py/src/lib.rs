@@ -67,6 +67,10 @@ fn core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<limits::Limits>()?;
     module.add_class::<pool::Threads>()?;
     module.add_class::<parallel::Stop>()?;
+    module.add(
+        "StoppedError",
+        module.py().get_type::<parallel::StoppedError>(),
+    )?;
     module.add_class::<keys::KeyPlan>()?;
     module.add_class::<keys::Keys>()?;
     module.add_class::<store::MemoryStore>()?;
