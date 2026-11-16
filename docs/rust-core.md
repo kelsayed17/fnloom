@@ -177,9 +177,22 @@ A `Task` names its node, its branch and its key, and its `Work` is one of:
   asks, and gives the `Outcome::Needs` to complete it with.
 
 A node skipped by the absence rules becomes no task: it is reported in `Report::skipped` with its key. A collect waits
-for every branch of its block and gathers them in branch order, whatever order they finished in. A failure stops the
-run: nothing but `Finish` is handed out after it, one per open iterator with no pull in flight, innermost first.
-`stop()` does the same from outside.
+for every branch of its block and gathers them in branch order, whatever order they finished in.
+
+- **Limits.** `limits::Limits::new(max_workers, node_caps, node_groups, group_caps)` is a `Grant` of atomic counters
+  only, shared by every run of a driver. A task takes a worker slot when its seat is `Seat::Take`, and none when it is
+  `Held` (a run's caller), `Lent` or `Threadless` (an async node); a compute or a pull also takes its node's slot and
+  its group's. `held(Slot)` says how many are taken. `limits::Unlimited` refuses nothing.
+- **In flight.** `Options::in_flight` bounds how many branches of an expand are unfinished at once: its iterator is
+  pulled only while fewer are.
+- **Single-flight.** A probe's `Outcome::Needs` gives each step's key, or `None`. A step whose key a running compute
+  has waits for it and completes as a hit with its value or declared absence (in `Report::hits`); if that compute
+  fails, the step is ready again. Steps without a key never wait.
+- **Stopping.** A failure, or `stop()`, ends the handing out of computes, pulls, iterates and probes. Then one `Finish`
+  is handed out per open iterator with no pull in flight, innermost first; an iterator whose pull is in flight is
+  finished once its pull returns. Failures keep their order keys, and `finish` returns the lowest key's.
+- `blocked()` names the lowest-key ready task's node when the grant refused it and nothing of the run is in flight,
+  and `lend()` gives the run one lent seat, which `Seat::Lent` tasks take one at a time.
 
 ## Guarantees
 

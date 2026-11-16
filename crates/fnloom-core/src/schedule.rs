@@ -13,8 +13,7 @@
 //! taken its arguments, and handed back in `Report::released`, never dropped here.
 
 use std::cmp::Reverse;
-use std::collections::BinaryHeap;
-use std::marker::PhantomData;
+use std::collections::{BTreeMap, BinaryHeap};
 
 use crate::branch::{Need, declined_wrongly, needs, node_error};
 use crate::graph::Graph;
@@ -526,7 +525,9 @@ enum Progress {
 }
 
 /// One instance of a scope: the outer plan, or one branch of a block.
-struct Instance<V> {
+struct Instance<V, K> {
+    /// Per step, its single-flight key from the branch's probe; empty for the outer plan.
+    keys: Vec<Option<K>>,
     template: usize,
     /// The frame this branch belongs to and its index there; `None` for the outer plan.
     up: Option<(usize, usize)>,
@@ -708,7 +709,7 @@ pub struct Scheduler<V, E, K> {
     shape: (usize, usize, usize, usize),
     layout: Layout,
     options: Options,
-    instances: Slab<Instance<V>>,
+    instances: Slab<Instance<V, K>>,
     frames: Slab<Frame<V>>,
     entries: Slab<Entry>,
     ready: BinaryHeap<Reverse<(OrderKey, usize)>>,
@@ -723,7 +724,18 @@ pub struct Scheduler<V, E, K> {
     closing: Vec<(OrderKey, usize)>,
     wanted: Vec<bool>,
     need: Vec<Need>,
-    keys: PhantomData<fn() -> K>,
+    /// The running compute of each single-flight key, and the steps waiting for it.
+    flights: BTreeMap<K, Flight>,
+    /// The lent worker seat: `None` until `lend`, then whether a task holds it.
+    lent: Option<bool>,
+    /// The node of the lowest-key ready task the grant refused at the last `next`.
+    refused: Option<NodeId>,
+}
+
+/// The running compute of a single-flight key, and the entries waiting for its value.
+struct Flight {
+    task: usize,
+    waiters: Vec<usize>,
 }
 
 /// The outer plan's instance.
@@ -760,7 +772,9 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             closing: Vec::new(),
             wanted: Vec::new(),
             need: Vec::new(),
-            keys: PhantomData,
+            flights: BTreeMap::new(),
+            lent: None,
+            refused: None,
         };
         let detail = mismatch(plan, graph).or_else(|| {
             (seeded.len() != graph.nodes().len()).then(|| {
@@ -839,31 +853,71 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         if self.shape != Self::shape_of(plan, graph) {
             self.fail(OrderKey::default(), another_plan());
         }
+        self.refused = None;
+        if seat == Seat::Lent && self.lent != Some(false) {
+            // No seat is lent, or a task holds it.
+            return if self.stopping {
+                self.idle_closing()
+            } else {
+                self.idle()
+            };
+        }
         loop {
             if self.stopping {
-                return self.next_closing(grant, seat);
+                let next = self.next_closing(grant, seat);
+                if seat == Seat::Lent && matches!(next, Next::Task(_)) {
+                    self.lent = Some(true);
+                }
+                return next;
             }
             let mut aside = Vec::new();
             let mut found = None;
+            let mut first = true;
             while let Some(Reverse((key, id))) = self.ready.pop() {
                 let Some(entry) = self.entries.get(id) else {
                     continue;
                 };
                 // A skip is settled by `complete`, which reports it, once it is the lowest.
-                if entry.kind == Kind::Skip || !grant.try_start(entry.granted(), seat) {
+                if entry.kind == Kind::Skip {
                     aside.push(Reverse((key, id)));
                     continue;
                 }
-                found = Some(id);
+                // A step whose key a running compute has waits for its value.
+                let flight = self.flight_key(graph, entry);
+                if let Some(running) = flight.as_ref().and_then(|key| self.flights.get_mut(key)) {
+                    running.waiters.push(id);
+                    continue;
+                }
+                if !grant.try_start(entry.granted(), seat) {
+                    if first {
+                        self.refused = Some(entry.node);
+                    }
+                    first = false;
+                    aside.push(Reverse((key, id)));
+                    continue;
+                }
+                found = Some((id, flight));
                 break;
             }
             self.ready.extend(aside);
-            let Some(id) = found else {
+            let Some((id, flight)) = found else {
                 return self.idle();
             };
             match self.task(plan, graph, id, seat) {
                 Ok(task) => {
                     self.running += 1;
+                    if let Some(key) = flight {
+                        self.flights.insert(
+                            key,
+                            Flight {
+                                task: id,
+                                waiters: Vec::new(),
+                            },
+                        );
+                    }
+                    if seat == Seat::Lent {
+                        self.lent = Some(true);
+                    }
                     return Next::Task(task);
                 }
                 Err(failure) => {
@@ -910,8 +964,45 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         let seat = entry.seat.unwrap_or(Seat::Take);
         grant.release(entry.granted(), seat);
         self.running -= 1;
+        if seat == Seat::Lent && self.lent.is_some() {
+            self.lent = Some(false);
+        }
         if self.shape == Self::shape_of(plan, graph) {
+            let waiters = match self.flight_key(graph, &entry) {
+                Some(key)
+                    if self
+                        .flights
+                        .get(&key)
+                        .is_some_and(|flight| flight.task == id.0 as usize) =>
+                {
+                    self.flights
+                        .remove(&key)
+                        .map(|flight| flight.waiters)
+                        .unwrap_or_default()
+                }
+                _ => Vec::new(),
+            };
+            // A value or a declared absence completes every waiter as a hit.
+            let shared = match &outcome {
+                Outcome::Value { value, absent } if !waiters.is_empty() && !self.stopping => {
+                    Some((value.clone(), *absent))
+                }
+                _ => None,
+            };
             self.land(plan, graph, entry, outcome);
+            for waiter in waiters {
+                match &shared {
+                    Some((value, absent)) => {
+                        self.share(plan, graph, waiter, value.clone(), *absent);
+                    }
+                    // A failed original: the waiter runs itself.
+                    None => {
+                        if let Some(entry) = self.entries.get(waiter) {
+                            self.ready.push(Reverse((entry.key.clone(), waiter)));
+                        }
+                    }
+                }
+            }
             self.settle(plan, graph);
             self.drain(plan, graph);
         } else {
@@ -951,6 +1042,21 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
     #[must_use]
     pub const fn is_stopping(&self) -> bool {
         self.stopping
+    }
+
+    /// The node of the lowest-key ready task, when the grant refused it at the last `next`
+    /// and nothing of this run is in flight: what the run waits for a slot of.
+    #[must_use]
+    pub fn blocked(&self) -> Option<NodeId> {
+        self.refused.filter(|_| self.running == 0)
+    }
+
+    /// Gives the run one lent worker seat, which `next` hands out to with `Seat::Lent`: to
+    /// one task at a time, and free again once that task completes.
+    pub const fn lend(&mut self) {
+        if self.lent.is_none() {
+            self.lent = Some(false);
+        }
     }
 
     /// The run's outputs, by node id in `Plan::outputs` order, or its failure.
@@ -1050,13 +1156,13 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             .steps[position]
     }
 
-    fn instance(&self, instance: usize) -> &Instance<V> {
+    fn instance(&self, instance: usize) -> &Instance<V, K> {
         self.instances
             .get(instance)
             .unwrap_or_else(|| unreachable!("instance {instance} is open"))
     }
 
-    fn instance_mut(&mut self, instance: usize) -> &mut Instance<V> {
+    fn instance_mut(&mut self, instance: usize) -> &mut Instance<V, K> {
         self.instances
             .get_mut(instance)
             .unwrap_or_else(|| unreachable!("instance {instance} is open"))
@@ -1066,6 +1172,40 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         self.frames
             .get_mut(frame)
             .unwrap_or_else(|| unreachable!("frame {frame} is open"))
+    }
+
+    /// The single-flight key of a compute entry, from its branch's probe; never an expand's,
+    /// whose iterator can't be shared.
+    fn flight_key<P>(&self, graph: &Graph<P>, entry: &Entry) -> Option<K> {
+        if entry.kind != Kind::Compute || graph.node(entry.node).is_expand() {
+            return None;
+        }
+        self.instances
+            .get(entry.at)?
+            .keys
+            .get(entry.position)
+            .cloned()
+            .flatten()
+    }
+
+    /// Completes the waiting entry `waiter` with the value its key's compute gave.
+    fn share<P>(&mut self, plan: &Plan, graph: &Graph<P>, waiter: usize, value: V, absent: bool) {
+        let Some(entry) = self.entries.remove(waiter) else {
+            return;
+        };
+        let branch = self.instance(entry.at).branch.clone();
+        self.report.hits.push((entry.node, branch, value.clone()));
+        self.use_args(entry.at, entry.position);
+        self.computed(plan, graph, entry.at, entry.position, value, absent);
+    }
+
+    /// `Next::Done` once a stopped run has nothing in flight, else `Next::Wait`.
+    fn idle_closing(&self) -> Next<V> {
+        if self.running == 0 && self.closing.is_empty() {
+            Next::Done
+        } else {
+            Next::Wait
+        }
     }
 
     /// `Next::Done` when nothing is left, else `Next::Wait`.
@@ -1118,11 +1258,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                 },
             });
         }
-        if self.running == 0 {
-            Next::Done
-        } else {
-            Next::Wait
-        }
+        self.idle_closing()
     }
 
     /// Queues frame `at` to be finished as stopped.
@@ -1379,6 +1515,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         let gathered = t.gather_readers.iter().map(|&r| (None, r)).collect();
         let remaining = steps.len();
         let instance = Instance {
+            keys: Vec::new(),
             template,
             up,
             parent,
@@ -1870,7 +2007,8 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                 self.frame_mut(entry.at).finished = Some(value);
                 self.todo.push(Event::Frame(entry.at));
             }
-            (Kind::Probe, Outcome::Needs { hits, .. }) => {
+            (Kind::Probe, Outcome::Needs { hits, keys }) => {
+                self.instance_mut(entry.at).keys = keys;
                 self.probed(plan, graph, entry.at, hits);
             }
             (Kind::Probe, Outcome::LookupFailed(node, error)) => {
@@ -2109,7 +2247,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
-    use crate::limits::Unlimited;
+    use crate::limits::{Limits, Slot as LimitSlot, Unlimited};
     use crate::node::{Dependency, NodeSpec};
     use crate::run::{Arg, Blocks, Evaluate};
     use crate::testing::blocks::{
@@ -2851,11 +2989,32 @@ mod tests {
         graph: &Graph<Pay>,
         plan: &Plan,
         eval: &mut Fan,
+        pick: impl FnMut(&[Task<Val>]) -> usize,
+        watch: impl FnMut(&[Task<Val>]),
+    ) -> Outputs {
+        greedy_with(
+            graph,
+            plan,
+            eval,
+            Options::default(),
+            pick,
+            watch,
+            |_, _| {},
+        )
+    }
+
+    /// `greedy` with `options`, calling `seen` with each completed task and its report.
+    fn greedy_with(
+        graph: &Graph<Pay>,
+        plan: &Plan,
+        eval: &mut Fan,
+        options: Options,
         mut pick: impl FnMut(&[Task<Val>]) -> usize,
         mut watch: impl FnMut(&[Task<Val>]),
+        mut seen: impl FnMut(&Task<Val>, &Report<Val>),
     ) -> Outputs {
         let seeded = seed(graph, plan, &[], &[], eval);
-        let (mut scheduler, _) = Sched::new(plan, graph, seeded, Options::default());
+        let (mut scheduler, _) = Sched::new(plan, graph, seeded, options);
         let mut flying: Vec<Task<Val>> = Vec::new();
         loop {
             while let Next::Task(task) = scheduler.next(plan, graph, &Unlimited, Seat::Take) {
@@ -2867,9 +3026,395 @@ mod tests {
             }
             let task = flying.remove(pick(&flying));
             let outcome = perform(plan, graph, eval, &task, &mut Vec::new());
-            scheduler.complete(plan, graph, &Unlimited, task.id, outcome);
+            let report = scheduler.complete(plan, graph, &Unlimited, task.id, outcome);
+            seen(&task, &report);
         }
         named(graph, scheduler.finish(plan, graph))
+    }
+
+    /// The first task in flight that isn't `name`'s, else the first: holds `name` back.
+    fn last_of(graph: &Graph<Pay>, name: &str) -> impl FnMut(&[Task<Val>]) -> usize {
+        move |flying| {
+            flying
+                .iter()
+                .position(|task| graph.node(task.node).name != name)
+                .unwrap_or(0)
+        }
+    }
+
+    #[test]
+    fn the_in_flight_bound_holds_pulls_back() {
+        let graph = fan(items(&(0..10_000).collect::<Vec<_>>()));
+        let plan = graph.prepare(&request(&["total"], &[], &[])).unwrap();
+        let (mut pulled, mut ended, mut most) = (0_usize, 0_usize, 0_usize);
+        let outputs = greedy_with(
+            &graph,
+            &plan,
+            &mut Fan::default(),
+            Options { in_flight: 4 },
+            last_of(&graph, "details"),
+            |_| {},
+            |task, _| {
+                match graph.node(task.node).name.as_str() {
+                    "details" => ended += 1,
+                    "picked" if matches!(task.work, Work::Pull { .. }) => pulled += 1,
+                    _ => {}
+                }
+                most = most.max(pulled.saturating_sub(ended));
+            },
+        );
+        assert_eq!(
+            num(&outputs.unwrap()["total"]),
+            (0..10_000).map(|i| 10 * i + 1).sum()
+        );
+        assert_eq!(most, 4);
+    }
+
+    /// `fan` over `[1, 1, 2]`, with `keys` as each branch's single-flight key of `details`.
+    fn duplicates(keys: &[Option<&str>]) -> (Graph<Pay>, Plan, Fan) {
+        let graph = fan(items(&[1, 1, 2]));
+        let plan = graph.prepare(&request(&["total"], &[], &[])).unwrap();
+        let eval = Fan {
+            keys: keys
+                .iter()
+                .enumerate()
+                .filter_map(|(at, key)| {
+                    Some((("details".to_owned(), vec![at]), (*key)?.to_owned()))
+                })
+                .collect(),
+            ..Fan::default()
+        };
+        (graph, plan, eval)
+    }
+
+    #[test]
+    fn a_duplicate_key_waits_and_completes_as_a_hit() {
+        let (graph, plan, mut eval) = duplicates(&[Some("one"), Some("one"), Some("two")]);
+        let mut hits = Vec::new();
+        let mut most = 0;
+        let outputs = greedy_with(
+            &graph,
+            &plan,
+            &mut eval,
+            Options::default(),
+            last_of(&graph, "details"),
+            |flying| {
+                let details = flying
+                    .iter()
+                    .filter(|t| graph.node(t.node).name == "details");
+                most = most.max(details.count());
+            },
+            |_, report| hits.extend(report.hits.iter().cloned()),
+        );
+        assert_eq!(outputs.unwrap()["total"], nums(&[11, 11, 21]));
+        // Branch 1 waited for branch 0's call and got its value; branch 2's key differs.
+        assert_eq!(eval.called("details"), [vec![0], vec![2]]);
+        assert_eq!(hits, [(graph.id_of("details").unwrap(), vec![1], Num(11))]);
+        assert_eq!(most, 2);
+    }
+
+    #[test]
+    fn a_failed_original_lets_the_duplicate_run() {
+        let (graph, plan, mut eval) = duplicates(&[Some("one"), Some("one"), None]);
+        eval.fail = Some(("details", vec![0]));
+        let mut hits = Vec::new();
+        let outputs = greedy_with(
+            &graph,
+            &plan,
+            &mut eval,
+            Options::default(),
+            last_of(&graph, "details"),
+            |_| {},
+            |_, report| hits.extend(report.hits.iter().cloned()),
+        );
+        // The duplicate is made ready again rather than given the failure as a hit; the
+        // stopped run then hands out no compute, so the failure raised is the original's.
+        assert_eq!(hits, []);
+        let RunError::Node { node, branch, .. } = outputs.unwrap_err() else {
+            unreachable!("a node failed");
+        };
+        assert_eq!(
+            (node.as_str(), branch.as_slice()),
+            ("details", [0].as_slice())
+        );
+        assert!(!eval.called("details").contains(&vec![1]));
+    }
+
+    #[test]
+    fn steps_without_keys_are_never_deduplicated() {
+        let (graph, plan, mut eval) = duplicates(&[None, None, None]);
+        let outputs = greedy(&graph, &plan, &mut eval, last_of(&graph, "details"), |_| {});
+        assert_eq!(outputs.unwrap()["total"], nums(&[11, 11, 21]));
+        assert_eq!(eval.called("details"), [vec![0], vec![1], vec![2]]);
+    }
+
+    /// Steps `scheduler` with one worker until the task `stop_at` picks, which it returns
+    /// unrun.
+    fn until(
+        scheduler: &mut Sched,
+        plan: &Plan,
+        graph: &Graph<Pay>,
+        eval: &mut Fan,
+        mut stop_at: impl FnMut(&Task<Val>) -> bool,
+    ) -> Task<Val> {
+        loop {
+            let task = task_of(scheduler.next(plan, graph, &Unlimited, Seat::Take));
+            if stop_at(&task) {
+                return task;
+            }
+            let outcome = perform(plan, graph, eval, &task, &mut Vec::new());
+            scheduler.complete(plan, graph, &Unlimited, task.id, outcome);
+        }
+    }
+
+    fn failed(scheduler: &mut Sched, plan: &Plan, graph: &Graph<Pay>, task: &Task<Val>) {
+        let outcome = Outcome::Failed(format!("{} failed", name_of(graph, task)));
+        scheduler.complete(plan, graph, &Unlimited, task.id, outcome);
+    }
+
+    #[test]
+    fn after_a_failure_only_finish_tasks_are_handed_out_innermost_first() {
+        let graph = nested();
+        let (plan, mut scheduler) = start(&graph, &["outer_sum"], &[]);
+        let mut eval = Fan::default();
+        let leaf = until(&mut scheduler, &plan, &graph, &mut eval, |task| {
+            name_of(&graph, task) == "leaf"
+        });
+        failed(&mut scheduler, &plan, &graph, &leaf);
+        assert!(scheduler.is_stopping());
+        let mut closed = Vec::new();
+        while let Next::Task(task) = scheduler.next(&plan, &graph, &Unlimited, Seat::Take) {
+            let Work::Finish { exhausted, .. } = task.work else {
+                unreachable!("only finishes after a failure, got {task:?}");
+            };
+            assert!(!exhausted);
+            closed.push(name_of(&graph, &task));
+            let outcome = perform(&plan, &graph, &mut eval, &task, &mut Vec::new());
+            scheduler.complete(&plan, &graph, &Unlimited, task.id, outcome);
+        }
+        assert_eq!(closed, ["inner", "outer"]);
+        let RunError::Node { node, branch, .. } = scheduler.finish(&plan, &graph).unwrap_err()
+        else {
+            unreachable!("a node failed");
+        };
+        assert_eq!(
+            (node.as_str(), branch.as_slice()),
+            ("leaf", [0, 0].as_slice())
+        );
+    }
+
+    #[test]
+    fn an_iterator_with_a_pull_in_flight_is_finished_after_the_pull() {
+        let graph = fan(items(&[1, 2, 3]));
+        let (plan, mut scheduler) = start(&graph, &["total"], &[]);
+        let mut eval = Fan::default();
+        // The first item's probe, with the second item's pull still to run.
+        let probe = until(&mut scheduler, &plan, &graph, &mut eval, |task| {
+            matches!(task.work, Work::Probe { .. })
+        });
+        let pull = task_of(scheduler.next(&plan, &graph, &Unlimited, Seat::Take));
+        assert!(matches!(pull.work, Work::Pull { .. }));
+        failed(&mut scheduler, &plan, &graph, &probe);
+        // The pull is in flight: its generator is not closed while it runs.
+        assert_eq!(
+            scheduler.next(&plan, &graph, &Unlimited, Seat::Take),
+            Next::Wait
+        );
+        let outcome = perform(&plan, &graph, &mut eval, &pull, &mut Vec::new());
+        let report = scheduler.complete(&plan, &graph, &Unlimited, pull.id, outcome);
+        // The item it gave is released, and the iterator is finished, once.
+        assert_eq!(report.released, [Num(2)]);
+        let finish = task_of(scheduler.next(&plan, &graph, &Unlimited, Seat::Take));
+        assert!(matches!(
+            finish.work,
+            Work::Finish {
+                exhausted: false,
+                ..
+            }
+        ));
+        let outcome = perform(&plan, &graph, &mut eval, &finish, &mut Vec::new());
+        scheduler.complete(&plan, &graph, &Unlimited, finish.id, outcome);
+        assert_eq!(
+            scheduler.next(&plan, &graph, &Unlimited, Seat::Take),
+            Next::Done
+        );
+        assert_eq!(eval.finished, [("picked".to_owned(), false)]);
+    }
+
+    #[test]
+    fn the_lowest_order_key_failure_is_returned() {
+        let graph = fan(items(&[1, 2, 3]));
+        let plan = graph.prepare(&request(&["total"], &[], &[])).unwrap();
+        let mut eval = Fan::default();
+        let seeded = seed(&graph, &plan, &[], &[], &eval);
+        let (mut scheduler, _) = Sched::new(&plan, &graph, seeded, Options::default());
+        let mut details = Vec::new();
+        let mut flying = Vec::new();
+        // Run everything but `details`, which is held back until all three are out.
+        while details.len() < 3 {
+            while let Next::Task(task) = scheduler.next(&plan, &graph, &Unlimited, Seat::Take) {
+                if name_of(&graph, &task) == "details" {
+                    details.push(task);
+                } else {
+                    flying.push(task);
+                }
+            }
+            let Some(task) = flying.pop() else {
+                break;
+            };
+            let outcome = perform(&plan, &graph, &mut eval, &task, &mut Vec::new());
+            scheduler.complete(&plan, &graph, &Unlimited, task.id, outcome);
+        }
+        // They fail last branch first.
+        for task in details.iter().rev() {
+            failed(&mut scheduler, &plan, &graph, task);
+        }
+        loop {
+            while let Next::Task(task) = scheduler.next(&plan, &graph, &Unlimited, Seat::Take) {
+                flying.push(task);
+            }
+            let Some(task) = flying.pop() else {
+                break;
+            };
+            let outcome = perform(&plan, &graph, &mut eval, &task, &mut Vec::new());
+            scheduler.complete(&plan, &graph, &Unlimited, task.id, outcome);
+        }
+        let RunError::Node { node, branch, .. } = scheduler.finish(&plan, &graph).unwrap_err()
+        else {
+            unreachable!("a node failed");
+        };
+        assert_eq!(
+            (node.as_str(), branch.as_slice()),
+            ("details", [0].as_slice())
+        );
+    }
+
+    #[test]
+    fn blocked_names_the_refused_node() {
+        let graph = diamond();
+        let (plan, mut scheduler) = start(&graph, &["d"], &[("x", Num(1))]);
+        let a = graph.id_of("a").unwrap();
+        let grant = Refuse {
+            node: a,
+            refusing: AtomicBool::new(true),
+        };
+        assert_eq!(scheduler.blocked(), None);
+        assert_eq!(
+            scheduler.next(&plan, &graph, &grant, Seat::Take),
+            Next::Wait
+        );
+        assert_eq!(scheduler.blocked(), Some(a));
+        grant.refusing.store(false, Ordering::Relaxed);
+        let task = task_of(scheduler.next(&plan, &graph, &grant, Seat::Take));
+        assert_eq!(scheduler.blocked(), None);
+        let outcome = perform(&plan, &graph, &mut Fan::default(), &task, &mut Vec::new());
+        scheduler.complete(&plan, &graph, &grant, task.id, outcome);
+        // `b` refused while `c` runs is not blocked: something of the run is in flight.
+        let refuse_b = Refuse {
+            node: graph.id_of("b").unwrap(),
+            refusing: AtomicBool::new(true),
+        };
+        let c = task_of(scheduler.next(&plan, &graph, &refuse_b, Seat::Take));
+        assert_eq!(name_of(&graph, &c), "c");
+        assert_eq!(
+            scheduler.next(&plan, &graph, &refuse_b, Seat::Take),
+            Next::Wait
+        );
+        assert_eq!(scheduler.blocked(), None);
+    }
+
+    #[test]
+    fn a_lent_seat_is_held_by_one_task_at_a_time_and_reused() {
+        let graph = diamond();
+        let (plan, mut scheduler) = start(&graph, &["d"], &[("x", Num(1))]);
+        let mut eval = Fan::default();
+        // No seat is lent yet.
+        assert_eq!(
+            scheduler.next(&plan, &graph, &Unlimited, Seat::Lent),
+            Next::Wait
+        );
+        scheduler.lend();
+        let a = task_of(scheduler.next(&plan, &graph, &Unlimited, Seat::Lent));
+        let outcome = perform(&plan, &graph, &mut eval, &a, &mut Vec::new());
+        scheduler.complete(&plan, &graph, &Unlimited, a.id, outcome);
+        // `b` and `c` are ready, but the lent seat holds one task at a time.
+        let b = task_of(scheduler.next(&plan, &graph, &Unlimited, Seat::Lent));
+        assert_eq!(
+            scheduler.next(&plan, &graph, &Unlimited, Seat::Lent),
+            Next::Wait
+        );
+        let outcome = perform(&plan, &graph, &mut eval, &b, &mut Vec::new());
+        scheduler.complete(&plan, &graph, &Unlimited, b.id, outcome);
+        let c = task_of(scheduler.next(&plan, &graph, &Unlimited, Seat::Lent));
+        assert_eq!(name_of(&graph, &c), "c");
+        let outcome = perform(&plan, &graph, &mut eval, &c, &mut Vec::new());
+        scheduler.complete(&plan, &graph, &Unlimited, c.id, outcome);
+        let d = task_of(scheduler.next(&plan, &graph, &Unlimited, Seat::Lent));
+        let outcome = perform(&plan, &graph, &mut eval, &d, &mut Vec::new());
+        scheduler.complete(&plan, &graph, &Unlimited, d.id, outcome);
+        assert_eq!(
+            scheduler.next(&plan, &graph, &Unlimited, Seat::Lent),
+            Next::Done
+        );
+        assert_eq!(
+            named(&graph, scheduler.finish(&plan, &graph)).unwrap()["d"],
+            Num(1110)
+        );
+    }
+
+    #[test]
+    fn limits_cap_workers_nodes_and_groups_across_two_schedulers() {
+        let graph = fan(items(&[1, 2, 3, 4, 5, 6]));
+        let plan = graph.prepare(&request(&["total"], &[], &[])).unwrap();
+        let id = |name: &str| graph.id_of(name).unwrap();
+        let mut caps = vec![None; graph.nodes().len()];
+        caps[id("details").index()] = Some(1);
+        let mut groups = vec![None; graph.nodes().len()];
+        groups[id("picked").index()] = Some(0);
+        groups[id("zz_rate").index()] = Some(0);
+        let limits = Limits::new(Some(2), caps, groups, vec![1]);
+        let mut evals = [Fan::default(), Fan::default()];
+        let mut schedulers: Vec<Sched> = evals
+            .iter()
+            .map(|eval| {
+                let seeded = seed(&graph, &plan, &[], &[], eval);
+                Sched::new(&plan, &graph, seeded, Options::default()).0
+            })
+            .collect();
+        let mut flying: Vec<(usize, Task<Val>)> = Vec::new();
+        let mut most = (0, 0, 0);
+        loop {
+            for (at, scheduler) in schedulers.iter_mut().enumerate() {
+                while let Next::Task(task) = scheduler.next(&plan, &graph, &limits, Seat::Take) {
+                    flying.push((at, task));
+                }
+            }
+            let calls = |names: &[&str]| {
+                flying
+                    .iter()
+                    .filter(|(_, t)| matches!(t.work, Work::Compute { .. } | Work::Pull { .. }))
+                    .filter(|(_, t)| names.contains(&name_of(&graph, t).as_str()))
+                    .count()
+            };
+            let now = (
+                flying.len(),
+                calls(&["details"]),
+                calls(&["picked", "zz_rate"]),
+            );
+            most = (most.0.max(now.0), most.1.max(now.1), most.2.max(now.2));
+            if flying.is_empty() {
+                break;
+            }
+            let (at, task) = flying.remove(0);
+            let outcome = perform(&plan, &graph, &mut evals[at], &task, &mut Vec::new());
+            schedulers[at].complete(&plan, &graph, &limits, task.id, outcome);
+        }
+        assert_eq!(most, (2, 1, 1));
+        for scheduler in schedulers {
+            let outputs = named(&graph, scheduler.finish(&plan, &graph)).unwrap();
+            assert_eq!(outputs["total"], nums(&[11, 21, 31, 41, 51, 61]));
+        }
+        assert_eq!(limits.held(LimitSlot::Worker), 0);
     }
 
     #[test]

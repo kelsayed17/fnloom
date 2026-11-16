@@ -17,6 +17,13 @@ change the public API; such changes are listed under **Changed** and **Removed**
   returns the outputs, or the failure with the lowest key. Stepped one task at a time, it makes the calls `Plan::run`
   makes, in the same order, and `Plan::run` is unchanged. `Plan::order_key(node, branch)` gives any step's key, and
   `run::Slot` is public, to seed a scheduler with each value's absence.
+- Rust core: limits, the in-flight bound, single-flight and stopping, in the scheduler. `limits::Limits` caps
+  workers, each node and each group with atomic counters, shared by the schedulers of one driver; a `Seat::Held`,
+  `Lent` or `Threadless` task takes no worker slot. `Options::in_flight` bounds an expand's unfinished branches. A
+  step whose single-flight key a running compute has waits for it and completes as a hit. A failure or `stop()`
+  hands out only the finishes of open iterators, innermost first, an iterator whose pull is in flight once the pull
+  returns, and `finish` returns the lowest key's failure. `blocked()` names the node a run waits for, and `lend()`
+  gives it one lent seat.
 
 ## [0.5.0] - 2026-11-15
 

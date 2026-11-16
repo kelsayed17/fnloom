@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use fnloom_core::graph::Graph;
-use fnloom_core::limits::Unlimited;
+use fnloom_core::limits::{Grant, Limits, Slot as LimitSlot, Unlimited};
 use fnloom_core::node::{Collect, Dependency, InputSpec, Node, NodeId, NodeSpec};
 use fnloom_core::plan::{Plan, Request};
 use fnloom_core::run::{Arg, Blocks, Evaluate, Item, Slot};
@@ -230,22 +230,53 @@ fn lock(shared: &Shared) -> MutexGuard<'_, Option<Scheduler<Val, String, String>
     shared.0.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// How many tasks, and how many of `leaf`, run now and ran at most at once.
+#[derive(Default)]
+struct Watch {
+    now: AtomicUsize,
+    most: AtomicUsize,
+    leaves: AtomicUsize,
+    most_leaves: AtomicUsize,
+    ran: AtomicUsize,
+}
+
+fn enter(now: &AtomicUsize, most: &AtomicUsize) {
+    let count = now.fetch_add(1, Ordering::AcqRel) + 1;
+    most.fetch_max(count, Ordering::AcqRel);
+}
+
 /// One worker: takes tasks until the run is done, waiting at most `deadline` in all.
-fn work(plan: &Plan, graph: &Graph<Op>, shared: &Shared, deadline: Instant, ran: &AtomicUsize) {
+fn work(
+    plan: &Plan,
+    graph: &Graph<Op>,
+    grant: &dyn Grant,
+    shared: &Shared,
+    deadline: Instant,
+    watch: &Watch,
+) {
     let mut guard = lock(shared);
     loop {
         assert!(Instant::now() < deadline, "the run hung");
         let Some(scheduler) = guard.as_mut() else {
             return;
         };
-        match scheduler.next(plan, graph, &Unlimited, Seat::Take) {
+        match scheduler.next(plan, graph, grant, Seat::Take) {
             Next::Task(task) => {
                 drop(guard);
+                let leaf = graph.node(task.node).name == "leaf";
+                enter(&watch.now, &watch.most);
+                if leaf {
+                    enter(&watch.leaves, &watch.most_leaves);
+                }
                 let outcome = perform(plan, graph, &task);
-                ran.fetch_add(1, Ordering::Relaxed);
+                if leaf {
+                    watch.leaves.fetch_sub(1, Ordering::AcqRel);
+                }
+                watch.now.fetch_sub(1, Ordering::AcqRel);
+                watch.ran.fetch_add(1, Ordering::Relaxed);
                 guard = lock(shared);
                 if let Some(scheduler) = guard.as_mut() {
-                    let report = scheduler.complete(plan, graph, &Unlimited, task.id, outcome);
+                    let report = scheduler.complete(plan, graph, grant, task.id, outcome);
                     drop(report);
                 }
                 shared.1.notify_all();
@@ -265,9 +296,10 @@ fn work(plan: &Plan, graph: &Graph<Op>, shared: &Shared, deadline: Instant, ran:
     }
 }
 
-#[test]
-fn eight_threads_behind_a_mutex_give_plan_runs_outputs() {
-    let graph = nested(1_000);
+/// Runs the nested fan-out of `items` on eight threads under `grant`, and checks its outputs
+/// against `Plan::run`'s.
+fn eight_threads(items: i64, grant: &dyn Grant) -> Watch {
+    let graph = nested(items);
     let plan = graph
         .prepare(&Request {
             outputs: vec!["outer_sum".to_owned()],
@@ -283,10 +315,10 @@ fn eight_threads_behind_a_mutex_give_plan_runs_outputs() {
     let (scheduler, _) = Scheduler::new(&plan, &graph, seeded, Options::default());
     let shared: Shared = (Mutex::new(Some(scheduler)), Condvar::new());
     let deadline = Instant::now() + Duration::from_secs(120);
-    let ran = AtomicUsize::new(0);
+    let watch = Watch::default();
     thread::scope(|scope| {
         for _ in 0..8 {
-            scope.spawn(|| work(&plan, &graph, &shared, deadline, &ran));
+            scope.spawn(|| work(&plan, &graph, grant, &shared, deadline, &watch));
         }
     });
     let scheduler = lock(&shared)
@@ -296,6 +328,29 @@ fn eight_threads_behind_a_mutex_give_plan_runs_outputs() {
         .finish(&plan, &graph)
         .unwrap_or_else(|error| unreachable!("the run succeeds: {error}"));
     assert_eq!(got, want);
+    watch
+}
+
+#[test]
+fn eight_threads_behind_a_mutex_give_plan_runs_outputs() {
+    let watch = eight_threads(1_000, &Unlimited);
     // Every outer branch probed, pulled, iterated and finished its inner block.
-    assert!(ran.load(Ordering::Relaxed) > 5_000);
+    assert!(watch.ran.load(Ordering::Relaxed) > 5_000);
+    // The threads overlapped.
+    assert!(watch.most.load(Ordering::Acquire) > 1);
+}
+
+#[test]
+fn eight_threads_never_exceed_their_limits() {
+    let graph = nested(1);
+    let leaf = graph
+        .id_of("leaf")
+        .unwrap_or_else(|| unreachable!("the graph has a leaf"));
+    let mut caps = vec![None; graph.nodes().len()];
+    caps[leaf.index()] = Some(2);
+    let limits = Limits::new(Some(3), caps, Vec::new(), Vec::new());
+    let watch = eight_threads(300, &limits);
+    assert!(watch.most.load(Ordering::Acquire) <= 3);
+    assert!(watch.most_leaves.load(Ordering::Acquire) <= 2);
+    assert_eq!(limits.held(LimitSlot::Worker), 0);
 }
