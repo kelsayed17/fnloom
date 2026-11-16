@@ -472,24 +472,28 @@ def _check_kind(name: str, fn: Callable[..., object], *, awaits: bool) -> None:
     """`ValueError` when calling `fn` would not run its body to a value (Q32).
 
     With `awaits`, an `async def` is accepted: the async driver awaits it. A
-    generator function annotated `-> Parallelizable[...]` is an expand, and one
-    whose return annotation is still a string is left to `_blocks.refuse`, after
-    `resolve`, which refuses it with this message unless it is an expand.
+    generator function annotated `-> Parallelizable[...]` is an expand, and so is
+    an async generator function, with `awaits` only; one whose return annotation
+    is still a string is left to `_blocks.refuse`, after `resolve`, which refuses
+    it with this message unless it is an expand.
     """
     kind = _unsupported_function_kind(fn)
     if kind is None or (awaits and kind == "async function"):
         return
-    if kind == "generator function":
+    expand = False
+    if kind in {"generator function", "async generator function"}:
         returns = annotationlib.get_annotations(
             fn, format=annotationlib.Format.FORWARDREF
         ).get("return")
-        if isinstance(returns, str | annotationlib.ForwardRef) or _blocks.expands(
+        expand = isinstance(returns, str | annotationlib.ForwardRef) or _blocks.expands(
             returns
-        ):
+        )
+        # An async generator expands only on build_async, which awaits its items.
+        if expand and (awaits or kind == "generator function"):
             return
-    if kind == "async function":
+    if kind == "async function" or expand:
         msg = (
-            f"{name!r}: async function is not supported by build(), which calls "
+            f"{name!r}: {kind} is not supported by build(), which calls "
             "nodes synchronously; build it with build_async()"
         )
     elif awaits:

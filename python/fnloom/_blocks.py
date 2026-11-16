@@ -138,28 +138,30 @@ def refuse(nodes: Sequence[NodeDef], *, awaits: bool) -> None:
     """`ValueError` for each node that can't be what its annotation says, sorted.
 
     A generator function that is no expand stays refused (Q32), with the message
-    the scan gave before an expand could be one; an expand whose items may be
-    absent is refused. With `awaits`, a graph with any expand is a `TypeError`,
-    since blocks run on the async driver from Plan 11 (Q132).
+    the scan gave before an expand could be one, and so does an async generator
+    function that is no expand; an expand whose items may be absent is refused.
+    The scan refuses an async generator expand on `build` (Q32).
     """
     lines: list[str] = []
-    expanding: list[str] = []
     for node in nodes:
         item = expanded_type(node.returns)
         if item is None:
             # Read off the code's flags, as the scan does: far cheaper per node.
             code = getattr(node.origin, "__code__", None)
-            if code is not None and code.co_flags & inspect.CO_GENERATOR:
+            flags = 0 if code is None else code.co_flags
+            if flags & (inspect.CO_GENERATOR | inspect.CO_ASYNC_GENERATOR):
+                kind = (
+                    "async generator"
+                    if flags & inspect.CO_ASYNC_GENERATOR
+                    else "generator"
+                )
                 tail = (
                     "calling it returns a generator, not the node's value"
                     if awaits
                     else "nodes are called synchronously"
                 )
-                lines.append(
-                    f"{node.name!r}: generator function is not supported; {tail}"
-                )
+                lines.append(f"{node.name!r}: {kind} function is not supported; {tail}")
             continue
-        expanding.append(node.name)
         if admits_absent(item):
             shown = inspect.formatannotation(item)
             present = inspect.formatannotation(without_absent(item))
@@ -170,10 +172,6 @@ def refuse(nodes: Sequence[NodeDef], *, awaits: bool) -> None:
             )
     if lines:
         raise ValueError("; ".join(sorted(lines)))
-    if awaits and expanding:
-        listed = ", ".join(f"{name!r}" for name in sorted(expanding))
-        msg = f"blocks run on the async driver from Plan 11; {listed} expands"
-        raise TypeError(msg)
 
 
 def item_check(

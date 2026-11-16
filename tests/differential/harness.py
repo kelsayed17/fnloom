@@ -1,5 +1,6 @@
 """Runs one request through Hamilton and through fnloom, as `Outcome`s."""
 
+import asyncio
 import importlib.util
 import itertools
 import json
@@ -125,14 +126,25 @@ def run_fnloom_blocks(
     inputs: Mapping[str, object] | None = None,
     overrides: Mapping[str, object] | None = None,
     *,
-    threads: int | None = None,
+    threads: Workers = None,
 ) -> Outcome:
-    """`run_fnloom`, on a driver built `with_threads(threads)` when it is given."""
+    """`run_fnloom`, on a driver built `with_threads(threads)` when it is given.
+
+    `"async"` runs on `build_async()`, and `"async-8"` there with `with_threads(8)`.
+    """
     builder = fnloom.Builder().with_modules(*modules)
-    if threads is not None:
-        builder = builder.with_threads(threads)
+    if isinstance(threads, int) or threads == "async-8":
+        builder = builder.with_threads(threads if isinstance(threads, int) else 8)
     try:
-        result = builder.build().execute(outputs, inputs=inputs, overrides=overrides)
+        if isinstance(threads, str):
+            run = builder.build_async().execute(
+                outputs, inputs=inputs, overrides=overrides
+            )
+            result = asyncio.run(run)
+        else:
+            result = builder.build().execute(
+                outputs, inputs=inputs, overrides=overrides
+            )
     except Exception as error:  # noqa: BLE001  # the exception class is the thing being compared
         return Outcome(None, type(error).__name__)
     return Outcome(dict(result), None)
@@ -192,8 +204,10 @@ BLOCK_IMPORTS: dict[str, str] = {
 # (`MultiThreadingExecutor(10)`), and `("threads", n)`, `MultiThreadingExecutor(n)`.
 type Executor = Literal["synchronous", "default"] | tuple[Literal["threads"], int]
 EXECUTORS: tuple[Executor, ...] = ("synchronous", "default", ("threads", 8))
-# fnloom's worker counts: `None` is a driver without `with_threads`.
-THREADS: tuple[int | None, ...] = (None, 1, 2, 8)
+# fnloom's runs: a worker count, `None` for a driver without `with_threads`, and the
+# async driver, without and with `with_threads(8)`.
+type Workers = int | Literal["async", "async-8"] | None
+THREADS: tuple[Workers, ...] = (None, 1, 2, 8, "async", "async-8")
 
 
 def block_module(name: str, source: str, runtime: str) -> ModuleType:

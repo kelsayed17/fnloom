@@ -21,6 +21,7 @@ from harness import (
     Executor,
     Nodes,
     Outcome,
+    Workers,
     block_module,
     lineage_fnloom,
     lineage_hamilton,
@@ -1727,7 +1728,7 @@ def both_blocks(  # noqa: PLR0913  # the program, its request, and where each ru
     executor: Executor = "synchronous",
     overrides: Mapping[str, object] | None = None,
     *,
-    threads: int | None = None,
+    threads: Workers = None,
 ) -> tuple[Outcome, Outcome]:
     """Hamilton's outcome and fnloom's, for one block program.
 
@@ -1777,7 +1778,7 @@ executors_of = pytest.mark.parametrize("executor", EXECUTORS, ids=str)
 @executors_of
 @threads_of
 def test_q119_collect_receives_branches_in_item_order(
-    executor: Executor, threads: int | None
+    executor: Executor, threads: Workers
 ) -> None:
     """Both collect in yield order, on every executor, whatever finishes first."""
     hamilton, ours = both_blocks(
@@ -1791,7 +1792,7 @@ def test_q119_collect_receives_branches_in_item_order(
 @executors_of
 @threads_of
 def test_q120_an_empty_expand_gives_an_empty_collect(
-    executor: Executor, threads: int | None
+    executor: Executor, threads: Workers
 ) -> None:
     """An expand that yields nothing gives its collect `[]`."""
     hamilton, ours = both_blocks(
@@ -1819,7 +1820,7 @@ def summary(details: Collect[int]) -> list[int]:
 @executors_of
 @threads_of
 def test_q121_an_expand_may_return_a_list_and_is_output_as_one(
-    executor: Executor, threads: int | None
+    executor: Executor, threads: Workers
 ) -> None:
     """A list is iterated like a generator, and the expand as an output is a list."""
     hamilton, ours = both_blocks(
@@ -1867,9 +1868,7 @@ def summary(details: Collect[str]) -> int:
 @pytest.mark.keeps("Q127")
 @pytest.mark.parametrize("source", [EXPAND_EDGE, COLLECT_EDGE])
 @threads_of
-def test_q127_block_edges_are_checked_at_build(
-    source: str, threads: int | None
-) -> None:
+def test_q127_block_edges_are_checked_at_build(source: str, threads: Workers) -> None:
     """An expand feeds `T`, a block node a collect's element: both refuse a mismatch."""
     hamilton, ours = both_blocks(source, ["summary"], {}, threads=threads)
     assert hamilton == Outcome(None, "ValueError")
@@ -1910,7 +1909,7 @@ def joined(left_sum: int, right_sum: int, k: int) -> list[int]:
 @executors_of
 @threads_of
 def test_q138_two_independent_blocks_share_their_inputs(
-    executor: Executor, threads: int | None
+    executor: Executor, threads: Workers
 ) -> None:
     """Two blocks joined downstream run; an input is shared by every branch."""
     hamilton, ours = both_blocks(
@@ -1945,7 +1944,7 @@ def summary(details: Collect[int]) -> list[int]:
 @executors_of
 @threads_of
 def test_q128_a_failing_branch_raises_its_own_exception(
-    executor: Executor, threads: int | None
+    executor: Executor, threads: Workers
 ) -> None:
     """Both raise the branch's own exception class, unwrapped, and return nothing."""
     hamilton, ours = both_blocks(

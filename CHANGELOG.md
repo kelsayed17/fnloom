@@ -67,6 +67,12 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - `with_threads` on `build_async()`: each sync node runs on the driver's own pool, holding a worker slot, so at most
   `max_workers` run at once, while `async def` nodes hold none (Q65). `sync_nodes="inline"` with it is a
   `ValueError`. A sync node there that runs its own async driver never waits for the slot it holds.
+- Blocks on the async driver (Q132). `build_async()` runs fan-outs as `build()` does, with a block's branches
+  overlapping on the loop and each `Collect` in item order, and an `async def` generator annotated
+  `-> Parallelizable[T]` is an expand there, its items awaited on the loop and checked as a sync expand's are (Q32).
+  A sync generator's items are read where its node runs. A generator keeps one context across its items. A failing
+  branch cancels every running node and pending read once, and the generator is closed once. `build()` refuses an
+  async generator expand, saying to use `build_async()`.
 
 ### Changed
 

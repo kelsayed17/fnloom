@@ -1026,6 +1026,47 @@ Either way the run is scheduled as the sync driver's is: ready nodes start in re
 `with_limits` hold ([Limits](#limits)), and each `NodeStart` and `NodeEnd` carries its `order`. With
 `sync_nodes="inline"` and no `async def` node, its events come exactly as the sync driver's do.
 
+**Blocks** run on the async driver as on `Driver` ([Fan-out and fan-in](#fan-out-and-fan-in)), with every branch's
+nodes overlapping, and each `Collect` in item order. The expand may be an `async def` generator, whose items are
+awaited on the loop:
+
+```python
+# file: catalog_async.py
+import asyncio
+
+from fnloom import Collect, Parallelizable
+
+
+async def picked(items: list[str]) -> Parallelizable[str]:
+    """Each item, as a paged listing would stream it."""
+    for item in items:
+        await asyncio.sleep(0)
+        yield item
+
+
+async def details(picked: str) -> str:
+    """One item's details, fetched concurrently with the others'."""
+    await asyncio.sleep(0)
+    return picked.upper()
+
+
+def summary(details: Collect[str]) -> list[str]:
+    """Every item's details, in the order the items came."""
+    return details
+```
+
+```python
+import catalog_async
+
+streamed = fnloom.Builder().with_modules(catalog_async).build_async()
+asyncio.run(streamed.execute(["summary"], inputs={"items": ["chair", "desk"]}))
+# -> {'summary': ['CHAIR', 'DESK']}
+```
+
+A sync generator's items are read where its node would run: in a thread, on the pool, or on the loop. A generator
+keeps one context from its first item to its last. When a branch fails, every running node and every pending read of
+an async generator is cancelled once, and the generator is closed once, after any read of it in a thread returns.
+
 **When a node fails,** the run cancels every node still running, waits for each `async def` node to stop, and raises
 the failed node's own exception, with the same note naming the node as the sync driver adds. There's no
 `ExceptionGroup`, so `except ZeroDivisionError` works as it does with `Driver`. A sync node in a thread can't be

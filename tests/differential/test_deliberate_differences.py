@@ -6202,15 +6202,18 @@ def test_q127_items_are_checked_as_inputs() -> None:
 
 
 @pytest.mark.deliberate("Q132")
-def test_q132_build_async_refuses_blocks_until_plan_11() -> None:
-    """Hamilton's async builder refuses the flag; fnloom's refuses the graph."""
+def test_q132_the_async_driver_runs_blocks() -> None:
+    """Hamilton's async builder refuses dynamic execution; fnloom's runs the block.
+
+    Its value is the sync driver's, which is Hamilton's sync one's (Q119).
+    """
     with pytest.raises(ValueError, match="not supported for the async driver"):
         hamilton_async.Builder().enable_dynamic_execution(allow_experimental_mode=True)
+    hamilton, _ = both_blocks(PICKED, ["summary"], {"n": 3, "rate": 2})
     module = block_module("q132_f", PICKED, "fnloom")
-    with pytest.raises(
-        TypeError, match="blocks run on the async driver from Plan 11; 'picked' expands"
-    ):
-        fnloom.Builder().with_modules(module).build_async()
+    driver = fnloom.Builder().with_modules(module).build_async()
+    ours = asyncio.run(driver.execute(["summary"], inputs={"n": 3, "rate": 2}))
+    assert hamilton == Outcome(ours, None)
 
 
 _BOTH_KINDS = """

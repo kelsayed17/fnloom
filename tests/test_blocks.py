@@ -6,7 +6,7 @@ import pytest
 
 import fnloom
 from fnloom import _core
-from helpers import make_module
+from helpers import DRIVER_KINDS, DriverKind, built, make_module, run
 from type_snippets import blocks as snippet
 
 if TYPE_CHECKING:
@@ -165,14 +165,13 @@ def picked() -> Parallelizable[dict]:
         fnloom.build(make_module(f"blocks_extract_{bool(future)}", source))
 
 
-def test_build_async_refuses_blocks() -> None:
-    """Blocks run on the async driver from Plan 11 (Q132)."""
+def test_build_async_runs_blocks() -> None:
+    """The async driver runs a block as the sync driver does (Q132)."""
     module = make_module("blocks_async", PICKED)
-    with pytest.raises(TypeError) as info:
-        fnloom.Builder().with_modules(module).build_async()
-    assert str(info.value) == (
-        "blocks run on the async driver from Plan 11; 'picked' expands"
-    )
+    request = (["summary"], {"n": 3, "rate": 2})
+    expected = fnloom.build(module).execute(request[0], inputs=request[1])
+    driver = fnloom.Builder().with_modules(module).build_async()
+    assert run(driver, request[0], inputs=request[1]) == expected
 
 
 STR_ITEMS = """
@@ -905,21 +904,24 @@ class Skips(fnloom.Hook):
         self.skipped = event.skipped
 
 
-def test_collect_drops_declined_branches_in_order() -> None:
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_collect_drops_declined_branches_in_order(driver_kind: DriverKind) -> None:
     """`Collect[T]` gathers the branches that gave a value, in item order."""
     skips = Skips()
-    module = make_module("blocks_declining_present", DECLINING)
-    driver = fnloom.Builder().with_modules(module).with_hooks(skips).build()
+    module = make_module(f"blocks_declining_present_{driver_kind}", DECLINING)
+    driver = built(driver_kind, fnloom.Builder().with_modules(module).with_hooks(skips))
     assert driver.nodes["tenfold"].may_be_absent
     assert not driver.nodes["present"].may_be_absent
-    assert driver.execute(["present"], inputs={"n": 5}) == {"present": [10, 30]}
+    assert run(driver, ["present"], inputs={"n": 5}) == {"present": [10, 30]}
     assert skips.skipped == (("tenfold", (0,)), ("tenfold", (2,)), ("tenfold", (4,)))
 
 
-def test_collect_with_absent_keeps_places() -> None:
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_collect_with_absent_keeps_places(driver_kind: DriverKind) -> None:
     """`Collect[T | Absent]` has an entry per item, `ABSENT` where a branch declined."""
-    driver = fnloom.build(make_module("blocks_declining_placed", DECLINING))
-    assert driver.execute(["placed"], inputs={"n": 4}) == {
+    module = make_module(f"blocks_declining_placed_{driver_kind}", DECLINING)
+    driver = built(driver_kind, fnloom.Builder().with_modules(module))
+    assert run(driver, ["placed"], inputs={"n": 4}) == {
         "placed": [fnloom.ABSENT, 10, fnloom.ABSENT, 30]
     }
 
@@ -949,21 +951,22 @@ def plain(doubled: Collect[int]) -> list[int]:
 """
 
 
-def test_an_absent_expand_is_not_an_empty_one() -> None:
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_an_absent_expand_is_not_an_empty_one(driver_kind: DriverKind) -> None:
     """An empty expand collects `[]`; an absent one, `ABSENT`, a default or a skip."""
     skips = Skips()
-    module = make_module("blocks_absent_expand", MAYBE_EMPTY)
-    driver = fnloom.Builder().with_modules(module).with_hooks(skips).build()
+    module = make_module(f"blocks_absent_expand_{driver_kind}", MAYBE_EMPTY)
+    driver = built(driver_kind, fnloom.Builder().with_modules(module).with_hooks(skips))
     shown = {n: driver.nodes[n].may_be_absent for n in ("given", "defaulted", "plain")}
     assert shown == {"given": False, "defaulted": False, "plain": True}
     outputs = ["given", "defaulted", "plain"]
-    assert driver.execute(outputs, inputs={"items": []}) == {
+    assert run(driver, outputs, inputs={"items": []}) == {
         "given": [],
         "defaulted": [],
         "plain": [],
     }
     assert skips.skipped == ()
-    assert driver.execute(outputs, inputs={"items": None}) == {
+    assert run(driver, outputs, inputs={"items": None}) == {
         "given": "absent",
         "defaulted": [-1],
         "plain": fnloom.ABSENT,
@@ -993,14 +996,21 @@ def shouted(shout: Collect[str] | Absent) -> str:
 """
 
 
-def test_items_already_pulled_are_dropped_when_the_expand_declines_midway() -> None:
+@pytest.mark.parametrize("driver_kind", DRIVER_KINDS)
+def test_items_already_pulled_are_dropped_when_the_expand_declines_midway(
+    driver_kind: DriverKind,
+) -> None:
     """A generator returning `ABSENT` declines as a whole, after its branches ran."""
-    module = make_module("blocks_midway", MIDWAY.format(admits=" | Absent"))
-    assert fnloom.build(module).execute(["shouted"]) == {"shouted": "declined"}
-    assert module.seen == ["a", "b"]
-    refused = make_module("blocks_midway_refused", MIDWAY.format(admits=""))
+    name = f"blocks_midway_{driver_kind}"
+    module = make_module(name, MIDWAY.format(admits=" | Absent"))
+    driver = built(driver_kind, fnloom.Builder().with_modules(module))
+    assert run(driver, ["shouted"]) == {"shouted": "declined"}
+    # Both ran; on the async driver, in threads, in either order.
+    assert sorted(module.seen) == ["a", "b"]
+    refused = make_module(f"{name}_refused", MIDWAY.format(admits=""))
+    driver = built(driver_kind, fnloom.Builder().with_modules(refused))
     with pytest.raises(TypeError, match="ABSENT") as info:
-        fnloom.build(refused).execute(["shouted"])
+        run(driver, ["shouted"])
     assert str(info.value) == (
         "node 'picked' returned fnloom.ABSENT, but its return annotation does not "
         "admit fnloom.Absent"
