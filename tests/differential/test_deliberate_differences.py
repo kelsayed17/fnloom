@@ -26,6 +26,7 @@ from hamilton.execution import executors
 from hamilton.function_modifiers import hamilton_exclude
 from hamilton.function_modifiers.base import InvalidDecoratorException
 from hamilton.lifecycle import NoEdgeAndInputTypeChecking
+from hamilton.lifecycle import default as hamilton_default
 from harness import (
     FAKE_GRAPHVIZ,
     FIXTURES,
@@ -6846,3 +6847,77 @@ def a(x: int) -> int:
         fnloom.step(_add, extra=fnloom.group(fnloom.value(1)))
     with pytest.raises(TypeError, match=r"_add: group\(\) binds a parameterize row"):
         fnloom.mutate(fnloom.apply_to(_add, extra=fnloom.group(fnloom.value(1))))(_add)
+
+
+_GRACEFUL = """
+def picked(items: list[int]) -> Parallelizable[int]:
+    yield from items
+
+
+def detail(picked: int) -> int:
+    if picked == 2:
+        raise KeyError(picked)
+    return picked
+
+
+def total(detail: Collect[int]) -> list[int]:
+    return list(detail)
+"""
+
+_ABSENT_ON = """
+from fnloom import Absent, absent_on
+
+
+def picked(items: list[int]) -> Parallelizable[int]:
+    yield from items
+
+
+@absent_on(KeyError)
+def detail(picked: int) -> int | Absent:
+    if picked == 2:
+        raise KeyError(picked)
+    return picked
+
+
+def total(detail: Collect[int]) -> list[int]:
+    return list(detail)
+
+
+def every(detail: Collect[int | Absent]) -> list[object]:
+    return list(detail)
+"""
+
+
+@pytest.mark.deliberate("Q133")
+@pytest.mark.threads
+@pytest.mark.parametrize("threads", [None, 8])
+def test_q133_an_error_absence_is_absent_not_a_sentinel(threads: int | None) -> None:
+    """Hamilton gives a sentinel like a value; fnloom an absence, dropped or kept."""
+    theirs = block_module(f"q133_h_{threads}", _GRACEFUL, "hamilton")
+    graceful = hamilton_default.GracefulErrorAdapter(error_to_catch=KeyError)
+    for executor in ("synchronous", "default"):
+        builder = (
+            hamilton_driver.Builder()
+            .enable_dynamic_execution(allow_experimental_mode=True)
+            .with_modules(theirs)
+            .with_adapters(graceful)
+        )
+        if executor == "synchronous":
+            builder = builder.with_local_executor(
+                executors.SynchronousLocalTaskExecutor()
+            ).with_remote_executor(executors.SynchronousLocalTaskExecutor())
+        got = builder.build().execute(["total"], inputs={"items": [1, 2, 3]})
+        # The failed branch is `None`, as a branch returning `None` would be.
+        assert got == {"total": [1, None, 3]}
+    ours = block_module(f"q133_f_{threads}", _ABSENT_ON, "fnloom")
+    builder = fnloom.Builder().with_modules(ours)
+    if threads is not None:
+        builder = builder.with_threads(threads)
+    assert builder.build().execute(["total", "every"], inputs={"items": [1, 2, 3]}) == {
+        "total": [1, 3],
+        "every": [1, fnloom.ABSENT, 3],
+    }
+    # With no policy, the error fails the run.
+    plain = block_module(f"q133_plain_{threads}", _GRACEFUL, "fnloom")
+    with pytest.raises(KeyError):
+        fnloom.build(plain).execute(["total"], inputs={"items": [1, 2, 3]})

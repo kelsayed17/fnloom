@@ -89,6 +89,17 @@ pub trait Evaluate<P> {
     ) -> Result<Option<Self::Value>, Self::Error> {
         Ok(None)
     }
+
+    /// The absent value `node` takes instead of failing with `error`, or `None` to fail.
+    ///
+    /// Asked only of a node that is absent on an error (`Node::absent_on_error`), once its
+    /// payload or, for an expand, a pull of its items failed, after `post_node` reported
+    /// the error. `Some(value)` makes the node absent, holding `value`, and fires
+    /// `Observer::absent_error`; an expand absent while it yields drops the branches already
+    /// run, as `Item::Declined` does. The default fails every time.
+    fn absent_on_error(&mut self, _node: &Node<P>, _error: &Self::Error) -> Option<Self::Value> {
+        None
+    }
 }
 
 /// What an expand's iterator gave: an item, the end, or a decline while yielding.
@@ -242,6 +253,17 @@ pub trait Observer<V, E> {
     ///
     /// An error aborts the run after every observer has seen the event.
     fn hit_in(&mut self, _node: &str, _branch: &[usize], _value: &V) -> Result<(), E> {
+        Ok(())
+    }
+
+    /// Called when `error` made `node` absent instead of failing the run
+    /// (`Evaluate::absent_on_error`), right after `post_node` reported it; `branch` is the
+    /// branch it ran in, an expand's own for an error while it yields.
+    ///
+    /// # Errors
+    ///
+    /// An error aborts the run after every observer has seen the event.
+    fn absent_error(&mut self, _node: &str, _branch: &[usize], _error: &E) -> Result<(), E> {
         Ok(())
     }
 
@@ -585,11 +607,13 @@ impl Plan {
                         return Err(planned_to_compute(node));
                     };
                     let slot = match gather_by_rules(graph, step, &slots)? {
-                        Gathered::Args(args) => {
-                            let value = call(eval, hooks, node, payload, &args)?;
-                            let absent = node.declines && eval.is_absent(&value);
-                            Slot { value, absent }
-                        }
+                        Gathered::Args(args) => match call(eval, hooks, node, payload, &args) {
+                            Ok(value) => {
+                                let absent = node.declines && eval.is_absent(&value);
+                                Slot { value, absent }
+                            }
+                            Err(failure) => error_absence(eval, hooks, node, &[], failure)?,
+                        },
                         Gathered::Skip(value) => {
                             hooks.check("skipped", |observer| observer.skipped(&node.name, &[]))?;
                             Slot {
@@ -687,6 +711,49 @@ fn gather_by_rules<'g, P, T: Clone, E>(
         });
     }
     Ok(Gathered::Args(args))
+}
+
+/// The absent slot `failure` gives `node` when it is absent on that error
+/// (`Evaluate::absent_on_error`), once `Observer::absent_error` fired; else `failure`.
+///
+/// What observers raised reporting the error, and the absence, fails the run as an
+/// observer error, as it would after a value.
+#[cold]
+pub(crate) fn error_absence<P, V: Evaluate<P>>(
+    eval: &mut V,
+    hooks: &mut Hooks<'_, '_, V::Value, V::Error>,
+    node: &Node<P>,
+    branch: &[usize],
+    failure: RunError<V::Error>,
+) -> Result<Slot<V::Value>, RunError<V::Error>> {
+    let value = match &failure {
+        RunError::Node { source, .. } if node.absent_on_error => eval.absent_on_error(node, source),
+        _ => None,
+    };
+    let Some(value) = value else {
+        return Err(failure);
+    };
+    let (source, mut observer_errors) = match failure {
+        RunError::Node {
+            source,
+            observer_errors,
+            ..
+        } => (source, observer_errors),
+        other => return Err(other),
+    };
+    observer_errors
+        .extend(hooks.fire(|observer| observer.absent_error(&node.name, branch, &source)));
+    if observer_errors.is_empty() {
+        Ok(Slot {
+            value,
+            absent: true,
+        })
+    } else {
+        Err(RunError::Observers {
+            event: "post_node",
+            errors: observer_errors,
+        })
+    }
 }
 
 /// The `RunError::BrokenPlan` for an input node a plan computes.

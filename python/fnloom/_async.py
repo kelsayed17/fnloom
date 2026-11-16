@@ -35,6 +35,7 @@ from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from fnloom import _core, _extract
 from fnloom._blocks import AsyncItems
+from fnloom._caching import Errors
 from fnloom._threads import CANCELLED
 
 if TYPE_CHECKING:
@@ -235,6 +236,7 @@ class CachedSchedule:
         warned: set[str] = set()
         versions = self._cache_run.versions(inputs, overrides, warned)
         known: dict[str, object] = {}
+        errors = Errors()
         for level in reversed(levels):
             outer = level is self._cache_run
             begun = level.begin(
@@ -245,10 +247,16 @@ class CachedSchedule:
                 warned=warned,
                 values=None if outer else {},
                 native=False,
+                errors=errors,
             )
             on_value = functools.partial(level.finish, begun)
             result = await self._runner.run(
-                begun.plan, inputs, begun.overrides, (), on_value, begun.late
+                begun.plan,
+                inputs,
+                begun.overrides,
+                begun.observers(),
+                on_value,
+                begun.late,
             )
             values = begun.values
             if values is None:
@@ -282,7 +290,7 @@ class CachedSchedule:
                 begun.plan,
                 inputs,
                 begun.overrides,
-                dispatch.observers(),
+                begun.observers(dispatch.observers()),
                 functools.partial(level.kept, begun, dispatch),
                 begun.late,
             )
@@ -533,7 +541,7 @@ class _Run:
                         value = context.run(function, **payload)
                     if inspect.isawaitable(value):
                         value = _awaitable_refusal(name, value)
-                        self._complete(task, "error", value)
+                        self._complete(task, "refused", value)
                     elif self._stepper.complete(task, "value", value):
                         self._halted = True
                     return
@@ -686,7 +694,7 @@ class _Run:
             return
         threaded = not isinstance(future, asyncio.Task)
         if threaded and work == "compute" and inspect.isawaitable(value):
-            self._complete(task, "error", _awaitable_refusal(name, value))
+            self._complete(task, "refused", _awaitable_refusal(name, value))
             return
         if self._stepper.complete(task, "value", value):
             self._halted = True

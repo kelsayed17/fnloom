@@ -8,7 +8,9 @@
 use crate::graph::Graph;
 use crate::node::{Collect, Dependency, Edge, Node, NodeId};
 use crate::plan::{Action, BlockId, Plan, Step, SubPlan};
-use crate::run::{Arg, Evaluate, Hooks, Item, Outputs, RunError, Slot, broken, planned_to_compute};
+use crate::run::{
+    Arg, Evaluate, Hooks, Item, Outputs, RunError, Slot, broken, error_absence, planned_to_compute,
+};
 
 /// What a collect reads of one node: its value in each branch, or the absent value of an
 /// expand that had none.
@@ -218,11 +220,15 @@ impl<'r, P, T: Clone> Runner<'r, P, T> {
                     return Err(planned_to_compute(node));
                 };
                 let slot = match self.gather(step, eval)? {
-                    Gathered::Args(args) => {
-                        let value = self.call(eval, hooks, node, payload, &args)?;
-                        let absent = node.declines && eval.is_absent(&value);
-                        Slot { value, absent }
-                    }
+                    Gathered::Args(args) => match self.call(eval, hooks, node, payload, &args) {
+                        Ok(value) => {
+                            let absent = node.declines && eval.is_absent(&value);
+                            Slot { value, absent }
+                        }
+                        Err(failure) => {
+                            error_absence(eval, hooks, node, self.branch_of(node), failure)?
+                        }
+                    },
                     Gathered::Skip(value) => {
                         let branch = self.branch_of(node);
                         hooks.check("skipped", |observer| observer.skipped(&node.name, branch))?;
@@ -277,6 +283,7 @@ impl<'r, P, T: Clone> Runner<'r, P, T> {
             // Nothing in the request reads the block: pull the items, and keep what the
             // iterator returns once exhausted as the expand's value.
             let mut items = 0;
+            let mut failed = None;
             let outcome = loop {
                 match blocks.next_item(node, &iterator) {
                     Ok(Item::Next(_)) => items += 1,
@@ -295,14 +302,38 @@ impl<'r, P, T: Clone> Runner<'r, P, T> {
                         });
                     }
                     Err(source) => {
+                        if node.absent_on_error {
+                            // Asked once the iterator's borrow of `eval` ends, below.
+                            failed = Some(source);
+                            break Ok(Slot {
+                                value: iterator.clone(),
+                                absent: true,
+                            });
+                        }
                         drop(blocks.finish_items(node, &iterator, false));
                         break Err(source);
                     }
                 }
             };
-            let slot =
-                outcome.map_err(|source| node_error(graph, node, source, branch, Vec::new()))?;
-            if slot.absent && !node.declines {
+            let by_error = failed.is_some();
+            let slot = match failed {
+                Some(source) => {
+                    let failure = node_error(graph, node, source, branch, Vec::new());
+                    match error_absence(eval, hooks, node, branch, failure) {
+                        Ok(slot) => slot,
+                        Err(failure) => {
+                            if let Some(blocks) = eval.blocks() {
+                                drop(blocks.finish_items(node, &iterator, false));
+                            }
+                            return Err(failure);
+                        }
+                    }
+                }
+                None => {
+                    outcome.map_err(|source| node_error(graph, node, source, branch, Vec::new()))?
+                }
+            };
+            if slot.absent && !node.declines && !by_error {
                 return Err(declined_wrongly(node));
             }
             let exhausted = !slot.absent;
@@ -375,9 +406,16 @@ impl<'r, P, T: Clone> Runner<'r, P, T> {
             return Err(without_blocks(node));
         };
         let depth = graph.block_path(sub.expand).len();
-        let item = blocks
-            .next_item(node, &frame.iterator)
-            .map_err(|source| node_error(graph, node, source, &self.branch[..depth], Vec::new()))?;
+        let item = match blocks.next_item(node, &frame.iterator) {
+            Ok(item) => item,
+            Err(source) => {
+                let branch = &self.branch[..depth];
+                let failure = node_error(graph, node, source, branch, Vec::new());
+                let slot = error_absence(eval, hooks, node, branch, failure)?;
+                self.absent_frame(sub, slot.value);
+                return Ok(());
+            }
+        };
         match item {
             Item::Next(value) => {
                 let index = frame.index;
@@ -397,6 +435,9 @@ impl<'r, P, T: Clone> Runner<'r, P, T> {
                     return Ok(());
                 };
                 self.branch.pop();
+                let Some(blocks) = eval.blocks() else {
+                    return Err(without_blocks(node));
+                };
                 let value = blocks
                     .finish_items(node, &frame.iterator, true)
                     .map_err(|source| node_error(graph, node, source, &self.branch, Vec::new()))?;
@@ -423,20 +464,25 @@ impl<'r, P, T: Clone> Runner<'r, P, T> {
                 if !node.declines {
                     return Err(declined_wrongly(node));
                 }
-                // The branches already run are dropped with the frame.
-                self.frames.pop();
-                self.branch.pop();
-                for &collected in &sub.collected {
-                    self.gathered[collected.index()] = Some(Collected::Absent(value.clone()));
-                }
-                self.slots[sub.expand.index()] = Some(Slot {
-                    value,
-                    absent: true,
-                });
-                self.complete_current();
+                self.absent_frame(sub, value);
                 Ok(())
             }
         }
+    }
+
+    /// The innermost frame's expand, of `sub`, is absent, holding `value`: the branches
+    /// already run are dropped with the frame.
+    fn absent_frame(&mut self, sub: &SubPlan, value: T) {
+        self.frames.pop();
+        self.branch.pop();
+        for &collected in &sub.collected {
+            self.gathered[collected.index()] = Some(Collected::Absent(value.clone()));
+        }
+        self.slots[sub.expand.index()] = Some(Slot {
+            value,
+            absent: true,
+        });
+        self.complete_current();
     }
 
     /// Decides the innermost frame's needs for its new branch (`needs`), asking `lookup` of

@@ -33,7 +33,8 @@ pub enum TagValue {
 /// How a consumer reads one of its inputs: what it needs, and what it does when the
 /// input's value is absent.
 ///
-/// An absent value comes from a node that declines (`NodeSpec::declines`). Each consumer
+/// An absent value comes from a node that declines (`NodeSpec::declines`), or that is absent
+/// on an error (`NodeSpec::absent_on_error`). Each consumer
 /// decides by its own dependency: `Admits` receives the absent value, `Optional` omits the
 /// argument, and `Required` skips the consumer, which is then absent too.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -101,6 +102,10 @@ pub struct NodeSpec<P> {
     /// Whether the node is an expand: its value is iterated, and each item runs the node's
     /// block once (`NodeKind::Expand`).
     pub expands: bool,
+    /// Whether some errors its payload raises make it absent instead of failing the run
+    /// (`Evaluate::absent_on_error`). Such a node may be absent, though it still may not
+    /// return an absent value itself unless it `declines`.
+    pub absent_on_error: bool,
 }
 
 /// How a node gets its value.
@@ -141,8 +146,12 @@ pub struct Node<P> {
     pub tags: BTreeMap<String, TagValue>,
     /// Whether the node may decline (`NodeSpec::declines`); never for an input.
     pub declines: bool,
-    /// Whether the node's value may be absent: it declines, or it is a function with a
-    /// `Required` edge from a node whose value may be absent. Known at build.
+    /// Whether some errors make the node absent (`NodeSpec::absent_on_error`); never for an
+    /// input.
+    pub absent_on_error: bool,
+    /// Whether the node's value may be absent: it declines or is absent on an error, or it
+    /// is a function with a `Required` edge from a node whose value may be absent. Known at
+    /// build.
     pub may_be_absent: bool,
     /// The innermost expand whose block holds this node; `None` outside every block. An
     /// expand's own block is not its `block`: that is the block it sits in.

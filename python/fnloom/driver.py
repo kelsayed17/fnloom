@@ -53,7 +53,7 @@ from fnloom._decorators import CacheBehavior, Source, Value
 from fnloom._defaults import default_problems, same_value
 from fnloom._drawing import Drawing, Mark, display, drawing, with_context
 from fnloom._export import export
-from fnloom._extract import is_generated
+from fnloom._extract import extractor, is_generated
 from fnloom._functions import (
     FunctionReference,
     FunctionSource,
@@ -70,6 +70,7 @@ from fnloom._requests import NO_NODE, requested, suggest
 from fnloom._requests import output_names as _requested_names
 from fnloom._scan import LeftOut, NodeDef, core_inputs, resolve, scan
 from fnloom._stores import CacheStore
+from fnloom._tags import Query
 from fnloom._types import ValueCheck
 from fnloom._view import (
     InputView,
@@ -444,13 +445,13 @@ def _returning(
                 return value
         except _types.UnresolvedError as error:
             msg = f"{name}: {error}"
-            raise TypeError(msg) from None
+            raise _absence.own(TypeError(msg)) from None
         msg = (
             f"{name}: returned {inspect.formatannotation(type(value))}, "
             f"expected {inspect.formatannotation(declared)}"
             f"{_inside(declared, value)}"
         )
-        raise TypeError(msg)
+        raise _absence.own(TypeError(msg))
 
     if _async.awaits(node):
         awaited = typing.cast("Callable[..., Awaitable[object]]", payload)
@@ -2858,12 +2859,14 @@ def _prepare_again[R](driver: Driver[R], key: _PlanKey) -> PreparedPlan[R]:
 def _graph_of(
     nodes: list[NodeDef],
     items: Callable[[NodeDef], Callable[..., object]] | None = None,
+    absent_on: Mapping[str, tuple[type[Exception], ...]] | None = None,
 ) -> _core.Graph:
     """Builds the native graph for scanned nodes: their core inputs and payloads.
 
     Each node says whether it declines: its return annotation admits
     `fnloom.Absent` (Q135). Each expand gets its item iterator factory from
-    `items`, or the unchecked `_blocks.items` when it is not given.
+    `items`, or the unchecked `_blocks.items` when it is not given. `absent_on`
+    holds the errors each node covered is absent on (Q133).
     """
     make = items or (lambda n: functools.partial(_blocks.items, n.name, None))
     return _core.Graph(
@@ -2879,6 +2882,7 @@ def _graph_of(
             for n in nodes
         ],
         {n.name: dict(n.renames) for n in nodes if n.renames},
+        None if absent_on is None else dict(absent_on),
     )
 
 
@@ -3227,6 +3231,7 @@ class _Changes(TypedDict, total=False):
     loose_edges: tuple[str, ...]
     threads: int | None
     limits: Mapping[str, int]
+    absent_on: tuple[_absence.AbsentOn, ...]
 
 
 class _Settings(TypedDict):
@@ -3250,6 +3255,7 @@ class _Settings(TypedDict):
     loose_edges: tuple[str, ...]
     threads: int | None
     limits: Mapping[str, int]
+    absent_on: tuple[_absence.AbsentOn, ...]
 
 
 class Builder[R = dict[str, object]]:
@@ -3290,6 +3296,7 @@ class Builder[R = dict[str, object]]:
         loose_edges: Sequence[str] = (),
         threads: int | None = None,
         limits: Mapping[str, int] | None = None,
+        absent_on: Sequence[_absence.AbsentOn] = (),
     ) -> None:
         """Starts with the given modules (none by default), checking input types.
 
@@ -3309,8 +3316,10 @@ class Builder[R = dict[str, object]]:
         `with_declared_inputs`, `with_deep_type_checks`,
         `with_numeric_widening`, `with_hooks`, `with_result_builder`,
         `with_output_type_checks`, `with_value_check`, `with_node_wrappers` and
-        `with_threads`, whose `max_workers` `threads` is, `None` for none, and
-        `with_limits`, whose group sizes `limits` are.
+        `with_threads`, whose `max_workers` `threads` is, `None` for none,
+        `with_limits`, whose group sizes `limits` are, and `with_absent_on`, each
+        of whose calls is one of `absent_on`, checked: its errors and its tag
+        query, `None` for every node.
         `TypeError` when an item of `modules` is not a module, or of
         `declared_inputs` is not a `str`; see `with_functions` for the errors
         `functions` raises, `with_hooks` for those of `hooks`,
@@ -3339,6 +3348,10 @@ class Builder[R = dict[str, object]]:
             None if threads is None else _threads.checked_max_workers(threads)
         )
         self._limits = _threads.checked_groups({} if limits is None else limits)
+        self._absent_on = tuple(
+            _absence.checked_absent_on(errors, None if query is None else dict(query))
+            for errors, query in absent_on
+        )
         self._store = store
         self._cache_settings = cache_settings
         # Never changed once made: `with_config` makes a new dict.
@@ -3410,6 +3423,7 @@ class Builder[R = dict[str, object]]:
             "loose_edges": self._loose_edges,
             "threads": self._threads,
             "limits": self._limits,
+            "absent_on": self._absent_on,
         }
 
     def _edge_setting(self) -> str | list[str]:
@@ -3768,6 +3782,29 @@ class Builder[R = dict[str, object]]:
         checked = _threads.checked_groups(groups)
         return self._with(limits={**self._limits, **checked})
 
+    def with_absent_on(
+        self, *errors: type[Exception], tags: Mapping[str, Query] | None = None
+    ) -> Builder[R]:
+        """Returns a new builder whose drivers make a node absent on one of `errors`.
+
+        When a covered node's call raises one of `errors`, or a subclass, its
+        outcome is `fnloom.ABSENT` instead of a failure, as `@absent_on` makes it:
+        `after_node` still reports `ok=False` with the error, `RunEnd.absent_errors`
+        lists it, and each node reading it decides by its own signature, so a
+        `Collect[T]` over a fan-out gets the branches that succeeded (Q133). It
+        covers every node, or with `tags` the nodes matching that query, by
+        `NodeViews.tagged`'s rules (Q141). A covered node may be absent whatever its
+        annotation, since the absence is the driver's doing; it still may not
+        return `fnloom.ABSENT` itself unless its annotation admits it. A node with
+        its own `@absent_on` too is absent on both lists.
+
+        Cumulative: each call adds a rule. An error absence is never stored, and
+        nothing computed from it is stored in that run. `TypeError` for no class,
+        one that is no subclass of `Exception`, or a malformed `tags` query.
+        """
+        rule = _absence.checked_absent_on(errors, tags)
+        return self._with(absent_on=(*self._absent_on, rule))
+
     def with_result_builder[T](self, build: _ResultBuilder[T]) -> Builder[T]:
         """Returns a new builder whose drivers' `execute` returns `build(outputs)`.
 
@@ -3871,7 +3908,7 @@ class Builder[R = dict[str, object]]:
         cache = (
             None
             if self._store is None
-            else Cache.of(self._store, nodes, self._cache_settings)
+            else Cache.of(self._store, nodes, self._cache_settings, graph)
         )
         return self._driver(graph, views, unmatched, left_out, cache, owner, caps=caps)
 
@@ -3900,7 +3937,7 @@ class Builder[R = dict[str, object]]:
         cache = (
             None
             if self._store is None
-            else Cache.of(self._store, nodes, self._cache_settings)
+            else Cache.of(self._store, nodes, self._cache_settings, graph)
         )
         built = AsyncDriver(
             self._driver(graph, views, unmatched, left_out, cache, owner, caps=caps),
@@ -3955,7 +3992,14 @@ class Builder[R = dict[str, object]]:
             unmatched = {n: why for n, why in unmatched.items() if n not in names}
             if absent := _unmatched_edges(nodes, unmatched):
                 raise ValueError(absent)
-        blocks, absent = self._blocks_and_absence(nodes)
+        # An extracted field and a `@pipe_output` relay call no function of the user's:
+        # the node calling it is the one `@absent_on` covers.
+        others = relays | {n.name for n in nodes if extractor(n) is not None}
+        _absence.refuse_unadmitted(nodes, others)
+        # A relay's `.raw` node calls the function: a tag query reads the relay's tags.
+        tags = {f"{n.name}.raw": n.tags for n in nodes if n.name in relays}
+        absent_on = _absence.covered(nodes, self._absent_on, others, tags)
+        blocks, absent = self._blocks_and_absence(nodes, absent_on)
         _refuse_bound_block_nodes(self._bound, blocks, nodes)
         views = node_views(
             nodes,
@@ -3975,6 +4019,7 @@ class Builder[R = dict[str, object]]:
         graph = _graph_of(
             nodes,
             _item_factory(self._rules, self._value_checks, checked=self._check_inputs),
+            absent_on,
         )
         _absence.refuse_mixed(nodes, absent)
         if (
@@ -3996,17 +4041,20 @@ class Builder[R = dict[str, object]]:
         return nodes, views, graph, unmatched, scanned.left_out, owner
 
     def _blocks_and_absence(
-        self, nodes: list[NodeDef]
+        self,
+        nodes: list[NodeDef],
+        absent_on: Mapping[str, tuple[type[Exception], ...]],
     ) -> tuple[dict[str, list[str]], frozenset[str]]:
         """Each block node's block path, and the nodes that may be absent.
 
         With no expand, there are no blocks, and absence is found here. With one,
         the core finds both, since a collect passes absence on only from an absent
-        expand (§7.4 of the dynamic execution design).
+        expand (§7.4 of the dynamic execution design). A node in `absent_on` may
+        be absent on an error.
         """
         if not any(_blocks.expands(n.returns) for n in nodes):
-            return {}, _absence.may_be_absent(nodes)
-        found = _graph_of(nodes)
+            return {}, _absence.may_be_absent(nodes, absent_on.keys())
+        found = _graph_of(nodes, absent_on=absent_on)
         return found.blocks(), frozenset(found.may_be_absent())
 
     def _chained(

@@ -128,27 +128,29 @@ impl<'py> Scope<'_, 'py> {
         caught(|| calls.call(factory.bind(py), args, None))
     }
 
-    /// The next item of expand `node`'s `iterator`.
+    /// The next item of expand `node`'s `iterator`; the inner error is what reading it
+    /// raised, which may make an expand absent on that error, and the outer one an error
+    /// of fnloom's own, such as a generator returning `fnloom.ABSENT` it may not.
     pub fn next_item(
         &self,
         calls: &impl Calls<'py>,
         node: &Node<Py<PyAny>>,
         iterator: &Bound<'py, PyAny>,
-    ) -> PyResult<Item<Bound<'py, PyAny>>> {
+    ) -> PyResult<PyResult<Item<Bound<'py, PyAny>>>> {
         let py = self.absent.py();
         match caught(|| calls.call_method(iterator, intern!(py, "__next__"), Vec::new())) {
-            Ok(item) => Ok(Item::Next(item)),
+            Ok(item) => Ok(Ok(Item::Next(item))),
             Err(error) if error.is_instance_of::<PyStopIteration>(py) => {
                 let value = error.value(py).getattr(intern!(py, "value"))?;
                 if !value.is(self.absent) {
-                    return Ok(Item::Done);
+                    return Ok(Ok(Item::Done));
                 }
                 if !node.declines {
                     return Err(undeclared_absence(&node.name));
                 }
-                Ok(Item::Declined(value))
+                Ok(Ok(Item::Declined(value)))
             }
-            Err(error) => Err(error),
+            Err(error) => Ok(Err(error)),
         }
     }
 

@@ -406,6 +406,7 @@ def test_public_api_is_exported() -> None:
         "Validator",
         "Value",
         "ValueCheck",
+        "absent_on",
         "apply_to",
         "build",
         "cache",

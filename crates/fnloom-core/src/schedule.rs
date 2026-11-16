@@ -141,7 +141,9 @@ pub enum Work<V> {
     /// Runs the node's payload on `args`, sorted by input id.
     ///
     /// An expand (`expands`) iterates the value it computed on the same worker, and completes
-    /// with `Outcome::Iterator`, or with `Outcome::Value` when the value is absent. A `late`
+    /// with `Outcome::Iterator`, or with `Outcome::Value` when the value is absent. A node
+    /// absent on its error (`Node::absent_on_error`) completes with `Outcome::ErrorAbsent`
+    /// once the binding fired `Observer::absent_error`. A `late`
     /// step, one outside every block that `Plan::is_late` names, is looked up first: a hit
     /// completes it with `Outcome::Hit` and no call.
     Compute {
@@ -158,7 +160,8 @@ pub enum Work<V> {
         /// The iterable.
         iterable: V,
     },
-    /// Pulls the next item (`Blocks::next_item`); completes with `Outcome::Item`.
+    /// Pulls the next item (`Blocks::next_item`); completes with `Outcome::Item`, or with
+    /// `Outcome::ErrorAbsent` for an expand absent on the error its pull raised.
     Pull {
         /// The iterator, as `Iterator` gave it.
         iterator: V,
@@ -205,6 +208,11 @@ pub enum Outcome<V, E, K> {
         /// Whether it is absent.
         absent: bool,
     },
+    /// A compute, or a pull, that failed with an error that makes its node absent
+    /// (`Node::absent_on_error`), holding this absent value: a pulled expand is then absent
+    /// with no branches. Unlike a declared absence, single-flight never shares it: a step
+    /// waiting on it runs itself.
+    ErrorAbsent(V),
     /// A late compute's value from `Evaluate::lookup`, and whether it is absent
     /// (`Node::may_be_absent` and `Evaluate::is_absent`).
     Hit {
@@ -1256,7 +1264,8 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                 }
                 _ => Vec::new(),
             };
-            // A value or a declared absence completes every waiter as a hit.
+            // A value or a declared absence completes every waiter as a hit; an error absence
+            // doesn't, so each waiter runs itself.
             let shared = match &outcome {
                 Outcome::Value { value, absent } if !waiters.is_empty() && !self.stopping => {
                     Some((value.clone(), *absent))
@@ -1418,6 +1427,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
     fn discard(&mut self, outcome: Outcome<V, E, K>) {
         match outcome {
             Outcome::Value { value, .. }
+            | Outcome::ErrorAbsent(value)
             | Outcome::Hit { value, .. }
             | Outcome::Iterator(value)
             | Outcome::Finished(value)
@@ -2370,6 +2380,9 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             (Kind::Compute, Outcome::Value { value, absent }) => {
                 self.computed(plan, graph, entry.at, entry.position, value, absent);
             }
+            (Kind::Compute, Outcome::ErrorAbsent(value)) => {
+                self.computed(plan, graph, entry.at, entry.position, value, true);
+            }
             (Kind::Compute, Outcome::Hit { value, absent }) => {
                 let branch = self.instance(entry.at).branch.clone();
                 self.report.hits.push((entry.node, branch, value.clone()));
@@ -2379,6 +2392,9 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                 self.open_frame(plan, entry.at, entry.position, iterator);
             }
             (Kind::Pull, Outcome::Item(item)) => self.pulled(graph, entry.at, item),
+            (Kind::Pull, Outcome::ErrorAbsent(value)) if graph.node(entry.node).absent_on_error => {
+                self.declined(entry.at, value);
+            }
             (Kind::Finish(true), Outcome::Finished(value)) => {
                 self.frame_mut(entry.at).finished = Some(value);
                 self.todo.push(Event::Frame(entry.at));
@@ -2516,10 +2532,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                 let frame = self.frame_mut(at);
                 let node = graph.node(frame.node);
                 if node.declines {
-                    let iterator = frame.iterator.take();
-                    frame.declined = Some(value);
-                    self.release_all(iterator);
-                    self.todo.push(Event::Frame(at));
+                    self.declined(at, value);
                 } else {
                     // `Plan::run` closes the iterator of a block it entered, and not that of
                     // an expand requested alone.
@@ -2535,6 +2548,15 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                 }
             }
         }
+    }
+
+    /// The expand of frame `at` is absent, holding `value`: its branches so far are dropped.
+    fn declined(&mut self, at: usize, value: V) {
+        let frame = self.frame_mut(at);
+        let iterator = frame.iterator.take();
+        frame.declined = Some(value);
+        self.release_all(iterator);
+        self.todo.push(Event::Frame(at));
     }
 
     /// A probe's hits are in: the branch's needs are decided, its hits are in their slots,
@@ -2635,11 +2657,11 @@ mod tests {
 
     use super::*;
     use crate::limits::{Limits, Resource, Unlimited};
-    use crate::node::{Dependency, NodeSpec};
+    use crate::node::{Dependency, Node, NodeSpec};
     use crate::run::{Arg, Blocks, Evaluate};
     use crate::testing::blocks::{
-        End, Fan, Log, Pay, Val, absent_expand, chain, declines, declining_details, echo, expand,
-        fan, first, hit, items, nested, node, num, nums, sibling_collect, tens,
+        End, Fan, Log, Pay, Val, absent_expand, absent_on, chain, declines, declining_details,
+        echo, expand, fan, first, hit, items, nested, node, num, nums, sibling_collect, tens,
     };
     use crate::testing::{collect, plain, request};
 
@@ -2761,7 +2783,10 @@ mod tests {
                     events.push(format!("post:{}:{branch:?}:{}", node.name, result.is_ok()));
                 }
                 match result {
-                    Err(error) => Outcome::Failed(error),
+                    Err(error) => match error_absent(eval, node, branch, &error, events) {
+                        Some(value) => Outcome::ErrorAbsent(value),
+                        None => Outcome::Failed(error),
+                    },
                     Ok(value) => {
                         let absent = node.declines && eval.is_absent(&value);
                         if *expands && !absent {
@@ -2775,9 +2800,13 @@ mod tests {
             Work::Iterate { iterable } => {
                 lift(eval.iterate(node, iterable, branch), Outcome::Iterator)
             }
-            Work::Pull { iterator } => eval
-                .next_item(node, iterator)
-                .map_or_else(Outcome::Failed, Outcome::Item),
+            Work::Pull { iterator } => match eval.next_item(node, iterator) {
+                Ok(item) => Outcome::Item(item),
+                Err(error) => match error_absent(eval, node, branch, &error, events) {
+                    Some(value) => Outcome::ErrorAbsent(value),
+                    None => Outcome::Failed(error),
+                },
+            },
             Work::Finish {
                 iterator,
                 exhausted,
@@ -2800,6 +2829,23 @@ mod tests {
                 })
             }
         }
+    }
+
+    /// The absent value `error` gives `node`, logged as `Log` logs `absent_error`, as a
+    /// binding asks it.
+    fn error_absent(
+        eval: &mut Fan,
+        node: &Node<Pay>,
+        branch: &[usize],
+        error: &String,
+        events: &mut Vec<String>,
+    ) -> Option<Val> {
+        let value = node
+            .absent_on_error
+            .then(|| eval.absent_on_error(node, error))
+            .flatten()?;
+        events.push(format!("absent:{}:{branch:?}:{error}", node.name));
+        Some(value)
     }
 
     /// Logs what a report settled, as `Log` logs it for `Plan::run`.
@@ -3057,6 +3103,82 @@ mod tests {
         .unwrap()
     }
 
+    /// `consumers`, with `a` failing, absent on its error, instead of declining.
+    fn erring() -> Graph<Pay> {
+        Graph::build(vec![
+            absent_on(node("a", &[], |_| Err("a timed out".to_owned()))),
+            node("req", &[plain("a")], tens),
+            node(
+                "opt",
+                &[("a", Dependency::Optional, None), plain("x")],
+                echo,
+            ),
+            node(
+                "adm",
+                &[("a", Dependency::Admits { optional: false }, None)],
+                echo,
+            ),
+            node("after", &[plain("req")], tens),
+        ])
+        .unwrap()
+    }
+
+    /// `picked` yields `[1, 2, 3]`; `details` is absent on an error, and fails for item 2;
+    /// `total` keeps the present branches, `every` every branch, `next` reads `details`.
+    fn erring_details() -> Graph<Pay> {
+        Graph::build(vec![
+            expand("picked", &[], |_| Ok(items(&[1, 2, 3]))),
+            absent_on(node("details", &[plain("picked")], |args| {
+                if num(&args[0]) == 2 {
+                    Err("details timed out".to_owned())
+                } else {
+                    tens(args)
+                }
+            })),
+            node("next", &[plain("details")], tens),
+            node("total", &[collect("next")], first),
+            node(
+                "every",
+                &[("details", Dependency::Required, Some(Collect::All))],
+                first,
+            ),
+        ])
+        .unwrap()
+    }
+
+    /// `picked` yields 1 and 2, then fails while yielding, absent on its error; `req`, `opt`
+    /// and `adm` collect `details` as `absent_expand`'s do.
+    fn erring_expand() -> Graph<Pay> {
+        let mut specs = absent_expand_specs();
+        specs[0] = absent_on(expand("picked", &[], |_| {
+            Ok(Val::Gen(vec![Num(1), Num(2)], End::Fail))
+        }));
+        Graph::build(specs).unwrap()
+    }
+
+    /// `absent_expand`'s specs, with `picked` failing before it yields.
+    fn absent_expand_specs() -> Vec<NodeSpec<Pay>> {
+        vec![
+            absent_on(expand("picked", &[], |_| Err("picked failed".to_owned()))),
+            node("details", &[plain("picked")], tens),
+            node("req", &[collect("details")], echo),
+            node(
+                "opt",
+                &[("details", Dependency::Optional, Some(Collect::Present))],
+                echo,
+            ),
+            node(
+                "adm",
+                &[(
+                    "details",
+                    Dependency::Admits { optional: false },
+                    Some(Collect::Present),
+                )],
+                echo,
+            ),
+        ]
+    }
+
     fn mid() -> Graph<Pay> {
         Graph::build(vec![
             expand("a", &[], |_| Ok(items(&[1, 2]))),
@@ -3238,11 +3360,186 @@ mod tests {
         ]
     }
 
+    /// The error absence cases, on plans with and without blocks.
+    fn error_cases() -> Vec<Case> {
+        vec![
+            Case::new(
+                "error absence",
+                erring(),
+                &["req", "opt", "adm", "after", "a"],
+            )
+            .inputs(vec![("x", Num(5))]),
+            Case::new("error not listed", erring(), &["after"]).eval(|| Fan {
+                refuses: true,
+                ..Fan::default()
+            }),
+            Case::new(
+                "error absence collected",
+                erring_details(),
+                &["total", "every"],
+            ),
+            Case::new("error absence unlisted", erring_details(), &["total"]).eval(|| Fan {
+                refuses: true,
+                ..Fan::default()
+            }),
+            Case::new(
+                "error absence of an expand",
+                Graph::build(absent_expand_specs()).unwrap(),
+                &["req", "opt", "adm", "picked"],
+            ),
+            Case::new(
+                "error absence while yielding",
+                erring_expand(),
+                &["req", "opt", "adm"],
+            ),
+            Case::new(
+                "error absence while yielding alone",
+                erring_expand(),
+                &["picked"],
+            ),
+        ]
+    }
+
     #[test]
     fn one_worker_matches_plan_run_task_for_task() {
-        for case in plain_cases().iter().chain(&block_cases()) {
+        for case in plain_cases()
+            .iter()
+            .chain(&block_cases())
+            .chain(&error_cases())
+        {
             case.check();
         }
+    }
+
+    /// Both runs of `graph` for `outputs`, which must agree, as `Case::check` asserts.
+    fn both(
+        graph: Graph<Pay>,
+        outputs: &'static [&'static str],
+        inputs: Vec<(&'static str, Val)>,
+    ) -> Ran {
+        let case = Case::new("both", graph, outputs).inputs(inputs);
+        case.check();
+        let names: Vec<&str> = case.inputs.iter().map(|(n, _)| *n).collect();
+        let plan = case.graph.prepare(&request(outputs, &names, &[])).unwrap();
+        by_scheduler(&case.graph, &plan, &case.inputs, &[], Fan::default())
+    }
+
+    #[test]
+    fn an_error_absence_skips_required_consumers() {
+        let ran = both(
+            erring(),
+            &["req", "opt", "adm", "after", "a"],
+            vec![("x", Num(5))],
+        );
+        let outputs = ran.outputs.unwrap();
+        // Absent, `req` and `after` skipped; `opt` falls back to its default, `adm` gets it.
+        for name in ["a", "req", "after"] {
+            assert_eq!(outputs[name], Absent, "{name}");
+        }
+        assert_eq!(outputs["opt"], List(vec![Num(5)]));
+        assert_eq!(outputs["adm"], List(vec![Absent]));
+        assert!(ran.events.contains(&"skipped:after:[]".to_owned()));
+        // In a block: the failed branch is dropped by a `Collect`, kept by a `Collect::All`.
+        let ran = both(erring_details(), &["total", "every"], Vec::new());
+        let outputs = ran.outputs.unwrap();
+        assert_eq!(outputs["total"], nums(&[100, 300]));
+        assert_eq!(outputs["every"], List(vec![Num(10), Absent, Num(30)]));
+    }
+
+    #[test]
+    fn an_error_absence_fires_post_node_err_then_absent_error() {
+        // A plan without blocks sends no node events to `Log`; this one does.
+        let ran = both(erring_details(), &["total"], Vec::new());
+        let at = ran
+            .events
+            .iter()
+            .position(|e| e == "pre:details:[1]")
+            .unwrap();
+        assert_eq!(
+            ran.events[at..at + 4],
+            [
+                "pre:details:[1]",
+                "post:details:[1]:false",
+                "absent:details:[1]:details timed out",
+                "skipped:next:[1]",
+            ]
+        );
+        // While yielding: the expand's events already fired; only the absence follows.
+        let ran = both(erring_expand(), &["adm"], Vec::new());
+        let events: Vec<&str> = ran.events.iter().map(String::as_str).collect();
+        assert!(
+            events.contains(&"absent:picked:[]:picked failed while iterating"),
+            "{events:?}"
+        );
+        assert_eq!(ran.outputs.unwrap()["adm"], List(vec![Absent]));
+    }
+
+    #[test]
+    fn an_error_not_listed_fails_the_run_and_an_absence_observer_error_fails_it() {
+        let graph = erring();
+        let plan = graph.prepare(&request(&["adm"], &[], &[])).unwrap();
+        let ran = by_plan_run(
+            &graph,
+            &plan,
+            &[],
+            &[],
+            Fan {
+                refuses: true,
+                ..Fan::default()
+            },
+        );
+        let RunError::Node { node, source, .. } = ran.outputs.unwrap_err() else {
+            unreachable!("a node failed");
+        };
+        assert_eq!((node.as_str(), source.as_str()), ("a", "a timed out"));
+        // An observer raising on the absence fails the run as an observer error.
+        let mut log = Log {
+            fail_on: Some("absent:a"),
+            ..Log::default()
+        };
+        let failed = plan.run(
+            &graph,
+            &mut Fan::default(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &mut [&mut log],
+        );
+        assert!(matches!(
+            failed,
+            Err(RunError::Observers { event: "post_node", ref errors }) if errors.len() == 1
+        ));
+    }
+
+    #[test]
+    fn an_error_absence_is_not_shared_by_single_flight() {
+        let graph = Graph::build(vec![
+            expand("picked", &[], |_| Ok(items(&[1, 1, 2]))),
+            absent_on(node("details", &[plain("picked")], tens)),
+            node("total", &[collect("details")], first),
+        ])
+        .unwrap();
+        let plan = graph.prepare(&request(&["total"], &[], &[])).unwrap();
+        let mut eval = Fan {
+            keys: [0, 1]
+                .map(|at| (("details".to_owned(), vec![at]), "one".to_owned()))
+                .into(),
+            fail: Some(("details", vec![0])),
+            ..Fan::default()
+        };
+        let mut hits = Vec::new();
+        let outputs = greedy_with(
+            &graph,
+            &plan,
+            &mut eval,
+            Options::default(),
+            last_of(&graph, "details"),
+            |_| {},
+            |_, report| hits.extend(report.hits.iter().cloned()),
+        );
+        // Branch 1 waited on branch 0's call, which became absent: it ran itself.
+        assert_eq!(outputs.unwrap()["total"], nums(&[10, 20]));
+        assert_eq!(hits, []);
+        assert_eq!(eval.called("details"), [vec![0], vec![2], vec![1]]);
     }
 
     #[test]

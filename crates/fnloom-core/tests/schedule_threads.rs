@@ -174,6 +174,7 @@ fn spec(name: &str, reads: &[(&str, bool)], op: Op) -> NodeSpec<Op> {
         payload: op,
         declines: false,
         expands: matches!(op, Op::Outer(_) | Op::Inner),
+        absent_on_error: false,
     }
 }
 

@@ -26,6 +26,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from fnloom import _async, _types
+from fnloom._absence import own
 from fnloom._blocks import BRANCH
 from fnloom._core import ABSENT
 from fnloom._decorators import _ATTRIBUTE, decorations
@@ -819,7 +820,7 @@ def verdict(
         msg = (
             f"{node}: its value is a one-shot iterator, which its checks would consume"
         )
-        raise TypeError(msg)
+        raise own(TypeError(msg))
     if value is None and any(
         c.identity == ("builtin", "allow_none", True) for c in checks
     ):
@@ -838,7 +839,7 @@ def verdict(
         else:
             failed.append(result)
     if failed:
-        raise ValidationError(node, failed)
+        raise own(ValidationError(node, failed))
 
 
 def attached(nodes: Sequence[NodeDef]) -> list[NodeDef]:

@@ -125,6 +125,9 @@ class RunEnd:
     an argument it needs was `fnloom.ABSENT` (Q135), as `(node, branch)` pairs
     sorted by order key, so in the order one worker skips them, `branch` being
     `()` outside a block: a skipped node fires no node event, and is absent too.
+    `absent_errors` lists each node an error made absent (`fnloom.absent_on`,
+    `Builder.with_absent_on`), as `(node, branch, error)`, sorted the same way:
+    its `after_node` reported `ok=False` with that error, and the run went on.
     """
 
     run_id: str
@@ -136,6 +139,7 @@ class RunEnd:
     error: BaseException | None
     results: Mapping[str, object] | None
     skipped: tuple[tuple[str, tuple[int, ...]], ...] = ()
+    absent_errors: tuple[tuple[str, tuple[int, ...], BaseException], ...] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -482,6 +486,7 @@ class Dispatch:
     """
 
     __slots__ = (
+        "_absent",
         "_errors",
         "_failed_node",
         "_hooks",
@@ -538,6 +543,10 @@ class Dispatch:
         self._token: contextvars.Token[_checks.Sink | None] | None = None
         # The `(order, node, branch)` of each node skipped so far, for `RunEnd`.
         self._skipped: list[tuple[tuple[int, ...], str, tuple[int, ...]]] = []
+        # The `(order, node, branch, error)` of each error absence so far, for `RunEnd`.
+        self._absent: list[
+            tuple[tuple[int, ...], str, tuple[int, ...], BaseException]
+        ] = []
         # A cached run's late keys, which give a late node's outcome per branch.
         self.late: LateKeys | None = None
         # Whether the run is on a pool, so several nodes run between start and end.
@@ -608,6 +617,31 @@ class Dispatch:
         """Records that node `name` was skipped in `branch`, for `RunEnd.skipped`."""
         if self._hooks.after_run:
             self._skipped.append((order, name, branch))
+
+    def absent_error(
+        self,
+        name: str,
+        branch: tuple[int, ...],
+        error: BaseException,
+        order: tuple[int, ...] = (),
+    ) -> None:
+        """Node `name`'s `error`, just reported, made it absent: the run goes on.
+
+        So it is no longer the run's node error, and `RunEnd.absent_errors` lists it.
+        """
+        if self._node_error is error:
+            if self._later_errors:
+                self._node_error, self._failed_node = self._later_errors.pop(0)
+            else:
+                self._node_error, self._failed_node = None, None
+        else:
+            self._later_errors = [
+                (later, node)
+                for later, node in self._later_errors
+                if later is not error
+            ]
+        if self._hooks.after_run:
+            self._absent.append((order, name, branch, error))
 
     @property
     def refused(self) -> bool:
@@ -831,6 +865,12 @@ class Dispatch:
                     (name, branch)
                     for _, name, branch in sorted(self._skipped, key=lambda s: s[0])
                 ),
+                absent_errors=tuple(
+                    (name, branch, error)
+                    for _, name, branch, error in sorted(
+                        self._absent, key=lambda a: a[0]
+                    )
+                ),
             )
             found = _called(methods, event)
         if not found:
@@ -912,6 +952,17 @@ class _Forward(_core.ObserverBase):
         self._dispatch.skipped(node, branch, order)
 
     @override
+    def absent_error(  # the binding's arguments, by position
+        self,
+        node: str,
+        branch: tuple[int, ...] = (),
+        error: BaseException | None = None,
+        order: tuple[int, ...] = (),
+    ) -> None:
+        if error is not None:
+            self._dispatch.absent_error(node, branch, error, order)
+
+    @override
     def post_expand(
         self,
         node: str,
@@ -944,13 +995,16 @@ class _Running(_Forward):
 
 
 class _Skips(_core.ObserverBase):
-    """The core observer of a run that wants skips or expands, and no node event."""
+    """The core observer of a run that wants skips or expands, and no node event.
+
+    It hears of error absences too, for `RunEnd.absent_errors`.
+    """
 
     # The binding passes each event's branch and order key, by position.
     orders: ClassVar[bool] = True
 
     def __init__(self, dispatch: Dispatch) -> None:
-        """Sends each skip and each exhausted expand to `dispatch`."""
+        """Sends each skip, error absence and exhausted expand to `dispatch`."""
         self._dispatch = dispatch
 
     @override
@@ -958,6 +1012,17 @@ class _Skips(_core.ObserverBase):
         self, node: str, branch: tuple[int, ...] = (), order: tuple[int, ...] = ()
     ) -> None:
         self._dispatch.skipped(node, branch, order)
+
+    @override
+    def absent_error(  # the binding's arguments, by position
+        self,
+        node: str,
+        branch: tuple[int, ...] = (),
+        error: BaseException | None = None,
+        order: tuple[int, ...] = (),
+    ) -> None:
+        if error is not None:
+            self._dispatch.absent_error(node, branch, error, order)
 
     @override
     def post_expand(

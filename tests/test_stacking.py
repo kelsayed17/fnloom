@@ -3,6 +3,7 @@
 Each Plan 8 decorator is stacked with each other one, and with `@tag`,
 `@parameterize`, `@config.when`, `@config.matches`, `@cache`, `@limit` and a step
 namespace, in both orders, with and without a `@mutate` step on the function;
+`@absent_on` is stacked with every one of them, on a function that fails;
 each is also stacked with `@extract_fields`. Both orders must build the same
 nodes, wired the same way, tagged the same, computing the same values with the
 same check results, or both must be refused with the same error. The roadmap's
@@ -41,9 +42,9 @@ OTHERS = {
 
 HEADER = """
 from fnloom import (
-    Collect, Parallelizable, cache, check_output, check_output_custom, config,
-    extract_fields, inject, limit, mutate, parameterize, pipe_input, pipe_output,
-    resolve, source, step, tag, value,
+    Absent, Collect, Parallelizable, absent_on, cache, check_output,
+    check_output_custom, config, extract_fields, inject, limit, mutate, parameterize,
+    pipe_input, pipe_output, resolve, source, step, tag, value,
 )
 
 def _small(v: int) -> bool:
@@ -201,3 +202,28 @@ def test_with_extract_fields_in_either_order(decorator: str, *, blocked: bool) -
     ]
     assert not isinstance(results[0], str), results[0]
     assert results[0] == results[1]
+
+
+def _failing(first: str, second: str, *, mutated: bool, blocked: bool) -> object:
+    """`_graph`'s function, absent on the `KeyError` it raises for `x == 3`."""
+    source = f"{HEADER}\n@{first}\n@{second}\n"
+    source += "def f__a(x: int, k: int = 1) -> int | Absent:\n"
+    source += "    if x == 3:\n        raise KeyError(x)\n    return x * k\n"
+    if mutated:
+        source += MUTATOR
+    return _outcome(source, "failing", blocked=blocked)
+
+
+@pytest.mark.parametrize("blocked", [False, True], ids=["outside", "in_block"])
+@pytest.mark.parametrize("mutated", [False, True], ids=["plain", "mutated"])
+@pytest.mark.parametrize("decorator", [*PLAN_8, *OTHERS])
+def test_absent_on_stacks_with_every_decorator(
+    decorator: str, *, mutated: bool, blocked: bool
+) -> None:
+    """Above or below each decorator: one graph, with the failing item absent."""
+    decorators = {**PLAN_8, **OTHERS}
+    absent_on = "absent_on(KeyError)"
+    one = _failing(absent_on, decorators[decorator], mutated=mutated, blocked=blocked)
+    other = _failing(decorators[decorator], absent_on, mutated=mutated, blocked=blocked)
+    assert one == other
+    assert not isinstance(one, str), one

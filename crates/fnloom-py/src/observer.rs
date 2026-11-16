@@ -105,6 +105,25 @@ impl ObserverBase {
     )]
     const fn skipped(&self, node: &str, branch: &Bound<'_, PyTuple>) {}
 
+    /// Called right after `post_node` reported `error`, when that error made the node
+    /// absent instead of failing the run (`fnloom.absent_on`, `Builder.with_absent_on`);
+    /// for an expand that raised it while yielding, with no `post_node` before. `branch`
+    /// is the branch it ran in, `()` outside blocks. Sent only to an observer whose
+    /// class overrides it.
+    #[pyo3(signature = (node, *, branch, error))]
+    #[expect(unused_variables, reason = "the base hook ignores its arguments")]
+    #[expect(
+        clippy::unused_self,
+        reason = "Python calls the hooks as instance methods"
+    )]
+    const fn absent_error(
+        &self,
+        node: &str,
+        branch: &Bound<'_, PyTuple>,
+        error: &Bound<'_, PyAny>,
+    ) {
+    }
+
     /// Called once after the run ended; `ok` says whether it succeeded.
     #[pyo3(signature = (*, ok))]
     #[expect(unused_variables, reason = "the base hook ignores its arguments")]
@@ -145,6 +164,8 @@ pub struct Flags {
     hits: bool,
     /// Whether the class overrides `skipped`, which is sent only then.
     skips: bool,
+    /// Whether the class overrides `absent_error`, which is sent only then.
+    absences: bool,
     /// Whether the class sets `orders = True`: its node, expand, hit and skip events are then
     /// called by position, `branch` and `order`, the step's order key, as tuples, last; a
     /// `post_node` also gets the node's arguments while they are lent, else `None`.
@@ -159,6 +180,7 @@ impl Flags {
             expands: overrides(observer, "post_expand"),
             hits: overrides(observer, "hit_in"),
             skips: overrides(observer, "skipped"),
+            absences: overrides(observer, "absent_error"),
             orders: observer
                 .get_type()
                 .getattr(intern!(observer.py(), "orders"))
@@ -421,6 +443,23 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "branch"), PyTuple::new(py, branch)?)?;
         self.call(intern!(py, "skipped"), (node,), Some(&kwargs))
+    }
+
+    fn absent_error(&mut self, node: &str, branch: &[usize], error: &PyErr) -> PyResult<()> {
+        if !self.flags.absences {
+            return Ok(());
+        }
+        let py = self.observer.py();
+        let error = error.value(py).clone().into_any();
+        if self.flags.orders {
+            let order = self.kwargs.order(node, branch)?;
+            let args = (node, self.branch(branch)?, error, order);
+            return self.call(intern!(py, "absent_error"), args, None);
+        }
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "branch"), self.branch(branch)?)?;
+        kwargs.set_item(intern!(py, "error"), error)?;
+        self.call(intern!(py, "absent_error"), (node,), Some(&kwargs))
     }
 
     fn post_graph(&mut self, ok: bool) -> PyResult<()> {

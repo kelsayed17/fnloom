@@ -212,6 +212,7 @@ mod suite {
             payload: (),
             declines: false,
             expands: false,
+            absent_on_error: false,
         }
     }
 
@@ -343,6 +344,7 @@ mod suite {
                 payload: i == 0,
                 declines: i == 0,
                 expands: false,
+                absent_on_error: false,
             })
             .collect();
         let graph = Graph::build(specs).expect("generated specs form a valid graph");
@@ -385,6 +387,7 @@ mod suite {
             payload,
             declines: false,
             expands: matches!(payload, Fan::Items(_)),
+            absent_on_error: false,
         };
         let outer: Vec<String> = (0..width).map(|i| format!("x{i}")).collect();
         let branch_reads = std::iter::once(("items".to_owned(), None))

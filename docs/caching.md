@@ -576,6 +576,14 @@ shop.explain_cache(["count"], inputs={"item": "desk"})
   supplied".** It is left out of the call and takes its default, so the call, and the key, are the same as with an
   optional input left out. A parameter admitting `Absent` is versioned by `ABSENT`'s fingerprint. A computed node that
   declines is read by its own key, as any computed node is, whatever it returned.
+- **An error absence is never stored** ([Partial results](writing-nodes.md#partial-results)). The node's error
+  stands for a value it would have returned, so its version is a fresh one each run, which no key repeats: no node
+  whose key reads it, in that run, is stored either, through any number of nodes, a skipped node, a parameter that
+  took its default, or a `Collect` that dropped its branch included. Only the branches it reaches are left out;
+  the other branches are stored as usual. The next run calls the node again, so a partial result is never served
+  as a whole one. The store still answers first: what a run with no absence stored is served as a hit, so the node
+  isn't called. A plain `MemoryCache` is written from Python rather than the binding for a plan with a node an
+  error may make absent.
 - **Every store returns the singleton.** `MemoryCache` and a store of your own keep the `ABSENT` object itself.
   `DiskCache` writes a flag in the entry's header with no payload, in every format, so no value of a format can pass
   for it and the `json` format needs no way to write it. `ABSENT` inside a value (a list holding it, say) pickles by

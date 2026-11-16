@@ -144,6 +144,9 @@ event by position, so a new field never breaks a hook.
       `fnloom.ABSENT`, as `(node, branch)` pairs. `branch` is `()` outside a block. `()` when nothing was skipped.
       Every driver sorts them by order key, which is plan order, with or without threads, so they never vary
       between runs.
+    - `absent_errors`: each node an error made absent ([Partial results](writing-nodes.md#partial-results)), as
+      `(node, branch, error)`, sorted by order key the same way. `()` when there was none. Its `after_node` got
+      `ok=False` with that error, and the run went on.
 
 ```python
 class Ends(fnloom.Hook):
@@ -176,6 +179,11 @@ Hamilton:
 - nodes the request doesn't need;
 - a node skipped because a node it reads [declined](writing-nodes.md#declining): it is listed in `RunEnd.skipped`
   instead, so `PrintNodes` prints nothing for it.
+
+A node an error made absent ([Partial results](writing-nodes.md#partial-results)) reports as a failed node does,
+`after_node` with `ok=False` and the error, so `LogFailures` logs it; the run goes on, and `RunEnd.absent_errors`
+lists it. An expand whose generator raised such an error while yielding gets no second `after_node`: its first one
+reported the call that made the generator, and `RunEnd.absent_errors` lists it.
 
 ```python
 ends.ends.clear()
