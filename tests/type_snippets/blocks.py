@@ -8,16 +8,16 @@ receives is a `list`, so `len()` and indexing type-check.
 from fnloom import Collect, Parallelizable  # noqa: TC001
 
 
-def tickers(universe: str) -> Parallelizable[str]:
+def picked(listing: str) -> Parallelizable[str]:
     """One item per comma-separated name."""
-    yield from universe.split(",")
+    yield from listing.split(",")
 
 
-def price(tickers: str) -> float:
-    """A price per ticker: its length."""
-    return float(len(tickers))
+def details(picked: str) -> float:
+    """A detail per item: its length."""
+    return float(len(picked))
 
 
-def total(price: Collect[float]) -> float:
-    """The first price plus how many there are."""
-    return price[0] + len(price)
+def total(details: Collect[float]) -> float:
+    """The first detail plus how many there are."""
+    return details[0] + len(details)

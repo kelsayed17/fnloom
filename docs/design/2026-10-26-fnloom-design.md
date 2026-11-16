@@ -22,8 +22,8 @@ outside Python.
 - It must be **fast, stable and superior to Hamilton**.
 - There is **no Hamilton compatibility layer**. Existing Hamilton code is not expected to run unchanged; consumers
   adopt the native API.
-- A later, separate open-source indicator library will be built on fnloom, with TA-Lib as its oracle, aiming to beat
-  TA-Lib on speed (§11).
+- A later, separate open-source kernel library will be built on fnloom, with an established C library as its oracle,
+  aiming to beat it on speed (§11).
 
 ## 2. Goals, non-goals, anti-goals
 
@@ -148,7 +148,7 @@ against Hamilton and green against fnloom.
 | Q10 | Edge checks always on; input checks on by default with an explicit opt-out. |
 | Q16 | FIX with caching: code versions are made once, at build (`2026-10-27-caching-design.md`). |
 | Q24 | KEEP a single result builder; hooks compose. |
-| Q9, Q17, Q18 (numeric widening, array shape/dtype contracts, length alignment) | Out of core: found against one consumer's numpy workloads, not Hamilton in general. Candidates for an opt-in policy, likely needed by the indicator library (§11). |
+| Q9, Q17, Q18 (numeric widening, array shape/dtype contracts, length alignment) | Out of core: found against one consumer's numpy workloads, not Hamilton in general. Candidates for an opt-in policy, likely needed by the kernel library (§11). |
 
 ## 7. Proof
 
@@ -213,19 +213,21 @@ are open.
   rather than being refused, so a prepared request can go to a process pool. A `DiskCache` reopens its directory; a
   `MemoryCache` arrives empty, its entries belonging to their process.
 
-## 11. Downstream: the indicator library (not part of fnloom)
+## 11. Downstream: the kernel library (not part of fnloom)
 
-A separate open-source library, built on fnloom, with TA-Lib as its oracle and speed as its claim. It is not
-designed here; this section lists what fnloom must not rule out, so that v1 choices leave room for it:
+A separate open-source library of numeric kernels, built on fnloom, with an established C library as its oracle and
+speed as its claim. It is not designed here; this section lists what fnloom must not rule out, so that v1 choices
+leave room for it:
 
 - **Mixed graphs.** A Python-driven graph whose nodes are a mix of Python and Rust. The core is already generic over
   `P` and `V`; the binding's Python-only payload and value types are the part that will change.
 - **A value type that keeps arrays out of Python** between two Rust nodes (a zero-copy array or buffer value).
-- **Streaming and incremental state.** Indicators are often recursive (EMA-style) or windowed, and TA-Lib offers a
-  streaming API. A plan that can be stepped bar by bar, with per-node state, is a likely requirement.
+- **Streaming and incremental state.** Kernels are often recursive (exponential smoothing) or windowed, and the
+  reference library offers a streaming API. A plan that can be stepped record by record, with per-node state, is a
+  likely requirement.
 - **Array contracts** (shape, dtype, length alignment): the Q9/Q17/Q18 family, as an opt-in policy.
-Speed against TA-Lib, which is C, will come from batching, parallelism, SIMD and streaming rather than from the
-language: an earlier Rust port of numba kernels showed no compute speedup between two LLVM backends.
+Speed against the reference library, which is C, will come from batching, parallelism, SIMD and streaming rather than
+from the language: an earlier Rust port of numba kernels showed no compute speedup between two LLVM backends.
 
 ## 12. Change log
 
@@ -233,7 +235,7 @@ language: an earlier Rust port of numba kernels showed no compute speedup betwee
 - **v2 (2026-10-26), after an audit:** scope rewritten as capabilities; compatibility-layer remnants and references
   to the deleted contract removed; anti-goal on copying aligned with §8; execution order made explicit (Q26); async
   model added; IR reduced to what v1 needs; numeric widening removed from the front end's duties; Python floor
-  3.10 → 3.14 (maintainer); `abi3` dropped; edition 2024; benchmark gate moved to instruction counts; indicator-library
+  3.10 → 3.14 (maintainer); `abi3` dropped; edition 2024; benchmark gate moved to instruction counts; kernel-library
   requirements recorded; authoring API decided: name-wiring.
 - **2026-10-27:** caching leaves the non-goals (§2) and Q16 becomes a FIX: result caching is designed in
   `2026-10-27-caching-design.md` and built in Plan 4.

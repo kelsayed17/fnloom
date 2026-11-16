@@ -102,8 +102,8 @@ async def summed(left: int, right: int) -> int:
 
 
 # A sync node that waits for an async sibling to tick, and says whether it did.
-# The ticker ticks only after the sync node has started, so a tick can reach it
-# only while it runs, and only if the loop is free to run the ticker meanwhile.
+# The clock ticks only after the sync node has started, so a tick can reach it
+# only while it runs, and only if the loop is free to run the clock meanwhile.
 TICKING = """
 import asyncio
 import threading
@@ -117,7 +117,7 @@ def waits_for_tick(x: int) -> bool:
     return TICKED.wait({patience})
 
 
-async def ticker(x: int) -> int:
+async def clock(x: int) -> int:
     await asyncio.to_thread(STARTED.wait, 10.0)
     TICKED.set()
     return x
@@ -125,15 +125,15 @@ async def ticker(x: int) -> int:
 
 
 def test_sync_nodes_do_not_block_the_loop() -> None:
-    """A sync node waiting in its thread; the async ticker ticks meanwhile.
+    """A sync node waiting in its thread; the async clock ticks meanwhile.
 
     By order of events, not by the clock: the sync node sees the tick only if the
-    loop ran the ticker while the node waited.
+    loop ran the clock while the node waited.
     """
     module = make_module("async_ticking", TICKING.format(patience=PATIENCE))
     driver = fnloom.Builder().with_modules(module).build_async()
-    result = _run(driver.execute(["waits_for_tick", "ticker"], inputs={"x": 1}))
-    assert result == {"waits_for_tick": True, "ticker": 1}
+    result = _run(driver.execute(["waits_for_tick", "clock"], inputs={"x": 1}))
+    assert result == {"waits_for_tick": True, "clock": 1}
 
 
 def test_inline_sync_nodes_block_the_loop() -> None:
@@ -143,8 +143,8 @@ def test_inline_sync_nodes_block_the_loop() -> None:
     """
     module = make_module("async_ticking_inline", TICKING.format(patience=0.1))
     driver = fnloom.Builder().with_modules(module).build_async(sync_nodes="inline")
-    result = _run(driver.execute(["waits_for_tick", "ticker"], inputs={"x": 1}))
-    assert result == {"waits_for_tick": False, "ticker": 1}
+    result = _run(driver.execute(["waits_for_tick", "clock"], inputs={"x": 1}))
+    assert result == {"waits_for_tick": False, "clock": 1}
 
 
 def test_inline_sync_nodes_run_on_the_loop_thread() -> None:

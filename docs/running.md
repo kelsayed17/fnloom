@@ -188,7 +188,7 @@ def quantities() -> pd.Series:
     return pd.Series([1, 2, 3])
 
 
-def returns() -> pd.Series:
+def refunds() -> pd.Series:
     return pd.Series([1, 0])
 
 
@@ -231,8 +231,8 @@ frames.execute(["revenue", "regions", "rate"]).to_dict("list")
   `fnloom.FrameBuilder`, for annotations.
 
 ```python
-frames.execute(["quantities", "returns"])
-# raises ValueError: frame(join='strict') needs every output on one index: quantities has 3 rows, returns has 2 rows; pass join='outer' to align them
+frames.execute(["quantities", "refunds"])
+# raises ValueError: frame(join='strict') needs every output on one index: quantities has 3 rows, refunds has 2 rows; pass join='outer' to align them
 ```
 
 The frame class itself still works, and builds by the library's own rules (Q89):
@@ -241,7 +241,7 @@ The frame class itself still works, and builds by the library's own rules (Q89):
 import pandas
 
 plain = builder.with_result_builder(pandas.DataFrame).build()
-plain.execute(["quantities", "returns"])["returns"].isna().tolist()  # NaN-padded
+plain.execute(["quantities", "refunds"])["refunds"].isna().tolist()  # NaN-padded
 # -> [False, False, True]
 ```
 
@@ -873,14 +873,14 @@ you asked for:
 import asyncio
 
 
-async def rate(currency: str) -> float:
-    """The exchange rate, as a remote service would return it."""
+async def rate(speed: str) -> float:
+    """The playback rate, as a remote service would return it."""
     await asyncio.sleep(0)
-    return {"EUR": 1.0, "USD": 1.5}[currency]
+    return {"normal": 1.0, "fast": 1.5}[speed]
 
 
 def converted(rate: float, amount: float) -> float:
-    """The amount in the currency."""
+    """The amount at that rate."""
     return amount * rate
 ```
 
@@ -892,7 +892,7 @@ import rates
 async_driver = fnloom.Builder().with_modules(rates).build_async()
 asyncio.run(
     async_driver.execute(
-        ["converted", "rate"], inputs={"currency": "USD", "amount": 10.0}
+        ["converted", "rate"], inputs={"speed": "fast", "amount": 10.0}
     )
 )
 # -> {'converted': 15.0, 'rate': 1.5}
@@ -904,9 +904,9 @@ defaults as with `build()`. `prepare` is synchronous too, and returns a plan who
 
 ```python
 async_plan = async_driver.prepare(
-    ["converted"], inputs={"currency": "EUR", "amount": 0.0}
+    ["converted"], inputs={"speed": "normal", "amount": 0.0}
 )
-asyncio.run(async_plan.run(inputs={"currency": "EUR", "amount": 4.0}))
+asyncio.run(async_plan.run(inputs={"speed": "normal", "amount": 4.0}))
 # -> {'converted': 4.0}
 ```
 
