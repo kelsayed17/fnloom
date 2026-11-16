@@ -10,18 +10,23 @@
 //! Threads leave when the pool is stopped: by `Threads.close`, when the `Threads` is
 //! collected, or at interpreter exit.
 //!
+//! A run with a deadline runs no task on its caller, so the pool grows to `max_workers`
+//! for it, and keeps a thread more for each run that lends a seat. A thread whose task a
+//! run abandoned leaves the pool at once, which starts another in its place; the thread
+//! itself ends when its call returns (O27).
+//!
 //! One `Mutex` and `Condvar` guard the pool's state and wake every thread waiting on any
 //! of the driver's runs: a task's completion, a new run and the close each bump its
 //! generation, so a waiter that read the generation before it looked for work never
 //! misses the change.
 
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use fnloom_core::schedule::{Report, Seat};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyKeyboardInterrupt, PyValueError};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyCFunction, PyDict};
@@ -45,8 +50,6 @@ const IDLE: Duration = Duration::from_secs(1);
 pub struct Pool {
     /// The driver's caps, which every run's scheduler is granted slots by.
     pub limits: Arc<Caps>,
-    /// The threads it starts: `max_workers - 1`.
-    size: usize,
     /// `max_workers`.
     pub max_workers: usize,
     state: Mutex<State>,
@@ -63,9 +66,17 @@ struct State {
     generation: u64,
     /// The runs that want work, oldest first.
     runs: Vec<Arc<Run>>,
-    /// Threads started, and threads ended.
+    /// Threads started, and threads ended. A thread whose task a run abandoned, or one
+    /// left over when lent seats end, is taken off `started` instead, as it leaves the
+    /// pool: `started - exited` is how many threads the pool has.
     started: usize,
     exited: usize,
+    /// How many threads the pool keeps: `max_workers - 1`, since a run's caller works too,
+    /// until a run with a deadline, whose caller doesn't, makes it `max_workers`.
+    floor: usize,
+    /// Runs with a lent seat registered: the pool keeps a thread more for each, since the
+    /// caller that lent its slot runs none of its tasks.
+    lenders: usize,
 }
 
 impl Pool {
@@ -105,10 +116,15 @@ impl Pool {
 
     /// Waits, detached, until the generation is no longer `generation`, or at most `IDLE`:
     /// a grant that refused a task and gave its slots back woke no one, so an idle thread
-    /// looks for work again now and then.
-    fn wait(&self, py: Python<'_>, generation: u64) {
+    /// looks for work again now and then. `true`, at once, when the thread is one too many,
+    /// now that fewer seats are lent: it is taken off the pool, and leaves.
+    fn wait(&self, py: Python<'_>, generation: u64) -> bool {
         py.detach(|| {
-            let state = self.locked();
+            let mut state = self.locked();
+            if state.started.saturating_sub(state.exited) > state.floor + state.lenders {
+                state.started -= 1;
+                return true;
+            }
             if state.generation == generation && !self.stopping.load(Ordering::Acquire) {
                 drop(
                     self.wake
@@ -116,7 +132,8 @@ impl Pool {
                         .unwrap_or_else(PoisonError::into_inner),
                 );
             }
-        });
+            false
+        })
     }
 
     /// Waits, detached, at most `slice`, until the generation is no longer `generation`:
@@ -134,32 +151,88 @@ impl Pool {
         });
     }
 
-    /// Adds `run` to the runs that want work, and starts the threads if none has started.
-    pub fn register(self: &Arc<Self>, py: Python<'_>, run: &Arc<Run>) {
+    /// Adds `run` to the runs that want work, and starts the threads it needs: the pool's
+    /// `max_workers - 1` at its first run, all `max_workers` for a run with a `deadline`,
+    /// and one more while the run is `lending` a seat.
+    pub fn register(
+        self: &Arc<Self>,
+        py: Python<'_>,
+        run: &Arc<Run>,
+        deadline: bool,
+        lending: bool,
+    ) {
         let run = Arc::clone(run);
-        let (size, stopping) = (self.size, self.stopping.load(Ordering::Acquire));
-        let wanted = self.with_state(py, move |state| {
+        let max_workers = self.max_workers;
+        self.grow(py, move |state| {
             state.runs.push(run);
             state.generation += 1;
-            let wanted = if stopping { 0 } else { size - state.started };
+            if deadline {
+                state.floor = state.floor.max(max_workers);
+            }
+            state.lenders += usize::from(lending);
+        });
+    }
+
+    /// A run lends a seat from now on: the pool keeps a thread more until it ends.
+    pub fn lend(self: &Arc<Self>, py: Python<'_>) {
+        self.grow(py, |state| state.lenders += 1);
+    }
+
+    /// `count` threads are lost to tasks a run abandoned, each still inside its call: they
+    /// leave the pool, which starts as many new ones.
+    pub fn replace(self: &Arc<Self>, py: Python<'_>, count: usize) {
+        if count > 0 {
+            self.grow(py, |state| {
+                state.started = state.started.saturating_sub(count);
+            });
+        }
+    }
+
+    /// Applies `change` to the state, then starts threads until the pool has as many as it
+    /// keeps, waking every waiter.
+    fn grow(self: &Arc<Self>, py: Python<'_>, change: impl FnOnce(&mut State) + Send) {
+        let stopping = self.stopping.load(Ordering::Acquire);
+        let wanted = self.with_state(py, move |state| {
+            change(state);
+            let alive = state.started.saturating_sub(state.exited);
+            let wanted = if stopping {
+                0
+            } else {
+                (state.floor + state.lenders).saturating_sub(alive)
+            };
             state.started += wanted;
             wanted
         });
         self.wake.notify_all();
         for _ in 0..wanted {
-            if self.spawn(py).is_err() {
+            if let Err(error) = self.spawn(py) {
+                // A `Ctrl-C` that `threading`'s own code took is sent again, for the
+                // run's caller to see.
+                if error.is_instance_of::<PyKeyboardInterrupt>(py) {
+                    interrupt_again(py);
+                }
                 // The run still runs, on the threads there are and its caller.
                 self.with_state(py, |state| state.started -= 1);
             }
         }
     }
 
-    /// Starts one worker: a daemon `threading.Thread` running `work`.
+    /// Starts one worker: a daemon `threading.Thread` running `work`. A `Ctrl-C` while
+    /// `start` waits for the thread to begin leaves it running: it counts as started,
+    /// and the interrupt is sent again.
     fn spawn(self: &Arc<Self>, py: Python<'_>) -> PyResult<()> {
         let number = NEXT.fetch_add(1, Ordering::Relaxed);
         let pool = Arc::clone(self);
+        // 0 until the thread begins its work (1), or its spawner gives it up (2).
+        let begun = Arc::new(AtomicU8::new(0));
+        let own = Arc::clone(&begun);
         let target = PyCFunction::new_closure(py, None, None, move |args, _| {
-            work(args.py(), &pool);
+            if own
+                .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                work(args.py(), &pool);
+            }
         })?;
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "target"), target)?;
@@ -178,17 +251,22 @@ impl Pool {
             .call((), Some(&kwargs))?;
         LIVE.fetch_add(1, Ordering::AcqRel);
         if let Err(error) = thread.call_method0(intern!(py, "start")) {
+            if error.is_instance_of::<PyKeyboardInterrupt>(py) && begins(py, &begun) {
+                interrupt_again(py);
+                return Ok(());
+            }
             LIVE.fetch_sub(1, Ordering::AcqRel);
             return Err(error);
         }
         Ok(())
     }
 
-    /// Removes `run` from the runs that want work. The removed handle is dropped here,
-    /// attached, never inside the lock.
-    pub fn unregister(&self, py: Python<'_>, run: &Arc<Run>) {
+    /// Removes `run` from the runs that want work, and its lent seat, if `lending`. The
+    /// removed handle is dropped here, attached, never inside the lock.
+    pub fn unregister(&self, py: Python<'_>, run: &Arc<Run>, lending: bool) {
         let run = Arc::clone(run);
         let removed: Vec<Arc<Run>> = self.with_state(py, move |state| {
+            state.lenders = state.lenders.saturating_sub(usize::from(lending));
             let (gone, kept) = std::mem::take(&mut state.runs)
                 .into_iter()
                 .partition(|other| Arc::ptr_eq(other, &run));
@@ -248,43 +326,97 @@ impl Pool {
     }
 }
 
+/// Whether a thread whose `start` an interrupt cut short begins its work: waits for it,
+/// detached, at most `CLOSING`, else gives it up, so it does nothing if it begins later.
+fn begins(py: Python<'_>, begun: &AtomicU8) -> bool {
+    py.detach(|| {
+        let until = Instant::now() + CLOSING;
+        while begun.load(Ordering::Acquire) == 0 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    });
+    begun
+        .compare_exchange(0, 2, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+}
+
+/// Sends the `Ctrl-C` that `threading`'s code took while a thread started again.
+fn interrupt_again(py: Python<'_>) {
+    drop(
+        py.import(intern!(py, "_thread"))
+            .and_then(|thread| thread.call_method0(intern!(py, "interrupt_main"))),
+    );
+}
+
+/// Why a pool thread leaves.
+enum Leave {
+    /// The pool stopped.
+    Stopped,
+    /// It left the pool already: its task was abandoned, or it was one thread too many.
+    Left,
+    /// A node forked, and this is the child.
+    Forked,
+}
+
+/// Takes one task of `run` for `seat`, a panic outside a node call failing the run.
+fn caught_step(
+    py: Python<'_>,
+    run: &Arc<Run>,
+    pool: &Pool,
+    seat: Seat,
+    report: &mut Report<Arc<Py<PyAny>>>,
+) -> Step {
+    panic::catch_unwind(AssertUnwindSafe(|| {
+        parallel::step(py, run, pool, seat, report)
+    }))
+    .unwrap_or_else(|payload| {
+        run.fail_now(py, panic_error(&*payload));
+        Step::Worked
+    })
+}
+
 /// A pool thread's body, attached by `threading` for the thread's whole life: it takes
-/// tasks from any run that wants work, and waits detached when none does.
+/// tasks from any run that wants work, a run's lent seat once no worker slot is free, and
+/// waits detached when none does.
 fn work(py: Python<'_>, pool: &Arc<Pool>) {
-    let forked = (|| {
+    let leave = (|| {
         let mut report = Report::default();
         loop {
             let (generation, stopping, runs) = pool.snapshot(py);
             if stopping {
-                return false;
+                return Leave::Stopped;
             }
             let mut worked = false;
             for run in &runs {
-                let step = panic::catch_unwind(AssertUnwindSafe(|| {
-                    parallel::step(py, run, pool, Seat::Take, &mut report)
-                }))
-                .unwrap_or_else(|payload| {
-                    run.fail_now(py, panic_error(&*payload));
-                    Step::Worked
-                });
+                let mut step = caught_step(py, run, pool, Seat::Take, &mut report);
+                if matches!(step, Step::Wait | Step::Blocked(_)) && run.lends() {
+                    step = caught_step(py, run, pool, Seat::Lent, &mut report);
+                }
                 // A node forked: this child's one thread is this one, with no caller to
                 // return to. It ends without touching any lock it inherited.
                 if std::process::id() != pool.pid {
-                    return true;
+                    return Leave::Forked;
                 }
-                if step == Step::Worked {
-                    worked = true;
-                    break;
+                match step {
+                    // Its run went on without it, and the pool has a thread in its place.
+                    Step::Abandoned => return Leave::Left,
+                    Step::Worked => {
+                        worked = true;
+                        break;
+                    }
+                    _ => {}
                 }
             }
             drop(runs);
-            if !worked {
-                pool.wait(py, generation);
+            if !worked && pool.wait(py, generation) {
+                return Leave::Left;
             }
         }
     })();
-    if !forked {
-        pool.exited(py);
+    match leave {
+        Leave::Stopped => pool.exited(py),
+        Leave::Left => pool.wake.notify_all(),
+        Leave::Forked => {}
     }
     LIVE.fetch_sub(1, Ordering::AcqRel);
 }
@@ -292,8 +424,9 @@ fn work(py: Python<'_>, pool: &Arc<Pool>) {
 /// A driver's pool of worker threads, for `Plan.run(..., threads=)`.
 ///
 /// Holds `max_workers - 1` threads, started at the first parallel run, since the run's
-/// calling thread works too. `close()` stops them, waiting a second at most for the idle
-/// ones to leave; a collected pool stops them without waiting.
+/// calling thread works too, and `max_workers` from the first run with a deadline, whose
+/// caller doesn't. `close()` stops them, waiting a second at most for the idle ones to
+/// leave; a collected pool stops them without waiting.
 #[pyclass(frozen, weakref, module = "fnloom._core")]
 pub struct Threads {
     pool: Arc<Pool>,
@@ -312,13 +445,14 @@ impl Threads {
         Ok(Self {
             pool: Arc::new(Pool {
                 limits: Arc::clone(limits.get().caps()),
-                size: max_workers - 1,
                 max_workers,
                 state: Mutex::new(State {
                     generation: 0,
                     runs: Vec::new(),
                     started: 0,
                     exited: 0,
+                    floor: max_workers - 1,
+                    lenders: 0,
                 }),
                 wake: Condvar::new(),
                 stopping: AtomicBool::new(false),

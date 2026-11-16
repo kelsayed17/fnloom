@@ -14,14 +14,16 @@
 //! - a limited call's node slot, around the call: a run that needs a slot whose every unit
 //!   its ancestors hold is refused at once instead of waiting for good;
 //! - a parallel run's worker slots, in the context its tasks copy: a run started from one
-//!   takes its caller's tasks on the slot its ancestor holds (`Seat::Held`).
+//!   takes its caller's tasks on the slot its ancestor holds (`Seat::Held`), one such run
+//!   at a time. The entry's fourth item, `lend`, is `[True]` while no run has taken it: a
+//!   run takes it with `lend.pop()`, atomic on either build, and gives it back at its end.
 //!
 //! `live` is `[True]` until the slot is given back, so a thread or task that inherited the
 //! context and outlived the slot counts it no more.
 
 use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::Duration;
 
@@ -86,6 +88,18 @@ impl Drop for Granted<'_, '_> {
     }
 }
 
+/// The `RuntimeError` of a run inherited across a fork, started in process `pid`.
+pub fn inherited(pid: u32) -> PyErr {
+    PyRuntimeError::new_err(format!(
+        "this run was started in process {pid}; a run doesn't survive os.fork()"
+    ))
+}
+
+/// The error of a task its run abandoned, which no one sees: its outcome is dropped.
+pub fn abandoned() -> PyErr {
+    PyRuntimeError::new_err("the run abandoned this task")
+}
+
 /// `fnloom._threads.HELD`, the context variable of the node and group slots the running
 /// tasks hold.
 pub fn held_variable(py: Python<'_>) -> PyResult<&'static Py<PyAny>> {
@@ -120,12 +134,17 @@ impl Caps {
     }
 
     /// `held` with an entry for the worker slots a parallel run's tasks hold, and its live
-    /// flag, which the run clears as it ends.
+    /// flag, which the run clears as it ends. The entry carries `lend`, `[True]`, which
+    /// one run started from the run's context at a time takes to run on that slot.
     pub fn holding_worker<'py>(
         &self,
         held: &Bound<'py, PyAny>,
     ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyList>)> {
-        self.entered(held, WORKER)
+        let py = held.py();
+        let live = PyList::new(py, [true])?;
+        let lend = PyList::new(py, [true])?;
+        let entry = (self.id(), WORKER, live.clone(), lend).into_pyobject(py)?;
+        Ok((held.add(PyTuple::new(py, [entry])?)?, live))
     }
 
     fn entered<'py>(
@@ -144,32 +163,48 @@ impl Caps {
         std::ptr::from_ref(self) as usize
     }
 
-    /// The live entries of these caps in `held`, a `HELD` value, as their slots.
-    fn live<'py>(&self, held: &Bound<'py, PyAny>) -> impl Iterator<Item = usize> + use<'py> {
+    /// The live entries of these caps in `held`, a `HELD` value, as their slots, each with
+    /// its entry.
+    fn live<'py>(
+        &self,
+        held: &Bound<'py, PyAny>,
+    ) -> impl Iterator<Item = (usize, Bound<'py, PyAny>)> + use<'py> {
         let me = self.id();
         held.try_iter()
             .into_iter()
             .flatten()
             .flatten()
             .filter_map(move |entry| {
-                let (caps, slot, live) =
-                    entry.extract::<(usize, usize, Bound<'_, PyAny>)>().ok()?;
-                let live = live.get_item(0).and_then(|live| live.is_truthy()).ok()?;
-                (caps == me && live).then_some(slot)
+                let caps = entry.get_item(0).ok()?.extract::<usize>().ok()?;
+                let slot = entry.get_item(1).ok()?.extract::<usize>().ok()?;
+                let live = entry.get_item(2).ok()?.get_item(0).ok()?.is_truthy().ok()?;
+                (caps == me && live).then_some((slot, entry))
             })
     }
 
-    /// Whether `held`, a `HELD` value, has a live worker entry of these caps: a run started
-    /// there runs inside a task that holds a worker slot of them.
-    pub fn works(&self, held: &Bound<'_, PyAny>) -> bool {
-        self.live(held).any(|slot| slot == WORKER)
+    /// The `lend` list of the innermost live worker entry of these caps in `held`, a `HELD`
+    /// value: a run started there runs inside a task that holds a worker slot of them, and
+    /// may take that slot for its own tasks. `None` when there is no such entry.
+    pub fn lend<'py>(&self, held: &Bound<'py, PyAny>) -> Option<Bound<'py, PyList>> {
+        self.live(held)
+            .filter(|(slot, _)| *slot == WORKER)
+            .last()
+            .and_then(|(_, entry)| entry.get_item(3).ok()?.cast_into::<PyList>().ok())
     }
 
     /// Takes `node`'s slots back for a task that gave them back while it waited for its
     /// run's hooks: waits, detached, for a release while refused. Its ancestors can't hold
-    /// every unit, since the task was granted them once in this run.
-    pub fn retake(&self, py: Python<'_>, node: NodeId) -> PyResult<()> {
+    /// every unit, since the task was granted them once in this run. Gives up once `gone`
+    /// is set, as its run abandons it, and in a forked child, which locks nothing it
+    /// inherited.
+    pub fn retake(&self, py: Python<'_>, node: NodeId, gone: &AtomicBool) -> PyResult<()> {
+        if self.pid != std::process::id() {
+            return Err(inherited(self.pid));
+        }
         loop {
+            if gone.load(Ordering::SeqCst) {
+                return Err(abandoned());
+            }
             let seen = self.generation(py);
             if self.core.try_start(Some(node), Seat::Threadless) {
                 return Ok(());
@@ -255,7 +290,7 @@ impl Caps {
     pub fn reentered(&self, node: NodeId, held: Option<&Bound<'_, PyAny>>) -> Option<PyErr> {
         let wanted = self.nodes.get(node.index())?.as_ref()?;
         let (mut own, mut grouped) = (0, 0);
-        for index in self.live(held?) {
+        for (index, _) in self.live(held?) {
             if index == node.index() {
                 own += 1;
             }
@@ -297,10 +332,7 @@ impl Caps {
     /// runs that called this one hold every unit, which is a `RuntimeError` at once.
     fn grant(&self, py: Python<'_>, node: NodeId, held: &Bound<'_, PyAny>) -> PyResult<()> {
         if self.pid != std::process::id() {
-            return Err(PyRuntimeError::new_err(format!(
-                "this run was started in process {}; a run doesn't survive os.fork()",
-                self.pid
-            )));
+            return Err(inherited(self.pid));
         }
         let mut checked = false;
         loop {
@@ -459,4 +491,34 @@ impl Limits {
     pub const fn caps(&self) -> &Arc<Caps> {
         &self.caps
     }
+}
+
+/// How many units of `limits`' caps are held now: worker slots, then each node's own cap
+/// and each group's, by name, for the tests of abandoned calls.
+#[cfg(feature = "test-hooks")]
+#[pyfunction]
+pub fn held_slots(
+    limits: &Bound<'_, Limits>,
+) -> (usize, BTreeMap<String, usize>, BTreeMap<String, usize>) {
+    use fnloom_core::limits::Resource;
+    let caps = limits.get().caps();
+    let nodes = caps
+        .nodes
+        .iter()
+        .zip(0..)
+        .filter_map(|(node, id)| {
+            let node = node.as_ref().filter(|node| node.cap.is_some())?;
+            Some((
+                node.name.clone(),
+                caps.core.held(Resource::Node(NodeId(id))),
+            ))
+        })
+        .collect();
+    let groups = caps
+        .groups
+        .iter()
+        .zip(0..)
+        .map(|((name, _), id)| (name.clone(), caps.core.held(Resource::Group(id))))
+        .collect();
+    (caps.core.held(Resource::Worker), nodes, groups)
 }

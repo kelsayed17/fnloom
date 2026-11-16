@@ -67,6 +67,7 @@ from fnloom._stores import (
 )
 from fnloom._style import Style
 from fnloom._tags import ANY
+from fnloom._threads import cancelled
 from fnloom._types import ValueCheck, type_matches, value_matches
 from fnloom._view import InputView, NodeView, Param
 from fnloom.driver import (
@@ -131,6 +132,7 @@ __all__ = [
     "apply_to",
     "build",
     "cache",
+    "cancelled",
     "check_output",
     "check_output_custom",
     "config",

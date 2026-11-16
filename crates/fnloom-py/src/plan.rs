@@ -8,7 +8,7 @@ use fnloom_core::node::{Node, NodeId};
 use fnloom_core::plan::{Action, Plan as CorePlan, Step};
 use fnloom_core::run::{Arg, Blocks, Evaluate, Item, Observer};
 use fnloom_core::schedule::Layout;
-use pyo3::exceptions::PyRuntimeError;
+use pyo3::exceptions::{PyRuntimeError, PyTypeError};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
@@ -249,10 +249,13 @@ impl Plan {
     ///
     /// Without `threads`, `limits` grants each limited node's call its slots, waiting
     /// detached for a release while refused, and releasing them as soon as the call returns.
+    ///
+    /// `timeout`, in seconds, needs `threads`: the calling thread then runs no task, and
+    /// once it passes the run stops, abandons its running tasks and raises `TimeoutError`.
     // PyO3 renders the `Vec::new()` default as `Ellipsis`, so the signature says `()` itself.
     #[pyo3(
-        signature = (inputs, overrides, observers = Vec::new(), on_value = None, late = None, *, threads = None, limits = None),
-        text_signature = "($self, /, inputs, overrides, observers=(), on_value=None, late=None, *, threads=None, limits=None)"
+        signature = (inputs, overrides, observers = Vec::new(), on_value = None, late = None, *, threads = None, limits = None, timeout = None),
+        text_signature = "($self, /, inputs, overrides, observers=(), on_value=None, late=None, *, threads=None, limits=None, timeout=None)"
     )]
     #[expect(
         clippy::too_many_arguments,
@@ -268,9 +271,17 @@ impl Plan {
         late: Option<&Bound<'py, PyAny>>,
         threads: Option<&Bound<'py, Threads>>,
         limits: Option<&Bound<'py, Limits>>,
+        timeout: Option<f64>,
     ) -> PyResult<Bound<'py, PyDict>> {
         if let Some(threads) = threads {
-            return parallel::run(slf, inputs, overrides, observers, on_value, late, threads);
+            return parallel::run(
+                slf, inputs, overrides, observers, on_value, late, threads, timeout,
+            );
+        }
+        if timeout.is_some() {
+            return Err(PyTypeError::new_err(
+                "timeout= needs Builder.with_threads(...)",
+            ));
         }
         let this = slf.get();
         let limits = limits.map(|limits| &**limits.get().caps());

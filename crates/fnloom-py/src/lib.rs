@@ -49,6 +49,8 @@ fn core(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module.add_function(wrap_pyfunction!(parallel::arm_hook_panic, module)?)?;
         module.add_function(wrap_pyfunction!(parallel::arm_report_panic, module)?)?;
         module.add_function(wrap_pyfunction!(parallel::arm_perform_panic, module)?)?;
+        module.add_function(wrap_pyfunction!(limits::held_slots, module)?)?;
+        module.add_function(wrap_pyfunction!(parallel::arm_state_panic, module)?)?;
     }
     module.add_function(wrap_pyfunction!(fingerprint::fingerprint, module)?)?;
     module.add_function(wrap_pyfunction!(fingerprint::hash_parts, module)?)?;
@@ -64,6 +66,11 @@ fn core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<plan::Plan>()?;
     module.add_class::<limits::Limits>()?;
     module.add_class::<pool::Threads>()?;
+    module.add_class::<parallel::Stop>()?;
+    module.add(
+        "StoppedError",
+        module.py().get_type::<parallel::StoppedError>(),
+    )?;
     module.add_class::<keys::KeyPlan>()?;
     module.add_class::<keys::Keys>()?;
     module.add_class::<store::MemoryStore>()?;

@@ -768,8 +768,8 @@ threaded.execute(["summary"], inputs={"category": "furniture", "endpoint": endpo
   that comes first in reference order, as one exception.
 - **The GIL build.** On `3.14`, nodes that release the GIL (I/O, `time.sleep`, many C extensions) overlap, and pure
   Python nodes take turns; on `3.14t` they all run at once.
-- **`Ctrl-C`** stops a run between nodes, but can't end a node that hangs on a worker thread: the run waits for it.
-  Deadlines that abandon a hung node come with a later release.
+- **`Ctrl-C`** ends a run at once, a node hung on a worker thread included: the run abandons the nodes still running,
+  as a [deadline](#deadlines-and-cancellation) does, and raises `KeyboardInterrupt`.
 - **The pool's life.** A driver's worker threads leave once the driver is collected. A discarded driver caught in a
   reference cycle keeps its idle threads until the cyclic garbage collector frees it.
 - **Lazy generators.** An expand's generator is read only while fewer than `2 * max_workers` of its branches are
@@ -777,8 +777,11 @@ threaded.execute(["summary"], inputs={"category": "furniture", "endpoint": endpo
 - **Runs inside runs.** A node may run its own driver: the inner run's tasks start on the worker the node holds, so it
   never waits for a free one. That holds on a thread or task the node starts and waits for too, when it carries the
   node's context: `asyncio.to_thread`, `threading.Thread(context=contextvars.copy_context())`, or any thread on
-  `3.14t`, which inherits its starter's context by default. On `3.14` a plain `threading.Thread` doesn't, so a run it
-  starts waits for a free worker like any other run, and with `with_threads(1)` for the one its node holds.
+  `3.14t`, which inherits its starter's context by default. A run lends that worker to one such inner run at a time:
+  a second one, started meanwhile, takes a free worker if there is one, or the lent one once the first has ended. On
+  `3.14` a plain `threading.Thread` doesn't carry the context, so a run it starts waits for a free worker like any
+  other run, and with `with_threads(1)` for the one its node holds. An inner run with a `timeout=` lends the worker to
+  its own nodes, which run on the pool.
 - An `AsyncDriver` built from such a builder ignores the setting for now.
 
 fnloom can't make your own code safe:
@@ -863,6 +866,68 @@ Here at most four `details` calls, and six calls of `details` and `reviews` toge
   itself, or a node in a full group whose inner run needs that group. Two unrelated runs that each hold part of a
   group and wait for each other are not detected.
 - An `AsyncDriver` checks the limits at build, and honours them from a later release.
+
+## Deadlines and cancellation
+
+On a driver built `with_threads`, `execute(..., timeout=seconds)` bounds the run, and so does the keyword on
+`raw_execute`, `PreparedPlan.run` and `PreparedPlan.run_raw`. Once that many seconds pass, the run stops and raises
+`TimeoutError` at once, without waiting for the nodes still running (Q170). A node that runs long can ask
+`fnloom.cancelled()` whether its run is stopping, and return early:
+
+```python
+# file: lookups.py
+import time
+
+import fnloom
+
+
+def answer(question: str) -> str:
+    """Asks a slow service, giving up once the run is stopping."""
+    for _ in range(100):
+        if fnloom.cancelled():
+            return "gave up"
+        time.sleep(0.01)
+    return f"the answer to {question}"
+```
+
+```python
+import lookups
+
+patient = fnloom.Builder().with_modules(lookups).with_threads(2).build()
+patient.execute(["answer"], inputs={"question": "why"}, timeout=0.1)
+# raises TimeoutError: the run did not finish within its timeout of 0.1 s
+fnloom.build(lookups).execute(["answer"], inputs={"question": "why"}, timeout=0.1)
+# raises TypeError: timeout= needs Builder.with_threads(...)
+```
+
+- **Only with `with_threads`.** The calling thread can't abandon a node it runs itself, so a run with a deadline runs
+  every node on the pool, which grows to `max_workers` threads for it, and the caller only waits. Without
+  `with_threads`, `timeout=` is a `TypeError`. An `AsyncDriver` takes none: wrap its `execute` in `asyncio.timeout`,
+  which cancels the run (Q66).
+- **Abandoned nodes.** A node still running at the deadline is abandoned. Its worker and its `@limit` slots are given
+  back at once, so later runs never wait for it, and the pool starts a thread in its place. Python can't interrupt a
+  running function, so the call goes on until it returns, and what it returns is dropped: no hook hears of it, and
+  nothing is stored. That has two costs. While an abandoned call still runs, its node's limit may be exceeded, and the
+  process keeps one more thread for each abandoned call that never returns. Such a thread doesn't keep the
+  interpreter from exiting.
+- **Generators.** At the deadline the caller closes each expand's generator that isn't reading an item, before it
+  raises. One that is gets closed by its worker once the item comes.
+- **A failure first.** A run that had failed and was waiting for its running nodes raises that failure at the
+  deadline, not `TimeoutError`.
+- **`fnloom.cancelled()`** is `True` inside a node once its run is stopping: its deadline passed, another node failed,
+  or it was interrupted. It is `False` outside a run, and in a run of a driver without `with_threads`.
+- **Runs inside runs** stop with the run that started them. A node of a run started inside a node of a stopping run,
+  on any driver and at any depth, sees `cancelled()` turn `True` too. A parallel inner run also starts no new node.
+  Once its running nodes return, it returns its outputs if they were all computed. Otherwise it raises a
+  `RuntimeError`: `the run that started this one has stopped or ended, so this one stopped`. The outer run never
+  raises that error in place of the failure that stopped it. A context that outlives a stopped run, such as one a
+  thread copied, keeps it stopped, so a run started from it later stops at once.
+- **`Ctrl-C`** stops a parallel run the same way, with or without a deadline: the nodes still running are abandoned,
+  and `KeyboardInterrupt` is raised at once.
+- **Cached runs.** On a driver with a cache, the deadline covers the whole run, the `recompute` nodes run first
+  included.
+- **Hooks.** `after_run` gets `ok=False` and the `TimeoutError`, and fires once any hook call already going on has
+  returned, so a run's hook calls never overlap.
 
 ## Rebuilding after an edit
 
