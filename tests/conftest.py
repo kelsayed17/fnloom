@@ -1,9 +1,11 @@
 """Registers the shared helpers' fixtures for every test, and the threads watchdog."""
 
 import faulthandler
+import os
 from typing import TYPE_CHECKING
 
 import pytest
+from hypothesis import settings
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -12,6 +14,11 @@ pytest_plugins = ["helpers"]
 
 # How long a test marked `threads` may run before the watchdog ends the session.
 WATCHDOG_SECONDS = 300
+
+# The CI `stress` job sets HYPOTHESIS_PROFILE=stress, for many more examples.
+settings.register_profile("stress", max_examples=500)
+if os.environ.get("HYPOTHESIS_PROFILE") == "stress":
+    settings.load_profile("stress")
 
 
 @pytest.fixture(autouse=True)

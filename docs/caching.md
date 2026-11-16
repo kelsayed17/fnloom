@@ -582,8 +582,9 @@ shop.explain_cache(["count"], inputs={"item": "desk"})
   took its default, or a `Collect` that dropped its branch included. Only the branches it reaches are left out;
   the other branches are stored as usual. The next run calls the node again, so a partial result is never served
   as a whole one. The store still answers first: what a run with no absence stored is served as a hit, so the node
-  isn't called. A plain `MemoryCache` is written from Python rather than the binding for a plan with a node an
-  error may make absent.
+  isn't called. So one result can mix the two: a reader an earlier run stored, computed from the node's value, is
+  served beside a reader this run computed from its absence. Nothing computed from an absence is ever stored. A plain
+  `MemoryCache` is written from Python rather than the binding for a plan with a node an error may make absent.
 - **Every store returns the singleton.** `MemoryCache` and a store of your own keep the `ABSENT` object itself.
   `DiskCache` writes a flag in the entry's header with no payload, in every format, so no value of a format can pass
   for it and the `json` format needs no way to write it. `ABSENT` inside a value (a list holding it, say) pickles by
@@ -671,12 +672,14 @@ The second run calls `sales` once, for `"us"`, and prints `sales us`.
 A store is any object with three methods, the `fnloom.CacheStore` protocol: `get(key)` returns the value or
 `fnloom.MISSING`, `put(key, value)` stores one, replacing any there, and `discard(key)` forgets one. A key is 32 bytes.
 A store must be safe to call from several threads at once, and must never raise for a store error: it misses or skips
-the write, and warns with `fnloom.CacheWarning`. A miss is `MISSING`, never `None`, which is a value a node may
-return. `with_cache` refuses an object without these three methods. fnloom has two; they live in the private module
-`fnloom._stores`, so use them through `fnloom`: `fnloom.MemoryCache`, `fnloom.DiskCache`, `fnloom.CacheStore`,
-`fnloom.MISSING` and `fnloom.CacheWarning`. (`fnloom.cache` is the decorator.) One store can be shared by several
-drivers in one process. A pickled driver takes its store along: a `DiskCache` reopens the same directory, and a
-`MemoryCache` arrives empty (see [Pickling and process pools](running.md#pickling-and-process-pools)).
+the write, and warns with `fnloom.CacheWarning`. On a driver built [`with_threads`](running.md#threads), a run calls
+its store from its workers, several at once, after each node's hooks and with no lock of fnloom's held. A miss is
+`MISSING`, never `None`, which is a value a node may return. `with_cache` refuses an object without these three
+methods. fnloom has two; they live in the private module `fnloom._stores`, so use them through `fnloom`:
+`fnloom.MemoryCache`, `fnloom.DiskCache`, `fnloom.CacheStore`, `fnloom.MISSING` and `fnloom.CacheWarning`.
+(`fnloom.cache` is the decorator.) One store can be shared by several drivers in one process. A pickled driver takes
+its store along: a `DiskCache` reopens the same directory, and a `MemoryCache` arrives empty (see [Pickling and
+process pools](running.md#pickling-and-process-pools)).
 
 **`MemoryCache(max_entries=100_000, max_bytes=None)`** holds the results themselves, so a hit costs a lookup and no
 copy (hence the [purity contract](#the-purity-contract)). Past either bound it evicts the least recently used entries.

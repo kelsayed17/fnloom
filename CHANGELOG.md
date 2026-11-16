@@ -134,9 +134,25 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - A run started on a thread that carries a parallel task's context takes that task's worker slot only while no other
   such run has it, so threads a node starts can no longer run more nodes than `max_workers` at once. A fork inside a
   `before_node` hook, or a `pre_graph` one, of a parallel run no longer touches the parent's locks in the child.
+- A dropped driver's pool threads end at once. A driver and the plans it kept referred to each other, so they
+  lived until the cyclic garbage collector ran. A plan now keeps what its driver pickles as instead of the driver,
+  and an `AsyncDriver` keeps its own async plans; plans pickled with their driver still share one rebuilt driver.
+- At interpreter exit, the pools' idle threads are joined, within the one-second budget, once `threading`'s own
+  cleanup of them has ended too, so finalization no longer finds one half done on 3.14t.
+- An async run started inside a node of a stopping run stops within 50 ms, cancelling its running `async def` nodes,
+  instead of only once one of its own nodes completed.
+- A stopping async run that detached a sync call its pool thread had taken, but not yet begun, could leave that
+  thread busy and unreplaced: such a call now never runs.
+- A caller waiting on a pool no longer passes a queued call's wake on to other waiting callers while every worker
+  is busy.
+- `LogFailures` logs an expand an error made absent while it yielded, from `RunEnd.absent_errors`, as `node 'x'
+  failed while yielding its items`. Such an expand gets no second `after_node`, so it went unlogged.
 
 ### Changed
 
+- The Threads section of the running guide is rewritten: what depends on timing and what doesn't, what a run shares
+  and serializes, runs inside runs, thread counts and fork. The thread tests gain stress tests, which the CI `stress`
+  job runs 200 rounds of (`FNLOOM_STRESS_ROUNDS`), with a `stress` hypothesis profile.
 - `RunEnd.skipped` is sorted by order key on the sync driver (Q84). Without threads that is the order it was in.
   Output checks' results reach `NodeEnd.checks` per node and branch, so two branches checked at once each report
   their own.

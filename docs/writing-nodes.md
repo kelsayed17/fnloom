@@ -511,7 +511,9 @@ keeps its place. Any other error fails the run as before.
   as any other.
 - What counts is what the node's own code raises, its [wrappers](running.md#node-wrappers) included. A check of
   fnloom's never becomes an absence, whatever is listed: an item refused, an output check or output type check
-  failed, or a field missing from what an `@extract_fields` producer returned fails the run as before.
+  failed, or a field missing from what an `@extract_fields` producer returned fails the run as before. The mark is on
+  the exception itself, so it holds across drivers: a node that runs another driver, and lists `ValueError`, still
+  fails when the inner driver's `@check_output` raises its `ValueError` through it.
 - An expand absent on an error, before or while it yields, has no branches: the branches it already ran are
   dropped, as when it [declines](#fan-out-and-fan-in), and each `Collect` of its block follows the three rules as a
   whole. An iterator that raised is closed at once, so a custom one's `close()` runs.

@@ -1,22 +1,29 @@
-"""Concurrent use of one driver and one plan, and free-threaded imports."""
+"""Concurrent use of one driver and one plan, free-threaded imports, and stress."""
 
+import os
 import sys
 import sysconfig
 import threading
 from concurrent.futures import ThreadPoolExecutor
-from typing import override
+from typing import TYPE_CHECKING, Any, cast, override
 
 import pytest
 
 import fnloom
+from fnloom import _core
 from helpers import make_module
+from helpers import run as run_driver
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
 
 THREADS = 8
 RUNS = 500
 
 SOURCE = """
-def total(price: float, quantity: int) -> float:
-    return price * quantity
+def total(step: float, steps: int) -> float:
+    return step * steps
 
 def label(total: float) -> str:
     return f"{total:.2f}"
@@ -36,20 +43,16 @@ def test_importing_fnloom_keeps_the_gil_off() -> None:
 def test_threads_share_a_driver_and_a_plan() -> None:
     """Threads sharing one plan and one driver each get their own answers."""
     driver = fnloom.build(make_module("threaded", SOURCE))
-    plan = driver.prepare(["label"], inputs={"price": 0.0, "quantity": 0})
+    plan = driver.prepare(["label"], inputs={"step": 0.0, "steps": 0})
 
     def work(thread: int) -> None:
         for run in range(RUNS):
-            quantity = thread * RUNS + run
-            expected = f"{quantity * 2.0:.2f}"
-            assert plan.run(inputs={"price": 2.0, "quantity": quantity}) == {
-                "label": expected
-            }
+            steps = thread * RUNS + run
+            expected = f"{steps * 2.0:.2f}"
+            assert plan.run(inputs={"step": 2.0, "steps": steps}) == {"label": expected}
             # Alternate two request shapes, so the plan cache and its fast path churn.
             outputs = ["label"] if run % 2 else ["total", "label"]
-            result = driver.execute(
-                outputs, inputs={"price": 2.0, "quantity": quantity}
-            )
+            result = driver.execute(outputs, inputs={"step": 2.0, "steps": steps})
             assert result["label"] == expected
 
     with ThreadPoolExecutor(THREADS) as pool:
@@ -372,3 +375,345 @@ def test_a_container_changed_by_another_thread_is_fingerprinted_whole(
     finally:
         stop.set()
         thread.join()
+
+
+# The stress tests: each marked `threads`, and repeated `ROUNDS` times; the CI
+# `stress` job runs 200. Every counter they keep is changed under a lock, since
+# `+=` on a shared value is no atomic step on 3.14t.
+ROUNDS = int(os.environ.get("FNLOOM_STRESS_ROUNDS", "10"))
+CALLERS = 16
+WORKERS = 8
+# How long a caller thread may take for all its rounds, at most.
+CALLER_TIMEOUT = 120.0
+
+
+def _sizes(thread: int, run: int) -> list[int]:
+    """A nested fan-out's sizes, repeating every 12 runs, overlapping other threads'."""
+    return [(thread + run) % 4 + 1, run % 3 + 1, (thread * run) % 2 + 1]
+
+
+def _callers[T](work: Callable[[int], T], count: int = CALLERS) -> list[T]:
+    """`work(thread)` on `count` threads started together; their results, in order.
+
+    Every thread meets at a barrier first, so all of them overlap, and each is
+    given `CALLER_TIMEOUT` seconds: a hang fails the test, not the session.
+    """
+    start = threading.Barrier(count, timeout=CALLER_TIMEOUT)
+
+    def started(thread: int) -> T:
+        start.wait()
+        return work(thread)
+
+    with ThreadPoolExecutor(count) as pool:
+        done = [pool.submit(started, thread) for thread in range(count)]
+        return [future.result(timeout=CALLER_TIMEOUT) for future in done]
+
+
+def _held(driver: fnloom.Driver[Any] | fnloom.AsyncDriver[Any]) -> object:
+    """The units of the driver's caps held now: workers, nodes, groups."""
+    inner = driver._driver if isinstance(driver, fnloom.AsyncDriver) else driver  # noqa: SLF001  # its sync driver
+    workers = inner._workers  # noqa: SLF001  # the driver's own limits
+    assert workers is not None
+    return _core.held_slots(workers.limits())
+
+
+@pytest.mark.threads
+@pytest.mark.parametrize("store", ["memory", "disk"])
+def test_parallel_runs_share_one_driver_pool_and_cache(
+    store: str, tmp_path: Path
+) -> None:
+    """16 callers each run a nested, cached fan-out on one `with_threads(8)` driver.
+
+    Every result is the single-threaded one, `current_branch()` is each node's
+    own, and once they end no worker slot is held.
+    """
+    cache: fnloom.MemoryCache | fnloom.DiskCache = (
+        fnloom.MemoryCache() if store == "memory" else fnloom.DiskCache(tmp_path)
+    )
+    driver = (
+        fnloom.Builder()
+        .with_modules(make_module(f"stress_shared_{store}", BLOCKED))
+        .with_cache(cache)
+        .with_threads(WORKERS)
+        .build()
+    )
+
+    def work(thread: int) -> int:
+        for run in range(ROUNDS):
+            sizes = _sizes(thread, run)
+            result = driver.execute(["everything"], inputs={"sizes": sizes})
+            assert result == {"everything": _everything(sizes)}, (thread, run)
+        return ROUNDS
+
+    assert sum(_callers(work)) == CALLERS * ROUNDS
+    assert _held(driver) == (0, {}, {})
+    # What the callers stored is there for a later run.
+    explained = driver.explain_cache(["everything"], inputs={"sizes": _sizes(0, 0)})
+    assert explained["everything"].status == "hit"
+
+
+# Each node of `BLOCKED` with the length of its branch, and the nodes it reads.
+_DEPTHS = {"outer": 0, "inner": 1, "leaf": 2, "per_outer": 1, "everything": 0}
+_READS = {
+    "outer": (),
+    "inner": ("outer",),
+    "leaf": ("inner", "outer"),
+    "per_outer": ("leaf",),
+    "everything": ("per_outer",),
+}
+
+type _Call = tuple[str, tuple[int, ...]]
+
+
+class _Ordered(fnloom.Hook):
+    """Every run's sizes, and its node events in the order the hook heard them."""
+
+    def __init__(self) -> None:
+        self.sizes: dict[str, list[int]] = {}
+        self.events: dict[str, list[tuple[str, _Call]]] = {}
+        self._lock = threading.Lock()
+
+    @override
+    def before_run(self, event: fnloom.RunStart) -> None:
+        with self._lock:
+            self.sizes[event.run_id] = cast("list[int]", event.inputs["sizes"])
+
+    @override
+    def before_node(self, event: fnloom.NodeStart) -> None:
+        with self._lock:
+            self.events.setdefault(event.run_id, []).append(
+                ("before", (event.node.name, event.branch))
+            )
+
+    @override
+    def after_node(self, event: fnloom.NodeEnd) -> None:
+        with self._lock:
+            self.events.setdefault(event.run_id, []).append(
+                ("after", (event.node.name, event.branch))
+            )
+
+
+def _calls(sizes: list[int]) -> set[_Call]:
+    """Every `(node, branch)` a run of `everything` over `sizes` calls."""
+    calls: set[_Call] = {("outer", ()), ("everything", ())}
+    for i, size in enumerate(sizes):
+        calls |= {("inner", (i,)), ("per_outer", (i,))}
+        calls |= {("leaf", (i, j)) for j in range(size)}
+    return calls
+
+
+def _read_ended(call: _Call, ended: set[_Call], sizes: list[int]) -> bool:
+    """Whether every input `call` reads has ended: each branch of a collected one."""
+    name, branch = call
+    for read in _READS[name]:
+        depth = _DEPTHS[read]
+        if depth <= len(branch):
+            if (read, branch[:depth]) not in ended:
+                return False
+            continue
+        # A collect, one branch deeper: every branch of its block.
+        width = sizes[branch[0]] if branch else len(sizes)
+        if any((read, (*branch, i)) not in ended for i in range(width)):
+            return False
+    return True
+
+
+def _check_ordered(events: list[tuple[str, _Call]], sizes: list[int]) -> None:
+    """One run's events: each node once, started after its inputs ended, then ended."""
+    started: set[_Call] = set()
+    ended: set[_Call] = set()
+    for kind, call in events:
+        if kind == "before":
+            assert call not in started, (call, events)
+            assert _read_ended(call, ended, sizes), (call, events)
+            started.add(call)
+        else:
+            assert call in started, (call, events)
+            assert call not in ended, (call, events)
+            ended.add(call)
+    assert started == ended == _calls(sizes), events
+
+
+@pytest.mark.threads
+def test_a_shared_hook_sees_each_parallel_run_whole() -> None:
+    """16 callers share one hooked `with_threads(8)` driver over a nested fan-out.
+
+    Grouped by `run_id`, each run calls every node once, each `before_node`
+    precedes its `after_node`, and a node starts only after each input it reads
+    has ended: a collect after every branch it gathers.
+    """
+    hook = _Ordered()
+    driver = (
+        fnloom.Builder()
+        .with_modules(make_module("stress_ordered", BLOCKED))
+        .with_hooks(hook)
+        .with_threads(WORKERS)
+        .build()
+    )
+
+    def work(thread: int) -> None:
+        for run in range(ROUNDS):
+            sizes = _sizes(thread, run)
+            assert driver.execute(["everything"], inputs={"sizes": sizes}) == {
+                "everything": _everything(sizes)
+            }
+
+    _callers(work)
+    assert len(hook.sizes) == len(hook.events) == CALLERS * ROUNDS
+    for run_id, events in hook.events.items():
+        _check_ordered(events, hook.sizes[run_id])
+
+
+@pytest.mark.threads
+def test_run_many_and_execute_mixed_on_one_driver() -> None:
+    """Callers mix `run_many`, `PreparedPlan.run` and `execute` on one driver."""
+    driver = (
+        fnloom.Builder()
+        .with_modules(make_module("stress_mixed_calls", BLOCKED))
+        .with_threads(WORKERS)
+        .build()
+    )
+    plan = driver.prepare(["everything"], inputs={"sizes": []})
+
+    def work(thread: int) -> int:
+        checked = 0
+        for run in range(ROUNDS):
+            sets = [_sizes(thread, run + k) for k in range(4)]
+            if thread % 3 == 0:
+                results = plan.run_many([{"sizes": sizes} for sizes in sets])
+            elif thread % 3 == 1:
+                results = [plan.run(inputs={"sizes": sizes}) for sizes in sets]
+            else:
+                results = [
+                    driver.execute(["everything"], inputs={"sizes": sizes})
+                    for sizes in sets
+                ]
+            assert results == [{"everything": _everything(s)} for s in sets]
+            checked += len(sets)
+        return checked
+
+    assert sum(_callers(work)) == CALLERS * ROUNDS * 4
+    assert _held(driver) == (0, {}, {})
+
+
+@pytest.mark.threads
+def test_async_and_sync_drivers_of_one_builder_under_load() -> None:
+    """A builder's `Driver` and `AsyncDriver`, each with its own pool, 16 callers."""
+    builder = (
+        fnloom.Builder()
+        .with_modules(make_module("stress_sync_async", BLOCKED))
+        .with_cache(fnloom.MemoryCache())
+        .with_threads(4)
+    )
+    sync, async_ = builder.build(), builder.build_async()
+
+    def work(thread: int) -> int:
+        for run in range(ROUNDS):
+            sizes = _sizes(thread, run)
+            driver = async_ if (thread + run) % 2 else sync
+            got = run_driver(driver, ["everything"], inputs={"sizes": sizes})
+            assert got == {"everything": _everything(sizes)}, (thread, run)
+        return ROUNDS
+
+    assert sum(_callers(work)) == CALLERS * ROUNDS
+    assert _held(sync) == _held(async_) == (0, {}, {})
+
+
+# A limited node that records how many of its calls overlap, and the most seen.
+CONTENDED = """
+import threading
+import time
+
+from fnloom import Collect, Parallelizable, limit
+
+LOCK = threading.Lock()
+RUNNING = [0]
+PEAK = [0]
+
+
+def item(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+def _enter() -> None:
+    with LOCK:
+        RUNNING[0] += 1
+        PEAK[0] = max(PEAK[0], RUNNING[0])
+
+
+def _leave() -> None:
+    with LOCK:
+        RUNNING[0] -= 1
+
+
+@limit(group="store")
+def read(item: int) -> int:
+    _enter()
+    try:
+        time.sleep(0)
+        return item
+    finally:
+        _leave()
+
+
+@limit(2, group="store")
+def write(read: int) -> int:
+    _enter()
+    try:
+        time.sleep(0)
+        return read * 2
+    finally:
+        _leave()
+
+
+def total(write: Collect[int]) -> int:
+    return sum(write)
+
+
+@limit(2)
+def single(x: int) -> int:
+    _enter()
+    try:
+        time.sleep(0.001)
+        return x + 1
+    finally:
+        _leave()
+"""
+BRANCHES = 500
+
+
+@pytest.mark.threads
+def test_limits_never_overshoot_under_contention() -> None:
+    """A group of 3 over 500 branches on eight workers: never four calls at once."""
+    module = make_module("stress_contended", CONTENDED)
+    driver = (
+        fnloom.Builder()
+        .with_modules(module)
+        .with_threads(WORKERS)
+        .with_limits({"store": 3})
+        .build()
+    )
+    expected = sum(range(BRANCHES)) * 2
+    for _ in range(ROUNDS):
+        assert driver.execute(["total"], inputs={"n": BRANCHES}) == {"total": expected}
+    assert 1 <= module.PEAK[0] <= 3  # noqa: PLR2004  # the group's size
+    assert module.RUNNING == [0]
+    assert _held(driver) == (0, {"single": 0, "write": 0}, {"store": 0})
+
+
+@pytest.mark.threads
+def test_a_sequential_driver_under_16_threads_honours_its_limits() -> None:
+    """A `@limit(2)` node of a driver without threads, called by 16 threads at once."""
+    module = make_module("stress_sequential_limits", CONTENDED)
+    driver = fnloom.Builder().with_modules(module).with_limits({"store": 3}).build()
+
+    def work(thread: int) -> int:
+        for run in range(ROUNDS):
+            x = thread * 1_000 + run
+            assert driver.execute(["single"], inputs={"x": x}) == {"single": x + 1}
+        return ROUNDS
+
+    assert sum(_callers(work)) == CALLERS * ROUNDS
+    assert 1 <= module.PEAK[0] <= 2  # noqa: PLR2004  # the node's cap
+    assert module.RUNNING == [0]
+    assert _held(driver) == (0, {"single": 0, "write": 0}, {"store": 0})
