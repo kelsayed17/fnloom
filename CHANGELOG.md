@@ -147,6 +147,12 @@ change the public API; such changes are listed under **Changed** and **Removed**
   is busy.
 - `LogFailures` logs an expand an error made absent while it yielded, from `RunEnd.absent_errors`, as `node 'x'
   failed while yielding its items`. Such an expand gets no second `after_node`, so it went unlogged.
+- An async run that follows the stop of the run that started it cancels its next look at it as it ends, so the loop
+  no longer keeps the finished run alive for up to 50 ms.
+- At interpreter exit, a pool thread that left is matched by its native id and its ident, so a later thread the system
+  gave the same native id is never waited for.
+- A `Ctrl-C` that cut short the start of one of `run_many`'s helper threads no longer keeps one of the driver's helper
+  permits: it is given back, once, by the caller if the thread never began, else by the thread as it ends.
 
 ### Changed
 

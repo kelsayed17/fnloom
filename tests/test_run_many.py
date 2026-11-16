@@ -782,3 +782,43 @@ def test_a_keyboard_interrupt_is_noted_with_its_set() -> None:
     with pytest.raises(KeyboardInterrupt) as raised:
         plan.run_many(sets(1))
     assert raised.value.__notes__[-1] == "while running input set 0 of run_many"
+
+
+def _free(permits: threading.Semaphore, count: int) -> bool:
+    """Whether exactly `count` of `permits` are free; each taken is given back."""
+    taken = 0
+    while taken <= count and permits.acquire(blocking=False):
+        taken += 1
+    for _ in range(taken):
+        permits.release()
+    return taken == count
+
+
+@pytest.mark.parametrize("began", [False, True])
+def test_an_interrupted_helper_start_gives_its_permit_back_once(
+    monkeypatch: pytest.MonkeyPatch,
+    began: bool,  # noqa: FBT001  # a parameter
+) -> None:
+    """A `KeyboardInterrupt` from a helper's `start()` leaks no permit.
+
+    A thread that never began has its permit given back by its starter, and one
+    that began gives its own back as it ends, so it is never given back twice.
+    """
+    permits = threading.Semaphore(HELPERS)
+    start = threading.Thread.start
+    started: list[threading.Thread] = []
+
+    def interrupted(thread: threading.Thread) -> None:
+        if began:
+            start(thread)
+            started.append(thread)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(threading.Thread, "start", interrupted)
+    with pytest.raises(KeyboardInterrupt):
+        _threads.run_sets(lambda index, _: index, 4, 4, None, permits)
+    monkeypatch.undo()
+    for thread in started:
+        thread.join(WAIT)
+    assert len(started) == int(began)
+    assert _free(permits, HELPERS)
