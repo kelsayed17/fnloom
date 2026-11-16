@@ -5,8 +5,10 @@ without `with_threads` and with 1, 2 and 8 workers, over drawn inputs. Its value
 `Collect` orders, exception class, skipped nodes and cache keys are the same on all.
 """
 
+import gc
 import os
 import threading
+import time
 from typing import Any, override
 
 import pytest
@@ -14,6 +16,7 @@ from hypothesis import given, settings
 from hypothesis import strategies as st
 
 import fnloom
+from fnloom import _core
 from helpers import make_module
 
 pytestmark = pytest.mark.threads
@@ -99,10 +102,12 @@ class Skips(fnloom.Hook):
 
 
 def outcome(workers: int | None, inputs: dict[str, int], outputs: list[str]) -> Any:  # noqa: ANN401  # one comparable record
-    """One run's values, skipped nodes and sorted cache keys; or its exception class.
+    """One run's values, skipped nodes and the keys it wrote; or its exception class.
 
     A failed run is only its exception class: which other branches ran before the
-    run stopped depends on timing with several workers, as Hamilton's does.
+    run stopped depends on timing with several workers, as Hamilton's does. The keys
+    are compared as a set: two branches with one key both write it when the first
+    finishes before the second is handed out, which single-flight doesn't cover.
     """
     store, hook = Keys(), Skips()
     builder = (
@@ -113,11 +118,18 @@ def outcome(workers: int | None, inputs: dict[str, int], outputs: list[str]) -> 
     )
     if workers is not None:
         builder = builder.with_threads(workers)
+    driver = builder.build()
     try:
-        result = builder.build().execute(outputs, inputs=inputs)
+        result = driver.execute(outputs, inputs=inputs)
     except Exception as error:  # noqa: BLE001  # the exception class is compared
         return type(error).__name__
-    return result, sorted(hook.skipped), sorted(store.keys)
+    finally:
+        # Ended now, not when the cyclic collector frees the driver: hundreds of
+        # examples would otherwise keep hundreds of pool threads alive.
+        pool = None if driver._workers is None else driver._workers.threads()  # noqa: SLF001  # the driver's own pool
+        if pool is not None:
+            pool.close()
+    return result, sorted(hook.skipped), sorted(set(store.keys))
 
 
 @settings(max_examples=EXAMPLES, deadline=None)
@@ -135,3 +147,16 @@ def test_results_are_equal_over_worker_counts(
     reference = outcome(None, inputs, outputs)
     for workers in WORKERS[1:]:
         assert outcome(workers, inputs, outputs) == reference
+
+
+def test_an_outcome_leaves_no_pool_thread_running() -> None:
+    """Each run's pool is closed once it ends, so examples don't pile up threads."""
+    gc.collect()
+    before = _core.live_workers()
+    inputs = {"n": 4, "absent_at": -1, "fail_at": -99}
+    for _ in range(5):
+        outcome(8, inputs, ["total"])
+    deadline = time.monotonic() + 2
+    while _core.live_workers() > before and time.monotonic() < deadline:
+        time.sleep(0.02)
+    assert _core.live_workers() <= before

@@ -74,6 +74,28 @@ change the public API; such changes are listed under **Changed** and **Removed**
   A sync generator's items are read, and it is closed, where its node runs. A generator keeps one context across its
   items. A failing branch cancels every running node and pending read once, and the generator is closed once.
   `build()` refuses an async generator expand, saying to use `build_async()`.
+- Deadlines (Q170). On a driver built `with_threads`, `execute`, `raw_execute`, `PreparedPlan.run` and `run_raw` take
+  `timeout=` in seconds: the run's nodes then run on the pool only, and once the time passes the run raises
+  `TimeoutError` at once, or the failure it already had. The nodes still running are abandoned: their worker and
+  `@limit` slots are given back at once, the pool starts a thread for each, and what each returns later is dropped,
+  with no hook and no store. The caller closes the generators no worker is reading before it raises. A deadline run
+  inside a node lends that node's worker to its own nodes. Without `with_threads`, `timeout=` is a `TypeError`.
+- `fnloom.cancelled()` tells a node whether its parallel run is stopping, by its deadline, another node's failure or
+  an interrupt, so it can return early; `False` outside one. A run started inside a node of a stopping run, on any
+  driver, sees it too, and a parallel one stops starting nodes. It then returns its outputs if they were all computed,
+  or else raises a `RuntimeError`, which the outer run never raises in place of the failure that stopped it.
+- `Ctrl-C` ends a parallel run at once, abandoning its running nodes as a deadline does, so a node hung on a worker
+  thread no longer keeps the run waiting. A `KeyboardInterrupt` a node raises does the same.
+
+### Fixed
+
+- On 3.14t, a cached parallel run could, rarely, skip storing a block node's value or an expand's items. Their key
+  read the item versions of an expand that was finishing at that moment, and found none.
+- A `Ctrl-C` that arrived while a parallel run started its pool's threads was lost, and could leave the pool counting
+  a thread that never started.
+- A run started on a thread that carries a parallel task's context takes that task's worker slot only while no other
+  such run has it, so threads a node starts can no longer run more nodes than `max_workers` at once. A fork inside a
+  `before_node` hook, or a `pre_graph` one, of a parallel run no longer touches the parent's locks in the child.
 
 ### Changed
 

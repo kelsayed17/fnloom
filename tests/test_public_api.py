@@ -96,4 +96,5 @@ def test_the_regressed_callables_are_covered() -> None:
         "Drawing.to_mermaid",
         "limit",
         "Builder.with_limits",
+        "cancelled",
     }

@@ -1,6 +1,7 @@
 """Running one run's nodes in parallel, and limits: a driver's pool, caps and checks."""
 
 import atexit
+import math
 import os
 import weakref
 from collections.abc import Mapping, Sequence
@@ -16,12 +17,15 @@ if TYPE_CHECKING:
     from fnloom._scan import NodeDef
 
 __all__ = [
+    "CANCELLED",
     "HELD",
     "Caps",
     "Workers",
+    "cancelled",
     "caps_of",
     "checked_groups",
     "checked_max_workers",
+    "checked_timeout",
     "close_all",
     "make_limits",
     "make_threads",
@@ -31,10 +35,47 @@ __all__ = [
 # entries the binding makes: a node's index, or a parallel run's worker slots,
 # and `[True]` until the slot is given back. A run started inside one sees them
 # as its ancestors': it is refused a node or group slot whose every unit they
-# hold, and runs its tasks on the worker slot they hold.
-HELD: Final[ContextVar[tuple[tuple[int, int, list[bool]], ...]]] = ContextVar(
-    "fnloom_held", default=()
+# hold, and runs its tasks on the worker slot they hold. A worker entry has a
+# fourth item, `[True]` while no run started from its context has taken that
+# slot: one such run at a time does, with `pop()`, and gives it back at its end.
+type _Entry = tuple[int, int, list[bool]] | tuple[int, int, list[bool], list[bool]]
+HELD: Final[ContextVar[tuple[_Entry, ...]]] = ContextVar("fnloom_held", default=())
+
+# The stop flag of the parallel run a task belongs to, set in the context every
+# task of the run copies: true once the run is stopping.
+CANCELLED: Final[ContextVar[_core.Stop | None]] = ContextVar(
+    "fnloom_cancelled", default=None
 )
+
+
+def cancelled() -> bool:
+    """Whether the run calling this is stopping, so a node can return early.
+
+    `True` once a run of a driver built `with_threads` is stopping: its
+    `timeout=` passed, another node failed, or it was interrupted. `False`
+    outside a run, and in a run of a driver without `with_threads`, unless that
+    run was started by a node of a stopping one.
+    """
+    stop = CANCELLED.get()
+    return stop is not None and bool(stop)
+
+
+def checked_timeout(timeout: object) -> float:
+    """`execute`'s `timeout=`, in seconds: a finite `int` or `float` of at least 0.
+
+    A `bool` or another type is a `TypeError`; a negative, NaN or infinite one a
+    `ValueError`.
+    """
+    if isinstance(timeout, bool) or not isinstance(timeout, int | float):
+        msg = f"timeout must be a number of seconds, not {timeout!r}"
+        raise TypeError(msg)
+    if not math.isfinite(timeout) or timeout < 0:
+        msg = (
+            f"timeout must be a finite number of seconds of at least 0, not {timeout!r}"
+        )
+        raise ValueError(msg)
+    return float(timeout)
+
 
 # Every pool alive, which interpreter exit closes.
 _LIVE: Final[weakref.WeakSet[_core.Threads]] = weakref.WeakSet()

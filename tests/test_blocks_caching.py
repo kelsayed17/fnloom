@@ -8,6 +8,7 @@ import pytest
 
 import fnloom
 from fnloom import CacheOutcome, MemoryCache
+from fnloom._caching import CacheRun
 from fnloom._stores import MISSING
 from helpers import make_module
 
@@ -755,3 +756,70 @@ def test_single_flight_never_waits_a_worker() -> None:
     )
     assert result == {"summary": ["A", "A", "B"]}
     assert sorted(module.CALLS) == ["a", "b"]
+
+
+def test_an_items_version_is_known_while_its_expand_finishes() -> None:
+    """A key read while `finished` moves an expand's items still finds them.
+
+    `_item` reads `_items`, then `_pulling`, without the lock: `finished` writes the
+    first before it empties the second, so a reader between the two finds one.
+    """
+    module = make_module("finishing_items", ORDERED)
+    driver = fnloom.Builder().with_modules(module).with_cache(MemoryCache()).build()
+    inputs: dict[str, object] = {"order": [3], "rate": 2}
+    runnable = driver.prepare(["summary"], inputs=inputs)._plan  # noqa: SLF001  # the cached run
+    assert isinstance(runnable, CacheRun)
+    late = runnable.begin(inputs, {}).late
+    assert late is not None
+    late.pulled("picked", (), 3)
+    seen: list[object] = []
+
+    class Watched(dict[object, object]):
+        """A dict that reads the item's version as each entry is written."""
+
+        @override
+        def __setitem__(self, key: object, value: object) -> None:
+            assert late is not None
+            seen.append(late._item("picked", (), 0, [], set()))  # noqa: SLF001  # the race's reader
+            super().__setitem__(key, value)
+
+    late._items = Watched()  # noqa: SLF001  # watch the write  # ty: ignore[invalid-assignment]
+    late.finished("picked", (), [3])
+    assert len(seen) == 1
+    assert isinstance(seen[0], bytes)
+
+
+def test_an_items_version_is_known_when_its_expand_finishes_between_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reader that missed `_items`, then misses `_pulling`, reads `_items` again.
+
+    The whole of `finished` runs between the reader's two reads, so `_pulling` is
+    empty when it looks, and the items are in `_items` only: the expand's items
+    aren't stored here, so the store can't answer instead, as it may not have yet
+    in a real race.
+    """
+    module = make_module("finished_between_reads", ORDERED)
+    driver = fnloom.Builder().with_modules(module).with_cache(MemoryCache()).build()
+    inputs: dict[str, object] = {"order": [3], "rate": 2}
+    runnable = driver.prepare(["summary"], inputs=inputs)._plan  # noqa: SLF001  # the cached run
+    assert isinstance(runnable, CacheRun)
+    late = runnable.begin(inputs, {}).late
+    assert late is not None
+    late.pulled("picked", (), 3)
+    finishing = [True]
+
+    class Watched(dict[object, object]):
+        """A dict whose first `get` lets `finished` run before it reads."""
+
+        @override
+        def get(self, key: object, default: object = None) -> object:
+            if finishing and finishing.pop():
+                assert late is not None
+                late.finished("picked", (), [3])
+            return super().get(key, default)
+
+    monkeypatch.setattr(late, "_stores", lambda _name: False)
+    late._pulling = Watched(late._pulling)  # noqa: SLF001  # watch the reads  # ty: ignore[invalid-assignment]
+    seen = late._item("picked", (), 0, [], set())  # noqa: SLF001  # the race's reader
+    assert isinstance(seen, bytes)

@@ -110,10 +110,13 @@ class _Runnable(Protocol):
         overrides: dict[str, Any],
         observers: Sequence[_core.ObserverBase] = (),
         /,
+        *,
+        timeout: float | None = None,
     ) -> dict[str, object]:
         """Runs with checked values; exactly the outputs, keyed by name, sorted.
 
-        `observers` see each node the core computes.
+        `observers` see each node the core computes. `timeout`, in seconds, is
+        given only to a run on a driver's pool (`_threaded`).
         """
         ...
 
@@ -147,8 +150,14 @@ class _Threaded:
         overrides: dict[str, Any],
         observers: Sequence[_core.ObserverBase] = (),
         /,
+        *,
+        timeout: float | None = None,
     ) -> dict[str, object]:
-        """Runs as the native plan does, its tasks on the pool and the caller."""
+        """Runs as the native plan does, its tasks on the pool and the caller.
+
+        With `timeout`, its tasks run on the pool alone, and the run is abandoned
+        once `timeout` seconds pass.
+        """
         workers = self._workers
         return self._plan.run(
             inputs,
@@ -156,7 +165,20 @@ class _Threaded:
             observers,
             threads=workers.threads(),
             limits=workers.limits(),
+            timeout=timeout,
         )
+
+
+def _timeout(plan: _Runnable, timeout: object) -> float:
+    """`timeout=` in seconds, for a run of `plan`; a `TypeError` off a pool.
+
+    A run on the calling thread can't abandon the node it runs itself, so a
+    deadline needs `Builder.with_threads` (O7).
+    """
+    if not (isinstance(plan, (_Threaded, CacheRun)) and plan.threaded):
+        msg = "timeout= needs Builder.with_threads(...)"
+        raise TypeError(msg)
+    return _threads.checked_timeout(timeout)
 
 
 class _GraphLike(Protocol):
@@ -627,6 +649,7 @@ class PreparedPlan[R = dict[str, object]]:
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
+        timeout: float | None = None,
     ) -> R:
         """Runs the plan; raises `ValueError` if the input or override names differ.
 
@@ -636,10 +659,18 @@ class PreparedPlan[R = dict[str, object]]:
         checked against an annotation that did not resolve at build (Q81). The
         result holds each requested output once, in the order first requested,
         or is what the driver's result builder makes of that dict (Q19).
+
+        `timeout`, in seconds, needs `Builder.with_threads`, else it is a
+        `TypeError`. Once it passes, the run stops, abandons the nodes still
+        running, and raises `TimeoutError` (Q170).
         """
         # This class runs only without a result builder, so `R` is the raw dict.
         given_inputs, given_overrides = self._checked(inputs, overrides)
-        values = self._plan.run(given_inputs, given_overrides)
+        if timeout is None:
+            values = self._plan.run(given_inputs, given_overrides)
+        else:
+            seconds = _timeout(self._plan, timeout)
+            values = self._plan.run(given_inputs, given_overrides, timeout=seconds)
         if self._sorted:
             return values  # ty: ignore[invalid-return-type]  # `R` is the raw dict here
         return {name: values[name] for name in self._outputs}  # ty: ignore[invalid-return-type]  # `R` is the raw dict here
@@ -649,13 +680,18 @@ class PreparedPlan[R = dict[str, object]]:
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
+        timeout: float | None = None,
     ) -> dict[str, object]:
         """Runs as `run` does, but returns the raw dict, skipping any result builder.
 
         Every hook fires, as for `run` (Q19).
         """
         given_inputs, given_overrides = self._checked(inputs, overrides)
-        values = self._plan.run(given_inputs, given_overrides)
+        if timeout is None:
+            values = self._plan.run(given_inputs, given_overrides)
+        else:
+            seconds = _timeout(self._plan, timeout)
+            values = self._plan.run(given_inputs, given_overrides, timeout=seconds)
         if self._sorted:
             return values
         return {name: values[name] for name in self._outputs}
@@ -739,9 +775,12 @@ class _BuiltPlan[R](PreparedPlan[R]):
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
+        timeout: float | None = None,
     ) -> R:
         """Runs as `PreparedPlan.run_raw` does, then builds the result."""
-        return self._finish(self.run_raw(inputs=inputs, overrides=overrides))
+        return self._finish(
+            self.run_raw(inputs=inputs, overrides=overrides, timeout=timeout)
+        )
 
 
 class _HookedPlan[R](PreparedPlan[R]):
@@ -782,9 +821,10 @@ class _HookedPlan[R](PreparedPlan[R]):
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
+        timeout: float | None = None,
     ) -> R:
         """Runs the plan as `PreparedPlan.run` does, firing the hooks' events."""
-        return self._fired(inputs, overrides, self._build)  # ty: ignore[invalid-return-type]  # the raw dict is `R` when there is no builder
+        return self._fired(inputs, overrides, self._build, timeout)  # ty: ignore[invalid-return-type]  # the raw dict is `R` when there is no builder
 
     @override
     def run_raw(
@@ -792,19 +832,28 @@ class _HookedPlan[R](PreparedPlan[R]):
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
+        timeout: float | None = None,
     ) -> dict[str, object]:
         """Runs as `run` does, firing every hook, but skips the result builder."""
-        return typing.cast("dict[str, object]", self._fired(inputs, overrides, None))
+        return typing.cast(
+            "dict[str, object]", self._fired(inputs, overrides, None, timeout)
+        )
 
     def _fired(
         self,
         inputs: Mapping[str, object] | None,
         overrides: Mapping[str, object] | None,
         build: _ResultBuilder[object] | None,
+        timeout: float | None,
     ) -> object:
-        """A run that fires the hooks' events, and its outputs as `build` makes them."""
+        """A run that fires the hooks' events, and its outputs as `build` makes them.
+
+        A bad `timeout` is raised before any event fires.
+        """
         given_inputs, given_overrides, mismatches = self._opened(inputs, overrides)
         plan = self._plan
+        if timeout is not None:
+            timeout = _timeout(plan, timeout)
         cached = isinstance(plan, CacheRun)
         owner = None if self._driver is None else self._driver._checks_owner  # noqa: SLF001  # the plan's own driver
         dispatch = _hooks.Dispatch(
@@ -817,10 +866,18 @@ class _HookedPlan[R](PreparedPlan[R]):
                 self._refuse_values(dispatch, given_inputs, given_overrides, mismatches)
             start = self._starter(dispatch, given_inputs, given_overrides)
             if isinstance(plan, CacheRun):
-                values = plan.hooked(given_inputs, given_overrides, dispatch, start)
+                values = plan.hooked(
+                    given_inputs, given_overrides, dispatch, start, timeout=timeout
+                )
             else:
                 start(self._views.names)
-                values = plan.run(given_inputs, given_overrides, dispatch.observers())
+                observers = dispatch.observers()
+                if timeout is None:
+                    values = plan.run(given_inputs, given_overrides, observers)
+                else:
+                    values = plan.run(
+                        given_inputs, given_overrides, observers, timeout=timeout
+                    )
         except BaseException as caught:  # noqa: BLE001  # raised by `end`, after `after_run`
             error = caught
         else:
@@ -1588,6 +1645,7 @@ class Driver[R = dict[str, object]]:
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
+        timeout: float | None = None,
     ) -> R:
         """Computes `final_vars`, reusing the cached plan for the same request shape.
 
@@ -1597,12 +1655,16 @@ class Driver[R = dict[str, object]]:
         matched by identity (Q30): the result is still keyed by the node's name.
         `TypeError` when it makes several nodes, as a `@parameterize` function does,
         and `ValueError` when it makes none.
+
+        `timeout`, in seconds, needs `Builder.with_threads`, else it is a
+        `TypeError`. Once it passes, the run stops, abandons the nodes still
+        running, and raises `TimeoutError` (Q170).
         """
         try:
             plan = self.prepare(final_vars, inputs=inputs, overrides=overrides)
         except ValueError as error:
             self._refuse(final_vars, inputs, overrides, error)
-        return plan.run(inputs=inputs, overrides=overrides)
+        return plan.run(inputs=inputs, overrides=overrides, timeout=timeout)
 
     def raw_execute(
         self,
@@ -1610,6 +1672,7 @@ class Driver[R = dict[str, object]]:
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
+        timeout: float | None = None,
     ) -> dict[str, object]:
         """Computes `final_vars` as `execute` does, skipping the result builder.
 
@@ -1620,7 +1683,7 @@ class Driver[R = dict[str, object]]:
             plan = self.prepare(final_vars, inputs=inputs, overrides=overrides)
         except ValueError as error:
             self._refuse(final_vars, inputs, overrides, error)
-        return plan.run_raw(inputs=inputs, overrides=overrides)
+        return plan.run_raw(inputs=inputs, overrides=overrides, timeout=timeout)
 
     def _refuse(
         self,

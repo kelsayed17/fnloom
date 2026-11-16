@@ -408,6 +408,7 @@ def test_public_api_is_exported() -> None:
         "apply_to",
         "build",
         "cache",
+        "cancelled",
         "check_output",
         "check_output_custom",
         "config",

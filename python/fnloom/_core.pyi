@@ -15,6 +15,8 @@ __all__ = [
     "ObserverBase",
     "Plan",
     "Stepper",
+    "Stop",
+    "StoppedError",
     "Threads",
     "UnfingerprintableError",
     "_panic_for_test",
@@ -22,10 +24,12 @@ __all__ = [
     "arm_perform_panic",
     "arm_report_panic",
     "arm_stepper_panic",
+    "arm_state_panic",
     "arm_worker_panic",
     "core_version",
     "fingerprint",
     "hash_parts",
+    "held_slots",
     "live_workers",
 ]
 
@@ -34,6 +38,10 @@ def fingerprint(
     value: object, fallback: Callable[[object], object | None]
 ) -> bytes: ...
 def hash_parts(parts: Sequence[bytes]) -> bytes: ...
+
+class StoppedError(RuntimeError):
+    # A parallel run stopped because the run that started it stopped or ended.
+    ...
 
 class UnfingerprintableError(TypeError):
     path: str
@@ -62,6 +70,8 @@ def arm_hook_panic() -> None: ...
 def arm_report_panic() -> None: ...
 def arm_perform_panic() -> None: ...
 def arm_stepper_panic() -> None: ...
+def arm_state_panic() -> None: ...
+def held_slots(limits: Limits) -> tuple[int, dict[str, int], dict[str, int]]: ...
 
 @final
 class Graph:
@@ -101,6 +111,7 @@ class Plan:
         *,
         threads: Threads | None = None,
         limits: Limits | None = None,
+        timeout: float | None = None,
     ) -> dict[str, object]: ...
     def steps(self) -> list[tuple[str, str]]: ...
     def late(self) -> list[str]: ...
@@ -158,6 +169,12 @@ class Threads:
     def submit(
         self, function: Callable[[], object], context: contextvars.Context, /
     ) -> concurrent.futures.Future[Any]: ...
+
+@final
+class Stop:
+    # A run's stop flag: true once the run is stopping. Made by the binding only.
+    def __new__(cls, never: Never, /) -> NoReturn: ...
+    def __bool__(self) -> bool: ...
 
 @final
 class KeyPlan:
