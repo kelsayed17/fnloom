@@ -13,8 +13,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
   clock and no locks, and borrows nothing: each method takes the plan and graph. `next` hands out the ready `Task`
   with the lowest `OrderKey` that a `limits::Grant` lets a `Seat` start (a compute, an iterate, a pull, a finish, or a
   new branch's probe, which `schedule::probe` runs with the embedder's lookup); `complete` takes its `Outcome` back
-  and returns a `Report` of the values to drop, the nodes skipped, the expands exhausted and the hits; `finish`
-  returns the outputs, or the failure with the lowest key. Stepped one task at a time, it makes the calls `Plan::run`
+  and adds to a caller-owned `Report`, cleared and reused, the values to drop, the nodes skipped, the expands
+  exhausted and the hits; `recycle` takes a compute's emptied arguments back for reuse; `finish` returns the outputs,
+  or the failure with the lowest key. Stepped one task at a time, it makes the calls `Plan::run`
   makes, in the same order, and `Plan::run` is unchanged. `Plan::order_key(node, branch)` gives any step's key, and
   `run::Slot` is public, to seed a scheduler with each value's absence.
 - Rust core: limits, the in-flight bound, single-flight and stopping, in the scheduler. `limits::Limits` caps

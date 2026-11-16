@@ -12,7 +12,9 @@ use fnloom_core::limits::{Grant, Limits, Slot as LimitSlot, Unlimited};
 use fnloom_core::node::{Collect, Dependency, InputSpec, Node, NodeId, NodeSpec};
 use fnloom_core::plan::{Plan, Request};
 use fnloom_core::run::{Arg, Blocks, Evaluate, Item, Slot};
-use fnloom_core::schedule::{ArgValue, Next, Options, Outcome, Scheduler, Seat, Task, Work, probe};
+use fnloom_core::schedule::{
+    ArgValue, Next, Options, Outcome, Report, Scheduler, Seat, Task, Work, probe,
+};
 
 /// An iterator's items and how far it got; shared, since a pull may run on any thread.
 #[derive(Debug)]
@@ -255,6 +257,7 @@ fn work(
     watch: &Watch,
 ) {
     let mut guard = lock(shared);
+    let mut report = Report::default();
     loop {
         assert!(Instant::now() < deadline, "the run hung");
         let Some(scheduler) = guard.as_mut() else {
@@ -274,12 +277,26 @@ fn work(
                 }
                 watch.now.fetch_sub(1, Ordering::AcqRel);
                 watch.ran.fetch_add(1, Ordering::Relaxed);
+                // The arguments drop here, outside the lock, and their buffer goes back.
+                let args = match task.work {
+                    Work::Compute { mut args, .. } => {
+                        args.clear();
+                        Some(args)
+                    }
+                    _ => None,
+                };
                 guard = lock(shared);
                 if let Some(scheduler) = guard.as_mut() {
-                    let report = scheduler.complete(plan, graph, grant, task.id, outcome);
-                    drop(report);
+                    scheduler.complete(plan, graph, grant, task.id, outcome, &mut report);
+                    if let Some(args) = args {
+                        scheduler.recycle(args);
+                    }
                 }
                 shared.1.notify_all();
+                drop(guard);
+                // Released values drop here, outside the lock too.
+                report.clear();
+                guard = lock(shared);
             }
             Next::Wait => {
                 guard = shared
@@ -312,7 +329,13 @@ fn eight_threads(items: i64, grant: &dyn Grant) -> Watch {
         .unwrap_or_else(|error| unreachable!("the reference run succeeds: {error}"));
 
     let seeded: Vec<Option<Slot<Val>>> = vec![None; graph.nodes().len()];
-    let (scheduler, _) = Scheduler::new(&plan, &graph, seeded, Options::default());
+    let scheduler = Scheduler::new(
+        &plan,
+        &graph,
+        seeded,
+        Options::default(),
+        &mut Report::default(),
+    );
     let shared: Shared = (Mutex::new(Some(scheduler)), Condvar::new());
     let deadline = Instant::now() + Duration::from_secs(120);
     let watch = Watch::default();

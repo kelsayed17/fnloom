@@ -41,7 +41,7 @@ mod suite {
     use fnloom_core::node::{Collect, Dependency, InputSpec, Node, NodeId, NodeSpec};
     use fnloom_core::plan::{Action, Plan, Request};
     use fnloom_core::run::{Arg, Blocks, Evaluate, Item, Outputs, RunError, Slot};
-    use fnloom_core::schedule::{ArgValue, Next, Options, Outcome, Scheduler, Seat, Work};
+    use fnloom_core::schedule::{ArgValue, Next, Options, Outcome, Report, Scheduler, Seat, Work};
     use gungraun::prelude::*;
 
     /// Row width of the layered shape, as in `benches/generate.py`.
@@ -474,10 +474,17 @@ mod suite {
                     });
             }
         }
-        let (mut scheduler, _) =
-            Scheduler::<u64, Infallible, ()>::new(plan, graph, seeded, Options::default());
+        // One report and one argument buffer for the whole run, as a binding keeps them.
+        let mut report = Report::default();
+        let mut scheduler = Scheduler::<u64, Infallible, ()>::new(
+            plan,
+            graph,
+            seeded,
+            Options::default(),
+            &mut report,
+        );
         while let Next::Task(task) = scheduler.next(plan, graph, &Unlimited, Seat::Take) {
-            let Work::Compute { args, .. } = task.work else {
+            let Work::Compute { mut args, .. } = task.work else {
                 continue;
             };
             let value = args.iter().fold(0_u64, |sum, (_, arg)| match arg {
@@ -488,7 +495,10 @@ mod suite {
                 value,
                 absent: false,
             };
-            scheduler.complete(plan, graph, &Unlimited, task.id, outcome);
+            args.clear();
+            report.clear();
+            scheduler.complete(plan, graph, &Unlimited, task.id, outcome, &mut report);
+            scheduler.recycle(args);
         }
         scheduler.finish(plan, graph)
     }

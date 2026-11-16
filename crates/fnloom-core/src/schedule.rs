@@ -12,8 +12,7 @@
 //! readers of its value there. A value is released once its last reader in its scope has
 //! taken its arguments, and handed back in `Report::released`, never dropped here.
 
-use std::cmp::Reverse;
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::BTreeMap;
 
 use crate::branch::{Need, declined_wrongly, needs, node_error};
 use crate::graph::Graph;
@@ -174,6 +173,17 @@ pub struct Report<V> {
     /// Steps that completed as hits, with their branch and value, in plan order within a
     /// branch: the events `Observer::hit_in` reports.
     pub hits: Vec<(NodeId, Vec<usize>, V)>,
+}
+
+impl<V> Report<V> {
+    /// Empties the report, keeping its buffers, to pass it to the next call: values released
+    /// are dropped here, by the caller.
+    pub fn clear(&mut self) {
+        self.released.clear();
+        self.skipped.clear();
+        self.expanded.clear();
+        self.hits.clear();
+    }
 }
 
 impl<V> Default for Report<V> {
@@ -601,9 +611,15 @@ enum Kind {
 }
 
 /// A task ready or in flight.
+///
+/// Its order key is never stored: it is the prefix of instance `base` then `tail`, compared
+/// in place, and built only for a task handed out.
+#[derive(Clone, Copy)]
 struct Entry {
     kind: Kind,
-    key: OrderKey,
+    base: usize,
+    tail: [u32; 2],
+    tail_len: u8,
     node: NodeId,
     /// The instance of a compute, skip, iterate or probe; the frame of a pull or finish.
     at: usize,
@@ -614,6 +630,11 @@ struct Entry {
 }
 
 impl Entry {
+    /// What its key adds to its base instance's prefix.
+    fn tail(&self) -> &[u32] {
+        &self.tail[..usize::from(self.tail_len)]
+    }
+
     /// The node whose slots the grant gives the task: a compute's or a pull's.
     const fn granted(&self) -> Option<NodeId> {
         match self.kind {
@@ -676,6 +697,68 @@ impl<T> Slab<T> {
     }
 }
 
+/// A min-heap of entry ids, ordered by `before`, which compares their keys in place: a
+/// binary heap on a `Vec`, since `BinaryHeap` would need each key owned.
+fn sift_up(heap: &mut [usize], mut at: usize, before: impl Fn(usize, usize) -> bool) {
+    while at > 0 {
+        let parent = (at - 1) / 2;
+        if !before(heap[at], heap[parent]) {
+            return;
+        }
+        heap.swap(at, parent);
+        at = parent;
+    }
+}
+
+fn sift_down(heap: &mut [usize], mut at: usize, before: impl Fn(usize, usize) -> bool) {
+    loop {
+        let (left, right) = (2 * at + 1, 2 * at + 2);
+        let mut least = at;
+        if left < heap.len() && before(heap[left], heap[least]) {
+            least = left;
+        }
+        if right < heap.len() && before(heap[right], heap[least]) {
+            least = right;
+        }
+        if least == at {
+            return;
+        }
+        heap.swap(at, least);
+        at = least;
+    }
+}
+
+/// Whether entry `a` comes before entry `b`: by order key, then by id.
+fn before<V, K>(
+    entries: &Slab<Entry>,
+    instances: &Slab<Instance<V, K>>,
+    a: usize,
+    b: usize,
+) -> bool {
+    let (Some(first), Some(second)) = (entries.get(a), entries.get(b)) else {
+        return a < b;
+    };
+    // One base, as every entry of a plan without blocks has: the tails decide.
+    let order = if first.base == second.base {
+        first.tail().cmp(second.tail())
+    } else {
+        let prefix = |entry: &Entry| {
+            instances
+                .get(entry.base)
+                .map_or(&[][..], |found| found.prefix.as_slice())
+        };
+        let (one, two) = (prefix(first), prefix(second));
+        one.iter()
+            .chain(first.tail())
+            .cmp(two.iter().chain(second.tail()))
+    };
+    match order {
+        std::cmp::Ordering::Less => true,
+        std::cmp::Ordering::Greater => false,
+        std::cmp::Ordering::Equal => a < b,
+    }
+}
+
 /// A read of an argument's value.
 enum Read<'a, V> {
     Value(&'a Slot<V>),
@@ -729,10 +812,15 @@ pub struct Scheduler<V, E, K> {
     instances: Slab<Instance<V, K>>,
     frames: Slab<Frame<V>>,
     entries: Slab<Entry>,
-    ready: BinaryHeap<Reverse<(OrderKey, usize)>>,
+    /// The ready entries, a min-heap by `before`.
+    ready: Vec<usize>,
     running: usize,
     todo: Vec<Event>,
+    /// While `new` or `complete` runs, the caller's report; between calls, what `next` or
+    /// `recycle` released, which the next `complete` reports.
     report: Report<V>,
+    /// Empty argument vectors handed back by `recycle`, for the next computes.
+    spare: Vec<Vec<(NodeId, ArgValue<V>)>>,
     failures: Vec<(OrderKey, RunError<E>)>,
     /// What finishing a stopped run's iterators raised: dropped by `finish`.
     dropped: Vec<E>,
@@ -759,8 +847,8 @@ struct Flight {
 const OUTER: usize = 0;
 
 impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
-    /// A scheduler for one run of `plan`, prepared from `graph`, and what its seeded values
-    /// settle before any task: consumers skipped by an absent override.
+    /// A scheduler for one run of `plan`, prepared from `graph`. What its seeded values settle
+    /// before any task, consumers skipped by an absent override, is added to `report`.
     ///
     /// `seeded` holds, by node id, the value of each `UseInput` and `UseOverride` step,
     /// absent only for an override of a node that may be absent (`Node::may_be_absent`)
@@ -771,7 +859,8 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         graph: &Graph<P>,
         seeded: Vec<Option<Slot<V>>>,
         options: Options,
-    ) -> (Self, Report<V>) {
+        report: &mut Report<V>,
+    ) -> Self {
         let mut this = Self {
             shape: Self::shape_of(plan, graph),
             layout: Layout::default(),
@@ -779,10 +868,11 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             instances: Slab::default(),
             frames: Slab::default(),
             entries: Slab::default(),
-            ready: BinaryHeap::new(),
+            ready: Vec::new(),
             running: 0,
             todo: Vec::new(),
             report: Report::default(),
+            spare: Vec::new(),
             failures: Vec::new(),
             dropped: Vec::new(),
             stopping: false,
@@ -793,6 +883,15 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             lent: None,
             refused: None,
         };
+        this.adopt(report);
+        this.start(plan, graph, seeded);
+        this.hand_back(report);
+        this
+    }
+
+    /// Seeds the outer plan and makes its first steps ready.
+    fn start<P>(&mut self, plan: &Plan, graph: &Graph<P>, seeded: Vec<Option<Slot<V>>>) {
+        let this = self;
         let detail = mismatch(plan, graph).or_else(|| {
             (seeded.len() != graph.nodes().len()).then(|| {
                 format!(
@@ -805,7 +904,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         if let Some(detail) = detail {
             this.release_all(seeded.into_iter().flatten().map(|slot| slot.value));
             this.fail(OrderKey::default(), broken(detail));
-            return this.out();
+            return;
         }
         this.layout = Layout::new(plan, graph);
         this.wanted = vec![false; graph.nodes().len()];
@@ -825,7 +924,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         if !missing.is_empty() {
             missing.sort();
             this.fail(OrderKey::default(), RunError::MissingValues(missing));
-            return this.out();
+            return;
         }
         for (position, step) in plan.steps().iter().enumerate() {
             match step.action {
@@ -851,7 +950,6 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             }
         }
         this.drain(plan, graph);
-        this.out()
     }
 
     /// The ready task with the lowest order key that `grant` lets `seat` start, skipping
@@ -890,13 +988,13 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             let mut aside = Vec::new();
             let mut found = None;
             let mut first = true;
-            while let Some(Reverse((key, id))) = self.ready.pop() {
+            while let Some(id) = self.ready_pop() {
                 let Some(entry) = self.entries.get(id) else {
                     continue;
                 };
                 // A skip is settled by `complete`, which reports it, once it is the lowest.
                 if entry.kind == Kind::Skip {
-                    aside.push(Reverse((key, id)));
+                    aside.push(id);
                     continue;
                 }
                 // A step whose key a running compute has waits for its value.
@@ -910,13 +1008,15 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                         self.refused = Some(entry.node);
                     }
                     first = false;
-                    aside.push(Reverse((key, id)));
+                    aside.push(id);
                     continue;
                 }
                 found = Some((id, flight));
                 break;
             }
-            self.ready.extend(aside);
+            for id in aside {
+                self.ready_push(id);
+            }
             let Some((id, flight)) = found else {
                 return self.idle();
             };
@@ -938,9 +1038,10 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                     return Next::Task(task);
                 }
                 Err(failure) => {
+                    let key = self.key_of(id);
                     if let Some(entry) = self.entries.remove(id) {
                         grant.release(entry.granted(), seat);
-                        self.fail(entry.key, failure);
+                        self.fail(key, failure);
                     }
                 }
             }
@@ -952,7 +1053,8 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
     ///
     /// A `Failed` outcome stops the run (`stop`) and is kept with the task's order key; the
     /// lowest key's is what `finish` returns. An outcome after the run stopped is dropped,
-    /// its values released. The report holds what this settled.
+    /// its values released. What this settled is added to `report`, which the caller clears
+    /// and reuses, so a run allocates no report per task.
     pub fn complete<P>(
         &mut self,
         plan: &Plan,
@@ -960,7 +1062,21 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         grant: &dyn Grant,
         id: TaskId,
         outcome: Outcome<V, E, K>,
-    ) -> Report<V> {
+        report: &mut Report<V>,
+    ) {
+        self.adopt(report);
+        self.settle_outcome(plan, graph, grant, id, outcome);
+        self.hand_back(report);
+    }
+
+    fn settle_outcome<P>(
+        &mut self,
+        plan: &Plan,
+        graph: &Graph<P>,
+        grant: &dyn Grant,
+        id: TaskId,
+        outcome: Outcome<V, E, K>,
+    ) {
         let running = self
             .entries
             .get(id.0 as usize)
@@ -976,7 +1092,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                 OrderKey::default(),
                 broken(format!("task {} completed but not running", id.0)),
             );
-            return std::mem::take(&mut self.report);
+            return;
         };
         let seat = entry.seat.unwrap_or(Seat::Take);
         grant.release(entry.granted(), seat);
@@ -1014,9 +1130,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                     }
                     // A failed original: the waiter runs itself.
                     None => {
-                        if let Some(entry) = self.entries.get(waiter) {
-                            self.ready.push(Reverse((entry.key.clone(), waiter)));
-                        }
+                        self.ready_push(waiter);
                     }
                 }
             }
@@ -1026,7 +1140,6 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             self.discard(outcome);
             self.fail(OrderKey::default(), another_plan());
         }
-        std::mem::take(&mut self.report)
     }
 
     /// Stops the run: no compute, pull, iterate or probe is handed out any more, and each open
@@ -1124,9 +1237,34 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         )
     }
 
-    fn out(mut self) -> (Self, Report<V>) {
-        let report = std::mem::take(&mut self.report);
-        (self, report)
+    /// Takes the caller's `report` in, with what was released since the last call added.
+    fn adopt(&mut self, report: &mut Report<V>) {
+        std::mem::swap(&mut self.report, report);
+        self.report.released.append(&mut report.released);
+    }
+
+    /// Gives the caller's report back, keeping the empty buffer for releases between calls.
+    fn hand_back(&mut self, report: &mut Report<V>) {
+        std::mem::swap(&mut self.report, report);
+    }
+
+    /// Hands back an argument vector of a task that ran, emptied, so the next compute
+    /// reuses its buffer instead of allocating one. A vector that still holds values has
+    /// them released by the next `complete`, never dropped here.
+    pub fn recycle(&mut self, mut args: Vec<(NodeId, ArgValue<V>)>) {
+        if !args.is_empty() {
+            for (_, arg) in args.drain(..) {
+                match arg {
+                    ArgValue::One(value) => self.report.released.push(value),
+                    ArgValue::Gather(values) => self.report.released.extend(values),
+                    ArgValue::Omitted => {}
+                }
+            }
+        }
+        // A few are enough: one per worker in flight.
+        if self.spare.len() < 64 {
+            self.spare.push(args);
+        }
     }
 
     fn release(&mut self, value: V) {
@@ -1225,6 +1363,41 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         }
     }
 
+    /// Entry `id`'s order key, built.
+    fn key_of(&self, id: usize) -> OrderKey {
+        self.entries
+            .get(id)
+            .map_or_else(OrderKey::default, |entry| self.entry_key(entry))
+    }
+
+    /// `entry`'s order key, built: its base instance's prefix, then its tail.
+    fn entry_key(&self, entry: &Entry) -> OrderKey {
+        let prefix = self
+            .instances
+            .get(entry.base)
+            .map_or(&[][..], |found| found.prefix.as_slice());
+        OrderKey(extend(prefix, entry.tail()))
+    }
+
+    fn ready_push(&mut self, id: usize) {
+        self.ready.push(id);
+        let (entries, instances) = (&self.entries, &self.instances);
+        let last = self.ready.len() - 1;
+        sift_up(&mut self.ready, last, |a, b| {
+            before(entries, instances, a, b)
+        });
+    }
+
+    fn ready_pop(&mut self) -> Option<usize> {
+        if self.ready.is_empty() {
+            return None;
+        }
+        let id = self.ready.swap_remove(0);
+        let (entries, instances) = (&self.entries, &self.instances);
+        sift_down(&mut self.ready, 0, |a, b| before(entries, instances, a, b));
+        Some(id)
+    }
+
     /// `Next::Done` when nothing is left, else `Next::Wait`.
     fn idle(&self) -> Next<V> {
         if self.running == 0 && self.ready.is_empty() {
@@ -1252,16 +1425,19 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             self.closing.pop();
             let frame = self.frame_mut(at);
             let (node, scope) = (frame.node, frame.scope);
-            let key = OrderKey(extend(&frame.key, &[as_u32(frame.pulled)]));
+            let tail = [as_u32(frame.position), as_u32(frame.pulled)];
             let branch = self.instance(scope).branch.clone();
             let id = self.entries.insert(Entry {
                 kind: Kind::Finish(false),
-                key: key.clone(),
+                base: scope,
+                tail,
+                tail_len: 2,
                 node,
                 at,
                 position: 0,
                 seat: Some(seat),
             });
+            let key = self.key_of(id);
             self.frame_mut(at).finishing = Some(id);
             self.running += 1;
             return Next::Task(Task {
@@ -1303,13 +1479,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         let Some(entry) = self.entries.get(id) else {
             return Err(broken(format!("task {id} is not ready")));
         };
-        let (kind, node, at, position, key) = (
-            entry.kind,
-            entry.node,
-            entry.at,
-            entry.position,
-            entry.key.clone(),
-        );
+        let (kind, node, at, position) = (entry.kind, entry.node, entry.at, entry.position);
         let (branch, work) = match kind {
             Kind::Compute => {
                 let instance = self.instance(at);
@@ -1318,7 +1488,12 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                 if target.payload().is_none() {
                     return Err(planned_to_compute(target));
                 }
-                let args = self.arguments(plan, graph, at, step)?;
+                let mut args = self.spare.pop().unwrap_or_default();
+                if let Err(failure) = self.arguments(plan, graph, at, step, &mut args) {
+                    // What was cloned so far is released, not dropped here.
+                    self.recycle(args);
+                    return Err(failure);
+                }
                 let instance = self.instance(at);
                 let late = plan.is_late(node) && instance.up.is_none();
                 let branch = instance.branch.clone();
@@ -1379,6 +1554,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         if let Some(entry) = self.entries.get_mut(id) {
             entry.seat = Some(seat);
         }
+        let key = self.key_of(id);
         Ok(Task {
             id: TaskId(as_u32(id)),
             node,
@@ -1408,6 +1584,15 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         arg: NodeId,
         collects: bool,
     ) -> Option<Read<'_, V>> {
+        if !plan.has_expands() {
+            // One scope: every value is an outer step's.
+            let state = self
+                .instances
+                .get(OUTER)?
+                .steps
+                .get(self.layout.position(arg))?;
+            return state.slot.as_ref().map(Read::Value);
+        }
         let node = graph.node(arg);
         if collects {
             let holder = self.holder(instance, scope_of(plan, node.block?))?;
@@ -1436,7 +1621,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         graph: &Graph<P>,
         instance: usize,
         step: &Step,
-    ) -> Result<Option<V>, RunError<E>> {
+    ) -> Result<Option<&V>, RunError<E>> {
         for (at, &arg) in step.args.iter().enumerate() {
             let collects = plan.has_expands()
                 && edge_of(plan, graph, step.node, at, arg).is_some_and(|e| e.collect.is_some());
@@ -1450,28 +1635,29 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                 let dependency = edge_of(plan, graph, step.node, at, arg)
                     .map_or(Dependency::Required, |edge| edge.dependency);
                 if dependency == Dependency::Required {
-                    return Ok(Some(value.clone()));
+                    return Ok(Some(value));
                 }
             }
         }
         Ok(None)
     }
 
-    /// The arguments of `step` of `instance`, by the absence rules.
+    /// The arguments of `step` of `instance`, by the absence rules, into `args`.
     fn arguments<P>(
         &self,
         plan: &Plan,
         graph: &Graph<P>,
         instance: usize,
         step: &Step,
-    ) -> Result<Vec<(NodeId, ArgValue<V>)>, RunError<E>> {
+        args: &mut Vec<(NodeId, ArgValue<V>)>,
+    ) -> Result<(), RunError<E>> {
         if plan.has_expands() && plan.arg_edges(step.node).len() != step.args.len() {
             return Err(broken(format!(
                 "node '{}' has no edge it was planned to read",
                 graph.node(step.node).name
             )));
         }
-        let mut args = Vec::with_capacity(step.args.len());
+        args.reserve(step.args.len());
         for (at, &arg) in step.args.iter().enumerate() {
             let edge = plan
                 .has_expands()
@@ -1504,7 +1690,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             };
             args.push((arg, value));
         }
-        Ok(args)
+        Ok(())
     }
 
     /// Opens an instance of scope `template`.
@@ -1560,24 +1746,30 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
     }
 
     /// Queues a ready entry.
+    ///
+    /// Its key is instance `base`'s prefix then `tail`, of at most two parts.
     fn queue(
         &mut self,
         kind: Kind,
-        key: Vec<u32>,
+        (base, tail): (usize, &[u32]),
         node: NodeId,
         at: usize,
         position: usize,
     ) -> usize {
-        let key = OrderKey(key);
+        let mut parts = [0; 2];
+        let len = tail.len().min(2);
+        parts[..len].copy_from_slice(&tail[..len]);
         let id = self.entries.insert(Entry {
             kind,
-            key: key.clone(),
+            base,
+            tail: parts,
+            tail_len: u8::try_from(len).unwrap_or(2),
             node,
             at,
             position,
             seat: None,
         });
-        self.ready.push(Reverse((key, id)));
+        self.ready_push(id);
         id
     }
 
@@ -1589,20 +1781,27 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         }
         state.progress = Progress::Queued;
         let iterates = state.need == Need::Hit;
-        let found = self.instance(instance);
-        let step = &steps_of(plan, found.template)[position];
-        let key = extend(&found.prefix, &[as_u32(position)]);
+        let step = &steps_of(plan, self.instance(instance).template)[position];
+        let key = (instance, &[as_u32(position)][..]);
         // An expand's override or hit, whose iterable is in its slot, once what its block
         // reads is in.
         if iterates || step.action == Action::UseOverride {
             self.queue(Kind::Iterate, key, step.node, instance, position);
             return;
         }
-        let kind = match self.skip_value(plan, graph, instance, step) {
-            Ok(Some(_)) => Kind::Skip,
-            Ok(None) => Kind::Compute,
+        // Only a plan with absence rules can skip; any other reads its arguments once.
+        let skips = if plan.needs_rules() {
+            self.skip_value(plan, graph, instance, step)
+                .map(|value| value.is_some())
+        } else {
+            Ok(false)
+        };
+        let kind = match skips {
+            Ok(true) => Kind::Skip,
+            Ok(false) => Kind::Compute,
             Err(failure) => {
-                self.fail(OrderKey(key), failure);
+                let prefix = &self.instance(instance).prefix;
+                self.fail(OrderKey(extend(prefix, &[as_u32(position)])), failure);
                 return;
             }
         };
@@ -1615,8 +1814,13 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             value: iterable,
             absent: false,
         });
-        let key = extend(&self.instance(instance).prefix, &[as_u32(position)]);
-        self.queue(Kind::Iterate, key, node, instance, position);
+        self.queue(
+            Kind::Iterate,
+            (instance, &[as_u32(position)]),
+            node,
+            instance,
+            position,
+        );
     }
 
     /// Counts down the readers of `uses`, releasing each value whose last reader that was.
@@ -1708,38 +1912,40 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
     /// Settles the skips that are the lowest ready entries, reporting each.
     fn drain<P>(&mut self, plan: &Plan, graph: &Graph<P>) {
         while !self.stopping {
-            let Some(&Reverse((_, id))) = self.ready.peek() else {
+            let Some(&id) = self.ready.first() else {
                 return;
             };
             match self.entries.get(id) {
                 Some(entry) if entry.kind == Kind::Skip => {}
                 Some(_) => return,
                 None => {
-                    self.ready.pop();
+                    self.ready_pop();
                     continue;
                 }
             }
-            self.ready.pop();
+            self.ready_pop();
+            let key = self.key_of(id);
             let Some(entry) = self.entries.remove(id) else {
                 continue;
             };
-            self.skip(plan, graph, &entry);
+            self.skip(plan, graph, &entry, key);
             self.settle(plan, graph);
         }
     }
 
     /// Settles a skip: the node is absent, holding the absent value that skipped it.
-    fn skip<P>(&mut self, plan: &Plan, graph: &Graph<P>, entry: &Entry) {
+    fn skip<P>(&mut self, plan: &Plan, graph: &Graph<P>, entry: &Entry, key: OrderKey) {
         let (instance, position) = (entry.at, entry.position);
         let template = self.instance(instance).template;
         let step = &steps_of(plan, template)[position];
         let value = match self.skip_value(plan, graph, instance, step) {
-            Ok(Some(value)) => value,
+            Ok(Some(value)) => value.clone(),
             Ok(None) => {
                 // Not absent after all: compute it.
+                let tail = entry.tail();
                 self.queue(
                     Kind::Compute,
-                    entry.key.0.clone(),
+                    (entry.base, tail),
                     entry.node,
                     instance,
                     position,
@@ -1747,15 +1953,13 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                 return;
             }
             Err(failure) => {
-                self.fail(entry.key.clone(), failure);
+                self.fail(key, failure);
                 return;
             }
         };
         self.use_args(instance, position);
         let branch = self.instance(instance).branch.clone();
-        self.report
-            .skipped
-            .push((entry.node, branch, entry.key.clone()));
+        self.report.skipped.push((entry.node, branch, key));
         if graph.node(entry.node).is_expand() {
             self.absent_expand(plan, instance, position, value);
         } else {
@@ -1938,9 +2142,9 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
     fn queue_pull(&mut self, at: usize) {
         let frame = self.frame_mut(at);
         frame.pull_wanted = false;
-        let key = extend(&frame.key, &[as_u32(frame.pulled)]);
-        let node = frame.node;
-        let id = self.queue(Kind::Pull, key, node, at, 0);
+        let (scope, node) = (frame.scope, frame.node);
+        let tail = [as_u32(frame.position), as_u32(frame.pulled)];
+        let id = self.queue(Kind::Pull, (scope, &tail), node, at, 0);
         self.frame_mut(at).pull = Some(id);
     }
 
@@ -2047,12 +2251,12 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                     _ => self.instance(entry.at).branch.clone(),
                 };
                 let failure = node_error(graph, graph.node(entry.node), error, &branch, Vec::new());
-                self.fail(entry.key, failure);
+                self.fail(self.entry_key(&entry), failure);
             }
             (_, outcome) => {
                 self.discard(outcome);
                 self.fail(
-                    entry.key,
+                    self.entry_key(&entry),
                     broken(format!(
                         "a task of node '{}' gave an outcome it cannot give",
                         graph.node(entry.node).name
@@ -2129,11 +2333,11 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                     block.index() + 1,
                     Some((at, index)),
                     Some(scope),
-                    prefix.clone(),
+                    prefix,
                     branch,
                     Some(value),
                 );
-                self.queue(Kind::Probe, prefix, node, instance, 0);
+                self.queue(Kind::Probe, (instance, &[]), node, instance, 0);
                 if open < in_flight {
                     self.queue_pull(at);
                 } else {
@@ -2142,9 +2346,9 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             }
             Item::Done => {
                 let frame = self.frame_mut(at);
-                let key = extend(&frame.key, &[as_u32(frame.pulled)]);
-                let node = frame.node;
-                let id = self.queue(Kind::Finish(true), key, node, at, 0);
+                let (scope, node) = (frame.scope, frame.node);
+                let tail = [as_u32(frame.position), as_u32(frame.pulled)];
+                let id = self.queue(Kind::Finish(true), (scope, &tail), node, at, 0);
                 self.frame_mut(at).finishing = Some(id);
             }
             Item::Declined(value) => {
@@ -2280,6 +2484,32 @@ mod tests {
     use Val::{Absent, List, Num};
 
     type Sched = Scheduler<Val, String, String>;
+
+    /// `Scheduler::new`, with a fresh report.
+    fn open<V: Clone>(
+        plan: &Plan,
+        graph: &Graph<Pay>,
+        seeded: Vec<Option<Slot<V>>>,
+        options: Options,
+    ) -> (Scheduler<V, String, String>, Report<V>) {
+        let mut report = Report::default();
+        let scheduler = Scheduler::new(plan, graph, seeded, options, &mut report);
+        (scheduler, report)
+    }
+
+    /// `Scheduler::complete`, with a fresh report.
+    fn done<V: Clone>(
+        scheduler: &mut Scheduler<V, String, String>,
+        plan: &Plan,
+        graph: &Graph<Pay>,
+        grant: &dyn Grant,
+        id: TaskId,
+        outcome: Outcome<V, String, String>,
+    ) -> Report<V> {
+        let mut report = Report::default();
+        scheduler.complete(plan, graph, grant, id, outcome, &mut report);
+        report
+    }
     type Outputs = Result<BTreeMap<String, Val>, RunError<String>>;
 
     /// The seeded values of `plan`: `inputs` and `overrides` by name, an override absent as
@@ -2447,13 +2677,13 @@ mod tests {
         events: &mut Vec<String>,
     ) -> Outputs {
         let seeded = seed(graph, plan, inputs, overrides, eval);
-        let (mut scheduler, report) = Sched::new(plan, graph, seeded, Options::default());
+        let (mut scheduler, report) = open(plan, graph, seeded, Options::default());
         record(graph, &report, events);
         loop {
             match scheduler.next(plan, graph, &Unlimited, Seat::Take) {
                 Next::Task(task) => {
                     let outcome = perform(plan, graph, eval, &task, events);
-                    let report = scheduler.complete(plan, graph, &Unlimited, task.id, outcome);
+                    let report = done(&mut scheduler, plan, graph, &Unlimited, task.id, outcome);
                     record(graph, &report, events);
                 }
                 Next::Wait => return Err(broken("one worker waited".to_owned())),
@@ -2894,11 +3124,11 @@ mod tests {
     /// Every task of a one-worker run, in the order handed out.
     fn every_task(graph: &Graph<Pay>, plan: &Plan, mut eval: Fan) -> Vec<Task<Val>> {
         let seeded = seed(graph, plan, &[], &[], &eval);
-        let (mut scheduler, _) = Sched::new(plan, graph, seeded, Options::default());
+        let (mut scheduler, _) = open(plan, graph, seeded, Options::default());
         let mut tasks = Vec::new();
         while let Next::Task(task) = scheduler.next(plan, graph, &Unlimited, Seat::Take) {
             let outcome = perform(plan, graph, &mut eval, &task, &mut Vec::new());
-            scheduler.complete(plan, graph, &Unlimited, task.id, outcome);
+            done(&mut scheduler, plan, graph, &Unlimited, task.id, outcome);
             tasks.push(task);
         }
         tasks
@@ -2928,7 +3158,7 @@ mod tests {
         let names: Vec<&str> = inputs.iter().map(|(n, _)| *n).collect();
         let plan = graph.prepare(&request(outputs, &names, &[])).unwrap();
         let seeded = seed(graph, &plan, inputs, &[], &Fan::default());
-        let (scheduler, _) = Sched::new(&plan, graph, seeded, Options::default());
+        let (scheduler, _) = open(&plan, graph, seeded, Options::default());
         (plan, scheduler)
     }
 
@@ -2955,7 +3185,7 @@ mod tests {
             Next::Wait
         );
         let outcome = perform(&plan, &graph, &mut eval, &a, &mut Vec::new());
-        scheduler.complete(&plan, &graph, &Unlimited, a.id, outcome);
+        done(&mut scheduler, &plan, &graph, &Unlimited, a.id, outcome);
         // `b` and `c` are both ready now, and `b` comes first in the plan.
         let b = task_of(scheduler.next(&plan, &graph, &Unlimited, Seat::Take));
         let c = task_of(scheduler.next(&plan, &graph, &Unlimited, Seat::Take));
@@ -2991,7 +3221,7 @@ mod tests {
         let mut eval = Fan::default();
         let a = task_of(scheduler.next(&plan, &graph, &grant, Seat::Take));
         let outcome = perform(&plan, &graph, &mut eval, &a, &mut Vec::new());
-        scheduler.complete(&plan, &graph, &grant, a.id, outcome);
+        done(&mut scheduler, &plan, &graph, &grant, a.id, outcome);
         let c = task_of(scheduler.next(&plan, &graph, &grant, Seat::Take));
         assert_eq!(name_of(&graph, &c), "c");
         assert_eq!(
@@ -3035,7 +3265,7 @@ mod tests {
         mut seen: impl FnMut(&Task<Val>, &Report<Val>),
     ) -> Outputs {
         let seeded = seed(graph, plan, &[], &[], eval);
-        let (mut scheduler, _) = Sched::new(plan, graph, seeded, options);
+        let (mut scheduler, _) = open(plan, graph, seeded, options);
         let mut flying: Vec<Task<Val>> = Vec::new();
         loop {
             while let Next::Task(task) = scheduler.next(plan, graph, &Unlimited, Seat::Take) {
@@ -3047,7 +3277,7 @@ mod tests {
             }
             let task = flying.remove(pick(&flying));
             let outcome = perform(plan, graph, eval, &task, &mut Vec::new());
-            let report = scheduler.complete(plan, graph, &Unlimited, task.id, outcome);
+            let report = done(&mut scheduler, plan, graph, &Unlimited, task.id, outcome);
             seen(&task, &report);
         }
         named(graph, scheduler.finish(plan, graph))
@@ -3184,13 +3414,13 @@ mod tests {
                 return task;
             }
             let outcome = perform(plan, graph, eval, &task, &mut Vec::new());
-            scheduler.complete(plan, graph, &Unlimited, task.id, outcome);
+            done(scheduler, plan, graph, &Unlimited, task.id, outcome);
         }
     }
 
     fn failed(scheduler: &mut Sched, plan: &Plan, graph: &Graph<Pay>, task: &Task<Val>) {
         let outcome = Outcome::Failed(format!("{} failed", name_of(graph, task)));
-        scheduler.complete(plan, graph, &Unlimited, task.id, outcome);
+        done(scheduler, plan, graph, &Unlimited, task.id, outcome);
     }
 
     #[test]
@@ -3211,7 +3441,7 @@ mod tests {
             assert!(!exhausted);
             closed.push(name_of(&graph, &task));
             let outcome = perform(&plan, &graph, &mut eval, &task, &mut Vec::new());
-            scheduler.complete(&plan, &graph, &Unlimited, task.id, outcome);
+            done(&mut scheduler, &plan, &graph, &Unlimited, task.id, outcome);
         }
         assert_eq!(closed, ["inner", "outer"]);
         let RunError::Node { node, branch, .. } = scheduler.finish(&plan, &graph).unwrap_err()
@@ -3242,7 +3472,7 @@ mod tests {
             Next::Wait
         );
         let outcome = perform(&plan, &graph, &mut eval, &pull, &mut Vec::new());
-        let report = scheduler.complete(&plan, &graph, &Unlimited, pull.id, outcome);
+        let report = done(&mut scheduler, &plan, &graph, &Unlimited, pull.id, outcome);
         // The item it gave is released, and the iterator is finished, once.
         assert_eq!(report.released, [Num(2)]);
         let finish = task_of(scheduler.next(&plan, &graph, &Unlimited, Seat::Take));
@@ -3254,7 +3484,14 @@ mod tests {
             }
         ));
         let outcome = perform(&plan, &graph, &mut eval, &finish, &mut Vec::new());
-        scheduler.complete(&plan, &graph, &Unlimited, finish.id, outcome);
+        done(
+            &mut scheduler,
+            &plan,
+            &graph,
+            &Unlimited,
+            finish.id,
+            outcome,
+        );
         assert_eq!(
             scheduler.next(&plan, &graph, &Unlimited, Seat::Take),
             Next::Done
@@ -3268,7 +3505,7 @@ mod tests {
         let plan = graph.prepare(&request(&["total"], &[], &[])).unwrap();
         let mut eval = Fan::default();
         let seeded = seed(&graph, &plan, &[], &[], &eval);
-        let (mut scheduler, _) = Sched::new(&plan, &graph, seeded, Options::default());
+        let (mut scheduler, _) = open(&plan, &graph, seeded, Options::default());
         let mut details = Vec::new();
         let mut flying = Vec::new();
         // Run everything but `details`, which is held back until all three are out.
@@ -3284,7 +3521,7 @@ mod tests {
                 break;
             };
             let outcome = perform(&plan, &graph, &mut eval, &task, &mut Vec::new());
-            scheduler.complete(&plan, &graph, &Unlimited, task.id, outcome);
+            done(&mut scheduler, &plan, &graph, &Unlimited, task.id, outcome);
         }
         // They fail last branch first.
         for task in details.iter().rev() {
@@ -3298,7 +3535,7 @@ mod tests {
                 break;
             };
             let outcome = perform(&plan, &graph, &mut eval, &task, &mut Vec::new());
-            scheduler.complete(&plan, &graph, &Unlimited, task.id, outcome);
+            done(&mut scheduler, &plan, &graph, &Unlimited, task.id, outcome);
         }
         let RunError::Node { node, branch, .. } = scheduler.finish(&plan, &graph).unwrap_err()
         else {
@@ -3329,7 +3566,7 @@ mod tests {
         let task = task_of(scheduler.next(&plan, &graph, &grant, Seat::Take));
         assert_eq!(scheduler.blocked(), None);
         let outcome = perform(&plan, &graph, &mut Fan::default(), &task, &mut Vec::new());
-        scheduler.complete(&plan, &graph, &grant, task.id, outcome);
+        done(&mut scheduler, &plan, &graph, &grant, task.id, outcome);
         // `b` refused while `c` runs is not blocked: something of the run is in flight.
         let refuse_b = Refuse {
             node: graph.id_of("b").unwrap(),
@@ -3357,7 +3594,7 @@ mod tests {
         scheduler.lend();
         let a = task_of(scheduler.next(&plan, &graph, &Unlimited, Seat::Lent));
         let outcome = perform(&plan, &graph, &mut eval, &a, &mut Vec::new());
-        scheduler.complete(&plan, &graph, &Unlimited, a.id, outcome);
+        done(&mut scheduler, &plan, &graph, &Unlimited, a.id, outcome);
         // `b` and `c` are ready, but the lent seat holds one task at a time.
         let b = task_of(scheduler.next(&plan, &graph, &Unlimited, Seat::Lent));
         assert_eq!(
@@ -3365,14 +3602,14 @@ mod tests {
             Next::Wait
         );
         let outcome = perform(&plan, &graph, &mut eval, &b, &mut Vec::new());
-        scheduler.complete(&plan, &graph, &Unlimited, b.id, outcome);
+        done(&mut scheduler, &plan, &graph, &Unlimited, b.id, outcome);
         let c = task_of(scheduler.next(&plan, &graph, &Unlimited, Seat::Lent));
         assert_eq!(name_of(&graph, &c), "c");
         let outcome = perform(&plan, &graph, &mut eval, &c, &mut Vec::new());
-        scheduler.complete(&plan, &graph, &Unlimited, c.id, outcome);
+        done(&mut scheduler, &plan, &graph, &Unlimited, c.id, outcome);
         let d = task_of(scheduler.next(&plan, &graph, &Unlimited, Seat::Lent));
         let outcome = perform(&plan, &graph, &mut eval, &d, &mut Vec::new());
-        scheduler.complete(&plan, &graph, &Unlimited, d.id, outcome);
+        done(&mut scheduler, &plan, &graph, &Unlimited, d.id, outcome);
         assert_eq!(
             scheduler.next(&plan, &graph, &Unlimited, Seat::Lent),
             Next::Done
@@ -3399,7 +3636,7 @@ mod tests {
             .iter()
             .map(|eval| {
                 let seeded = seed(&graph, &plan, &[], &[], eval);
-                Sched::new(&plan, &graph, seeded, Options::default()).0
+                open(&plan, &graph, seeded, Options::default()).0
             })
             .collect();
         let mut flying: Vec<(usize, Task<Val>)> = Vec::new();
@@ -3428,7 +3665,14 @@ mod tests {
             }
             let (at, task) = flying.remove(0);
             let outcome = perform(&plan, &graph, &mut evals[at], &task, &mut Vec::new());
-            schedulers[at].complete(&plan, &graph, &limits, task.id, outcome);
+            done(
+                &mut schedulers[at],
+                &plan,
+                &graph,
+                &limits,
+                task.id,
+                outcome,
+            );
         }
         assert_eq!(most, (2, 1, 1));
         for scheduler in schedulers {
@@ -3493,7 +3737,7 @@ mod tests {
         let mut hits = Vec::new();
         while let Next::Task(task) = scheduler.next(&plan, &graph, &Unlimited, Seat::Take) {
             let outcome = perform(&plan, &graph, &mut eval, &task, &mut Vec::new());
-            let report = scheduler.complete(&plan, &graph, &Unlimited, task.id, outcome);
+            let report = done(&mut scheduler, &plan, &graph, &Unlimited, task.id, outcome);
             hits.extend(report.hits);
         }
         assert_eq!(hits, [(graph.id_of("b").unwrap(), vec![1], Num(-1))]);
@@ -3514,7 +3758,8 @@ mod tests {
             let task = task_of(scheduler.next(&plan, &graph, &Unlimited, Seat::Take));
             if name_of(&graph, &task) == "total" {
                 assert!(matches!(task.work, Work::Compute { late: true, .. }));
-                let report = scheduler.complete(
+                let report = done(
+                    &mut scheduler,
                     &plan,
                     &graph,
                     &Unlimited,
@@ -3529,7 +3774,7 @@ mod tests {
             }
             assert!(!matches!(task.work, Work::Compute { late: true, .. }));
             let outcome = perform(&plan, &graph, &mut eval, &task, &mut Vec::new());
-            scheduler.complete(&plan, &graph, &Unlimited, task.id, outcome);
+            done(&mut scheduler, &plan, &graph, &Unlimited, task.id, outcome);
         }
         assert_eq!(
             scheduler.next(&plan, &graph, &Unlimited, Seat::Take),
@@ -3549,13 +3794,13 @@ mod tests {
         let mut skipped = Vec::new();
         let mut arguments = BTreeMap::new();
         let seeded = seed(&graph, &plan, &[("x", Num(5))], &[], &eval);
-        let (mut scheduler, _) = Sched::new(&plan, &graph, seeded, Options::default());
+        let (mut scheduler, _) = open(&plan, &graph, seeded, Options::default());
         while let Next::Task(task) = scheduler.next(&plan, &graph, &Unlimited, Seat::Take) {
             if let Work::Compute { args, .. } = &task.work {
                 arguments.insert(name_of(&graph, &task), args.clone());
             }
             let outcome = perform(&plan, &graph, &mut eval, &task, &mut Vec::new());
-            let report = scheduler.complete(&plan, &graph, &Unlimited, task.id, outcome);
+            let report = done(&mut scheduler, &plan, &graph, &Unlimited, task.id, outcome);
             skipped.extend(report.skipped);
         }
         let id = |name: &str| graph.id_of(name).unwrap();
@@ -3645,9 +3890,8 @@ mod tests {
             value: seed.clone(),
             absent: false,
         });
-        let (mut scheduler, report) = inside(|| {
-            Scheduler::<Watched, String, String>::new(&plan, &graph, seeded, Options::default())
-        });
+        let (mut scheduler, report) =
+            inside(|| open::<Watched>(&plan, &graph, seeded, Options::default()));
         let mut released = report.released.len();
         drop(report);
         let mut pulled = 0;
@@ -3688,7 +3932,8 @@ mod tests {
                 },
                 Work::Iterate { .. } => unreachable!("nothing is overridden"),
             };
-            let report = inside(|| scheduler.complete(&plan, &graph, &Unlimited, task.id, outcome));
+            let report =
+                inside(|| done(&mut scheduler, &plan, &graph, &Unlimited, task.id, outcome));
             released += report.released.len();
             drop(report);
             most = most.max(seed.live.get());
@@ -3729,7 +3974,7 @@ mod tests {
         // The same ids in other roles: `a` is an input here, and `b` has the id `x` had.
         let other = Graph::build(vec![node("b", &[plain("a")], tens)]).unwrap();
         let seeded = seed(&other, &plan, &[("b", Num(5))], &[], &Fan::default());
-        let (mut scheduler, _) = Sched::new(&plan, &other, seeded, Options::default());
+        let (mut scheduler, _) = open(&plan, &other, seeded, Options::default());
         assert_eq!(
             scheduler.next(&plan, &other, &Unlimited, Seat::Take),
             Next::Done
@@ -3749,7 +3994,7 @@ mod tests {
         assert_eq!(scheduler.finish(&plan, &graph).unwrap_err(), another_plan());
         // A plan that reads ids the graph doesn't have.
         let small = Graph::build(vec![node("q", &[], tens)]).unwrap();
-        let (mut scheduler, _) = Sched::new(&plan, &small, vec![None], Options::default());
+        let (mut scheduler, _) = open::<Val>(&plan, &small, vec![None], Options::default());
         assert_eq!(
             scheduler.next(&plan, &small, &Unlimited, Seat::Take),
             Next::Done
@@ -3764,7 +4009,7 @@ mod tests {
     fn a_missing_seeded_value_is_reported_before_anything_runs() {
         let graph = diamond();
         let plan = graph.prepare(&request(&["d"], &["x"], &[])).unwrap();
-        let (mut scheduler, _) = Sched::new(
+        let (mut scheduler, _) = open::<Val>(
             &plan,
             &graph,
             vec![None; graph.nodes().len()],

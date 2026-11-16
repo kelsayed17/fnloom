@@ -150,15 +150,20 @@ aborts the run, and `post_graph(false)` still runs so observers can close what t
 and no locks, and it borrows nothing: every method takes the plan and graph it was made with, so a caller with several
 workers keeps it behind one lock. `Plan::run` stays the reference it is tested against.
 
-- `Scheduler::new(&plan, &graph, seeded, options)` takes each input's and override's value by node id, as a
-  `run::Slot` that says whether it is absent, and returns the scheduler and a first `Report`.
+- `Scheduler::new(&plan, &graph, seeded, options, &mut report)` takes each input's and override's value by node id,
+  as a `run::Slot` that says whether it is absent, and adds to `report` what they settle before any task.
 - `next(&plan, &graph, &grant, seat)` hands out the ready task with the lowest **order key** that the `Grant` lets the
   `Seat` start, skipping over the ones it refuses. It gives `Next::Wait` while tasks are in flight or refused, and
   `Next::Done` when nothing is left.
-- `complete(&plan, &graph, &grant, id, outcome)` takes back a task's `Outcome` and returns a `Report`: the values no
-  step reads any more (`released`, for the caller to drop, so no value is dropped under its lock), and the nodes
-  skipped, the expands exhausted and the hits that completion settled, for the observer events.
+- `complete(&plan, &graph, &grant, id, outcome, &mut report)` takes back a task's `Outcome` and adds to the `Report`
+  the values no step reads any more (`released`, for the caller to drop, so no value is dropped under its lock), and
+  the nodes skipped, the expands exhausted and the hits that completion settled, for the observer events. The caller
+  keeps one report, and `Report::clear`s it between calls.
+- `recycle(args)` hands a compute's emptied argument vector back, so the next compute reuses its buffer.
 - `finish(&plan, &graph)` returns the outputs by id, or the failure with the lowest order key.
+
+The ready set is a heap of entry ids whose keys are compared in place, never stored: one run allocates an `OrderKey`
+only for each task it hands out.
 
 An order key (`OrderKey`, also given by `Plan::order_key(node, branch)`) is the (step position, branch index) pairs of
 the expands whose blocks hold a step, outermost first, then the step's position. Keys compare lexicographically, so
