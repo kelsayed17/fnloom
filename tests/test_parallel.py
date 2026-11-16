@@ -296,6 +296,7 @@ def _child(work: Callable[[], object]) -> NoReturn:
 
 def _waited(pid: int) -> int:
     """The forked child `pid`'s exit status, waiting at most ten seconds."""
+    assert sys.platform != "win32", "only where os.fork is"
     deadline = time.monotonic() + 10
     while time.monotonic() < deadline:
         done, status = os.waitpid(pid, os.WNOHANG)
@@ -363,6 +364,7 @@ def test_a_forked_child_gets_a_new_pool() -> None:
     inputs = {"n": 6, **NO_FAIL}
     expected = {"summary": [0, 10, 20, 30, 40, 50]}
     assert driver.execute(["summary"], inputs=inputs) == expected
+    assert sys.platform != "win32", "only where os.fork is"
     pid = os.fork()
     if pid == 0:
         _child(lambda: driver.execute(["summary"], inputs=inputs) == expected)
