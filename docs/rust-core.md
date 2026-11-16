@@ -70,8 +70,8 @@ makes the node absent, holding `value`, after `post_node` reported the error, an
 `absent_error(node, branch, &error)`; an expand absent while it yields drops its branches, as `Item::Declined` does.
 `None` fails the run as before. Such a node may be absent, so its consumers follow the rules above, but it doesn't
 decline: an absent value it returns itself is still yours to refuse. A `Scheduler` takes such an outcome as
-`Outcome::ErrorAbsent(value)`, or for a pull `Outcome::Item(Item::Declined(value))`, and single-flight never shares
-it: a step waiting on its key runs itself.
+`Outcome::ErrorAbsent(value)`, from a compute or a pull, and single-flight never shares it: a step waiting on its
+key runs itself. An `Item::Declined` from a node that doesn't decline is still a broken plan.
 
 ## Blocks
 

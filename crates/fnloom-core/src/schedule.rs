@@ -160,8 +160,8 @@ pub enum Work<V> {
         /// The iterable.
         iterable: V,
     },
-    /// Pulls the next item (`Blocks::next_item`); completes with `Outcome::Item`, an
-    /// `Item::Declined` for an expand absent on the error its pull raised.
+    /// Pulls the next item (`Blocks::next_item`); completes with `Outcome::Item`, or with
+    /// `Outcome::ErrorAbsent` for an expand absent on the error its pull raised.
     Pull {
         /// The iterator, as `Iterator` gave it.
         iterator: V,
@@ -208,9 +208,10 @@ pub enum Outcome<V, E, K> {
         /// Whether it is absent.
         absent: bool,
     },
-    /// A compute that failed with an error that makes its node absent
-    /// (`Node::absent_on_error`), holding this absent value. Unlike a declared absence,
-    /// single-flight never shares it: a step waiting on it runs itself.
+    /// A compute, or a pull, that failed with an error that makes its node absent
+    /// (`Node::absent_on_error`), holding this absent value: a pulled expand is then absent
+    /// with no branches. Unlike a declared absence, single-flight never shares it: a step
+    /// waiting on it runs itself.
     ErrorAbsent(V),
     /// A late compute's value from `Evaluate::lookup`, and whether it is absent
     /// (`Node::may_be_absent` and `Evaluate::is_absent`).
@@ -2391,6 +2392,9 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                 self.open_frame(plan, entry.at, entry.position, iterator);
             }
             (Kind::Pull, Outcome::Item(item)) => self.pulled(graph, entry.at, item),
+            (Kind::Pull, Outcome::ErrorAbsent(value)) if graph.node(entry.node).absent_on_error => {
+                self.declined(entry.at, value);
+            }
             (Kind::Finish(true), Outcome::Finished(value)) => {
                 self.frame_mut(entry.at).finished = Some(value);
                 self.todo.push(Event::Frame(entry.at));
@@ -2527,11 +2531,8 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             Item::Declined(value) => {
                 let frame = self.frame_mut(at);
                 let node = graph.node(frame.node);
-                if node.declines || node.absent_on_error {
-                    let iterator = frame.iterator.take();
-                    frame.declined = Some(value);
-                    self.release_all(iterator);
-                    self.todo.push(Event::Frame(at));
+                if node.declines {
+                    self.declined(at, value);
                 } else {
                     // `Plan::run` closes the iterator of a block it entered, and not that of
                     // an expand requested alone.
@@ -2547,6 +2548,15 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                 }
             }
         }
+    }
+
+    /// The expand of frame `at` is absent, holding `value`: its branches so far are dropped.
+    fn declined(&mut self, at: usize, value: V) {
+        let frame = self.frame_mut(at);
+        let iterator = frame.iterator.take();
+        frame.declined = Some(value);
+        self.release_all(iterator);
+        self.todo.push(Event::Frame(at));
     }
 
     /// A probe's hits are in: the branch's needs are decided, its hits are in their slots,
@@ -2793,7 +2803,7 @@ mod tests {
             Work::Pull { iterator } => match eval.next_item(node, iterator) {
                 Ok(item) => Outcome::Item(item),
                 Err(error) => match error_absent(eval, node, branch, &error, events) {
-                    Some(value) => Outcome::Item(Item::Declined(value)),
+                    Some(value) => Outcome::ErrorAbsent(value),
                     None => Outcome::Failed(error),
                 },
             },

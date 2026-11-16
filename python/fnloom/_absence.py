@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal, Union
 
 from fnloom._core import ABSENT, Absent
 from fnloom._decorators import Source, checked_errors, decorations
-from fnloom._tags import checked_query, tag_matches
+from fnloom._tags import TagValue, checked_query, tag_matches
 from fnloom._types import Unresolved, stripped
 
 if TYPE_CHECKING:
@@ -42,6 +42,7 @@ __all__ = [
     "may_be_absent",
     "merged",
     "needs_input",
+    "own",
     "refuse_given",
     "refuse_mixed",
     "refuse_unadmitted",
@@ -118,6 +119,20 @@ def declines(node: NodeDef) -> bool:
     return admits_absent(node.returns)
 
 
+# The attribute that marks an exception fnloom raised for a check of its own.
+_OWN = "__fnloom_own__"
+
+
+def own[E: BaseException](error: E) -> E:
+    """`error`, marked as raised by a check of fnloom's, which no `absent_on` matches.
+
+    An item check, an output check or a field extraction that fails is a fault the
+    absence rules can't stand in for, so it fails the run whatever is listed (Q133).
+    """
+    setattr(error, _OWN, True)
+    return error
+
+
 def checked_absent_on(
     errors: tuple[object, ...], tags: Mapping[str, object] | None
 ) -> AbsentOn:
@@ -140,21 +155,27 @@ def checked_absent_on(
 
 
 def covered(
-    nodes: Sequence[NodeDef], rules: Sequence[AbsentOn], others: AbstractSet[str]
+    nodes: Sequence[NodeDef],
+    rules: Sequence[AbsentOn],
+    others: AbstractSet[str],
+    tags: Mapping[str, Mapping[str, TagValue]] | None = None,
 ) -> dict[str, tuple[type[Exception], ...]]:
     """The errors each node is absent on, by node: its `@absent_on` and `rules`' union.
 
     A node in `others`, such as an extracted field or a `@pipe_output` relay, takes
     no `@absent_on` of its function: the node calling the function does, and what
     reads an absent node is absent too. A rule covers each node its tag query
-    matches, those included.
+    matches, those included, reading a node's tags from `tags` when it is there:
+    a `@pipe_output` function's `.raw` node, which keeps none of its own.
     """
     found: dict[str, tuple[type[Exception], ...]] = {}
+    given = tags or {}
     for node in nodes:
         errors = () if node.name in others else decorations(node.origin).absent_on
+        held = given.get(node.name, node.tags)
         for listed, query in rules:
             if query is None or all(
-                tag_matches(node.tags, key, value) for key, value in query
+                tag_matches(held, key, value) for key, value in query
             ):
                 errors = (*errors, *listed)
         if errors:

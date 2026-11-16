@@ -509,10 +509,14 @@ keeps its place. Any other error fails the run as before.
   never becomes an absence. Nor does the `StoppedError` of a run that stopped because the run that started it did,
   nor a run's own `timeout=`, which raises `TimeoutError` from `execute`: a node's own `TimeoutError` is listed
   as any other.
-- What counts is anything the node's call raises: its own code, its output checks and its
-  [wrappers](running.md#node-wrappers). An expand absent on an error, before or while it yields, has no branches:
-  the branches it already ran are dropped, as when it [declines](#fan-out-and-fan-in), and each `Collect` of its
-  block follows the three rules as a whole.
+- What counts is what the node's own code raises, its [wrappers](running.md#node-wrappers) included. A check of
+  fnloom's never becomes an absence, whatever is listed: an item refused, an output check or output type check
+  failed, or a field missing from what an `@extract_fields` producer returned fails the run as before.
+- An expand absent on an error, before or while it yields, has no branches: the branches it already ran are
+  dropped, as when it [declines](#fan-out-and-fan-in), and each `Collect` of its block follows the three rules as a
+  whole. An iterator that raised is closed at once, so a custom one's `close()` runs.
+- A `@tag` query of `with_absent_on` covers a `@pipe_output` or `@mutate` function's own call, which has its
+  tags.
 - Its `after_node` still reports `ok=False` with the error, so [`LogFailures`](hooks.md#logging-failures) logs it, and
   [`RunEnd.absent_errors`](hooks.md#the-events) lists each one as `(node, branch, error)`, in reference order on every
   driver. An error absence is no failure: with several workers, the run's error is still the first real failure in

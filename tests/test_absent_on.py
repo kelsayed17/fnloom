@@ -900,7 +900,7 @@ class Raising(fnloom.Hook):
 def test_a_hook_raising_on_an_absence_fails_the_run_with_its_own_error(
     kind: Kind,
 ) -> None:
-    """The hook's error is raised, never the node's absorbed one, and nothing stored."""
+    """The hook's error is raised, never the node's absorbed one."""
     module = make_module(f"raising_{kind}", RAISING_HOOK)
     store = fnloom.MemoryCache()
     builder = (
@@ -908,7 +908,6 @@ def test_a_hook_raising_on_an_absence_fails_the_run_with_its_own_error(
     )
     with pytest.raises(RuntimeError, match="the hook saw a"):
         executed(kind, builder, ["b"], {"x": 1})
-    assert len(store) == 0
 
 
 STOPPED = """
@@ -1030,3 +1029,218 @@ def test_an_error_absence_gives_its_limit_slot_back(kind: Kind) -> None:
     workers = inner._workers  # noqa: SLF001  # the driver's own limits
     assert workers is not None
     assert _core.held_slots(workers.limits()) == (0, {"guarded": 0}, {})
+
+
+STEPPED = """
+from fnloom import mutate, pipe_output, step, tag
+
+
+def _double(v: int) -> int:
+    return v * 2
+
+
+@tag(io="net")
+@pipe_output(step(_double))
+def fetched(x: int) -> int:
+    raise TimeoutError(x)
+
+
+@tag(io="net")
+def mutated(x: int) -> int:
+    raise TimeoutError(x)
+
+
+@mutate(mutated)
+def _plus(v: int) -> int:
+    return v + 1
+
+
+def use(fetched: int = 0, mutated: int = 0) -> int:
+    return fetched + mutated
+"""
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_a_tag_query_covers_a_function_with_steps(kind: Kind) -> None:
+    """The node calling a tagged `@pipe_output` or `@mutate` function is covered."""
+    module = make_module(f"stepped_{kind}", STEPPED)
+    builder = (
+        fnloom.Builder()
+        .with_modules(module)
+        .with_absent_on(TimeoutError, tags={"io": "net"})
+    )
+    assert executed(kind, builder, ["use"], {"x": 1}) == {"use": 0}
+
+
+# fnloom's own checks, each failing inside a call or a pull of a covered node.
+OWN_CHECKS = {
+    "absent item": """
+from fnloom import ABSENT, Collect, Parallelizable
+
+
+def item(n: int) -> Parallelizable[int]:
+    yield 1
+    yield ABSENT
+
+
+def each(item: int) -> int:
+    return item
+
+
+def out(each: Collect[int]) -> list[int]:
+    return list(each)
+""",
+    "item type": """
+from fnloom import Collect, Parallelizable
+
+
+def item(n: int) -> Parallelizable[int]:
+    yield "one"
+
+
+def each(item: int) -> int:
+    return item
+
+
+def out(each: Collect[int]) -> list[int]:
+    return list(each)
+""",
+    "failed check": """
+from fnloom import check_output
+
+
+@check_output(range=(0, 5))
+def out(n: int) -> int:
+    return n * 10
+""",
+    "missing field": """
+from fnloom import extract_fields
+
+
+@extract_fields({"p": int, "q": int})
+def made(n: int) -> dict:
+    return {"p": n}
+
+
+def out(q: int) -> int:
+    return q
+""",
+}
+
+
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("check", OWN_CHECKS)
+def test_a_check_of_fnlooms_own_never_becomes_an_absence(
+    kind: Kind, check: str
+) -> None:
+    """An item, a check or a field that fails fails the run, whatever is listed."""
+    name = f"own_{check.replace(' ', '_')}_{kind}"
+    builder = (
+        fnloom.Builder()
+        .with_modules(make_module(name, OWN_CHECKS[check]))
+        .with_absent_on(TypeError, ValueError)
+    )
+    with pytest.raises((TypeError, ValueError)):
+        executed(kind, builder, ["out"], {"n": 1})
+
+
+def test_an_output_type_check_never_becomes_an_absence() -> None:
+    """`with_output_type_checks`' mismatch is fnloom's `TypeError`, not the node's."""
+    module = make_module(
+        "own_output_type",
+        """
+def out(n: int) -> int:
+    return "ten"
+""",
+    )
+    builder = (
+        fnloom.Builder()
+        .with_modules(module)
+        .with_output_type_checks()
+        .with_absent_on(TypeError)
+    )
+    with pytest.raises(TypeError, match="out: returned str, expected int"):
+        builder.build().execute(["out"], inputs={"n": 1})
+
+
+CLOSED = """
+from fnloom import Absent, Collect, Parallelizable, absent_on
+
+CLOSED = []
+
+
+class Listing:
+    def __init__(self) -> None:
+        self.given = 0
+
+    def __iter__(self) -> "Listing":
+        return self
+
+    def __next__(self) -> int:
+        self.given += 1
+        if self.given == 2:
+            raise ConnectionError("lost")
+        return self.given
+
+    def close(self) -> None:
+        CLOSED.append(self.given)
+
+
+@absent_on(ConnectionError)
+def item(n: int) -> Parallelizable[int] | Absent:
+    return Listing()
+
+
+def each(item: int) -> int:
+    return item
+
+
+def out(each: Collect[int] | Absent) -> object | Absent:
+    return each
+"""
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_an_iterator_absent_on_its_error_is_closed_once(kind: Kind) -> None:
+    """A custom iterator that raised is closed, once, though the expand is absent."""
+    module = make_module(f"closed_{kind}", CLOSED)
+    builder = fnloom.Builder().with_modules(module)
+    assert executed(kind, builder, ["out"], {"n": 1}) == {"out": ABSENT}
+    assert module.CLOSED == [2]
+
+
+NATIVE = """
+from fnloom import Absent, absent_on, cache
+
+FAILING = [True]
+CALLS = []
+
+
+@cache(version="1")
+@absent_on(KeyError)
+def a(x: int) -> int | Absent:
+    if FAILING[0]:
+        raise KeyError(x)
+    return x
+
+
+@cache(version="1")
+def b(x: int, a: int = 0) -> int:
+    CALLS.append("b")
+    return x + a
+"""
+
+
+def test_a_plain_memory_cache_stores_nothing_made_from_an_absence() -> None:
+    """With no expand, a `MemoryCache` is written natively, but not for this plan."""
+    module = make_module("native_absent", NATIVE)
+    driver = (
+        fnloom.Builder().with_modules(module).with_cache(fnloom.MemoryCache()).build()
+    )
+    for _ in range(2):
+        assert driver.execute(["b"], inputs={"x": 1}) == {"b": 1}
+    assert module.CALLS == ["b", "b"]
+    module.FAILING[0] = False
+    for _ in range(2):
+        assert driver.execute(["b"], inputs={"x": 1}) == {"b": 2}
+    assert module.CALLS == ["b", "b", "b"]

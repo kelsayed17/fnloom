@@ -1143,9 +1143,9 @@ fn land(
                     hook.absent_error(&node.name, branch, &error)
                 });
                 if errors.is_empty() {
-                    Landed::done(Outcome::Item(Item::Declined(shared(
+                    Landed::done(Outcome::ErrorAbsent(shared(
                         scope.absent.clone().into_any(),
-                    ))))
+                    )))
                 } else {
                     Landed::hooks(py, "absent_error", errors)
                 }

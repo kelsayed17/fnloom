@@ -922,8 +922,7 @@ impl Stepper {
                 let Ok(absent) = absent::singleton(py) else {
                     return failed(PyRuntimeError::new_err("fnloom.ABSENT is missing"));
                 };
-                let declined =
-                    Outcome::Item(Item::Declined(shared(absent.bind(py).clone().into_any())));
+                let declined = Outcome::ErrorAbsent(shared(absent.bind(py).clone().into_any()));
                 if !self.observers.any() {
                     return (declined, None, false);
                 }

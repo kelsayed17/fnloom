@@ -441,13 +441,13 @@ def _returning(
                 return value
         except _types.UnresolvedError as error:
             msg = f"{name}: {error}"
-            raise TypeError(msg) from None
+            raise _absence.own(TypeError(msg)) from None
         msg = (
             f"{name}: returned {inspect.formatannotation(type(value))}, "
             f"expected {inspect.formatannotation(declared)}"
             f"{_inside(declared, value)}"
         )
-        raise TypeError(msg)
+        raise _absence.own(TypeError(msg))
 
     if _async.awaits(node):
         awaited = typing.cast("Callable[..., Awaitable[object]]", payload)
@@ -3895,7 +3895,9 @@ class Builder[R = dict[str, object]]:
         # the node calling it is the one `@absent_on` covers.
         others = relays | {n.name for n in nodes if extractor(n) is not None}
         _absence.refuse_unadmitted(nodes, others)
-        absent_on = _absence.covered(nodes, self._absent_on, others)
+        # A relay's `.raw` node calls the function: a tag query reads the relay's tags.
+        tags = {f"{n.name}.raw": n.tags for n in nodes if n.name in relays}
+        absent_on = _absence.covered(nodes, self._absent_on, others, tags)
         blocks, absent = self._blocks_and_absence(nodes, absent_on)
         _refuse_bound_block_nodes(self._bound, blocks, nodes)
         views = node_views(

@@ -99,8 +99,10 @@ change the public API; such changes are listed under **Changed** and **Removed**
   branch's place; an expand absent on an error, before or while it yields, has no branches. An `@absent_on` node's
   return annotation must admit `Absent`, checked at build, naming the node, and an unresolved one is refused; a node
   covered only by `with_absent_on` may be absent whatever its annotation. Only `Exception` subclasses may be listed,
-  so an interrupt, an exit, a generator's close or a cancellation is never absorbed, and neither is fnloom's own
-  `TypeError` for a value nor a stopped inner run's `StoppedError`. `after_node` still reports `ok=False` with the
+  so an interrupt, an exit, a generator's close or a cancellation is never absorbed, and neither is a check of
+  fnloom's own (an item refused, an output check, a missing field, a value `ABSENT` it may not be) nor a stopped
+  inner run's `StoppedError`. An expand's item iterator that raises anything but `StopIteration` is now closed at
+  once, and once. `after_node` still reports `ok=False` with the
   error, so `LogFailures` logs it, and `RunEnd.absent_errors` lists each as `(node, branch, error)`, sorted by order
   key on every driver (amends Q84). An error absence is no failure: the run's error is still the first real failure
   in reference order. It is never stored, nothing computed from it in that run is either, and single-flight never

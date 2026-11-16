@@ -5,7 +5,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use fnloom_core::graph::Graph as CoreGraph;
 use fnloom_core::node::{Collect, Dependency, InputSpec, NodeId, NodeSpec, TagValue};
 use fnloom_core::plan::Request;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyBaseExceptionGroup, PyValueError};
+use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::pybacked::PyBackedStr;
 use pyo3::types::{PyDict, PyString, PyTuple};
@@ -283,14 +284,29 @@ impl Graph {
     }
 
     /// Whether `error`, raised by node `id`'s own call or one of its items, makes the node
-    /// absent: it is an instance of one of the node's `absent_on` classes, and no
-    /// `StoppedError`, which only says that the run that started this one stopped.
+    /// absent: it is an instance of one of the node's `absent_on` classes, and neither one
+    /// fnloom raised for a check of its own (`fnloom._absence.own`) nor a `StoppedError`,
+    /// alone or in a group, which only says that the run that started this one stopped.
     pub fn absent_on(&self, py: Python<'_>, id: NodeId, error: &PyErr) -> bool {
         let Some(classes) = self.absent_on.get(id.index()).and_then(Option::as_ref) else {
             return false;
         };
-        error.matches(py, classes.bind(py)).unwrap_or(false)
-            && !error.is_instance_of::<crate::parallel::StoppedError>(py)
+        if !error.matches(py, classes.bind(py)).unwrap_or(false) {
+            return false;
+        }
+        let value = error.value(py);
+        if value.hasattr(intern!(py, "__fnloom_own__")).unwrap_or(true) {
+            return false;
+        }
+        let stopped = py.get_type::<crate::parallel::StoppedError>();
+        if value.is_instance(&stopped).unwrap_or(true) {
+            return false;
+        }
+        // A group holding a `StoppedError`: what a stopped inner run's hooks raised with it.
+        !value.is_instance_of::<PyBaseExceptionGroup>()
+            || value
+                .call_method1(intern!(py, "subgroup"), (stopped,))
+                .is_ok_and(|found| found.is_none())
     }
 
     /// The item iterator factory of expand `id`; `None` for any other node.

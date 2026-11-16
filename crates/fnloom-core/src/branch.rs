@@ -315,6 +315,7 @@ impl<'r, P, T: Clone> Runner<'r, P, T> {
                     }
                 }
             };
+            let by_error = failed.is_some();
             let slot = match failed {
                 Some(source) => {
                     let failure = node_error(graph, node, source, branch, Vec::new());
@@ -332,7 +333,7 @@ impl<'r, P, T: Clone> Runner<'r, P, T> {
                     outcome.map_err(|source| node_error(graph, node, source, branch, Vec::new()))?
                 }
             };
-            if slot.absent && !node.declines && !node.absent_on_error {
+            if slot.absent && !node.declines && !by_error {
                 return Err(declined_wrongly(node));
             }
             let exhausted = !slot.absent;
@@ -410,7 +411,9 @@ impl<'r, P, T: Clone> Runner<'r, P, T> {
             Err(source) => {
                 let branch = &self.branch[..depth];
                 let failure = node_error(graph, node, source, branch, Vec::new());
-                Item::Declined(error_absence(eval, hooks, node, branch, failure)?.value)
+                let slot = error_absence(eval, hooks, node, branch, failure)?;
+                self.absent_frame(sub, slot.value);
+                return Ok(());
             }
         };
         match item {
@@ -458,23 +461,28 @@ impl<'r, P, T: Clone> Runner<'r, P, T> {
                 Ok(())
             }
             Item::Declined(value) => {
-                if !node.declines && !node.absent_on_error {
+                if !node.declines {
                     return Err(declined_wrongly(node));
                 }
-                // The branches already run are dropped with the frame.
-                self.frames.pop();
-                self.branch.pop();
-                for &collected in &sub.collected {
-                    self.gathered[collected.index()] = Some(Collected::Absent(value.clone()));
-                }
-                self.slots[sub.expand.index()] = Some(Slot {
-                    value,
-                    absent: true,
-                });
-                self.complete_current();
+                self.absent_frame(sub, value);
                 Ok(())
             }
         }
+    }
+
+    /// The innermost frame's expand, of `sub`, is absent, holding `value`: the branches
+    /// already run are dropped with the frame.
+    fn absent_frame(&mut self, sub: &SubPlan, value: T) {
+        self.frames.pop();
+        self.branch.pop();
+        for &collected in &sub.collected {
+            self.gathered[collected.index()] = Some(Collected::Absent(value.clone()));
+        }
+        self.slots[sub.expand.index()] = Some(Slot {
+            value,
+            absent: true,
+        });
+        self.complete_current();
     }
 
     /// Decides the innermost frame's needs for its new branch (`needs`), asking `lookup` of

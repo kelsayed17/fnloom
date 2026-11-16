@@ -8,14 +8,15 @@ branch order. The core finds the blocks and runs them; this module reads the
 annotations, checks the items and holds the branch a node runs in.
 """
 
+import contextlib
 import inspect
 import types
 import typing
-from collections.abc import AsyncIterable, Callable, Iterable, Iterator
+from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterable, Iterator
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Annotated, Final, Literal, Union, override
 
-from fnloom._absence import ABSENT, admits_absent, without_absent
+from fnloom._absence import ABSENT, admits_absent, own, without_absent
 from fnloom._types import Rules, ValueCheck, admitting, checks_of
 
 if TYPE_CHECKING:
@@ -228,8 +229,22 @@ class Items(Iterator[object]):
 
     @override
     def __next__(self) -> object:
-        """The next item, checked; `StopIteration` as the iterable raised it."""
-        return self._kept(self._in_branch(next, self._iterator))
+        """The next item, checked; `StopIteration` as the iterable raised it.
+
+        An iterator that raised anything else is closed at once, and only once: the
+        run's end may not close it, when the error makes the expand absent (Q133).
+        """
+        try:
+            item = self._in_branch(next, self._iterator)
+        except StopIteration:
+            raise
+        except Exception:
+            # What closing raises is dropped, as for a stopped run's iterator.
+            with contextlib.suppress(Exception):
+                self.close()
+            self._iterator = iter(())
+            raise
+        return self._kept(item)
 
     def _kept(self, item: object) -> object:
         """`item`, the next one read, once checked, recorded and reported."""
@@ -240,10 +255,10 @@ class Items(Iterator[object]):
                 f"item {index} of {self._node!r} is fnloom.ABSENT, which an item "
                 "can't be"
             )
-            raise TypeError(msg)
+            raise own(TypeError(msg))
         if self._check is not None and (problem := self._check(item)) is not None:
             msg = f"item {index} of {self._node!r}: {problem}"
-            raise TypeError(msg)
+            raise own(TypeError(msg))
         if self._items is not None:
             self._items.append(item)
         if self._late is not None:
@@ -280,6 +295,12 @@ class Items(Iterator[object]):
         return self._items
 
 
+async def _nothing() -> AsyncIterator[object]:
+    """An async iterator with no items: what a closed `AsyncItems` reads."""
+    return
+    yield
+
+
 class AsyncItems(Items):
     """`Items` of an async generator expand, read with `__anext__` by the async driver.
 
@@ -312,8 +333,21 @@ class AsyncItems(Items):
         raise TypeError(msg)
 
     async def __anext__(self) -> object:
-        """The next item, checked; `StopAsyncIteration` at the end."""
-        return self._kept(await anext(self._aiterator))
+        """The next item, checked; `StopAsyncIteration` at the end.
+
+        An iterator that raised anything else is closed at once, and only once, as
+        `Items.__next__` closes one.
+        """
+        try:
+            item = await anext(self._aiterator)
+        except StopAsyncIteration:
+            raise
+        except Exception:
+            with contextlib.suppress(Exception):
+                await self.afinish(False)  # noqa: FBT003  # `afinish`'s flag, by position
+            self._aiterator = _nothing()
+            raise
+        return self._kept(item)
 
     async def afinish(self, exhausted: bool) -> list[object] | None:  # noqa: FBT001  # as `finish`
         """Ends the iteration, closing it unless `exhausted`; the items, if recorded.
