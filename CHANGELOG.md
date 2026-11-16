@@ -72,6 +72,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Fixed
 
+- On 3.14t, a cached parallel run could, rarely, skip storing a block node's value or an expand's items. Their key
+  read the item versions of an expand that was finishing at that moment, and found none.
 - A `Ctrl-C` that arrived while a parallel run started its pool's threads was lost, and could leave the pool counting
   a thread that never started.
 - A run started on a thread that carries a parallel task's context takes that task's worker slot only while no other

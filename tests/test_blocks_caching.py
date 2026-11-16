@@ -8,6 +8,7 @@ import pytest
 
 import fnloom
 from fnloom import CacheOutcome, MemoryCache
+from fnloom._caching import CacheRun
 from fnloom._stores import MISSING
 from helpers import make_module
 
@@ -755,3 +756,34 @@ def test_single_flight_never_waits_a_worker() -> None:
     )
     assert result == {"summary": ["A", "A", "B"]}
     assert sorted(module.CALLS) == ["a", "b"]
+
+
+def test_an_items_version_is_known_while_its_expand_finishes() -> None:
+    """A key read while `finished` moves an expand's items still finds them.
+
+    `_item` reads `_items`, then `_pulling`, without the lock: `finished` writes the
+    first before it empties the second, so a reader between the two finds one.
+    """
+    module = make_module("finishing_items", ORDERED)
+    driver = fnloom.Builder().with_modules(module).with_cache(MemoryCache()).build()
+    inputs: dict[str, object] = {"order": [3], "rate": 2}
+    runnable = driver.prepare(["summary"], inputs=inputs)._plan  # noqa: SLF001  # the cached run
+    assert isinstance(runnable, CacheRun)
+    late = runnable.begin(inputs, {}).late
+    assert late is not None
+    late.pulled("picked", (), 3)
+    seen: list[object] = []
+
+    class Watched(dict[object, object]):
+        """A dict that reads the item's version as each entry is written."""
+
+        @override
+        def __setitem__(self, key: object, value: object) -> None:
+            assert late is not None
+            seen.append(late._item("picked", (), 0, [], set()))  # noqa: SLF001  # the race's reader
+            super().__setitem__(key, value)
+
+    late._items = Watched()  # noqa: SLF001  # watch the write  # ty: ignore[invalid-assignment]
+    late.finished("picked", (), [3])
+    assert len(seen) == 1
+    assert isinstance(seen[0], bytes)

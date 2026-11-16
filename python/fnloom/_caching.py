@@ -1915,8 +1915,11 @@ class LateKeys:
         """Expand `name` in `branch` is exhausted: its items are known, and stored."""
         prefix = tuple(branch)
         with self._lock:
-            versions = self._pulling.pop((name, prefix), [])
+            # `_items` first: `_item` reads it, then `_pulling`, without the lock, so
+            # it always finds one of them.
+            versions = self._pulling.get((name, prefix), [])
             self._items[name, prefix] = tuple(versions)
+            self._pulling.pop((name, prefix), None)
         if (name, prefix) in self._replayed or not self._stores(name):
             return
         key = self._expand_key(name, prefix)
