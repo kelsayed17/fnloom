@@ -1086,3 +1086,56 @@ def test_a_node_whose_slot_is_taken_during_its_hooks_waits_parked_for_it() -> No
     hook.thread.join(5)
     assert result == {"slow": 1}
     assert module.MOST == [1]
+
+
+ABANDONED = """
+import asyncio
+import threading
+import time
+
+from fnloom import limit
+
+ALONE = threading.Lock()
+OVERLAPS = []
+
+
+@limit(1)
+def slow(x: int) -> int:
+    if not ALONE.acquire(blocking=False):
+        OVERLAPS.append(x)
+        return x
+    try:
+        time.sleep(0.3)
+    finally:
+        ALONE.release()
+    return x
+
+
+async def boom(x: int) -> int:
+    await asyncio.sleep(0.05)
+    raise ValueError("boom")
+"""
+
+
+@pytest.mark.parametrize("threads", [None, 2], ids=["no-threads", "threads"])
+def test_a_sync_node_its_failed_run_abandons_keeps_its_slot_until_it_returns(
+    threads: int | None,
+) -> None:
+    """The run raises without waiting for the thread, but the slot stays taken."""
+    module = make_module(f"async_abandoned_{threads}", ABANDONED)
+    builder = fnloom.Builder().with_modules(module)
+    if threads is not None:
+        builder = builder.with_threads(threads)
+    driver = builder.build_async()
+
+    async def scenario() -> tuple[float, object]:
+        started = time.monotonic()
+        with pytest.raises(ValueError, match="boom"):
+            await driver.execute(["slow", "boom"], inputs={"x": 1})
+        raised = time.monotonic() - started
+        return raised, await driver.execute(["slow"], inputs={"x": 2})
+
+    raised, result = asyncio.run(asyncio.wait_for(scenario(), 10))
+    assert raised < 0.25  # noqa: PLR2004  # well before the abandoned call returns
+    assert result == {"slow": 2}
+    assert module.OVERLAPS == []

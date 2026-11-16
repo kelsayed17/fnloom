@@ -258,8 +258,12 @@ impl Pool {
 
     /// Queues `job`, starting a thread when no idle one is left to take it: an async
     /// run's calls are capped by its worker slots, not by the threads started so far.
-    fn submit(self: &Arc<Self>, py: Python<'_>, job: Job) {
+    ///
+    /// When no thread can be started to take it, the job is taken back, unless a thread
+    /// took it meanwhile, and the error raised, so its future is never left unresolved.
+    fn submit(self: &Arc<Self>, py: Python<'_>, job: Job) -> PyResult<()> {
         let stopping = self.stopping.load(Ordering::Acquire);
+        let future = job.future.clone_ref(py);
         let spawn = self.with_state(py, move |state| {
             state.jobs.push_back(job);
             state.generation += 1;
@@ -270,8 +274,27 @@ impl Pool {
             spawn
         });
         self.wake.notify_all();
-        if spawn && self.spawn(py).is_err() {
-            self.with_state(py, |state| state.started -= 1);
+        if !spawn {
+            return Ok(());
+        }
+        let Err(error) = self.spawn(py) else {
+            return Ok(());
+        };
+        let address = future.as_ptr() as usize;
+        let taken = self.with_state(py, move |state| {
+            state.started -= 1;
+            let at = state
+                .jobs
+                .iter()
+                .position(|job| job.future.as_ptr() as usize == address);
+            at.and_then(|at| state.jobs.remove(at))
+        });
+        match taken {
+            Some(job) => {
+                drop(job);
+                Err(error)
+            }
+            None => Ok(()),
         }
     }
 
@@ -297,7 +320,8 @@ fn work(py: Python<'_>, pool: &Arc<Pool>) {
                 }
                 continue;
             }
-            if stopping {
+            // A job queued as the pool stopped is still run, so its future resolves.
+            if stopping && pool.with_state(py, |state| state.jobs.is_empty()) {
                 return false;
             }
             let mut worked = false;
@@ -411,7 +435,7 @@ impl Threads {
             function: function.unbind(),
             context: context.unbind(),
         };
-        self.pool.submit(py, job);
+        self.pool.submit(py, job)?;
         Ok(future)
     }
 }

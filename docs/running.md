@@ -1070,8 +1070,9 @@ an async generator is cancelled once, and the generator is closed once, after an
 **When a node fails,** the run cancels every node still running, waits for each `async def` node to stop, and raises
 the failed node's own exception, with the same note naming the node as the sync driver adds. There's no
 `ExceptionGroup`, so `except ZeroDivisionError` works as it does with `Driver`. A sync node in a thread can't be
-interrupted: the run doesn't wait for it, and drops its result when it comes. `asyncio.run` still waits for running
-threads when the loop shuts down, since it shuts the default executor down. If the caller is cancelled, as by
+interrupted: the run doesn't wait for it, and drops its result when it comes, but its `@limit` and worker slots stay
+taken until it returns. `asyncio.run` still waits for running threads when the loop shuts down, since it shuts the
+default executor down. If the caller is cancelled, as by
 `asyncio.timeout`, the run cancels its nodes the same way, and the cancellation reaches the caller once each
 `async def` node has stopped. Each node is cancelled once: a second cancellation of the caller, or one after a node
 failed, doesn't interrupt a node's cleanup, and the caller still waits for it.

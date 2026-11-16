@@ -7,6 +7,7 @@ __all__ = [
     "ABSENT",
     "Absent",
     "Graph",
+    "Held",
     "KeyPlan",
     "Keys",
     "Limits",
@@ -123,10 +124,15 @@ type Completion = Literal["value", "error", "done", "dropped"]
 type Handed = tuple[int, str, tuple[int, ...], Work, Any, contextvars.Context | None]
 
 @final
+class Held:
+    def release(self) -> None: ...
+
+@final
 class Stepper:
     def next(self) -> Handed | int: ...
     def complete(self, task: int, kind: Completion, value: object, /) -> bool: ...
     def stop(self) -> None: ...
+    def detach(self, task: int, /) -> Held | None: ...
     def outputs(self) -> dict[str, object]: ...
 
 @final

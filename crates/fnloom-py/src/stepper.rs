@@ -152,9 +152,9 @@ impl Grant for Grants<'_> {
     }
 }
 
-/// The grant a completion gives slots back to: the worker slot only, since the stepper
-/// gives a task's node and group slots back itself, before its hooks.
-struct WorkersOnly<'a>(Grants<'a>);
+/// The grant a completion gives slots back to: the worker slot only, when the task still
+/// holds it, since the stepper gives a task's node and group slots back itself.
+struct WorkersOnly<'a>(Grants<'a>, bool);
 
 impl Grant for WorkersOnly<'_> {
     fn try_start(&self, node: Option<NodeId>, seat: Seat) -> bool {
@@ -162,7 +162,7 @@ impl Grant for WorkersOnly<'_> {
     }
 
     fn release(&self, node: Option<NodeId>, _seat: Seat) {
-        if let Some(core) = self.0.core {
+        if let Some(core) = self.0.core.filter(|_| self.1) {
             core.release(None, self.0.seat(node));
         }
     }
@@ -386,7 +386,10 @@ impl Stepper {
             };
             self.failures.push((at, failure));
         }
-        let grants = WorkersOnly(Grants::new(self.caps.as_ref(), &self.pooled));
+        let grants = WorkersOnly(
+            Grants::new(self.caps.as_ref(), &self.pooled),
+            running.worker,
+        );
         let mut report = std::mem::take(&mut self.report);
         if let Some(scheduler) = self.scheduler.as_mut() {
             if stop {
@@ -969,6 +972,40 @@ impl Stepper {
         Ok(self.stopping())
     }
 
+    /// Completes task `task` as dropped, a sync node's call its stopping run abandons while
+    /// its thread still runs, but keeps the task's slots: the `Held` it returns gives them
+    /// back once the call returns, so a limit holds while it runs. `None` when it holds no
+    /// slot, or the task was already completed.
+    fn detach(&mut self, py: Python<'_>, task: usize) -> PyResult<Option<Held>> {
+        self.alive()?;
+        let Some(mut running) = self.take(task) else {
+            return Ok(None);
+        };
+        for flag in running.live.drain(..) {
+            drop(flag.bind(py).set_item(0, false));
+        }
+        let held = self
+            .caps
+            .as_ref()
+            .filter(|_| running.slots || running.worker)
+            .map(|caps| Held {
+                caps: Arc::clone(caps),
+                pool: self.pool.clone(),
+                node: running.node,
+                slots: running.slots,
+                worker: running.worker,
+                released: AtomicBool::new(false),
+                pid: self.pid,
+            });
+        // The scheduler takes the task back; its slots stay with `held`.
+        (running.slots, running.worker) = (false, false);
+        if let Some(scheduler) = self.scheduler.as_mut() {
+            scheduler.stop();
+        }
+        self.settle(py, &running, dropped(py), None, false);
+        Ok(held)
+    }
+
     /// Stops the run: no compute, pull or probe is handed out any more, and each open
     /// iterator is finished as stopped.
     fn stop(&mut self) {
@@ -1082,6 +1119,25 @@ pub fn start(
     Ok(stepper)
 }
 
+/// Gives back a task's node and group slots and its worker slot, as it holds them, then
+/// wakes whoever waits for one, when attached.
+fn release_all(caps: &Caps, pool: Option<&Arc<Pool>>, node: NodeId, slots: bool, worker: bool) {
+    if slots {
+        caps.core.release(Some(node), Seat::Threadless);
+    }
+    if worker {
+        caps.core.release(None, Seat::Take);
+    }
+    if slots || worker {
+        let _ = Python::try_attach(|py| {
+            caps.notify(py);
+            if let Some(pool) = pool {
+                pool.notify(py);
+            }
+        });
+    }
+}
+
 impl Drop for Stepper {
     /// Gives back the slots of tasks never completed, a run dropped mid-way, unless this
     /// is a forked child, which touches nothing it inherited.
@@ -1093,13 +1149,58 @@ impl Drop for Stepper {
             return;
         };
         for running in self.running.iter().flatten() {
-            if running.slots {
-                caps.core.release(Some(running.node), Seat::Threadless);
-            }
-            if running.worker {
-                caps.core.release(None, Seat::Take);
-            }
+            release_all(
+                caps,
+                self.pool.as_ref(),
+                running.node,
+                running.slots,
+                running.worker,
+            );
         }
+    }
+}
+
+/// The slots of a sync node's call that its run abandoned while the call still runs in
+/// a thread (`Stepper.detach`): given back once, by `release` as the call returns, or
+/// when collected.
+#[pyclass(frozen, module = "fnloom._core")]
+pub struct Held {
+    caps: Arc<Caps>,
+    pool: Option<Arc<Pool>>,
+    node: NodeId,
+    slots: bool,
+    worker: bool,
+    released: AtomicBool,
+    pid: u32,
+}
+
+impl Held {
+    fn give_back(&self) {
+        // In a forked child nothing inherited is touched.
+        if std::process::id() != self.pid || self.released.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        release_all(
+            &self.caps,
+            self.pool.as_ref(),
+            self.node,
+            self.slots,
+            self.worker,
+        );
+    }
+}
+
+#[pymethods]
+impl Held {
+    /// Gives the slots back, waking whoever waits for one; only the first call does.
+    fn release(&self) {
+        self.give_back();
+    }
+}
+
+impl Drop for Held {
+    fn drop(&mut self) {
+        self.give_back();
     }
 }
 

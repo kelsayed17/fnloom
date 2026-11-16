@@ -29,6 +29,7 @@ import contextvars
 import functools
 import inspect
 import os
+import threading
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
 from fnloom import _extract
@@ -344,6 +345,33 @@ async def _pull(items: AsyncItems) -> tuple[bool, object]:
         return False, None
 
 
+class _Guard:
+    """A sync node's call in a thread, which its stopping run may abandon.
+
+    The run then hands the guard the call's slots (`Stepper.detach`), which it gives
+    back once the call returns, so a limit holds while an abandoned call runs.
+    """
+
+    __slots__ = ("held", "lock", "returned")
+
+    def __init__(self) -> None:
+        """A call not yet returned, holding its own slots."""
+        self.lock = threading.Lock()
+        self.returned = False
+        self.held: _core.Held | None = None
+
+    def call(self, function: Callable[[], object]) -> object:
+        """`function()`, then the abandoned call's slots given back, if it was."""
+        try:
+            return function()
+        finally:
+            with self.lock:
+                self.returned = True
+                held = self.held
+            if held is not None:
+                held.release()
+
+
 def _retrieved(future: asyncio.Future[object]) -> None:
     """Marks a discarded future's outcome retrieved, so asyncio never reports it."""
     if not future.cancelled():
@@ -370,9 +398,11 @@ class _Run:
         "_calls",
         "_factory",
         "_finished",
+        "_guards",
         "_halted",
         "_limits",
         "_loop",
+        "_over",
         "_running",
         "_stepper",
         "_stopped",
@@ -401,10 +431,15 @@ class _Run:
         # Each running task's future: its stepper task, node and work.
         self._running: dict[asyncio.Future[Any], tuple[int, str, str]] = {}
         self._finished: asyncio.Future[None] = self._loop.create_future()
+        # The guard of each running sync compute, on a driver with limits.
+        self._guards: dict[asyncio.Future[Any], _Guard] = {}
         # Whether the stepper is stopping, as its calls said.
         self._halted = False
         # Whether the running tasks were cancelled, once the run stopped.
         self._stopped = False
+        # Whether `wait` has returned or raised: an outcome after it is dropped. Not
+        # `_finished.done()`, which a cancelled caller makes true before it stops.
+        self._over = False
         # Whether a waker is registered for a slot this run waits on.
         self._waking = False
 
@@ -431,6 +466,8 @@ class _Run:
             # The loop is stopping (`KeyboardInterrupt`, `SystemExit`): no waiting.
             self._stop()
             raise
+        finally:
+            self._over = True
         return self._stepper.outputs()
 
     def _drain(self) -> None:
@@ -442,7 +479,10 @@ class _Run:
         status = cast("int", task)
         if status & _HALTED or self._halted:
             self._halted = True
-            self._cancel()
+            if self._cancel():
+                # A task detached as it was cancelled is complete: look again.
+                self._drain()
+                return
         if status & _DONE:
             if not self._finished.done():
                 self._finished.set_result(None)
@@ -461,6 +501,7 @@ class _Run:
         """
         task, name, _, work, payload, context = handed
         function, kind = self._calls[name]
+        guard = None
         try:
             if work == "compute":
                 if kind == "inline":
@@ -477,9 +518,12 @@ class _Run:
                 if kind == "await":
                     future = self._task(function(**payload), context)
                 else:
-                    future = self._threaded(
-                        functools.partial(function, **payload), context
-                    )
+                    call = functools.partial(function, **payload)
+                    if self._limits is not None:
+                        # Its slots outlive the run that abandons it, until it returns.
+                        guard = _Guard()
+                        call = functools.partial(guard.call, call)
+                    future = self._threaded(call, context)
             elif isinstance(payload, AsyncItems):
                 awaited = (
                     _pull(payload)
@@ -502,6 +546,8 @@ class _Run:
             self._settle(future, task, name, work)
             return
         self._running[future] = (task, name, work)
+        if guard is not None:
+            self._guards[future] = guard
         future.add_done_callback(self._done)
 
     def _on_loop(
@@ -561,7 +607,9 @@ class _Run:
     def _done(self, future: asyncio.Future[object]) -> None:
         """A task or a thread finished: its outcome goes to the stepper."""
         found = self._running.pop(future, None)
-        if found is None or self._finished.done():
+        if self._guards:
+            self._guards.pop(future, None)
+        if found is None or self._over:
             _retrieved(future)
             return
         try:
@@ -592,29 +640,39 @@ class _Run:
             more, value = value
             self._complete(task, "value" if more else "done", value)
             return
-        threaded = type(future) is not asyncio.Task
+        threaded = not isinstance(future, asyncio.Task)
         if threaded and work == "compute" and inspect.isawaitable(value):
             self._complete(task, "error", _awaitable_refusal(name, value))
             return
         if self._stepper.complete(task, "value", value):
             self._halted = True
 
-    def _cancel(self) -> None:
+    def _cancel(self) -> bool:
         """Cancels every running node and pull, once, as the run stops.
 
         A task takes its cancellation; a thread cannot be interrupted, so a node's
-        future is cancelled and its result, when it comes, dropped. A pull in a
-        thread is waited for, so its generator is ended only after it returns, and
-        an iterator's end is never cancelled.
+        future is cancelled and its result, when it comes, dropped, while its slots
+        stay taken until its call returns. A pull in a thread is waited for, so its
+        generator is ended only after it returns, and an iterator's end is never
+        cancelled. Whether it completed a task, detaching it.
         """
         if self._stopped:
-            return
+            return False
         self._stopped = True
-        for future, (_, _, work) in list(self._running.items()):
+        detached = False
+        for future, (task, _, work) in list(self._running.items()):
+            guard = self._guards.pop(future, None)
+            if guard is not None:
+                with guard.lock:
+                    if not guard.returned:
+                        guard.held = self._stepper.detach(task)
+                        del self._running[future]
+                        detached = True
             if work == "compute" or (
                 work == "pull" and isinstance(future, asyncio.Task)
             ):
                 future.cancel()
+        return detached
 
     def _stop(self) -> None:
         """Stops the run and cancels what runs; a second stop does nothing more.
@@ -653,7 +711,7 @@ class _Run:
     def _woken(self) -> None:
         """A slot was released: the run looks for tasks again."""
         self._waking = False
-        if self._finished.done():
+        if self._over:
             return
         try:
             self._drain()

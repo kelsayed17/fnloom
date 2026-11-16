@@ -63,7 +63,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `sync_nodes="inline"` and only sync nodes, the events are the sync driver's, orders included. It honours `@limit`
   and `with_limits`: an `async def` node waiting for a slot holds no thread, and is woken by a release from any
   thread or loop. A node's slots are given back before its hooks, as on the sync driver, and a run inside a node
-  needing a slot its callers hold is refused at once.
+  needing a slot its callers hold is refused at once. A sync node a failed or cancelled run abandons in a thread keeps
+  its slots until its call returns.
 - `with_threads` on `build_async()`: each sync node runs on the driver's own pool, holding a worker slot, so at most
   `max_workers` run at once, while `async def` nodes hold none (Q65). `sync_nodes="inline"` with it is a
   `ValueError`. A sync node there that runs its own async driver never waits for the slot it holds.
