@@ -7,6 +7,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-15
+
 ### Added
 
 - Typed absence (Q135). A node annotated `-> T | fnloom.Absent` may return `fnloom.ABSENT`, a final singleton
@@ -744,7 +746,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - The type stub `fnloom/_core.pyi` matches the extension: `Graph`, `KeyPlan` and `ObserverBase` construct through `__new__`,
   and `Plan.run`'s `observers` defaults to `()` in its runtime signature too.
 
-[Unreleased]: https://github.com/kelsayed17/fnloom/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/kelsayed17/fnloom/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/kelsayed17/fnloom/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/kelsayed17/fnloom/compare/v0.3.1...v0.4.0
 [0.3.1]: https://github.com/kelsayed17/fnloom/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/kelsayed17/fnloom/compare/v0.2.0...v0.3.0

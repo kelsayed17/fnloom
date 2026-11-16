@@ -687,7 +687,7 @@ Plan 12's PRs A to G merge. Per the maintainer's 2026-11-03 decision above, Plan
 - **2026-11-09:** §7.3's stored absence is a header flag with no payload, as Plan 10 PR A3 built it, not a marker
   each format encodes.
 - **2026-11-15:** milestones A and B are built, as [Plan 10](../plans/2026-11-05-plan-10-absence-and-fan-out.md)
-  (#56, #61 to #63, #66, #68, #69, #72 and follow-ups in #83, #84 and #90), shipping in 0.5.0. Where the build
+  (#56, #61 to #63, #66, #68, #69, #72 and follow-ups in #83, #84 and #90), released in 0.5.0. Where the build
   departs from this design, each recorded in the plan's calls: `Evaluate::is_absent` and an opt-in `Blocks` trait
   instead of an `evaluate` returning an outcome and §5's `expand` iterator; `InputSpec.collect` instead of a collect
   dependency;
