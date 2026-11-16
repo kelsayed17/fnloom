@@ -597,6 +597,104 @@ def test_an_inner_run_that_finished_before_its_stop_returns_its_values() -> None
     assert returned == [7]
 
 
+# Three levels: `top` runs the middle driver, whose `mid` runs the inner one; `boom`
+# fails the top run, which stops the two below it.
+LAYERED = """
+import time
+
+import fnloom
+
+DRIVERS = {}
+SEEN = []
+
+
+def poll(x: int) -> int:
+    start = time.monotonic()
+    while not fnloom.cancelled() and time.monotonic() - start < 5:
+        time.sleep(0.01)
+    return -1
+
+
+def after(poll: int) -> int:
+    return poll
+
+
+def mid(x: int) -> int:
+    return DRIVERS["inner"].execute(["after"], inputs={"x": x})["after"]
+
+
+def top(x: int) -> int:
+    try:
+        return DRIVERS["middle"](x)
+    except BaseException as error:
+        SEEN.append(error)
+        raise
+
+
+def boom(x: int) -> int:
+    time.sleep(0.1)
+    raise ValueError("boom")
+"""
+
+
+class _RaisingAfterMid(_core.ObserverBase):
+    """A core observer whose `post_node` of `mid` raises."""
+
+    @override
+    def post_node(
+        self,
+        node: str,
+        *,
+        ok: bool,
+        value: object,
+        error: BaseException | None,
+        branch: tuple[int, ...] = (),
+    ) -> None:
+        if node == "mid":
+            msg = "the observer's own error"
+            raise LookupError(msg)
+
+
+@pytest.mark.parametrize("observer", ["hook", "core observer"])
+def test_a_stopped_nodes_observer_errors_are_raised_with_its_stop(
+    observer: str,
+) -> None:
+    """The middle run raises its node's `StoppedError` with what its observer raised."""
+
+    class Raising(fnloom.Hook):
+        @override
+        def after_node(self, event: fnloom.NodeEnd) -> None:
+            if event.node.name == "mid":
+                msg = "the hook's own error"
+                raise LookupError(msg)
+
+    module = make_module(f"stop_layered_{observer.replace(' ', '_')}", LAYERED)
+    builder = fnloom.Builder().with_modules(module).with_threads(2)
+    module.DRIVERS["inner"] = builder.build()
+    if observer == "hook":
+        hooked = builder.with_hooks(Raising()).build()
+        module.DRIVERS["middle"] = lambda x: hooked.execute(["mid"], inputs={"x": x})[
+            "mid"
+        ]
+    else:
+        # The middle plan run directly, so its observer's errors go through the core.
+        runnable = builder.build().prepare(["mid"], inputs={"x": 1})._plan  # noqa: SLF001  # the native plan and its pool
+        native, workers = runnable._plan, runnable._workers  # noqa: SLF001  # ty: ignore[unresolved-attribute]
+        module.DRIVERS["middle"] = lambda x: native.run(
+            {"x": x},
+            {},
+            [_RaisingAfterMid()],
+            threads=workers.threads(),
+            limits=workers.limits(),
+        )["mid"]
+    with pytest.raises(ValueError, match="boom"):
+        builder.build().execute(["top", "boom"], inputs={"x": 1})
+    (raised,) = module.SEEN
+    assert isinstance(raised, BaseExceptionGroup)
+    kinds = sorted(type(error).__name__ for error in raised.exceptions)
+    assert kinds == ["LookupError", "StoppedError"]
+
+
 def test_a_store_after_a_hook_the_deadline_outlasted_is_dropped() -> None:
     """A node whose `after_node` hook runs past the deadline stores nothing."""
 

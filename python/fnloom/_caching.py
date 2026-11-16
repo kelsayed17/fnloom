@@ -2045,6 +2045,10 @@ class LateKeys:
             pulling = self._pulling.get((name, prefix))
             if pulling is not None and index < len(pulling):
                 return pulling[index]
+            # `finished` writes `_items` before it empties `_pulling`: once this read
+            # of `_pulling` missed, a second read of `_items` finds what it moved.
+            found = self._items.get((name, prefix))
+        if found is None:
             listed = self._listed(name, prefix, needed, unknown)
             if not isinstance(listed, tuple):
                 return listed

@@ -208,9 +208,14 @@ fn demoted(
 ) -> (Out, Option<(OrderKey, Failure)>, bool) {
     match outcome {
         Outcome::Failed(error) if error.is_instance_of::<StoppedError>(py) => {
+            // What its `post_node` hooks raised goes with it.
+            let mut errors = vec![error];
+            if let Some((_, Failure::Task(extra))) = failure {
+                errors.extend(extra);
+            }
             let failure = RunError::Observers {
                 event: "the run",
-                errors: vec![error],
+                errors,
             };
             let dropped = Outcome::Value {
                 value: Arc::new(py.None()),
