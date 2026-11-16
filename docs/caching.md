@@ -525,7 +525,7 @@ same way, runs nothing, and returns every computed node of the plan, by name, wi
 | --- | --- | --- |
 | `hit` | the store holds the node's key | `None` |
 | `miss` | it does not, so a run runs and stores the node | `None`, or `"policy recompute (decorator)"` for a `recompute` node, which always runs and is never stored, or `"extracted field: runs whenever needed; never served from the store"` for a field or column node of `@extract_fields` or `@extract_columns` |
-| `uncacheable` | the node has no key: it always runs and is never stored | why, for example the global (`"global 'WEIGHTS' of 'f' is a dict, ..."`), the value path (`"levels[0]: Level"`), the policy (`"policy disable (decorator)"`), a source (`"reads uncacheable 'x'"`) or a failing fingerprint function (`"cannot fingerprint 'x' for the cache: ..."`) |
+| `uncacheable` | the node has no key: it always runs and is never stored | why, for example the global (`"global 'WEIGHTS' of 'f' is a dict, ..."`), the value path (`"shelves[0]: Shelf"`), the policy (`"policy disable (decorator)"`), a source (`"reads uncacheable 'x'"`) or a failing fingerprint function (`"cannot fingerprint 'x' for the cache: ..."`) |
 | `unknown` | the key depends on a `recompute` node's result, which only a run knows | for example `"downstream of recompute node 'x'"`, or `"no key"` |
 | `skipped` | the store doesn't hold the node, and a run skips it, so neither runs nor stores it: a source it requires is absent ([Declared absences](#declared-absences)) | the first such source, `"reads absent 'x'"` |
 

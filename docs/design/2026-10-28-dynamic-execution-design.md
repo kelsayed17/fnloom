@@ -101,7 +101,7 @@ def summary(details: Collect[float]) -> float:  # details: a list[float], in ite
   any graph that uses them.
 - **Typed for checkers.** `Parallelizable[T]` is an alias of `Iterable[T]` and `Collect[T]` of `list[T]`, each with
   a marker the front end reads (`Annotated`, through a PEP 695 alias). A checker sees a generator or a list returned,
-  and `len(prices)` and `prices[0]` type-check. Hamilton's `Collect` is an `Iterable` subclass, so neither does.
+  and `len(details)` and `details[0]` type-check. Hamilton's `Collect` is an `Iterable` subclass, so neither does.
   The exact spelling is the builder's, under that requirement.
 - **Any iterable**, not only a generator. It is consumed lazily and in order, one item per **pull** task (§6.1). A
   pull runs on whichever worker takes it, never two pulls of one iterator at once, and the scheduler hands one out
