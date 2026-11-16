@@ -107,6 +107,8 @@ in what happens when you run it.
 | An `async def` node | The un-awaited coroutine is the value | ✅ `ValueError` at `build()`; `build_async()` awaits it |
 | Execution order | Depends on how you list outputs | ✅ Always the same |
 | Running a request again | Re-planned on every call | ✅ `prepare` once, `run` many times |
+| Fan-out with `Parallelizable` and `Collect` | Behind an experimental flag; nesting and two collects of one block fail | ✅ No flag; blocks nest and may be collected any number of times |
+| A node with nothing to return | Returns `None`, and every consumer must test for it | ✅ Returns `ABSENT`; each consumer receives it, takes its default, or is skipped |
 | Runtime dependencies | numpy, pandas and more | ✅ None |
 
 Hamilton is fnloom's test oracle: the shared behaviour runs through both, and every deliberate difference is
@@ -125,6 +127,7 @@ Milliseconds on an Apple M2 Pro, lower is better, from the
 | 1,000-input fan-in | 3.02 → **1.47** | 2.73 → **0.31** (9×) |
 | 10,000-node chain | 207.5 → **63.4** | `RecursionError` → **1.34** |
 | 10,000 `@parameterize` rows | 5,285 → **128** | `RecursionError` → **1.35** |
+| Fan-out over 10,000 items | 0.28 → 0.47 | 24,767 → **4.97** (4,985×) |
 
 Your node functions still run at Python speed. fnloom removes the overhead around them: planning, validation and
 dispatch.
@@ -134,8 +137,8 @@ dispatch.
 **Yes, if** you compute many derived values from a few inputs (features, metrics, pricing, signals), want each step
 to be a small function you can test on its own, and run the same graph many times in one process.
 
-**Not yet, if** you need dynamic execution, or an adapter that wraps how a node is called, such
-as `GracefulErrorAdapter`. They're on the [roadmap](#status). fnloom is also not a scheduler. It doesn't retry,
+**Not yet, if** you need a fan-out's items run in parallel, or partial results past a failure, as
+`GracefulErrorAdapter` gives. They're on the [roadmap](#status). fnloom is also not a scheduler. It doesn't retry,
 distribute or schedule work, so pair it with an orchestrator if you need that.
 
 ## Install
@@ -169,7 +172,9 @@ uv run maturin develop --release
 - ✅ [Namespaces with `bind=`](https://kelsayed17.github.io/fnloom/writing-nodes/#namespaces), and a [written
   recipe](https://kelsayed17.github.io/fnloom/from-hamilton/#hamilton-features-fnloom-leaves-out) for each Hamilton
   feature left out
-- 🔜 Dynamic execution
+- ✅ [Fan-out and fan-in](https://kelsayed17.github.io/fnloom/running/#fan-out-and-fan-in) with `Parallelizable` and
+  `Collect`, one item after another, and [typed absence](https://kelsayed17.github.io/fnloom/running/#absence)
+- 🔜 The parallel executor and partial results
 
 The [design](https://kelsayed17.github.io/fnloom/design/2026-10-26-fnloom-design/) has the full plan. The name is
 provisional, pending a trademark check before the first release.

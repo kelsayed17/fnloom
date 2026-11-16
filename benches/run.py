@@ -1,8 +1,9 @@
 """Times fnloom against Hamilton on generated graphs; prints one JSON object per row.
 
 Run it as `uv run python -m benches.run`, or `uv run python -m benches.run extract`
-to time only the shapes named. It prints to stdout on purpose: the rows are the
-output, so redirect them to a file.
+to time only the shapes named. Beside the shapes are two block cases, also named
+this way: `fan_out_cached` and `absent_chain`, which print `CaseRow`s. It prints to
+stdout on purpose: the rows are the output, so redirect them to a file.
 """
 
 import json
@@ -11,15 +12,25 @@ import statistics
 import sys
 import time
 from dataclasses import asdict, dataclass
-from typing import TYPE_CHECKING, get_args
+from typing import TYPE_CHECKING, cast, get_args
 
 # Set before anything imports Hamilton, so its import loads no heavy extensions.
 os.environ["HAMILTON_AUTOLOAD_EXTENSIONS"] = "0"
 
 from hamilton import driver as hamilton_driver
+from hamilton.caching.stores.memory import InMemoryMetadataStore, InMemoryResultStore
+from hamilton.execution import executors
 
 import fnloom
-from benches.generate import Shape, generated, make_expected, make_request
+from benches.generate import (
+    Shape,
+    absent_chain_source,
+    file_module,
+    generated,
+    make_expected,
+    make_request,
+    module_source,
+)
 from benches.hooks import Counting
 
 if TYPE_CHECKING:
@@ -27,8 +38,18 @@ if TYPE_CHECKING:
     from types import ModuleType
 
 SIZES = (10, 100, 1000, 10000)
+# Branches, not nodes: the `fan_out` graph is three nodes at every size.
+FAN_OUT_SIZES = (1, 100, 1000, 10000)
 STEADY_RUNS = 7
 NS_PER_MS = 1_000_000
+#: The block cases, named like shapes.
+CASES = ("fan_out_cached", "absent_chain")
+CACHED_BRANCHES = 1000
+CHAIN_NODES = 200
+# A cached Hamilton fan-out of 1,000 branches takes seconds a run, so fewer samples.
+HAMILTON_CACHED_RUNS = 3
+# Runs per timed batch of `absent_chain`, whose runs take microseconds.
+BATCH = 100
 
 
 @dataclass(frozen=True)
@@ -51,6 +72,21 @@ class Row:
     prepare_ms: float | None
     error: str | None
     error_phase: str | None
+
+
+@dataclass(frozen=True)
+class CaseRow:
+    """One block case's run: the median of its samples, in milliseconds per run.
+
+    `case` is `fan_out_warm` (every branch already stored), `fan_out_appended` (one
+    item appended to `n` stored ones) or `absent_chain` (a chain of `n` nodes run
+    plain, through nodes that may be absent, or with its first node declining).
+    """
+
+    case: str
+    n: int
+    runtime: str
+    ms: float
 
 
 @dataclass(frozen=True)
@@ -127,15 +163,35 @@ def _fnloom(
     )
 
 
+def _hamilton_builder(module: ModuleType, *, blocks: bool) -> hamilton_driver.Builder:
+    """Hamilton's builder; with `blocks`, its dynamic execution, synchronously.
+
+    Both executors are set: Hamilton sends each branch to the remote one, which
+    defaults to a `MultiThreadingExecutor` (Q134).
+    """
+    builder = hamilton_driver.Builder().with_modules(module)
+    if blocks:
+        builder = (
+            builder.enable_dynamic_execution(allow_experimental_mode=True)
+            .with_local_executor(executors.SynchronousLocalTaskExecutor())
+            .with_remote_executor(executors.SynchronousLocalTaskExecutor())
+        )
+    return builder
+
+
 def _hamilton(
-    module: ModuleType, outputs: Sequence[str], inputs: Mapping[str, object]
+    module: ModuleType,
+    outputs: Sequence[str],
+    inputs: Mapping[str, object],
+    *,
+    blocks: bool = False,
 ) -> Runtime[hamilton_driver.Driver]:
     # Copied once, outside every timed region, as fnloom's calls need no copy.
     names: list[str | Callable[..., object] | hamilton_driver.Variable] = [*outputs]
     given = dict(inputs)
     return Runtime(
         "hamilton",
-        lambda: hamilton_driver.Builder().with_modules(module).build(),
+        lambda: _hamilton_builder(module, blocks=blocks).build(),
         lambda driver: driver.execute(names, inputs=given),
         lambda driver: lambda: driver.execute(names, inputs=given),
         None,
@@ -203,7 +259,7 @@ def measure_case(shape: Shape, n: int) -> list[Row]:
         generated(shape, n, "fnloom") as fnloom_module,
     ):
         runtimes = [
-            _hamilton(hamilton_module, outputs, inputs),
+            _hamilton(hamilton_module, outputs, inputs, blocks=shape == "fan_out"),
             _fnloom(fnloom_module, outputs, inputs, input_checks=True),
             _fnloom(fnloom_module, outputs, inputs, input_checks=False),
             _fnloom(
@@ -222,18 +278,129 @@ def measure_case(shape: Shape, n: int) -> list[Row]:
     return rows
 
 
+type _FanOut = Callable[[int], Mapping[str, object]]
+
+
+def _fnloom_cached(module: ModuleType) -> _FanOut:
+    """A fnloom plan over `module` with an empty `MemoryCache`, run by item count."""
+    builder = fnloom.Builder().with_modules(module).with_cache(fnloom.MemoryCache())
+    prepared = builder.build().prepare(["total"], inputs={"count": 0})
+    return lambda count: prepared.run(inputs={"count": count})
+
+
+def _hamilton_cached(module: ModuleType) -> _FanOut:
+    """A Hamilton driver over `module` with empty in-memory stores, by item count."""
+    driver = (
+        _hamilton_builder(module, blocks=True)
+        .with_cache(
+            metadata_store=InMemoryMetadataStore(), result_store=InMemoryResultStore()
+        )
+        .build()
+    )
+    names: list[str | Callable[..., object] | hamilton_driver.Variable] = ["total"]
+    return lambda count: cast(
+        "Mapping[str, object]", driver.execute(names, inputs={"count": count})
+    )
+
+
+def _timed_fan_out(run: _FanOut, count: int, where: str) -> float:
+    """Times one run over `count` items, aborting unless it gives the closed form."""
+    result, elapsed = _timed(lambda: run(count))
+    if dict(result) != (expected := make_expected("fan_out", count)):
+        msg = f"{where} computed {result!r}, not {expected!r}"
+        raise SystemExit(msg)
+    return elapsed
+
+
+def cached_fan_out() -> list[CaseRow]:
+    """Times a cached fan-out of `CACHED_BRANCHES` branches, warm and one appended.
+
+    A warm run follows a run over the same items. An appended run follows a run over
+    one item fewer, on a new driver and store each sample, so only the new branch,
+    the expand and the collect miss. Every answer is checked against the closed form.
+    """
+    n = CACHED_BRANCHES
+    rows: list[CaseRow] = []
+    for runtime, new_run, samples in (
+        ("fnloom", _fnloom_cached, STEADY_RUNS),
+        ("hamilton", _hamilton_cached, HAMILTON_CACHED_RUNS),
+    ):
+        where = f"fan_out_cached n={n}: {runtime}"
+        spelling = "hamilton" if runtime == "hamilton" else "fnloom"
+        with file_module(module_source("fan_out", n, spelling)) as module:
+            run = new_run(module)
+            _timed_fan_out(run, n, where)
+            warm = [_timed_fan_out(run, n, where) for _ in range(samples)]
+            appended: list[float] = []
+            for _ in range(samples):
+                fresh = new_run(module)
+                _timed_fan_out(fresh, n, where)
+                appended.append(_timed_fan_out(fresh, n + 1, where))
+        rows += [
+            CaseRow("fan_out_warm", n, runtime, statistics.median(warm)),
+            CaseRow("fan_out_appended", n, runtime, statistics.median(appended)),
+        ]
+    return rows
+
+
+def _batch(prepared: fnloom.PreparedPlan, inputs: Mapping[str, object]) -> None:
+    for _ in range(BATCH):
+        prepared.run(inputs=inputs)
+
+
+def absent_chain() -> list[CaseRow]:
+    """Times a prepared run of a `CHAIN_NODES`-node chain three ways, fnloom only.
+
+    `fnloom (plain)` is the `chain` shape, with no node that may be absent; `fnloom
+    (present)` the same chain after a first node that may decline and doesn't; and
+    `fnloom (declines)` that chain when it does, skipping every other node. Each is
+    the median of `STEADY_RUNS` batches of `BATCH` runs, per run.
+    """
+    n = CHAIN_NODES
+    outputs, inputs = make_request("chain", n)
+    present = make_expected("chain", n)
+    declining = absent_chain_source(n)
+    cases: tuple[tuple[str, str, dict[str, object], dict[str, object]], ...] = (
+        ("fnloom (plain)", module_source("chain", n), inputs, present),
+        ("fnloom (present)", declining, {**inputs, "skip": False}, present),
+        (
+            "fnloom (declines)",
+            declining,
+            {**inputs, "skip": True},
+            {outputs[0]: fnloom.ABSENT},
+        ),
+    )
+    rows: list[CaseRow] = []
+    for runtime, source, given, answer in cases:
+        with file_module(source) as module:
+            prepared = fnloom.build(module).prepare(outputs, inputs=given)
+            if dict(result := prepared.run(inputs=given)) != answer:
+                msg = f"absent_chain n={n}: {runtime} computed {result!r}"
+                raise SystemExit(msg)
+            ms = _median_ms(lambda: _batch(prepared, given)) / BATCH  # noqa: B023  # called before the loop moves on
+            rows.append(CaseRow("absent_chain", n, runtime, ms))
+    return rows
+
+
 def main() -> None:
-    """Prints the 104 rows as JSON lines, or those of the shapes named as arguments."""
+    """Prints the 120 rows and the 7 case rows as JSON lines, or those named."""
     every = get_args(Shape.__value__)
     named = sys.argv[1:]
-    if unknown := sorted(set(named) - set(every)):
-        msg = f"unknown shapes: {', '.join(unknown)}; the shapes: {', '.join(every)}"
+    if unknown := sorted(set(named) - set(every) - set(CASES)):
+        known = ", ".join([*every, *CASES])
+        msg = f"unknown names: {', '.join(unknown)}; the shapes and cases: {known}"
         raise SystemExit(msg)
     shapes = [shape for shape in every if not named or shape in named]
     for shape in shapes:
-        for n in SIZES:
+        for n in FAN_OUT_SIZES if shape == "fan_out" else SIZES:
             for row in measure_case(shape, n):
                 sys.stdout.write(json.dumps(asdict(row)) + "\n")
+                sys.stdout.flush()
+    cases = {"fan_out_cached": cached_fan_out, "absent_chain": absent_chain}
+    for name, measure in cases.items():
+        if not named or name in named:
+            for case_row in measure():
+                sys.stdout.write(json.dumps(asdict(case_row)) + "\n")
                 sys.stdout.flush()
 
 

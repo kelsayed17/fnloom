@@ -119,7 +119,7 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | A `StaticValidator`, refusing a node or the graph at build | `run_to_validate_node` and `run_to_validate_graph` | An `after_build` hook that raises refuses the build, with every problem in one error, carried through `rebuild()` ([`StaticValidator`](#staticvalidator), Q117) |
 | `NodeExecutionMethod` (`run_to_execute_node`) | Replaces how a node is called; one per driver | `with_node_wrappers(*wrappers)`: any number, an ordered chain, each `wrapper(node, call, inputs)` ([Node wrappers](running.md#node-wrappers), Q111) |
 | `lifecycle.default.GracefulErrorAdapter` | Keeps running past a failure, skipping what depends on it | Not yet: on the [roadmap](plans/2026-10-28-roadmap-ahead-of-hamilton.md). A failing node fails the run, and `after_node` sees its error and inputs (Q157) |
-| `Parallelizable[T]` and `Collect[T]` from `hamilton.htypes` | Need `enable_dynamic_execution(allow_experimental_mode=True)` and an executor; nesting and two collects of one block fail | The same names from `fnloom`, with no flag or executor setting: blocks nest, may be collected any number of times, run one item after another, and check each item as an input ([Fan-out and fan-in](writing-nodes.md#fan-out-and-fan-in), Q118 to Q127, Q137) |
+| `Parallelizable[T]` and `Collect[T]` from `hamilton.htypes` | Need `enable_dynamic_execution(allow_experimental_mode=True)` and an executor setting | The same names from `fnloom`, with no flag and no executor setting (Q118, Q137). Items run one after another, in item order; an empty expand gives `[]`, and an expand requested as an output gives its items as a `list` (Q119 to Q121, Q138). Not on `build_async()` until Plan 11 (Q132) ([Fan-out and fan-in](running.md#fan-out-and-fan-in)) |
 | `TaskExecutionHook` and the other task hooks | Hooks on dynamic execution's tasks | None: `NodeStart.branch` and `NodeEnd.branch` name a block node's branch, and `Hook.after_expand` gets each expand's item count ([The events](hooks.md#the-events), Q130) |
 | `display_all_functions()`, `display_upstream_of(*names)`, `display_downstream_of(*names)` | A `graphviz.Digraph`, or `None` and a logged traceback without the graphviz package; node order follows `PYTHONHASHSEED` | `draw()`, `draw_upstream_of(*names)`, `draw_downstream_of(*names)`: a `fnloom.Drawing`, whose `to_dot()`, `to_mermaid()` and `to_svg()` need nothing installed and give the same text every run ([Drawing](drawing.md), Q90, Q94, Q146) |
 | `visualize_path_between(a, b, strict_path_visualization=True)` | The path, and its nodes' parents unless strict | `draw_path_between(a, b, context=False)`; with `context=True`, the parents are drawn and marked `context` (Q90) |
@@ -149,6 +149,14 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | A failing node in an async driver | Its siblings keep running after `execute` raises | They're cancelled; its own exception is raised once, noted with its name (Q66) |
 | `None` for an input declared `x: int` | Passes the check; the node then runs with `None` | `ValueError` before anything runs; annotate `x: int \| None` (Q79) |
 | A node with nothing to return | Returns a sentinel such as `None`, and every consumer runs and must test for it | Returns `fnloom.ABSENT`, annotated `-> T \| fnloom.Absent`: a consumer admitting `Absent` receives it, one with a default takes its default, and any other is skipped, all known at build ([Declining](writing-nodes.md#declining), Q135) |
+| A `Parallelizable` inside a block | Not refused, and wrong: an unrelated `TypeError`, a wrong value or a run that never returns | Blocks nest to any depth, on an explicit stack (Q122) |
+| Two `Collect`s of one block | `KeyError` when run | Any number of collects per block (Q123) |
+| An expand that also takes a `Collect` parameter | Treated as a collect only | Both: it collects one block and expands another (Q136) |
+| A node reading a block node and that block's `Collect` | `execute` spins forever | `ValueError` at build naming the path (Q124) |
+| An override of a block node, or one requested as an output | The override is lost, `Collect` gets `[]`; a wrong value, or `KeyError` | `ValueError` saying to override the expand with the items, or naming the collect to request; `validate` lists both (Q125, Q126) |
+| An item of the wrong type from an expand | Reaches the block unchecked | `TypeError` naming the expand and the item's index, unless built `without_input_type_checks()`. `Parallelizable[T]` types as `Iterable[T]` and `Collect[T]` as `list[T]` (Q127) |
+| A failing branch | The same exception, finished branches dropped | The same, with the note `while computing 'details' for branch (2,) of 'picked'`, and a generator expand closed once (Q128) |
+| A block in a drawing | Double borders and crow's-foot edges | A cluster titled `for each item of <expand>`, with `expand` and `collect` edges ([Blocks](drawing.md#blocks), Q131) |
 | A `tuple[int, str]` input | Every tuple refused, a correct one too | Checked by length and each item (Q80) |
 | An annotation imported only under `TYPE_CHECKING` | `NameError` at build, naming no node | Builds as `unresolved 'Decimal'`; a value checked against it is a `TypeError` saying to import it (Q81) |
 | An `int` for `float`, a numpy scalar for `int` | Refused | Refused too, unless built `with_numeric_widening()`; items of a collection with `with_deep_type_checks()` |
@@ -204,6 +212,7 @@ value (Q46 to Q51 in [the register](quirk-register.md)). The guide is [Caching](
 | A corrupt stored entry | Fails the run | A miss, with a `CacheWarning` (Q51) |
 | What a run did with each node | A log that reports a hit on every lookup | `driver.explain_cache(...)` (Q159) |
 | A cache on the async driver | Fails at build | The same keys, store and `explain_cache` as the sync driver (Q68) |
+| A cached fan-out | The expand always runs; a collect's key sorts its branches, so reordered items hit an order-dependent collect | The expand's items are stored and replayed; branch keys are the item's content, so a moved item hits and an appended one runs one branch; a collect's key keeps branch order, so reordered items miss it ([Blocks](caching.md#blocks), Q129) |
 
 </div>
 
@@ -457,10 +466,11 @@ checked(fnloom.build(summing))
 fnloom is pre-alpha. The core, the native path, `@parameterize` and its sugar, `@tag`, `@config`, `@extract_fields`,
 `@extract_columns`, `@exclude`, graph inspection, `validate`, graphs from plain functions, namespaces, type checks,
 result caching, the async driver, hooks, result builders, output checks, custom value checks, drawing, export, the
-CLI, `@check_output` validators, step injection, `@inject`, `@resolve` and node wrappers are done. These Hamilton
-features come next, roughly in this order:
+CLI, `@check_output` validators, step injection, `@inject`, `@resolve`, node wrappers, typed absence and
+sequential fan-out and fan-in (`Parallelizable` and `Collect`) are done. These Hamilton features come next, roughly in
+this order:
 
-1. **Parallel blocks**: `Parallelizable` and `Collect` run their items one after another for now, and not on the
+1. **The parallel executor**: a block runs its items one after another, on the caller's thread, and not yet on the
    async driver.
 2. **`GracefulErrorAdapter`**. Node wrappers can change how a node is called, but a run still stops at the first
    failure.

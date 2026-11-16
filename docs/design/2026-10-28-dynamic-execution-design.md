@@ -686,3 +686,14 @@ Plan 12's PRs A to G merge. Per the maintainer's 2026-11-03 decision above, Plan
   decision (§12.3), Plan 10 ships as 0.5.0, the release after Plan 12's 0.4.0.
 - **2026-11-09:** §7.3's stored absence is a header flag with no payload, as Plan 10 PR A3 built it, not a marker
   each format encodes.
+- **2026-11-15:** milestones A and B are built, as [Plan 10](../plans/2026-11-05-plan-10-absence-and-fan-out.md)
+  (#56, #61 to #63, #66, #68, #69, #72 and follow-ups in #83, #84 and #90), shipping in 0.5.0. Where the build
+  departs from this design, each recorded in the plan's calls: `Evaluate::is_absent` and an opt-in `Blocks` trait
+  instead of an `evaluate` returning an outcome and §5's `expand` iterator; `InputSpec.collect` instead of a collect
+  dependency;
+  `Step.block` instead of §5's action set; `PlanError::OutputsInBlocks` and `OverridesInBlocks`, each listing every
+  culprit, instead of §4.3's `OutputInBlock`; `Parallelizable[T | Absent]` refused, and `bool(ABSENT)` a `TypeError`;
+  the builtin SVG engine labels block nodes and edges instead of boxing a block; `build_async()` refuses an expand
+  until Plan 11 (Q132); and a block reading its own collect back through nodes outside it refused at build. §12.2's
+  rows without threads are in the [benchmarks](../benchmarks.md#fan-out-and-absence): a branch costs about 0.5 µs,
+  under the 2 µs target.

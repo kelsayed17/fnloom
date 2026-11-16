@@ -8,13 +8,16 @@ from typing import TYPE_CHECKING
 import pytest
 from benches import async_, builds
 from benches.generate import (
+    absent_chain_source,
     discard,
+    file_module,
     generated,
     make_expected,
     make_module,
     make_request,
 )
 from hamilton import driver as hamilton_driver
+from hamilton.execution import executors
 
 import fnloom
 
@@ -192,3 +195,41 @@ def test_builds_benchmark_times_every_way_of_building() -> None:
     ]
     assert all(row.build_ms > 0 for row in rows)
     assert not [name for name in sys.modules if name.startswith("bench_temporary_")]
+
+
+BRANCHES = 12
+
+
+def test_fan_out_shape_runs_one_branch_per_item_in_both_spellings() -> None:
+    """An expand of `count` items, a block of one node and a collect of its sum."""
+    outputs, inputs = make_request("fan_out", BRANCHES)
+    expected = make_expected("fan_out", BRANCHES)
+    assert expected == {"total": sum(range(1, BRANCHES + 1))}
+    with generated("fan_out", BRANCHES) as module:
+        driver = fnloom.build(module)
+        assert driver.nodes["branch"].block == "items"
+        assert driver.execute(outputs, inputs=inputs) == expected
+    with generated("fan_out", BRANCHES, spelling="hamilton") as module:
+        built = (
+            hamilton_driver.Builder()
+            .with_modules(module)
+            .enable_dynamic_execution(allow_experimental_mode=True)
+            .with_local_executor(executors.SynchronousLocalTaskExecutor())
+            .with_remote_executor(executors.SynchronousLocalTaskExecutor())
+            .build()
+        )
+        names: list[str | Callable[..., object] | hamilton_driver.Variable] = [*outputs]
+        assert built.execute(names, inputs=inputs) == expected
+
+
+def test_absent_chain_declines_from_its_first_node() -> None:
+    """The chain's answer when `skip` is false; `ABSENT`, all else skipped, if true."""
+    outputs, inputs = make_request("chain", CHAIN_NODES)
+    with file_module(absent_chain_source(CHAIN_NODES)) as module:
+        driver = fnloom.build(module)
+        assert all(view.may_be_absent for view in driver.nodes.values() if view.params)
+        present = driver.execute(outputs, inputs={**inputs, "skip": False})
+        declined = driver.execute(outputs, inputs={**inputs, "skip": True})
+    assert present == make_expected("chain", CHAIN_NODES)
+    assert declined == {outputs[0]: fnloom.ABSENT}
+    assert module.__name__ not in sys.modules
