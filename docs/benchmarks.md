@@ -13,16 +13,17 @@ and at running a prepared plan, so a row where it's reliably slower counts as a 
     in Hamilton, 0.21 ms in fnloom. With `@extract_fields`, where Hamilton's cost grows faster than the graph, up to
     998×: 10,000 extracted fields take 6.4 s against 6.4 ms.
 
--   :lucide-hammer:{ .lg .fl-icon } **Every plain graph builds faster**
+-   :lucide-hammer:{ .lg .fl-icon } **Every graph of the Results table builds faster**
 
-    At least 1.17× faster on every graph of [Results](#results), the least on `types` with 100 parameters, counting
+    At least 1.17× faster on each graph of [Results](#results), the least on `types` with 100 parameters, counting
     each build marked † as re-measured one fresh process per sample; 41× on 10,000 `@parameterize` rows (5.3 s
-    against 0.13 s). The three-node fan-out graph is the exception, 0.2 ms slower ([Fan-out](#fan-out-and-absence)).
+    against 0.13 s). Graphs of three nodes are the exception: slower by 0.05 ms as a chain and 0.19 ms as a fan-out
+    ([Fan-out](#fan-out-and-absence)).
 
--   :lucide-split:{ .lg .fl-icon } **0.6 µs per fan-out branch**
+-   :lucide-split:{ .lg .fl-icon } **0.5 µs per fan-out branch**
 
-    A `Parallelizable` over 10,000 items runs in 5.8 ms, where Hamilton's synchronous executor takes 25 s: 4,330×.
-    Cached, 1,000 branches replay in 2.1 ms against Hamilton's 1.3 s.
+    A `Parallelizable` over 10,000 items runs in 5.0 ms, where Hamilton's synchronous executors take 24.8 s:
+    4,985×. Cached, 1,000 branches replay in 2.1 ms against Hamilton's 297 ms.
 
 -   :lucide-infinity:{ .lg .fl-icon } **Runs what Hamilton can't**
 
@@ -437,46 +438,52 @@ median of each, ms, the development build of `scripts/check.sh`, so slower than 
 
 ## Fan-out and absence
 
-A [fan-out](running.md#fan-out-and-fan-in) against Hamilton 1.90.0's dynamic execution with its
-`SynchronousLocalTaskExecutor`, the one that runs one item after another, as fnloom does. The `fan_out` graph is
-three nodes at every size: an expand yielding `range(count)`, a block of one trivial node adding one to its item, and
-a collect summing the branches. Milliseconds, Hamilton / fnloom with input checks on / off, as in
-[Results](#results); the last column is fnloom's steady run, checks on, per branch:
+A [fan-out](running.md#fan-out-and-fan-in) against Hamilton 1.90.0's dynamic execution with
+`SynchronousLocalTaskExecutor` as both its local and its remote executor. Hamilton sends each branch to the remote
+executor, which is a `MultiThreadingExecutor` unless set, so both are set to run one item after another, as
+fnloom does. The `fan_out` graph is three nodes at every size: an expand yielding `range(count)`, a block of one
+trivial node adding one to its item, and a collect summing the branches. Milliseconds, Hamilton / fnloom with input
+checks on / off, as in [Results](#results); the last column is fnloom's steady run, checks on, per branch:
 
 | branches | first execute | steady execute | Hamilton / fnloom, steady | per branch |
 | ---: | --- | --- | ---: | ---: |
-| 1 | 0.720 / 0.092 / 0.018 | 0.260 / 0.003 / 0.003 | 77× | |
-| 100 | 44.8 / 0.119 / 0.070 | 55.1 / 0.057 / 0.052 | 961× | 0.57 µs |
-| 1,000 | 860.1 / 0.663 / 0.533 | 840.0 / 0.596 / 0.531 | 1,409× | 0.60 µs |
-| 10,000 | 24,934 / 6.00 / 5.37 | 25,154 / 5.81 / 5.33 | 4,330× | 0.58 µs |
+| 1 | 0.569 / 0.097 / 0.022 | 0.137 / 0.004 / 0.003 | 34× | |
+| 100 | 5.333 / 0.095 / 0.056 | 4.624 / 0.049 / 0.044 | 95× | 0.49 µs |
+| 1,000 | 264.3 / 0.575 / 0.444 | 253.6 / 0.491 / 0.425 | 517× | 0.49 µs |
+| 10,000 | 24,457 / 5.12 / 4.42 | 24,767 / 4.97 / 4.43 | 4,985× | 0.50 µs |
 
-The design's target, under 2 µs per branch node, is met: a branch costs about 0.6 µs, flat from 100 to 10,000 items,
-its item check included. Hamilton's cost per branch grows with the count, from 0.55 ms at 100 to 2.5 ms at 10,000,
-so the gap widens. With a hook overriding all four methods, a branch costs 2.3 to 2.4 µs (2.27 ms for 1,000), the
+The design's target, under 2 µs per branch node, is met: a branch costs about 0.5 µs, flat from 100 to 10,000 items,
+its item check included. Hamilton's cost per branch grows with the count, from 46 µs at 100 to 2.5 ms at 10,000, so
+the gap widens. With a hook overriding all four methods, a branch costs 2.2 to 2.4 µs (2.26 ms for 1,000), the
 1.7 µs or so the two node events cost a node anywhere ([Hooks](#hooks)).
 
-**Building it is slower than Hamilton's.** The fan-out graph's build, measured as in
-[Build: re-measured](#build-re-measured) (nine fresh processes per runtime, alternating, release build), takes
-0.489 ms with checks on and 0.457 ms with them off, against Hamilton's 0.269 ms; in a warm process, 0.23 ms against
-0.13 ms for a three-node chain. About 0.2 ms on a three-node graph, it is a bug by the rule above, not yet fixed:
-reading the `Parallelizable` and `Collect` annotations costs more than plain classes do.
+**Building a three-node graph is slower than Hamilton's.** Measured as in [Build: re-measured](#build-re-measured)
+(nine fresh processes per runtime, alternating, release build), the fan-out graph builds in 0.468 ms with checks on
+and 0.477 ms with them off, against Hamilton's 0.278 ms, and a three-node `chain` in 0.254 ms and 0.280 ms against
+Hamilton's 0.205 ms. So the graphs of [Results](#results) all build faster, but at three nodes fnloom's fixed cost
+per build is more than Hamilton's, and a fan-out adds to it. It is a bug by the rule above, not yet fixed. In a warm
+process the fan-out graph builds in 0.15 ms against 0.074 ms for the chain. Profiled over 150 warm builds, it makes
+1,668 Python calls a build against the chain's 741, and about 70% of the extra time goes to two places: resolving
+the generic `Parallelizable[int]` and `Collect[int]` hints (`_scan.resolve`, five times the chain's) and reading
+them again for the blocks when the graph is made (`driver._graph_of`, with `_blocks._alias_argument` and 86
+`typing.get_origin` calls a build).
 
 **A cached fan-out** of 1,000 branches with a `MemoryCache`, against Hamilton's `InMemoryMetadataStore` and
-`InMemoryResultStore`. Milliseconds, the median of 7 runs for fnloom and 3 for Hamilton, whose runs take over a
-second. A warm run follows a run over the same items; an appended run follows one over 999 of them, on a new driver
-and store each sample, so it computes the one new branch and the collect:
+`InMemoryResultStore`, its executors set as above. Milliseconds, the median of 7 runs for fnloom and 3 for
+Hamilton. A warm run follows a run over the same 1,000 items. An appended run is a run over 1,001 items after one
+over 1,000, on a new driver and store each sample, so it computes the one new branch, the expand and the collect:
 
 | run | Hamilton | fnloom |
 | --- | ---: | ---: |
-| uncached, steady (above) | 840.0 | 0.596 |
-| cached, warm | 1,285.7 | 2.06 |
-| cached, one item appended | 1,257.7 | 2.12 |
+| uncached, steady (above) | 253.6 | 0.491 |
+| cached, warm | 297.4 | 2.05 |
+| cached, one item appended | 292.3 | 2.09 |
 
-A warm fnloom run is 620 times faster than Hamilton's, and an appended one 590 times. A branch hit costs about 2 µs,
-more than running the trivial branch (0.6 µs): each branch's key is made as its item arrives, from the item's
+A warm fnloom run is 145 times faster than Hamilton's, and an appended one 140 times. A branch hit costs about 2 µs,
+more than running the trivial branch (0.5 µs): each branch's key is made as its item arrives, from the item's
 fingerprint, so a hit saves time only when a branch does real work, such as a call to an endpoint. The caching
 design's 1 µs bound on a hit is for nodes outside blocks, whose keys are made before the run. Hamilton's cached runs
-cost more than its uncached ones here too, by half.
+cost more than its uncached ones here too, by 17%.
 
 **`ABSENT` through a 200-node chain**, fnloom only, since Hamilton has no absence. Microseconds per prepared run, the
 median of 7 batches of 100:
@@ -495,7 +502,7 @@ from other changes since, such as calling node functions by vectorcall. The
 [instruction-count gate](#the-instruction-count-gate) counts the core's plain loop on every pull request.
 
 Measured on the machine above (now macOS 27.2), with CPython 3.14.8 and a release build, on 2026-11-15
-(`python -m benches.run fan_out fan_out_cached absent_chain`).
+(`python -m benches.run fan_out fan_out_cached`; `absent_chain` in an earlier session that day).
 
 ## Cold start, first call and memory
 
@@ -596,8 +603,8 @@ uv run python -m benches.run extract > extract.jsonl 2> bench.stderr   # only th
 It prints 120 JSON lines to stdout (`shape`, `n`, `runtime`, `input_checks`, `build_ms`,
 `first_execute_ms`, `steady_execute_ms`, `prepare_ms`, `error`, `error_phase`), then 7 lines for the block cases
 `fan_out_cached` and `absent_chain` (`case`, `n`, `runtime`, `ms`), which can be named as shapes are. Hamilton runs
-`fan_out` with `enable_dynamic_execution(allow_experimental_mode=True)` and its `SynchronousLocalTaskExecutor`, and
-its `n` is 1, 100, 1,000 and 10,000 branches.
+`fan_out` with `enable_dynamic_execution(allow_experimental_mode=True)` and `SynchronousLocalTaskExecutor` as both
+its local and its remote executor, and its `n` is 1, 100, 1,000 and 10,000 branches.
 Hamilton prints a help banner to stderr whenever it raises, hence the second redirect.
 Each runtime's answer is checked against the shape's closed form, and a
 mismatch aborts the run. Generated modules are dropped from `sys.modules` after each case.

@@ -74,6 +74,9 @@ def test_cached_fan_out_appended(
     def run(prepared: fnloom.PreparedPlan) -> None:
         prepared.run(inputs=appended)
 
+    ((checked,), _) = fresh()
+    expected = make_expected("fan_out", CACHED_BRANCHES + 1)
+    assert checked.run(inputs=appended) == expected
     benchmark.pedantic(run, setup=fresh, rounds=20)
 
 

@@ -164,12 +164,18 @@ def _fnloom(
 
 
 def _hamilton_builder(module: ModuleType, *, blocks: bool) -> hamilton_driver.Builder:
-    """Hamilton's builder; with `blocks`, its dynamic execution, synchronously."""
+    """Hamilton's builder; with `blocks`, its dynamic execution, synchronously.
+
+    Both executors are set: Hamilton sends each branch to the remote one, which
+    defaults to a `MultiThreadingExecutor` (Q134).
+    """
     builder = hamilton_driver.Builder().with_modules(module)
     if blocks:
-        builder = builder.enable_dynamic_execution(
-            allow_experimental_mode=True
-        ).with_local_executor(executors.SynchronousLocalTaskExecutor())
+        builder = (
+            builder.enable_dynamic_execution(allow_experimental_mode=True)
+            .with_local_executor(executors.SynchronousLocalTaskExecutor())
+            .with_remote_executor(executors.SynchronousLocalTaskExecutor())
+        )
     return builder
 
 

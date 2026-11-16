@@ -3,8 +3,8 @@
 **Status:** in progress, 2026-11-15. Plans 1, 2 and 4 are released in 0.1.0, and the Plan 4 follow-up and Plan 3 in
 0.2.0. Plans 5 to 9 (#24 to #28) and Plan 12's PR 0 (#33) are released in 0.3.0, and Plan 12's PRs A to G
 (#43, #44, #46 to #49, #53) in 0.4.0. Plan 10, typed absence and sequential fan-out, is built and ships as 0.5.0,
-not yet released (PRs #56, #61, #62, #63, #66, #68, #69, #72, #90 and its close-out). Plan 11 follows it, then
-Plan 13. Plan 11 is designed and approved, not built.
+not yet released (PRs #56, #61, #62, #63, #66, #68, #69, #72, follow-ups #83, #84 and #90, and its close-out).
+Plan 11 follows it, then Plan 13. Plan 11 is designed and approved, not built.
 
 **Goal:** for every capability Hamilton 1.90.0 offers, fnloom has an equivalent that is at least as good, or a
 written decision explaining why it doesn't. "At least as good" means: same intent; behaviour proven differentially
@@ -232,8 +232,8 @@ tests against Hamilton for every kept behaviour; benchmarks for anything on the 
    is built after Plan 12's PRs A to G, and ships as 0.5.0, the release after Plan 12's 0.4.0 (maintainer,
    2026-11-03). Built: absence in the core and the front end (#56), at the edges of a run and on the async driver
    (#62), cached (#61); blocks in the core (#63), in the front end (#66), drawn and exported (#68), cached (#69), and
-   across namespaces, decorators and absence (#72), with follow-ups (#90), benchmarks and docs in the close-out. Not
-   yet released.
+   across namespaces, decorators and absence (#72), with follow-ups (#83, #84, #90), benchmarks and docs in the
+   close-out. Not yet released.
 10. **Plan 11: the parallel executor and partial results.** The same design, milestones C to E: the core
     `Scheduler`, `with_threads(...)` for free-threaded 3.14t, `run_many`, the async driver on the scheduler, and
     `absent_on` for partial results. Not started. The rest of "Beyond Hamilton" (streaming, incremental execution,

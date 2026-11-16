@@ -140,7 +140,7 @@ fnloom keeps what makes Hamilton pleasant and fixes what bites. A few highlights
 | A misspelled input | Silently ignored | `ValueError` naming it |
 | Execution order | Depends on how you list outputs | Always the same |
 | Running a request again | Re-planned every call | `prepare` once, `run` many times |
-| Fan-out over items | Behind an experimental flag | `Parallelizable` and `Collect` with no flag, about 0.6 µs a branch |
+| Fan-out over items | Behind an experimental flag | `Parallelizable` and `Collect` with no flag, about 0.5 µs a branch |
 
 </div>
 

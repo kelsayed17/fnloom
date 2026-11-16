@@ -215,6 +215,7 @@ def test_fan_out_shape_runs_one_branch_per_item_in_both_spellings() -> None:
             .with_modules(module)
             .enable_dynamic_execution(allow_experimental_mode=True)
             .with_local_executor(executors.SynchronousLocalTaskExecutor())
+            .with_remote_executor(executors.SynchronousLocalTaskExecutor())
             .build()
         )
         names: list[str | Callable[..., object] | hamilton_driver.Variable] = [*outputs]

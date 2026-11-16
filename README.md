@@ -127,7 +127,7 @@ Milliseconds on an Apple M2 Pro, lower is better, from the
 | 1,000-input fan-in | 3.02 → **1.47** | 2.73 → **0.31** (9×) |
 | 10,000-node chain | 207.5 → **63.4** | `RecursionError` → **1.34** |
 | 10,000 `@parameterize` rows | 5,285 → **128** | `RecursionError` → **1.35** |
-| Fan-out over 10,000 items | 0.27 → 0.49 | 25,154 → **5.81** (4,330×) |
+| Fan-out over 10,000 items | 0.28 → 0.47 | 24,767 → **4.97** (4,985×) |
 
 Your node functions still run at Python speed. fnloom removes the overhead around them: planning, validation and
 dispatch.
