@@ -28,6 +28,20 @@ pub trait Calls<'py> {
         args: Vec<Bound<'py, PyAny>>,
         kwargs: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<Bound<'py, PyAny>>;
+
+    /// `object.name(*args)`.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the lookup or the call raises.
+    fn call_method(
+        &self,
+        object: &Bound<'py, PyAny>,
+        name: &Bound<'py, PyString>,
+        args: Vec<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        self.call(&object.getattr(name)?, args, None)
+    }
 }
 
 /// Calls in the current context.
@@ -41,6 +55,19 @@ impl<'py> Calls<'py> for Direct {
         kwargs: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<Bound<'py, PyAny>> {
         function.call(PyTuple::new(function.py(), args)?, kwargs)
+    }
+
+    /// A method call in place, as `Plan::run`'s evaluator made it before tasks shared it.
+    fn call_method(
+        &self,
+        object: &Bound<'py, PyAny>,
+        name: &Bound<'py, PyString>,
+        args: Vec<Bound<'py, PyAny>>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if args.is_empty() {
+            return object.call_method0(name);
+        }
+        object.call_method1(name, PyTuple::new(object.py(), args)?)
     }
 }
 
@@ -106,8 +133,7 @@ impl<'py> Scope<'_, 'py> {
         iterator: &Bound<'py, PyAny>,
     ) -> PyResult<Item<Bound<'py, PyAny>>> {
         let py = self.absent.py();
-        let next = iterator.getattr(intern!(py, "__next__"))?;
-        match caught(|| calls.call(&next, Vec::new(), None)) {
+        match caught(|| calls.call_method(iterator, intern!(py, "__next__"), Vec::new())) {
             Ok(item) => Ok(Item::Next(item)),
             Err(error) if error.is_instance_of::<PyStopIteration>(py) => {
                 let value = error.value(py).getattr(intern!(py, "value"))?;
@@ -131,9 +157,8 @@ impl<'py> Scope<'_, 'py> {
         exhausted: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let py = self.absent.py();
-        let finish = iterator.getattr(intern!(py, "finish"))?;
         let flag = exhausted.into_pyobject(py)?.to_owned().into_any();
-        caught(|| calls.call(&finish, vec![flag], None))
+        caught(|| calls.call_method(iterator, intern!(py, "finish"), vec![flag]))
     }
 
     /// A cache hit from `late.lookup`, which returns a 1-tuple, or `None` for none.
@@ -147,12 +172,11 @@ impl<'py> Scope<'_, 'py> {
             return Ok(None);
         };
         let py = self.absent.py();
-        let lookup = late.getattr(intern!(py, "lookup"))?;
         let args = vec![
             self.name(node).into_any(),
             PyTuple::new(py, branch)?.into_any(),
         ];
-        let found = caught(|| calls.call(&lookup, args, None))?;
+        let found = caught(|| calls.call_method(late, intern!(py, "lookup"), args))?;
         if found.is_none() {
             return Ok(None);
         }
