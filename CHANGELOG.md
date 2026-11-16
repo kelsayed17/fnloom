@@ -114,6 +114,16 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `Outcome::ErrorAbsent`. A plan with no such node runs exactly as before.
 - `ObserverBase.absent_error(node, *, branch, error)`, the binding's forward of `Observer::absent_error`, sent only
   to an observer whose class overrides it; `_core.Graph(..., absent_on=)` takes each node's exception classes.
+- `PreparedPlan.run_many(inputs_seq, *, overrides=None, timeout=None)` runs a prepared plan once per input set and
+  returns each set's result, in order, as `run` would return it (Q171). `overrides` is shared by every set, and every
+  set is checked before any runs. On a driver built `with_threads`, the sets run on its pool under its limits, at most
+  `max_workers` open at once, in index order. Once one fails, no set opens and the open ones stop, and the failure of
+  the lowest-indexed failing set is raised, noted `while running input set 3 of run_many`. `timeout=` covers every
+  set together. Each set is its own run, with its own hook events; a set that never opened fires none. Without
+  `with_threads`, the sets run one after another on the calling thread. A driver has at most `max_workers - 1`
+  helper threads for `run_many`, however many callers run it at once.
+- `fnloom.StoppedError`, the `RuntimeError` a run stopped by the run that started it raises, is public. A node that
+  sees `fnloom.cancelled()` may raise it to stop: it is never raised in place of the failure that stopped its run.
 
 ### Fixed
 

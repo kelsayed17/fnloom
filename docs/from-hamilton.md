@@ -148,6 +148,7 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | A sync node in an async driver | Runs on the event loop, which stops while it does | Runs in a worker thread (`loop.run_in_executor`), on the driver's pool with `with_threads`, or on the loop with `sync_nodes="inline"` (Q65) |
 | A failing node in an async driver | Its siblings keep running after `execute` raises | They're cancelled; its own exception is raised once, noted with its name (Q66) |
 | A node that hangs | `execute` waits for it for good, with no deadline to give | `execute(..., timeout=)` on a driver built `with_threads` raises `TimeoutError` and abandons it; `fnloom.cancelled()` tells a node its run is stopping (Q170) ([Deadlines and cancellation](running.md#deadlines-and-cancellation)) |
+| One request over many input sets | A loop of `execute`, one set at a time | `PreparedPlan.run_many(inputs_seq)`: one result per set, in order, the sets running at once on a driver built `with_threads` (Q171) ([Many input sets](running.md#many-input-sets)) |
 | `None` for an input declared `x: int` | Passes the check; the node then runs with `None` | `ValueError` before anything runs; annotate `x: int \| None` (Q79) |
 | A node with nothing to return | Returns a sentinel such as `None`, and every consumer runs and must test for it | Returns `fnloom.ABSENT`, annotated `-> T \| fnloom.Absent`: a consumer admitting `Absent` receives it, one with a default takes its default, and any other is skipped, all known at build ([Declining](writing-nodes.md#declining), Q135) |
 | A `Parallelizable` inside a block | Not refused, and wrong: an unrelated `TypeError`, a wrong value or a run that never returns | Blocks nest to any depth, on an explicit stack (Q122) |
@@ -471,8 +472,7 @@ CLI, `@check_output` validators, step injection, `@inject`, `@resolve`, node wra
 results (`absent_on`) and sequential fan-out and fan-in (`Parallelizable` and `Collect`) are done. These Hamilton
 features come next, roughly in this order:
 
-1. **The rest of the parallel executor**: `Builder.with_threads` runs a run's nodes and branches on a pool, and
-   `@limit` caps a node's calls, and `timeout=` abandons a hung node, but there is no `run_many` yet, and the async
-   driver doesn't run blocks or honour limits.
+1. **The rest of the parallel executor**: `Builder.with_threads`, `@limit`, `timeout=` and `run_many` are built, but
+   the stress tests and the benchmarks against Hamilton's thread executor are still to come.
 
 If your pipeline depends on one of these, it's worth waiting for it before you switch.

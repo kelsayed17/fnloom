@@ -1182,6 +1182,10 @@ class CacheRun:
         """Whether its core runs are on a driver's pool."""
         return self._workers is not None and self._workers.max_workers is not None
 
+    def workers(self) -> Workers | None:
+        """The driver's limits and pool; `None` with neither."""
+        return self._workers
+
     @property
     def blocks(self) -> _Blocks | None:
         """What the plan knows of its late nodes; `None` with no expand."""

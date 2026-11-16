@@ -135,12 +135,40 @@ pub struct Stop {
     own: Arc<AtomicBool>,
     /// The stop flags of the runs that started this one, innermost first.
     ancestors: Vec<Arc<AtomicBool>>,
+    /// Made by `Stop()`, for `run_many`'s input sets: only such a flag may be `set` from
+    /// Python. A run's own flag is the run's to set.
+    batch: bool,
 }
 
 #[pymethods]
 impl Stop {
+    /// A flag of its own for `run_many`'s input sets, unset, under the run whose task the
+    /// current context is in, if any: a run started where `CANCELLED` holds it stops once
+    /// it is `set`.
+    #[new]
+    fn py_new(py: Python<'_>) -> PyResult<Self> {
+        Ok(Self {
+            batch: true,
+            ..Self::current(py)?
+        })
+    }
+
     fn __bool__(&self) -> bool {
         self.own.load(Ordering::Acquire) || stopping(&self.ancestors)
+    }
+
+    /// Sets the flag: every run that follows it stops. `RuntimeError` on a run's own flag,
+    /// which only its run sets.
+    #[pyo3(name = "set")]
+    fn py_set(&self) -> PyResult<()> {
+        if !self.batch {
+            return Err(PyRuntimeError::new_err(
+                "a run's own stop flag is set by its run only; raise fnloom.StoppedError \
+                 or return to stop a node",
+            ));
+        }
+        self.set();
+        Ok(())
     }
 }
 
@@ -158,6 +186,7 @@ impl Stop {
         Ok(Self {
             own: Arc::new(AtomicBool::new(false)),
             ancestors,
+            batch: false,
         })
     }
 
@@ -435,6 +464,18 @@ impl Drop for Holding {
 fn holds(limits: &Arc<Caps>) -> bool {
     let id = Arc::as_ptr(limits) as usize;
     WORKING.with(|held| held.borrow().contains(&id))
+}
+
+/// Whether a run started here runs inside a task holding a worker slot of `limits`: on
+/// that task's thread, or where the context of its run's tasks reaches.
+pub(crate) fn inside(py: Python<'_>, limits: &Arc<Caps>) -> PyResult<bool> {
+    if holds(limits) {
+        return Ok(true);
+    }
+    let held = held_variable(py)?
+        .bind(py)
+        .call_method1(intern!(py, "get"), (PyTuple::empty(py),))?;
+    Ok(limits.works(&held))
 }
 
 /// The calls of one task, in its own copy of the run's context, with
@@ -1568,6 +1609,7 @@ fn prepared<'py>(
     let flag = Stop {
         own: Arc::clone(&own),
         ancestors: ancestors.clone(),
+        batch: false,
     };
     inside.call1((
         cancelled.getattr(intern!(py, "set"))?,

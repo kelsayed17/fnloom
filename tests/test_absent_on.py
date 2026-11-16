@@ -1244,3 +1244,75 @@ def test_a_plain_memory_cache_stores_nothing_made_from_an_absence() -> None:
     for _ in range(2):
         assert driver.execute(["b"], inputs={"x": 1}) == {"b": 2}
     assert module.CALLS == ["b", "b", "b"]
+
+
+MANY = """
+import threading
+
+from fnloom import Absent, Collect, Parallelizable, absent_on, cache
+
+CALLS = []
+LOCK = threading.Lock()
+
+
+def item(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+# Reads globals it changes: versioned by hand, so it is cached.
+@cache(version="1")
+@absent_on(KeyError)
+def detail(item: int, bad: int) -> int | Absent:
+    with LOCK:
+        CALLS.append((bad, item))
+    if item == bad:
+        raise KeyError(item)
+    if item == -bad:
+        raise ValueError(f"the real failure, item {item}")
+    return item * 10
+
+
+def summary(detail: Collect[int]) -> list[int]:
+    return list(detail)
+"""
+
+
+@pytest.mark.parametrize("threads", [None, 1, 4])
+def test_each_run_many_set_has_its_own_error_absences(threads: int | None) -> None:
+    """Each set drops its own failed branch, lists its own error, and stores none."""
+    module = make_module(f"many_{threads}", MANY)
+    ends = Ends()
+    builder = (
+        fnloom.Builder()
+        .with_modules(module)
+        .with_hooks(ends)
+        .with_cache(fnloom.MemoryCache())
+    )
+    if threads is not None:
+        builder = builder.with_threads(threads)
+    plan = builder.build().prepare(["summary"], inputs={"n": 3, "bad": 0})
+    sets = [{"n": 3, "bad": bad} for bad in (0, 1, 2, 9)]
+    want = [
+        {"summary": [10, 20]},
+        {"summary": [0, 20]},
+        {"summary": [0, 10]},
+        {"summary": [0, 10, 20]},
+    ]
+    assert plan.run_many(sets) == want
+    by_set = sorted(
+        (tuple((n, b) for n, b, _ in end.absent_errors) for end in ends.runs),
+        key=repr,
+    )
+    assert by_set == sorted(
+        [(("detail", (0,)),), (("detail", (1,)),), (("detail", (2,)),), ()], key=repr
+    )
+    module.CALLS.clear()
+    # Again: each set's absent branch runs again, every other branch is a hit.
+    assert plan.run_many(sets) == want
+    assert sorted(module.CALLS) == [(0, 0), (1, 1), (2, 2)]
+    # A real failure in one set is raised, noted with its set, whatever absences
+    # the other sets have.
+    failing = [{"n": 3, "bad": 1}, {"n": 3, "bad": -2}]
+    with pytest.raises(ValueError, match="the real failure, item 2") as raised:
+        plan.run_many(failing)
+    assert "while running input set 1 of run_many" in raised.value.__notes__
