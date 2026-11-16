@@ -485,6 +485,11 @@ impl Run {
         let kwargs = Kwargs::new(py, plan, graph);
         let context = calls.map(|calls| &calls.run);
         let busy = self.acquire(py);
+        #[cfg(feature = "test-hooks")]
+        assert!(
+            !REPORT_ARMED.swap(false, Ordering::AcqRel),
+            "deliberate panic while reporting a completed task"
+        );
         let mut failed = None;
         for (node, branch, value) in &report.hits {
             let name = &core.node(*node).name;
@@ -564,7 +569,18 @@ pub fn step(
         Some((Next::Done, _)) => Step::Done,
         Some((Next::Task(task), _)) => {
             let active = Active { run, pool, py };
-            if perform(py, run, pool, seat, task, report) {
+            // A panic outside the node call, such as in the report after `complete`, is
+            // the run's failure, recorded before `active` drops: else the run could end as
+            // a success between the count reaching zero and the failure going in.
+            let forked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                perform(py, run, pool, seat, task, report)
+            }))
+            .unwrap_or_else(|payload| {
+                report.clear();
+                run.fail_now(py, crate::errors::panic_error(&*payload));
+                false
+            });
+            if forked {
                 // The child of a fork: no lock it inherited is touched again.
                 std::mem::forget(active);
                 return Step::Forked;
@@ -1172,6 +1188,19 @@ static ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new
 /// Armed by `_core.arm_hook_panic()`: the next hold of a busy flag panics.
 #[cfg(feature = "test-hooks")]
 static HOOK_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Armed by `_core.arm_report_panic()`: the next report of a completed task's events
+/// panics, outside any node call, after the task completed.
+#[cfg(feature = "test-hooks")]
+static REPORT_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Makes the next report of any run's completed task panic, in Rust, holding the busy
+/// flag: outside `caught`, so the panic unwinds through the task's guards.
+#[cfg(feature = "test-hooks")]
+#[pyfunction]
+pub fn arm_report_panic() {
+    REPORT_ARMED.store(true, Ordering::Release);
+}
 
 /// Makes the next hold of any run's busy flag panic, in Rust, while it holds it.
 #[cfg(feature = "test-hooks")]

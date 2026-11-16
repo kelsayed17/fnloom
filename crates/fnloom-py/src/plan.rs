@@ -383,13 +383,14 @@ pub struct Kwargs<'py, 'g> {
     graph: &'g Graph,
     /// The dict built for the observers of the node about to run, until its call.
     pending: RefCell<Option<(NodeId, Bound<'py, PyDict>)>>,
-    /// The last order key made, by the address of the node name it was made for and the
-    /// branch: a node's events come one after another, so `post_node` reuses `pre_node`'s.
+    /// The last order key made, by the address and length of the node name it was made
+    /// for and the branch: a node's events come one after another, so `post_node` reuses
+    /// `pre_node`'s.
     order: RefCell<Option<LastOrder<'py>>>,
 }
 
-/// An order key made, with the address of its node's name and its branch.
-type LastOrder<'py> = (usize, Vec<usize>, Bound<'py, PyTuple>);
+/// An order key made, with the address and length of its node's name, and its branch.
+type LastOrder<'py> = (usize, usize, Vec<usize>, Bound<'py, PyTuple>);
 
 impl<'py, 'g> Kwargs<'py, 'g> {
     /// The keyword arguments of a run of `plan` over `graph`, none built yet.
@@ -438,10 +439,11 @@ impl<'py> Kwargs<'py, '_> {
 
     /// `node`'s order key in `branch`, as a tuple (`Plan::order_key`).
     pub fn order(&self, node: &str, branch: &[usize]) -> PyResult<Bound<'py, PyTuple>> {
-        // The core passes each node's own name, so its address names the node.
+        // The core passes each node's own name, so its address and length name the node;
+        // the length too, so a caller passing a slice of a name can't match it.
         let address = node.as_ptr() as usize;
-        if let Some((at, of, order)) = self.order.borrow().as_ref() {
-            if *at == address && of.as_slice() == branch {
+        if let Some((at, len, of, order)) = self.order.borrow().as_ref() {
+            if *at == address && *len == node.len() && of.as_slice() == branch {
                 return Ok(order.clone());
             }
         }
@@ -455,7 +457,7 @@ impl<'py> Kwargs<'py, '_> {
         } else {
             PyTuple::new(self.py, self.plan.core.order_key(id, branch).as_slice())?
         };
-        *self.order.borrow_mut() = Some((address, branch.to_vec(), order.clone()));
+        *self.order.borrow_mut() = Some((address, node.len(), branch.to_vec(), order.clone()));
         Ok(order)
     }
 
