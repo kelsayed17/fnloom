@@ -1,15 +1,20 @@
 """Generates benchmark graphs as modules, so both runtimes load the same code."""
 
+import importlib.util
 import itertools
 import sys
+import tempfile
 from contextlib import contextmanager
+from pathlib import Path
 from types import ModuleType
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
     from collections.abc import Generator
 
-type Shape = Literal["chain", "fan_in", "layered", "rows", "extract", "types"]
+type Shape = Literal[
+    "chain", "fan_in", "layered", "rows", "extract", "types", "fan_out"
+]
 type Spelling = Literal["hamilton", "fnloom"]
 type Request = tuple[list[str], dict[str, object]]
 
@@ -20,13 +25,16 @@ _counter = itertools.count()
 _SEED = 7
 
 
-def _chain(n: int) -> str:
-    lines = ["def n0(seed: int) -> int:", "    return seed", ""]
-    lines.extend(
+def _links(n: int) -> list[str]:
+    """Nodes `n1` to `n{n-1}` of a chain, each adding one to the one before."""
+    return [
         f"def n{i}(n{i - 1}: int) -> int:\n    return n{i - 1} + 1\n"
         for i in range(1, n)
-    )
-    return "\n".join(lines)
+    ]
+
+
+def _chain(n: int) -> str:
+    return "\n".join(["def n0(seed: int) -> int:", "    return seed", "", *_links(n)])
 
 
 def _fan_in(n: int) -> str:
@@ -112,8 +120,37 @@ def _types(n: int, spelling: Spelling) -> str:
     )
 
 
+def _fan_out(spelling: Spelling) -> str:
+    package = "hamilton.htypes" if spelling == "hamilton" else "fnloom"
+    return (
+        f"from {package} import Collect, Parallelizable\n\n\n"
+        "def items(count: int) -> Parallelizable[int]:\n"
+        "    yield from range(count)\n\n\n"
+        "def branch(items: int) -> int:\n    return items + 1\n\n\n"
+        "def total(branch: Collect[int]) -> int:\n    return sum(branch)\n"
+    )
+
+
+def absent_chain_source(n: int) -> str:
+    """A `chain` of `n` nodes whose first node declines when the input `skip` is true.
+
+    Every other node reads the one before it without admitting `Absent`, so each may
+    be absent, and a declining `n0` skips the other `n - 1`. fnloom's spelling only:
+    Hamilton has no absence.
+    """
+    head = [
+        "from fnloom import ABSENT, Absent\n\n",
+        "def n0(seed: int, skip: bool) -> int | Absent:",
+        "    return ABSENT if skip else seed",
+        "",
+    ]
+    return "\n".join([*head, *_links(n)])
+
+
 def module_source(shape: Shape, n: int, spelling: Spelling = "fnloom") -> str:
     """Returns the source of `make_module(shape, n, spelling)`."""
+    if shape == "fan_out":
+        return _fan_out(spelling)
     if shape == "rows":
         return _rows(n, spelling)
     if shape == "extract":
@@ -135,6 +172,10 @@ def make_module(shape: Shape, n: int, spelling: Spelling = "fnloom") -> ModuleTy
     turn `Optional[int]`, `tuple[int, str, float]` and `list[int]`. Only `rows`,
     `extract` and `types` differ by `spelling`: the decorators come from Hamilton or
     from fnloom, and Hamilton's `types` declares its tuples as a bare `tuple`.
+    `fan_out` is the same three nodes for every `n`: an expand `items` yielding
+    `range(count)`, a block of one node, `branch`, adding one to its item, and
+    `total` collecting the branches into their sum; `n` is the input `count`, the
+    number of branches. Its `Parallelizable` and `Collect` come from each runtime.
     """
     source = module_source(shape, n, spelling)
     module = ModuleType(f"bench_{shape}_{n}_{next(_counter)}")
@@ -161,10 +202,37 @@ def generated(
         discard(module)
 
 
-def make_request(shape: Shape, n: int) -> Request:
+@contextmanager
+def file_module(source: str) -> Generator[ModuleType]:
+    """Yields `source` imported from a file, dropped from `sys.modules` on exit.
+
+    From a file, not `exec`: Hamilton's cache reads each function's source, and
+    without it versions no node.
+    """
+    name = f"bench_file_{next(_counter)}"
+    with tempfile.TemporaryDirectory() as directory:
+        path = Path(directory) / f"{name}.py"
+        path.write_text(source, encoding="utf-8")
+        spec = importlib.util.spec_from_file_location(name, path)
+        if spec is None or spec.loader is None:
+            msg = f"cannot import {path}"
+            raise ImportError(msg)
+        module = importlib.util.module_from_spec(spec)
+        # Hamilton finds a function's module through `sys.modules`.
+        sys.modules[name] = module
+        try:
+            spec.loader.exec_module(module)
+            yield module
+        finally:
+            discard(module)
+
+
+def make_request(shape: Shape, n: int) -> Request:  # noqa: PLR0911  # one return per shape
     """Returns the output names and the inputs that exercise the whole graph."""
     if shape == "chain":
         return [f"n{n - 1}"], {"seed": _SEED}
+    if shape == "fan_out":
+        return ["total"], {"count": n}
     if shape == "fan_in":
         return ["total"], {f"x{i}": i for i in range(n)}
     if shape == "rows":
@@ -180,10 +248,13 @@ def make_request(shape: Shape, n: int) -> Request:
     return outputs, {"seed": _SEED}
 
 
-def make_expected(shape: Shape, n: int) -> dict[str, object]:
+def make_expected(shape: Shape, n: int) -> dict[str, object]:  # noqa: PLR0911  # one per shape
     """Returns the answer to `make_request(shape, n)`, computed by neither runtime."""
     if shape == "chain":
         return {f"n{n - 1}": _SEED + n - 1}
+    if shape == "fan_out":
+        # Branch `i` gives `i + 1`, so the sum is `1 + 2 + ... + n`.
+        return {"total": n * (n + 1) // 2}
     if shape == "fan_in":
         return {"total": n * (n - 1) // 2}
     if shape == "rows":

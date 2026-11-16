@@ -140,6 +140,7 @@ fnloom keeps what makes Hamilton pleasant and fixes what bites. A few highlights
 | A misspelled input | Silently ignored | `ValueError` naming it |
 | Execution order | Depends on how you list outputs | Always the same |
 | Running a request again | Re-planned every call | `prepare` once, `run` many times |
+| Fan-out over items | Behind an experimental flag | `Parallelizable` and `Collect` with no flag, about 0.6 µs a branch |
 
 </div>
 
@@ -153,6 +154,7 @@ tested against Hamilton side by side.
     `validate`, graphs from plain functions, namespaces, type checks, [result caching](caching.md), the async driver,
     [hooks](hooks.md), result builders, output checks, custom value checks, [drawing, export and the
     CLI](drawing.md), [`@check_output` validators](writing-nodes.md#checking-values), [steps](writing-nodes.md#steps),
-    `@inject`, `@resolve`, [node wrappers](running.md#node-wrappers) and [`bind=` for namespaces](writing-nodes.md#namespaces)
-    are done. Dynamic execution comes later;
+    `@inject`, `@resolve`, [node wrappers](running.md#node-wrappers), [`bind=` for namespaces](writing-nodes.md#namespaces),
+    [fan-out and fan-in](running.md#fan-out-and-fan-in) and [typed absence](running.md#absence) are done. The
+    parallel executor comes later;
     [the design](design/2026-10-26-fnloom-design.md) has the full plan.

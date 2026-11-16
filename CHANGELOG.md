@@ -138,6 +138,16 @@ change the public API; such changes are listed under **Changed** and **Removed**
   of its block gets `ABSENT` (`Collect[T] | Absent`), its default, or is skipped. A declined branch is cached and
   replayed, so its block consumers skip again without running. A defaulted `Collect` parameter over an expand that
   may decline is no longer refused as a shadowed default.
+- Benchmarks of fan-out and absence. `benches.run` times a `fan_out` shape of 1 to 10,000 branches against Hamilton's
+  dynamic execution with its synchronous executor, and two cases: a cached fan-out of 1,000 branches, warm and with
+  one item appended, and `ABSENT` through a 200-node chain. `benchmarks/test_blocks.py` puts them under CodSpeed. A
+  branch costs about 0.6 µs, where Hamilton's cost 0.55 to 2.5 ms; building the fan-out graph is 0.2 ms slower than
+  Hamilton's, a known bug
+  ([Fan-out and absence](https://kelsayed17.github.io/fnloom/benchmarks/#fan-out-and-absence)).
+- [Fan-out and fan-in](https://kelsayed17.github.io/fnloom/running/#fan-out-and-fan-in) and
+  [Absence](https://kelsayed17.github.io/fnloom/running/#absence) in the guide to running a graph, over a catalog
+  that lists items and calls an endpoint once per item, tested end to end (`tests/test_fan_out_example.py`). The
+  register's Q157 now covers `GracefulErrorAdapter` alone, since Q130 answers Hamilton's task hooks.
 
 ### Changed
 

@@ -774,7 +774,7 @@ def test_q145_graph_construction_hook_against_build_end() -> None:
 
 
 @pytest.mark.deliberate("Q157")
-def test_q157_graceful_errors_and_task_hooks_are_hamilton_only() -> None:
+def test_q157_graceful_errors_are_hamilton_only() -> None:
     """`GracefulErrorAdapter` skips a failure's dependents; fnloom fails the run."""
     body = """
 def b(a: int) -> int:
@@ -797,8 +797,6 @@ def d(a: int) -> int:
     fnloom_module = make_module("rows_grace_f", body)
     with pytest.raises(ValueError, match="no"):
         fnloom.build(fnloom_module).execute(["c", "d"], inputs={"a": 1})
-    assert hasattr(lifecycle, "TaskExecutionHook")
-    assert not [name for name in fnloom.__all__ if "Task" in name]
 
 
 @pytest.mark.deliberate("Q139")

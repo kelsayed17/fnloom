@@ -518,6 +518,93 @@ Nodes run in topological order, and when two nodes could run in either order, th
 order never depends on how you list `final_vars` or a function's parameters, so logs and side effects come out the
 same way on every run.
 
+## Fan-out and fan-in
+
+A graph that calls an endpoint once per item lists the items, fans out over them, and gathers what each call
+returned. In this catalog, `picked` is the expand: annotated `-> Parallelizable[str]`, it runs `details` once per
+item, and `summary` collects every item's details with a `Collect[str]` parameter:
+
+```python
+# file: catalog_api.py
+from dataclasses import dataclass
+
+from fnloom import ABSENT, Absent, Collect, Parallelizable
+
+CATALOG = {"furniture": ["chair", "desk", "lamp"]}
+
+
+@dataclass(frozen=True)
+class Endpoint:
+    """Where item details are fetched from."""
+
+    base_url: str
+
+
+def listing(category: str, item: str | None = None) -> list[str] | Absent:
+    """Every item in the category, unless the request names one."""
+    return ABSENT if item is not None else CATALOG[category]
+
+
+def picked(listing: list[str] | Absent, item: str | None = None) -> Parallelizable[str]:
+    """The item named, or else every item listed."""
+    return [item] if isinstance(listing, Absent) else listing
+
+
+def details(picked: str, endpoint: Endpoint) -> str:
+    """One item's details: a real module would call the endpoint here."""
+    return f"{endpoint.base_url}/{picked}"
+
+
+def summary(details: Collect[str]) -> list[str]:
+    """Every item's details, in the order the items came."""
+    return details
+```
+
+```python
+import fnloom
+import catalog_api
+
+catalog = fnloom.build(catalog_api)
+endpoint = catalog_api.Endpoint("https://api.test")
+catalog.execute(["summary"], inputs={"category": "furniture", "endpoint": endpoint})
+# -> {'summary': ['https://api.test/chair', 'https://api.test/desk', 'https://api.test/lamp']}
+catalog.nodes["details"].block
+# -> 'picked'
+```
+
+`details` and every node reading it form `picked`'s block, which runs once per item, item after item; `endpoint`,
+outside the block, is shared by every item. There is no flag or executor to set. A failing item fails the run, naming
+its branch, as in `while computing 'details' for branch (1,) of 'picked'`. Blocks nest, a block may be collected any
+number of times, and a block node is neither an output nor an override: request the collect, or override the
+expand with the items. [Fan-out and fan-in](writing-nodes.md#fan-out-and-fan-in) has every rule.
+
+With a cache, each item's branch is keyed by the item's content, not its place, so a run that picks items already
+fetched, in any order, calls nothing for them, and one more item costs one more call ([Blocks](caching.md#blocks)).
+Hooks hear each branch ([The events](hooks.md#the-events)), and drawings draw each block as a cluster
+([Blocks](drawing.md#blocks)).
+
+## Absence
+
+A request naming one item needs no listing. `listing` declines by returning `ABSENT`, and `picked` admits it with
+`list[str] | Absent`, so it fans out over the item named instead:
+
+```python
+catalog.execute(
+    ["summary"], inputs={"category": "furniture", "endpoint": endpoint, "item": "desk"}
+)
+# -> {'summary': ['https://api.test/desk']}
+catalog.execute(["listing"], inputs={"category": "furniture", "item": "desk"})
+# -> {'listing': fnloom.ABSENT}
+catalog.nodes["listing"].may_be_absent
+# -> True
+```
+
+Whether a node may be absent is known at build, and each parameter reading it decides by its own signature: one
+admitting `Absent` receives `ABSENT`, one with a default takes its default, and any other skips its node, which is
+absent too. A skipped node runs nothing, and [`RunEnd.skipped`](hooks.md#the-events) lists it. An input is never
+`ABSENT`; an override may be, for a node that may be absent. With a cache, a stored absence replays, so the nodes it
+skipped are skipped again without running. [Declining](writing-nodes.md#declining) has every rule.
+
 ## Lineage
 
 ```python
@@ -655,6 +742,10 @@ These are safe to call from several threads at once:
 - `MemoryCache` and `DiskCache`, so a cached driver can be shared too.
 
 An `AsyncDriver`'s synchronous methods, `prepare`, `validate` and inspection, are the `Driver`'s, and as safe.
+
+A run itself stays on the thread that called it, one node at a time, blocks included: a
+[fan-out](#fan-out-and-fan-in) runs its items one after another. Running one run's nodes and branches on several
+threads is *Planned*, with `with_threads`, in Plan 11; until then, the default is the only mode.
 
 fnloom can't make your own code safe:
 
