@@ -6383,15 +6383,20 @@ def outside(n: int) -> str:
 @pytest.mark.deliberate("Q167")
 @pytest.mark.threads
 def test_q167_block_nodes_see_the_callers_context_variables() -> None:
-    """Hamilton's thread executor drops the caller's context; fnloom's threads don't."""
+    """Hamilton's thread executor drops the caller's context; fnloom's threads don't.
+
+    Unless threads inherit their starter's context, as on 3.14t by default: then
+    the pool threads Hamilton starts during the run copy the caller's.
+    """
     hamilton = block_module("q167_h", _CONTEXTS, "hamilton")
     ours = block_module("q167_f", _CONTEXTS, "fnloom")
     outputs, inputs = ["all_seen", "outside"], {"n": 4}
+    branches = "caller" if sys.flags.thread_inherit_context else "unset"
     token = hamilton.VAR.set("caller")
     try:
         assert run_hamilton_blocks(
             hamilton, outputs, inputs, executor="default"
-        ) == Outcome({"all_seen": ["unset"] * 4, "outside": "caller"}, None)
+        ) == Outcome({"all_seen": [branches] * 4, "outside": "caller"}, None)
     finally:
         hamilton.VAR.reset(token)
     token = ours.VAR.set("caller")

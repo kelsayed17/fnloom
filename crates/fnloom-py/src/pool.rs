@@ -1,9 +1,14 @@
 //! A driver's pool of worker threads, shared by its parallel runs.
 //!
 //! Threads start at the first parallel run, `max_workers - 1` of them, since a run's
-//! calling thread works too. Each attaches to the interpreter once, for its whole life,
-//! and does every wait inside `detach`. They leave when the pool is closed: by
-//! `Threads.close`, when the `Threads` is collected, or at interpreter exit.
+//! calling thread works too. Each is a daemon `threading.Thread` named
+//! `fnloom-worker-<n>`, whose target is the worker loop: so it is attached once, for its
+//! whole life, by `threading`, does every wait inside `detach`, and leaves the way any
+//! Python thread does. (A thread of our own, attached through `PyGILState_Ensure`, gets a
+//! `_DummyThread` once Python code asks for `threading.current_thread()`; on 3.14t, many
+//! of those ending at once deadlocked in the dummy's cleanup at interpreter exit.)
+//! Threads leave when the pool is stopped: by `Threads.close`, when the `Threads` is
+//! collected, or at interpreter exit.
 //!
 //! One `Mutex` and `Condvar` guard the pool's state and wake every thread waiting on any
 //! of the driver's runs: a task's completion, a new run and the close each bump its
@@ -13,7 +18,6 @@
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
-use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use fnloom_core::limits::Limits as CoreLimits;
@@ -21,6 +25,7 @@ use fnloom_core::schedule::{Report, Seat};
 use pyo3::exceptions::PyValueError;
 use pyo3::intern;
 use pyo3::prelude::*;
+use pyo3::types::{PyCFunction, PyDict};
 
 use crate::errors::panic_error;
 use crate::limits::Limits;
@@ -62,7 +67,6 @@ struct State {
     /// Threads started, and threads ended.
     started: usize,
     exited: usize,
-    handles: Vec<JoinHandle<()>>,
 }
 
 impl Pool {
@@ -125,27 +129,44 @@ impl Pool {
     /// Adds `run` to the runs that want work, and starts the threads if none has started.
     pub fn register(self: &Arc<Self>, py: Python<'_>, run: &Arc<Run>) {
         let run = Arc::clone(run);
-        let pool = Arc::clone(self);
-        self.with_state(py, move |state| {
+        let (size, stopping) = (self.size, self.stopping.load(Ordering::Acquire));
+        let wanted = self.with_state(py, move |state| {
             state.runs.push(run);
             state.generation += 1;
-            while state.started < pool.size && !pool.stopping.load(Ordering::Acquire) {
-                let number = NEXT.fetch_add(1, Ordering::Relaxed);
-                let worker = Arc::clone(&pool);
-                LIVE.fetch_add(1, Ordering::AcqRel);
-                let spawned = thread::Builder::new()
-                    .name(format!("fnloom-worker-{number}"))
-                    .spawn(move || work(&worker, number));
-                let Ok(handle) = spawned else {
-                    // The run still runs, on the threads there are and its caller.
-                    LIVE.fetch_sub(1, Ordering::AcqRel);
-                    break;
-                };
-                state.handles.push(handle);
-                state.started += 1;
-            }
+            let wanted = if stopping { 0 } else { size - state.started };
+            state.started += wanted;
+            wanted
         });
         self.wake.notify_all();
+        for _ in 0..wanted {
+            if self.spawn(py).is_err() {
+                // The run still runs, on the threads there are and its caller.
+                self.with_state(py, |state| state.started -= 1);
+            }
+        }
+    }
+
+    /// Starts one worker: a daemon `threading.Thread` running `work`.
+    fn spawn(self: &Arc<Self>, py: Python<'_>) -> PyResult<()> {
+        let number = NEXT.fetch_add(1, Ordering::Relaxed);
+        let pool = Arc::clone(self);
+        let target = PyCFunction::new_closure(py, None, None, move |args, _| {
+            work(args.py(), &pool);
+        })?;
+        let kwargs = PyDict::new(py);
+        kwargs.set_item(intern!(py, "target"), target)?;
+        kwargs.set_item(intern!(py, "name"), format!("fnloom-worker-{number}"))?;
+        kwargs.set_item(intern!(py, "daemon"), true)?;
+        let thread = py
+            .import(intern!(py, "threading"))?
+            .getattr(intern!(py, "Thread"))?
+            .call((), Some(&kwargs))?;
+        LIVE.fetch_add(1, Ordering::AcqRel);
+        if let Err(error) = thread.call_method0(intern!(py, "start")) {
+            LIVE.fetch_sub(1, Ordering::AcqRel);
+            return Err(error);
+        }
+        Ok(())
     }
 
     /// Removes `run` from the runs that want work. The removed handle is dropped here,
@@ -175,14 +196,11 @@ impl Pool {
         self.wake.notify_all();
     }
 
-    /// Stops the threads, then waits, detached, at most a second for them, and joins those
-    /// that ended. Idempotent.
+    /// Stops the threads, then waits, detached, at most a second for the idle ones to
+    /// leave. A busy thread is never waited for past that. Idempotent.
     pub fn close(&self, py: Python<'_>) {
         self.stop();
-        let handles = self.with_state(py, |state| {
-            state.generation += 1;
-            std::mem::take(&mut state.handles)
-        });
+        self.with_state(py, |state| state.generation += 1);
         self.wake.notify_all();
         py.detach(|| {
             let deadline = Instant::now() + CLOSING;
@@ -198,11 +216,6 @@ impl Pool {
                     .unwrap_or_else(PoisonError::into_inner)
                     .0;
             }
-            drop(state);
-            // A thread still busy is left to end by itself: it is never joined.
-            for handle in handles.into_iter().filter(JoinHandle::is_finished) {
-                drop(handle.join());
-            }
         });
     }
 
@@ -213,20 +226,17 @@ impl Pool {
         (generation, self.stopping.load(Ordering::Acquire), runs)
     }
 
-    /// A thread ended.
-    fn exited(&self) {
-        let mut state = self.locked();
-        state.exited += 1;
-        drop(state);
+    /// A thread is leaving.
+    fn exited(&self, py: Python<'_>) {
+        self.with_state(py, |state| state.exited += 1);
         self.wake.notify_all();
     }
 }
 
-/// A pool thread's body: one attach for its whole life, taking tasks from any run that
-/// wants work, and waiting detached when none does.
-fn work(pool: &Arc<Pool>, number: usize) {
-    let forked = Python::try_attach(|py| {
-        rename(py, number);
+/// A pool thread's body, attached by `threading` for the thread's whole life: it takes
+/// tasks from any run that wants work, and waits detached when none does.
+fn work(py: Python<'_>, pool: &Arc<Pool>) {
+    let forked = (|| {
         let mut report = Report::default();
         loop {
             let (generation, stopping, runs) = pool.snapshot(py);
@@ -257,32 +267,18 @@ fn work(pool: &Arc<Pool>, number: usize) {
                 pool.wait(py, generation);
             }
         }
-    })
-    .unwrap_or(false);
+    })();
     if !forked {
-        pool.exited();
+        pool.exited(py);
     }
     LIVE.fetch_sub(1, Ordering::AcqRel);
-}
-
-/// Names the thread's Python `_DummyThread` `fnloom-worker-<number>`, once, so
-/// `threading.current_thread()`, tracebacks and logs say which worker it is.
-fn rename(py: Python<'_>, number: usize) {
-    let renamed = py
-        .import(intern!(py, "threading"))
-        .and_then(|threading| threading.call_method0(intern!(py, "current_thread")))
-        .and_then(|current| {
-            current.setattr(intern!(py, "name"), format!("fnloom-worker-{number}"))
-        });
-    // A thread that can't be named still works.
-    drop(renamed);
 }
 
 /// A driver's pool of worker threads, for `Plan.run(..., threads=)`.
 ///
 /// Holds `max_workers - 1` threads, started at the first parallel run, since the run's
-/// calling thread works too. `close()` stops them, joining with a bounded wait; it runs
-/// when the pool is collected too.
+/// calling thread works too. `close()` stops them, waiting a second at most for the idle
+/// ones to leave; a collected pool stops them without waiting.
 #[pyclass(frozen, weakref, module = "fnloom._core")]
 pub struct Threads {
     pool: Arc<Pool>,
@@ -308,7 +304,6 @@ impl Threads {
                     runs: Vec::new(),
                     started: 0,
                     exited: 0,
-                    handles: Vec::new(),
                 }),
                 wake: Condvar::new(),
                 stopping: AtomicBool::new(false),

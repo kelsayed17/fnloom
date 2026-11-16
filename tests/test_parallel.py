@@ -868,7 +868,7 @@ class Written(fnloom.MemoryCache):
 
 
 def nested_keys(threads: int | None) -> tuple[object, list[bytes]]:
-    """`NESTED`'s result and its stores' keys, without threads or on `threads`."""
+    """`NESTED`'s result and the keys written, without threads or on `threads`."""
     store = Written()
     builder = (
         fnloom.Builder()
@@ -878,7 +878,8 @@ def nested_keys(threads: int | None) -> tuple[object, list[bytes]]:
     if threads is not None:
         builder = builder.with_threads(threads)
     result = builder.build().execute(["everything"], inputs={"n": 8})
-    return result, sorted(store.keys)
+    # A set: two branches with one key may both miss and write, until single-flight.
+    return result, sorted(set(store.keys))
 
 
 def test_nested_expands_pulled_concurrently_key_each_branch() -> None:

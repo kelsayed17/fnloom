@@ -353,10 +353,9 @@ pub fn step(
     report: &mut Report<Shared>,
 ) -> Step {
     #[cfg(feature = "test-hooks")]
-    assert!(
-        !ARMED.swap(false, Ordering::AcqRel),
-        "deliberate panic in fnloom's worker loop"
-    );
+    if armed_panic(py, run, pool) {
+        return Step::Worked;
+    }
     let plan = run.plan.get();
     let core = plan.core();
     let graph = plan.graph().get().core();
@@ -903,4 +902,35 @@ static ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new
 #[pyfunction]
 pub fn arm_worker_panic() {
     ARMED.store(true, Ordering::Release);
+}
+
+/// The armed panic, in a run still going: it panics, and the run fails with it as a
+/// worker loop's panic does. Counted as a task while it runs, so the run can't end
+/// before its failure is in; a pool thread may also still hold an ended run's handle.
+#[cfg(feature = "test-hooks")]
+fn armed_panic(py: Python<'_>, run: &Run, pool: &Pool) -> bool {
+    if !ARMED.load(Ordering::Acquire) {
+        return false;
+    }
+    let live = run.with_state(py, |state| {
+        let live = state.scheduler.is_some() && ARMED.swap(false, Ordering::AcqRel);
+        if live {
+            run.active.fetch_add(1, Ordering::AcqRel);
+        }
+        live
+    });
+    if live != Some(true) {
+        return false;
+    }
+    #[expect(
+        clippy::panic,
+        reason = "the deliberate panic is this hook's whole purpose"
+    )]
+    let payload = std::panic::catch_unwind(|| panic!("deliberate panic in fnloom's worker loop"))
+        .err()
+        .unwrap_or_else(|| Box::new("no panic"));
+    run.fail_now(py, crate::errors::panic_error(&*payload));
+    run.active.fetch_sub(1, Ordering::AcqRel);
+    pool.notify(py);
+    true
 }
