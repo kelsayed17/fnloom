@@ -495,6 +495,30 @@ impl<'py> Kwargs<'py, '_> {
         Ok(order)
     }
 
+    /// The dict lent for `node`'s observers, if one is: a running node's arguments, which
+    /// its `post_node` reports too.
+    pub fn lent(&self, node: &str) -> Option<Bound<'py, PyDict>> {
+        let consumer = self.graph.core().id_of(node)?;
+        let pending = self.pending.borrow();
+        let (id, kwargs) = pending.as_ref()?;
+        (*id == consumer).then(|| kwargs.clone())
+    }
+
+    /// The last order key made, which `post_node` of the same step reuses.
+    pub fn last_order(&self) -> Option<Bound<'py, PyTuple>> {
+        self.order
+            .borrow()
+            .as_ref()
+            .map(|(_, _, _, order)| order.clone())
+    }
+
+    /// Keeps `order` as `node`'s key in `branch`, made by an earlier event of that step:
+    /// `node` must be the graph's own name of it, which keys the cache by address.
+    pub fn reuse_order(&self, node: &str, branch: &[usize], order: Bound<'py, PyTuple>) {
+        *self.order.borrow_mut() =
+            Some((node.as_ptr() as usize, node.len(), branch.to_vec(), order));
+    }
+
     /// The dict `node`'s function is about to be called with, built by the first
     /// observer to ask and kept for the call.
     pub fn for_observers(

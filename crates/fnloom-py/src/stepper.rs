@@ -101,6 +101,10 @@ struct Running {
     /// The context a compute runs in, and its hooks and stores with it; `None` for the
     /// caller's own.
     context: Option<Py<PyAny>>,
+    /// A hooked compute's keyword arguments and order key, as its `pre_node` lent and
+    /// made them, for its `post_node`.
+    lent: Option<Py<PyDict>>,
+    order: Option<Py<PyTuple>>,
 }
 
 /// What a running task does.
@@ -642,6 +646,8 @@ impl Stepper {
             live: Vec::new(),
             kwargs: None,
             context: None,
+            lent: None,
+            order: None,
         };
         match work {
             Work::Iterate { iterable } => {
@@ -755,6 +761,8 @@ impl Stepper {
                         self.settle(py, &running, dropped(py), Some(failure), true);
                         return None;
                     }
+                    running.lent = Some(kwargs.clone().unbind());
+                    running.order = lent.last_order().map(Bound::unbind);
                     if limited && !self.retake(node) {
                         let held = self.held.bind(py);
                         let reentered = self
@@ -843,7 +851,12 @@ impl Stepper {
                 .context
                 .as_ref()
                 .and_then(|context| context_run(context.bind(py)).ok());
-            let kwargs = Kwargs::new(py, plan, graph);
+            // The arguments and order key its `pre_node` made, lent again.
+            let lent = running.lent.as_ref().map(|lent| lent.bind(py).clone());
+            let kwargs = Kwargs::lending(py, plan, graph, node.id, lent);
+            if let Some(order) = &running.order {
+                kwargs.reuse_order(&node.name, &running.branch, order.bind(py).clone());
+            }
             errors = self.observers.fire(py, &kwargs, run.as_ref(), |hook| {
                 hook.post_node_in(&node.name, &running.branch, result.as_ref())
             });

@@ -875,14 +875,19 @@ class _Forward(_core.ObserverBase):
         error: BaseException | None = None,
         branch: tuple[int, ...] = (),
         order: tuple[int, ...] = (),
+        kwargs: Mapping[str, object] | None = None,
     ) -> None:
+        """Ends the node; `kwargs` are its arguments, while the binding lends them.
+
+        Without them, they are the last `pre_node`'s.
+        """
         del ok
         dispatch = self._dispatch
         # Read only on a cached run: an uncached one has none.
         outcome = None if dispatch.outcomes is None else dispatch.outcome(node, branch)
         dispatch.node_ended(
             node,
-            self._kwargs,
+            self._kwargs if kwargs is None else kwargs,
             outcome,
             value,
             error,
@@ -918,12 +923,11 @@ class _Forward(_core.ObserverBase):
 
 
 class _Running(_Forward):
-    """`_Forward` for a run on a pool, whose nodes overlap between start and end."""
+    """`_Forward` for a run whose nodes overlap between their start and their end.
 
-    def __init__(self, dispatch: Dispatch) -> None:
-        """Forwards to `dispatch`, keeping each running node's arguments."""
-        super().__init__(dispatch)
-        self._running: dict[tuple[str, tuple[int, ...]], Mapping[str, object]] = {}
+    Each `post_node` gets its node's own arguments from the binding, on a pool or a
+    loop, so nothing is kept between a node's events.
+    """
 
     @override
     def pre_node(
@@ -933,35 +937,10 @@ class _Running(_Forward):
         branch: tuple[int, ...] = (),
         order: tuple[int, ...] = (),
     ) -> None:
-        self._running[node, branch] = kwargs
         dispatch = self._dispatch
         # Read only on a cached run: an uncached one has none.
         outcome = None if dispatch.outcomes is None else dispatch.outcome(node, branch)
         dispatch.node_started(node, kwargs, outcome, branch=branch, order=order)
-
-    @override
-    def post_node(  # the binding's arguments, by position
-        self,
-        node: str,
-        ok: bool = True,  # the binding passes it by position
-        value: object = None,
-        error: BaseException | None = None,
-        branch: tuple[int, ...] = (),
-        order: tuple[int, ...] = (),
-    ) -> None:
-        del ok
-        dispatch = self._dispatch
-        # Read only on a cached run: an uncached one has none.
-        outcome = None if dispatch.outcomes is None else dispatch.outcome(node, branch)
-        dispatch.node_ended(
-            node,
-            self._running.pop((node, branch), None),
-            outcome,
-            value,
-            error,
-            branch=branch,
-            order=order,
-        )
 
 
 class _Skips(_core.ObserverBase):

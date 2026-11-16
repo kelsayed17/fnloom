@@ -646,3 +646,73 @@ def test_async_events_equal_the_sync_drivers_with_one_worker(x: int) -> None:
     assert async_events.seen == sync_events.seen
     # With x == 2, `maybe` declines and `needs` is skipped.
     assert bool(sync_events.seen[-1][2]) == (x == DECLINING)
+
+
+OVERLAPPING = """
+import asyncio
+
+from fnloom import Collect, Parallelizable
+
+
+async def picked(n: int) -> Parallelizable[int]:
+    for item in range(n):
+        yield item
+
+
+async def slept(picked: int, n: int) -> int:
+    # The last item finishes first, so ends come in another order than starts.
+    await asyncio.sleep(0.01 * (n - picked))
+    return picked
+
+
+def every(slept: Collect[int]) -> list[int]:
+    return slept
+"""
+
+
+class _Inputs(Hook):
+    """Each block node's inputs, as its `before_node` and `after_node` see them."""
+
+    def __init__(self) -> None:
+        """None yet."""
+        self.started: dict[tuple[int, ...], object] = {}
+        self.ended: dict[tuple[int, ...], object] = {}
+        self.orders: dict[tuple[int, ...], tuple[object, object]] = {}
+
+    @override
+    def before_node(self, event: NodeStart) -> None:
+        if event.node.name == "slept":
+            self.started[event.branch] = dict(event.inputs or {})
+            self.orders[event.branch] = (event.order, None)
+
+    @override
+    def after_node(self, event: NodeEnd) -> None:
+        if event.node.name == "slept":
+            self.ended[event.branch] = dict(event.inputs or {})
+            self.orders[event.branch] = (self.orders[event.branch][0], event.order)
+
+
+@pytest.mark.parametrize("threads", [None, 2], ids=["no-threads", "threads"])
+def test_overlapping_async_nodes_each_end_with_their_own_inputs(
+    threads: int | None,
+) -> None:
+    """Branches end out of order: each `after_node` has its own inputs and order.
+
+    The binding hands each `post_node` the arguments and order key of its own
+    `pre_node`, so the observer keeps no table between them.
+    """
+    hook = _Inputs()
+    builder = (
+        fnloom.Builder()
+        .with_modules(make_module(f"async_overlapping_{threads}", OVERLAPPING))
+        .with_hooks(hook)
+    )
+    if threads is not None:
+        builder = builder.with_threads(threads)
+    assert _run(builder.build_async().execute(["every"], inputs={"n": 4})) == {
+        "every": [0, 1, 2, 3]
+    }
+    expected = {(i,): {"picked": i, "n": 4} for i in range(4)}
+    assert hook.started == expected
+    assert hook.ended == expected
+    assert all(start == end for start, end in hook.orders.values())

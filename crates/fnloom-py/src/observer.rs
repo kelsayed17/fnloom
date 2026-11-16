@@ -146,7 +146,8 @@ pub struct Flags {
     /// Whether the class overrides `skipped`, which is sent only then.
     skips: bool,
     /// Whether the class sets `orders = True`: its node, expand, hit and skip events are then
-    /// called by position, `branch` and `order`, the step's order key, as tuples, last.
+    /// called by position, `branch` and `order`, the step's order key, as tuples, last; a
+    /// `post_node` also gets the node's arguments while they are lent, else `None`.
     orders: bool,
 }
 
@@ -355,6 +356,11 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
                 Err(error) => (missing, error.value(py).clone().into_any()),
             };
             let order = self.kwargs.order(node, branch)?;
+            // The node's arguments, while still lent: so a parallel observer keeps no table.
+            let kwargs = self
+                .kwargs
+                .lent(node)
+                .map_or_else(|| py.None().into_bound(py), Bound::into_any);
             let args = (
                 node,
                 outcome.is_ok(),
@@ -362,6 +368,7 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
                 error,
                 self.branch(branch)?,
                 order,
+                kwargs,
             );
             return self.call(intern!(py, "post_node"), args, None);
         }
