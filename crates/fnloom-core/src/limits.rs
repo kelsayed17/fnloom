@@ -140,7 +140,9 @@ impl Limits {
         self.nodes.get(node.index()).and_then(Option::as_ref)
     }
 
-    /// The caps a task of `node` on `seat` takes a unit of.
+    /// The caps a task of `node` on `seat` takes a unit of, in the order they are taken:
+    /// the node's and its group's first, so a task refused for them never takes, and gives
+    /// back, a worker slot another task was refused.
     fn caps(&self, node: Option<NodeId>, seat: Seat) -> [Option<&Cap>; 3] {
         let worker = if seat == Seat::Take {
             self.workers.as_ref()
@@ -150,7 +152,7 @@ impl Limits {
         let group = node
             .and_then(|node| self.groups_of.get(node.index()).copied().flatten())
             .and_then(|group| self.groups.get(group as usize));
-        [worker, node.and_then(|node| self.node_cap(node)), group]
+        [node.and_then(|node| self.node_cap(node)), group, worker]
     }
 }
 
@@ -216,6 +218,25 @@ mod tests {
         assert_eq!(limits.held(Resource::Worker), 1);
         limits.release(N1, Seat::Take);
         assert!(limits.try_start(N2, Seat::Take));
+    }
+
+    #[test]
+    fn a_task_refused_its_node_never_takes_a_worker_slot() {
+        // `n0` is at its cap, so every start of it is refused; meanwhile the one worker
+        // slot must always be free for another task, never taken and given back.
+        let limits = limits(Some(1));
+        assert!(limits.try_start(N0, Seat::Threadless));
+        std::thread::scope(|scope| {
+            scope.spawn(|| {
+                for _ in 0..20_000 {
+                    assert!(!limits.try_start(N0, Seat::Take));
+                }
+            });
+            for _ in 0..20_000 {
+                assert!(limits.try_start(None, Seat::Take));
+                limits.release(None, Seat::Take);
+            }
+        });
     }
 
     #[test]

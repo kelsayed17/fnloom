@@ -13,7 +13,7 @@
 //! - On a failure no new task starts; the run waits for the running ones, then raises the
 //!   failure with the lowest order key, as `Plan::run` would have raised it.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError, TryLockError};
 use std::time::Duration;
@@ -134,6 +134,8 @@ struct Slots<'a, 'py> {
     pool: &'a Pool,
     /// The node, while its slots are held.
     node: Option<NodeId>,
+    /// The node, if it is limited, held or not.
+    limited: Option<NodeId>,
     py: Python<'py>,
 }
 
@@ -141,11 +143,22 @@ impl<'a, 'py> Slots<'a, 'py> {
     /// The slots a task of `node` doing `work` holds, if its node is limited.
     fn of(py: Python<'py>, pool: &'a Pool, node: NodeId, work: &Work<Shared>) -> Self {
         let takes = matches!(work, Work::Compute { .. } | Work::Pull { .. });
+        let limited = (takes && pool.limits.limited(node)).then_some(node);
         Self {
             pool,
-            node: (takes && pool.limits.limited(node)).then_some(node),
+            node: limited,
+            limited,
             py,
         }
+    }
+
+    /// Takes the slots back once given back, waiting detached while refused.
+    fn retake(&mut self) -> PyResult<()> {
+        if let (Some(node), None) = (self.limited, self.node) {
+            self.pool.limits.retake(self.py, node)?;
+            self.node = Some(node);
+        }
+        Ok(())
     }
 
     /// The caps the slots are held of, while they are.
@@ -188,7 +201,7 @@ impl Grant for WorkerOnly<'_> {
 thread_local! {
     /// The caps this thread holds a worker slot of, innermost last: a run started inside a
     /// task takes its caller's tasks on the slot already held.
-    static HELD: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
+    static WORKING: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Marks a worker slot of `limits` held by this thread while it lives.
@@ -196,21 +209,21 @@ struct Holding;
 
 impl Holding {
     fn enter(limits: &Arc<Caps>) -> Self {
-        HELD.with(|held| held.borrow_mut().push(Arc::as_ptr(limits) as usize));
+        WORKING.with(|held| held.borrow_mut().push(Arc::as_ptr(limits) as usize));
         Self
     }
 }
 
 impl Drop for Holding {
     fn drop(&mut self) {
-        HELD.with(|held| held.borrow_mut().pop());
+        WORKING.with(|held| held.borrow_mut().pop());
     }
 }
 
 /// Whether this thread holds a worker slot of `limits`.
 fn holds(limits: &Arc<Caps>) -> bool {
     let id = Arc::as_ptr(limits) as usize;
-    HELD.with(|held| held.borrow().contains(&id))
+    WORKING.with(|held| held.borrow().contains(&id))
 }
 
 /// The calls of one task, in its own copy of the run's context, with
@@ -572,15 +585,30 @@ pub fn step(
         Some((Next::Done, _)) => Step::Done,
         Some((Next::Task(task), _)) => {
             let active = Active { run, pool, py };
-            // A panic outside the node call, such as in the report after `complete`, is
-            // the run's failure, recorded before `active` drops: else the run could end as
-            // a success between the count reaching zero and the failure going in.
+            let id = task.id;
+            let completed = Cell::new(false);
+            // A panic outside the node call is the run's failure, recorded before `active`
+            // drops: else the run could end as a success between the count reaching zero
+            // and the failure going in. A task it hit before its completion is completed
+            // as failed, else the scheduler would wait for it for good.
             let forked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                perform(py, run, pool, seat, task, report)
+                perform(py, run, pool, seat, task, report, &completed)
             }))
             .unwrap_or_else(|payload| {
                 report.clear();
-                run.fail_now(py, crate::errors::panic_error(&*payload));
+                let error = crate::errors::panic_error(&*payload);
+                if !completed.get() {
+                    let failed = Outcome::Failed(error.clone_ref(py));
+                    let limits = WorkerOnly(&pool.limits.core);
+                    let report_in = &mut *report;
+                    run.with_state(py, move |state| {
+                        if let Some(scheduler) = state.scheduler.as_mut() {
+                            scheduler.complete(core, graph, &limits, id, failed, report_in);
+                        }
+                    });
+                    report.clear();
+                }
+                run.fail_now(py, error);
                 false
             });
             if forked {
@@ -603,6 +631,7 @@ fn perform(
     seat: Seat,
     task: Task<Shared>,
     report: &mut Report<Shared>,
+    completed: &Cell<bool>,
 ) -> bool {
     let plan = run.plan.get();
     let core = plan.core();
@@ -641,8 +670,14 @@ fn perform(
         };
         (at, failure)
     });
+    #[cfg(feature = "test-hooks")]
+    assert!(
+        !PERFORM_ARMED.swap(false, Ordering::AcqRel),
+        "deliberate panic in a task before its completion"
+    );
     let limits = WorkerOnly(&pool.limits.core);
     let report_in = &mut *report;
+    completed.set(true);
     run.with_state(py, move |state| {
         state.failures.extend(failure);
         if let Some(scheduler) = state.scheduler.as_mut() {
@@ -782,8 +817,10 @@ fn bound_args<'g, 'py>(
 }
 
 /// Runs a compute: a late step's lookup, its hooks, its node's call in the task's context,
-/// `on_value` and `late.store`, and an expand's iterator. `HELD` records a limited node's
-/// slots around its `pre_node` hooks too, since they are held from the hand-out.
+/// `on_value` and `late.store`, and an expand's iterator. A limited node's slots, taken
+/// at hand-out, are given back while its `pre_node` hooks wait for the run's busy flag and
+/// run, then taken back for the call: the flag's holder may be a hook whose own run needs
+/// them, which would otherwise wait for good on a task that waits for it.
 #[expect(
     clippy::too_many_arguments,
     reason = "the task's parts, as the scheduler gives them, and its slots"
@@ -831,15 +868,18 @@ fn compute<'py>(
         Err(error) => return Landed::failed(error),
     };
     let lent = Kwargs::lending(py, plan, graph, node.id, Some(kwargs.clone()));
-    let errors = calls
-        .holding(slots.caps(), node.id, || {
-            Ok(run.hooked(py, calls, &lent, |hook| {
-                hook.pre_node_in(&node.name, branch, &built)
-            }))
-        })
-        .unwrap_or_else(|error| vec![error]);
+    let hooked = run.observers.any();
+    if hooked {
+        slots.release();
+    }
+    let errors = run.hooked(py, calls, &lent, |hook| {
+        hook.pre_node_in(&node.name, branch, &built)
+    });
     if !errors.is_empty() {
         return Landed::hooks(py, "pre_node", errors);
+    }
+    if let Err(error) = slots.retake() {
+        return Landed::failed(error);
     }
     let result = calls
         .holding(slots.caps(), node.id, || {
@@ -986,6 +1026,15 @@ fn outcome_of(
     }
 }
 
+/// Clears a `HELD` entry's live flag when dropped: the slot it names is given back.
+struct Ended<'py>(Bound<'py, PyList>);
+
+impl Drop for Ended<'_> {
+    fn drop(&mut self) {
+        drop(self.0.set_item(0, false));
+    }
+}
+
 /// The `RuntimeError` of a run whose scheduler's lock a panic poisoned.
 fn broken() -> PyErr {
     PyRuntimeError::new_err("fnloom's scheduler panicked: a run's scheduler lock is poisoned")
@@ -1018,8 +1067,25 @@ pub fn run<'py>(
     let seeded = seed(py, core, graph, inputs, overrides, absent)?;
     let snapshot = py
         .import(intern!(py, "contextvars"))?
-        .call_method0(intern!(py, "copy_context"))?
-        .unbind();
+        .call_method0(intern!(py, "copy_context"))?;
+    let variable = held_variable(py)?.bind(py);
+    let held = snapshot.call_method1(intern!(py, "get"), (variable, PyTuple::empty(py)))?;
+    // A run started on the thread of one of its tasks, or one its context reaches, runs
+    // inside a task holding a worker slot: it takes its caller's tasks on that slot.
+    let seat = if holds(&pool.limits) || pool.limits.works(&held) {
+        Seat::Held
+    } else {
+        Seat::Take
+    };
+    // Every task of this run holds a worker slot or runs inside one that does, so the
+    // context they all copy records it, live until the run ends.
+    let (working, live) = pool.limits.holding_worker(&held)?;
+    snapshot.call_method1(
+        intern!(py, "run"),
+        (variable.getattr(intern!(py, "set"))?, working),
+    )?;
+    let _live = Ended(live);
+    let snapshot = snapshot.unbind();
     let run = Arc::new(Run {
         plan: slf.clone().unbind(),
         state: Mutex::new(State {
@@ -1063,11 +1129,6 @@ pub fn run<'py>(
     run.report(py, None, &report);
     report.clear();
     pool.register(py, &run);
-    let seat = if holds(&pool.limits) {
-        Seat::Held
-    } else {
-        Seat::Take
-    };
     let drove = drive(py, &run, pool, seat, &mut report);
     if std::process::id() != run.pid {
         // A node forked: this is the child, whose run's other threads are gone. Nothing
@@ -1204,6 +1265,18 @@ static ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new
 /// Armed by `_core.arm_hook_panic()`: the next hold of a busy flag panics.
 #[cfg(feature = "test-hooks")]
 static HOOK_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Armed by `_core.arm_perform_panic()`: the next task panics after its work, outside
+/// every node call, before its completion.
+#[cfg(feature = "test-hooks")]
+static PERFORM_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Makes the next task of any run panic, in Rust, between its work and its completion.
+#[cfg(feature = "test-hooks")]
+#[pyfunction]
+pub fn arm_perform_panic() {
+    PERFORM_ARMED.store(true, Ordering::Release);
+}
 
 /// Armed by `_core.arm_report_panic()`: the next report of a completed task's events
 /// panics, outside any node call, after the task completed.

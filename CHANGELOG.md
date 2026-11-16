@@ -49,11 +49,14 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - `@fnloom.limit(n=None, *, group=None)` caps how many calls of a node run at once, across every run of a driver, and
   `Builder.with_limits({group: size})` sizes the groups nodes share a cap in (Q134). Every driver honours them, with
   or without `with_threads`; the async driver checks them at build and honours them from a later release. A call
-  gives its slots back as it returns, before its `after_node` hooks, and a sequential run waits for one detached,
-  `Ctrl-C` ending the wait. A group with no size, or a size of a group no node is in, fails the build. A run started
-  inside a node that needs a slot its callers hold every unit of is refused at once with a `RuntimeError` naming the
-  node and the slot, instead of waiting for good. Each driver object has its own counters, through pickling, `copy`,
-  `rebuild()` and a fork.
+  takes its slots after its `before_node` hooks and gives them back as it returns, before its `after_node` hooks,
+  and a sequential run waits for one detached, `Ctrl-C` ending the wait; grants are not fair. A group with no size,
+  or a size of a group no node is in, fails the build. A run started inside a node that needs a slot its callers
+  hold every unit of is refused at once with a `RuntimeError` naming the node and the slot, instead of waiting for
+  good, and a run started on a thread that carries a node's context takes its tasks on that node's worker slot.
+  Each driver object has its own counters, through pickling, `copy`, `rebuild()` and a fork.
+- A run of a driver built `with_threads` fails at once on a panic in fnloom's own code outside a node call, instead
+  of ending as a success or waiting for good.
 
 ### Changed
 

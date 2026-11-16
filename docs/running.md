@@ -775,7 +775,10 @@ threaded.execute(["summary"], inputs={"category": "furniture", "endpoint": endpo
 - **Lazy generators.** An expand's generator is read only while fewer than `2 * max_workers` of its branches are
   unfinished, so a large one is never read far ahead.
 - **Runs inside runs.** A node may run its own driver: the inner run's tasks start on the worker the node holds, so it
-  never waits for a free one.
+  never waits for a free one. That holds on a thread or task the node starts and waits for too, when it carries the
+  node's context: `asyncio.to_thread`, `threading.Thread(context=contextvars.copy_context())`, or any thread on
+  `3.14t`, which inherits its starter's context by default. On `3.14` a plain `threading.Thread` doesn't, so a run it
+  starts waits for a free worker like any other run, and with `with_threads(1)` for the one its node holds.
 - An `AsyncDriver` built from such a builder ignores the setting for now.
 
 fnloom can't make your own code safe:
@@ -845,10 +848,11 @@ Here at most four `details` calls, and six calls of `details` and `reviews` toge
 
 - **Every driver honours limits**, with or without `with_threads`. A driver shared by several threads runs a
   `@limit(1)` node one call at a time: a call waits until a slot is free, and `Ctrl-C` ends the wait.
-- **A slot is held while the node runs.** It is given back as the node's call returns, before its `after_node` hooks
-  run or its value is stored, waking whoever waits for it. Without threads it is taken as the call starts; under
-  `with_threads`, as the node is handed to a worker, so its `before_node` hooks run holding it. A generator node takes
-  its slots for each item it yields.
+- **A slot is held while the node's call runs.** It is taken as the call starts, after the node's `before_node` hooks,
+  and given back as it returns, before its `after_node` hooks run or its value is stored, waking whoever waits for it.
+  A generator node takes its slots for each item it yields.
+- **Grants aren't fair.** A freed slot goes to whichever waiting call asks first, not the one that waited longest, so
+  under steady contention one call can wait long while others pass it.
 - **Each driver has its own counters.** A copy, a rebuilt or an unpickled driver starts with every slot free, and so
   does a forked child. Two drivers never share a slot, even over the same modules.
 - **Checked at build**, on every driver: a group a node is in that has no size, or a size of a group no node is in, is

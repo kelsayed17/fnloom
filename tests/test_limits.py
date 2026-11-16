@@ -9,6 +9,7 @@ import _thread
 import asyncio
 import copy
 import pickle
+import sys
 import threading
 import time
 from typing import TYPE_CHECKING, override
@@ -17,6 +18,7 @@ import pytest
 
 import fnloom
 import picklable_limited
+from fnloom import _core
 from helpers import make_module
 
 if TYPE_CHECKING:
@@ -657,23 +659,154 @@ class RunsBefore(fnloom.Hook):
         """Not run yet."""
         self.driver: fnloom.Driver | None = None
         self.ran = False
-        self.errors: list[str] = []
+        self.results: list[object] = []
 
     @override
     def before_node(self, event: fnloom.NodeStart) -> None:
         if event.node.name == "alone" and self.driver is not None and not self.ran:
             self.ran = True
-            try:
+            self.results.append(
                 self.driver.execute(["alone"], inputs={"x": 7, "pause": 0.0})
-            except RuntimeError as error:
-                self.errors.append(str(error).splitlines()[0])
+            )
 
 
-def test_a_before_node_hook_needing_its_nodes_slot_is_refused_under_threads() -> None:
-    """Under threads a node's slot is held through `before_node`: its run is refused."""
+@THREADS
+def test_a_before_node_hook_may_run_its_own_node(threads: int | None) -> None:
+    """No slot is held while `before_node` runs: the hook's own run of the node runs."""
     hook = RunsBefore()
-    driver, _ = counted("limit_before_node", 2, hooks=(hook,))
+    driver, _ = counted(f"limit_before_node_{threads}", threads, hooks=(hook,))
     hook.driver = driver
     assert driver.execute(["alone"], inputs={"x": 1, "pause": 0.0}) == {"alone": 1}
-    refused = "'alone' is limited to 1 call at a time, and the runs that called"
-    assert hook.errors == [f"{refused} this one hold it"]
+    assert hook.results == [{"alone": 7}]
+
+
+# Finding: a hook holding the run's busy flag runs the driver on a group a sibling
+# task holds; the sibling waits for the flag. It must give its slot back meanwhile.
+SIBLINGS = """
+import contextvars
+import time
+
+from fnloom import limit
+
+DRIVER = []
+NESTED = contextvars.ContextVar("NESTED", default=False)
+""" + "".join(
+    f"""
+
+@limit(group="db")
+def x{i}(v: int) -> int:
+    time.sleep(0.005)
+    return v
+
+
+def h{i}(v: int) -> int:
+    return v
+"""
+    for i in range(8)
+)
+
+
+class RunsInBefore(fnloom.Hook):
+    """In `before_node` of each `h*` node, runs `x0` of the same driver, unnested."""
+
+    def __init__(self, module: types.ModuleType) -> None:
+        """Runs `module.DRIVER[0]`."""
+        self.module = module
+
+    @override
+    def before_node(self, event: fnloom.NodeStart) -> None:
+        nested = self.module.NESTED
+        if event.node.name.startswith("h") and not nested.get():
+            nested.set(True)
+            self.module.DRIVER[0].execute(["x0"], inputs={"v": 1})
+
+
+def test_a_hook_running_the_driver_never_waits_on_a_sibling_holding_its_slot() -> None:
+    """A task waiting for the run's hooks holds no slot, so a hook's own run gets it."""
+    module = make_module("limit_siblings", SIBLINGS)
+    driver = (
+        fnloom.Builder()
+        .with_modules(module)
+        .with_limits({"db": 1})
+        .with_hooks(RunsInBefore(module))
+        .with_threads(4)
+        .build()
+    )
+    module.DRIVER.append(driver)
+    names = [f"x{i}" for i in range(8)] + [f"h{i}" for i in range(8)]
+    results: list[object] = []
+
+    def run() -> None:
+        results.extend(driver.execute(names, inputs={"v": v}) for v in range(10))
+
+    joined(started(run))
+    assert len(results) == 10  # noqa: PLR2004  # one per run
+
+
+# A node runs its own driver on a thread it starts, then joins it.
+FROM_A_THREAD = """
+import asyncio
+import contextvars
+import threading
+
+DRIVER = []
+OUT = []
+
+
+def b(x: int) -> int:
+    return x + 1
+
+
+def a(x: int, how: str) -> int:
+    def inner() -> None:
+        OUT.append(DRIVER[0].execute(["b"], inputs={"x": x})["b"])
+
+    if how == "to_thread":
+        asyncio.run(asyncio.to_thread(inner))
+        return OUT[-1]
+    context = contextvars.copy_context() if how == "context" else None
+    thread = threading.Thread(target=inner, context=context)
+    thread.start()
+    thread.join(5)
+    return -1 if thread.is_alive() else OUT[-1]
+"""
+
+HOWS = [
+    "context",
+    "to_thread",
+    pytest.param(
+        "inherited",
+        marks=pytest.mark.skipif(
+            not sys.flags.thread_inherit_context,
+            reason="only where threads inherit their starter's context (3.14t)",
+        ),
+    ),
+]
+
+
+@pytest.mark.parametrize("how", HOWS)
+def test_a_run_started_on_a_thread_a_node_starts_uses_its_worker_slot(how: str) -> None:
+    """One worker, held by `a`: a run on a thread `a` waits for takes no other slot."""
+    module = make_module(f"limit_from_thread_{how}", FROM_A_THREAD)
+    driver = fnloom.Builder().with_modules(module).with_threads(1).build()
+    module.DRIVER.append(driver)
+    assert driver.execute(["a"], inputs={"x": 1, "how": how}) == {"a": 2}
+
+
+def test_a_panic_before_a_tasks_completion_fails_the_run_and_ends_it() -> None:
+    """The task is completed as failed: the run raises at once instead of hanging."""
+    driver, _ = counted("limit_perform_panic", 2)
+    results: list[object] = []
+
+    def run() -> None:
+        _core.arm_perform_panic()
+        try:
+            driver.execute(["loads"], inputs={"n": 8, "pause": 0.0})
+        except BaseException as error:  # noqa: BLE001  # a PanicException is the point
+            results.append(type(error).__name__)
+
+    joined(started(run))
+    assert results == ["PanicException"]
+    assert driver.execute(["loads"], inputs={"n": 4, "pause": 0.0}) == {
+        "loads": [0, 1, 2, 3]
+    }

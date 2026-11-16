@@ -27,10 +27,12 @@ __all__ = [
     "make_threads",
 ]
 
-# The node and group slots the running calls of this context hold, as `(limits,
-# node)` pairs from the binding: a run started inside one sees them as its
-# ancestors', and is refused a slot whose every unit they hold.
-HELD: Final[ContextVar[tuple[tuple[int, int], ...]]] = ContextVar(
+# The slots the running calls of this context hold, as `(limits, slot, live)`
+# entries the binding makes: a node's index, or a parallel run's worker slots,
+# and `[True]` until the slot is given back. A run started inside one sees them
+# as its ancestors': it is refused a node or group slot whose every unit they
+# hold, and runs its tasks on the worker slot they hold.
+HELD: Final[ContextVar[tuple[tuple[int, int, list[bool]], ...]]] = ContextVar(
     "fnloom_held", default=()
 )
 

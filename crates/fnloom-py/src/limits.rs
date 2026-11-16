@@ -7,10 +7,17 @@
 //! attached and after the lock. A parallel run waits on its pool instead, which the
 //! release notifies too (`parallel`).
 //!
-//! The slots a task holds of a node or group are recorded in `fnloom._threads.HELD`, a
-//! context variable of `(limits, node)` pairs, so a run started inside the task sees them
-//! as its ancestors', on any thread and at any depth. A run that needs a slot whose every
-//! unit its ancestors hold is refused at once instead of waiting for good.
+//! The slots held are recorded in `fnloom._threads.HELD`, a context variable of
+//! `(limits, slot, live)` entries, so a run started inside a task sees them as its
+//! ancestors', on any thread its context reaches and at any depth:
+//!
+//! - a limited call's node slot, around the call: a run that needs a slot whose every unit
+//!   its ancestors hold is refused at once instead of waiting for good;
+//! - a parallel run's worker slots, in the context its tasks copy: a run started from one
+//!   takes its caller's tasks on the slot its ancestor holds (`Seat::Held`).
+//!
+//! `live` is `[True]` until the slot is given back, so a thread or task that inherited the
+//! context and outlived the slot counts it no more.
 
 use std::collections::{BTreeMap, HashMap};
 use std::num::NonZeroUsize;
@@ -32,6 +39,9 @@ use crate::graph::Graph;
 
 /// How long a sequential grant waits before it checks for signals again.
 const SLICE: Duration = Duration::from_millis(50);
+
+/// The slot a `HELD` entry names for a parallel run's worker slots: no node's index.
+const WORKER: usize = usize::MAX;
 
 /// A node's own cap and its group, for the re-entrancy check and its messages.
 struct Capped {
@@ -100,19 +110,73 @@ impl Caps {
     }
 
     /// `held`, the `HELD` value of the calling context, with an entry for `node`'s slot
-    /// added: these caps, the node, and a flag, `[True]` while the slot is held. A thread
-    /// or task started inside the call may inherit the entry and outlive the slot, so
-    /// `release_held` clears the flag, and `reentered` counts only live entries.
+    /// added, and its live flag, which the caller clears as the slot is given back.
     pub fn holding<'py>(
         &self,
         held: &Bound<'py, PyAny>,
         node: NodeId,
     ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyList>)> {
+        self.entered(held, node.index())
+    }
+
+    /// `held` with an entry for the worker slots a parallel run's tasks hold, and its live
+    /// flag, which the run clears as it ends.
+    pub fn holding_worker<'py>(
+        &self,
+        held: &Bound<'py, PyAny>,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyList>)> {
+        self.entered(held, WORKER)
+    }
+
+    fn entered<'py>(
+        &self,
+        held: &Bound<'py, PyAny>,
+        slot: usize,
+    ) -> PyResult<(Bound<'py, PyAny>, Bound<'py, PyList>)> {
         let py = held.py();
-        let id = std::ptr::from_ref(self) as usize;
         let live = PyList::new(py, [true])?;
-        let entry = (id, node.index(), live.clone()).into_pyobject(py)?;
+        let entry = (self.id(), slot, live.clone()).into_pyobject(py)?;
         Ok((held.add(PyTuple::new(py, [entry])?)?, live))
+    }
+
+    /// The identity entries name these caps by.
+    fn id(&self) -> usize {
+        std::ptr::from_ref(self) as usize
+    }
+
+    /// The live entries of these caps in `held`, a `HELD` value, as their slots.
+    fn live<'py>(&self, held: &Bound<'py, PyAny>) -> impl Iterator<Item = usize> + use<'py> {
+        let me = self.id();
+        held.try_iter()
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter_map(move |entry| {
+                let (caps, slot, live) =
+                    entry.extract::<(usize, usize, Bound<'_, PyAny>)>().ok()?;
+                let live = live.get_item(0).and_then(|live| live.is_truthy()).ok()?;
+                (caps == me && live).then_some(slot)
+            })
+    }
+
+    /// Whether `held`, a `HELD` value, has a live worker entry of these caps: a run started
+    /// there runs inside a task that holds a worker slot of them.
+    pub fn works(&self, held: &Bound<'_, PyAny>) -> bool {
+        self.live(held).any(|slot| slot == WORKER)
+    }
+
+    /// Takes `node`'s slots back for a task that gave them back while it waited for its
+    /// run's hooks: waits, detached, for a release while refused. Its ancestors can't hold
+    /// every unit, since the task was granted them once in this run.
+    pub fn retake(&self, py: Python<'_>, node: NodeId) -> PyResult<()> {
+        loop {
+            let seen = self.generation(py);
+            if self.core.try_start(Some(node), Seat::Threadless) {
+                return Ok(());
+            }
+            self.wait_slice(py, seen);
+            py.check_signals()?;
+        }
     }
 
     fn wake(&self) -> MutexGuard<'_, u64> {
@@ -190,17 +254,8 @@ impl Caps {
     /// leave one, so waiting may end.
     pub fn reentered(&self, node: NodeId, held: Option<&Bound<'_, PyAny>>) -> Option<PyErr> {
         let wanted = self.nodes.get(node.index())?.as_ref()?;
-        let me = std::ptr::from_ref(self) as usize;
         let (mut own, mut grouped) = (0, 0);
-        for entry in held?.try_iter().ok()?.flatten() {
-            let Ok((caps, index, live)) = entry.extract::<(usize, usize, Bound<'_, PyAny>)>()
-            else {
-                continue;
-            };
-            let live = live.get_item(0).and_then(|live| live.is_truthy());
-            if caps != me || !live.unwrap_or(false) {
-                continue;
-            }
+        for index in self.live(held?) {
             if index == node.index() {
                 own += 1;
             }

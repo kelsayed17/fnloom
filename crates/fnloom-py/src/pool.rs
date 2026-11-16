@@ -37,8 +37,8 @@ static NEXT: AtomicUsize = AtomicUsize::new(1);
 
 /// How long closing a pool waits for its idle threads, in all.
 const CLOSING: Duration = Duration::from_secs(1);
-/// How long an idle thread sleeps before it looks at the stop flag again, should a stop
-/// that could not take the lock have woken no one.
+/// How long an idle thread sleeps before it looks for work and at the stop flag again,
+/// should a stop that could not take the lock, or a refused grant, have woken no one.
 const IDLE: Duration = Duration::from_secs(1);
 
 /// A driver's pool: its caps, its threads and the runs that want work.
@@ -103,16 +103,18 @@ impl Pool {
         self.notify(py);
     }
 
-    /// Waits, detached, until the generation is no longer `generation`.
+    /// Waits, detached, until the generation is no longer `generation`, or at most `IDLE`:
+    /// a grant that refused a task and gave its slots back woke no one, so an idle thread
+    /// looks for work again now and then.
     fn wait(&self, py: Python<'_>, generation: u64) {
         py.detach(|| {
-            let mut state = self.locked();
-            while state.generation == generation && !self.stopping.load(Ordering::Acquire) {
-                state = self
-                    .wake
-                    .wait_timeout(state, IDLE)
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .0;
+            let state = self.locked();
+            if state.generation == generation && !self.stopping.load(Ordering::Acquire) {
+                drop(
+                    self.wake
+                        .wait_timeout(state, IDLE)
+                        .unwrap_or_else(PoisonError::into_inner),
+                );
             }
         });
     }
