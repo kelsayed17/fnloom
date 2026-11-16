@@ -64,6 +64,15 @@ that wasn't supplied, since an input is never absent. The build marks each node 
 reads a node that may be absent by a `Required` edge. A requested output that is absent is returned as its absent
 value. A plan where nothing may be absent (`Plan::needs_rules` is false) runs the plain loop, at no extra cost.
 
+A node with `absent_on_error: true` may be absent on an error instead: when its payload fails, or for an expand a
+pull of its items, the core asks `Evaluate::absent_on_error(node, &error)`, whose default is `None`. `Some(value)`
+makes the node absent, holding `value`, after `post_node` reported the error, and observers then see
+`absent_error(node, branch, &error)`; an expand absent while it yields drops its branches, as `Item::Declined` does.
+`None` fails the run as before. Such a node may be absent, so its consumers follow the rules above, but it doesn't
+decline: an absent value it returns itself is still yours to refuse. A `Scheduler` takes such an outcome as
+`Outcome::ErrorAbsent(value)`, from a compute or a pull, and single-flight never shares it: a step waiting on its
+key runs itself. An `Item::Declined` from a node that doesn't decline is still a broken plan.
+
 ## Blocks
 
 An expand (`expands: true`) is computed like a function, and its value is then iterated: each item runs the
@@ -143,6 +152,70 @@ aborts the run, and `post_graph(false)` still runs so observers can close what t
   before any hook fires), or `BrokenPlan` (the plan's own state is inconsistent, which is a bug). Its message shows a
   branch as `run::branch_text` writes it, a Python tuple such as `(0, 1)`. Run a plan only on the graph it was
   prepared from: on another graph it may read the wrong nodes, or panic.
+
+## The scheduler
+
+`schedule::Scheduler` is the second way to run a plan. It is a state machine over one run, with no threads, no clock
+and no locks, and it borrows nothing: every method takes the plan and graph it was made with, so a caller with several
+workers keeps it behind one lock. `Plan::run` stays the reference it is tested against.
+
+- `schedule::Layout::new(&plan, &graph)` computes, once per plan, what every run of it starts from: per scope, what
+  each step waits for and how many steps read its value. Keep it in an `Arc` beside the plan.
+- `Scheduler::new(&plan, &graph, layout, seeded, options, &mut report)` takes the plan's layout and each input's and
+  override's value by node id, as a `run::Slot` that says whether it is absent, and adds to `report` what they settle
+  before any task.
+- `next(&plan, &graph, &grant, seat)` hands out the ready task with the lowest **order key** that the `Grant` lets the
+  `Seat` start, skipping over the ones it refuses. It gives `Next::Wait` while tasks are in flight or refused, and
+  `Next::Done` when nothing is left.
+- `complete(&plan, &graph, &grant, id, outcome, &mut report)` takes back a task's `Outcome` and adds to the `Report`
+  the values no step reads any more (`released`, for the caller to drop, so no value is dropped under its lock), and
+  the nodes skipped, the expands exhausted and the hits that completion settled, for the observer events. The caller
+  keeps one report, and `Report::clear`s it between calls.
+- `recycle(args)` hands a compute's emptied argument vector back, so the next compute reuses its buffer.
+- `finish(&plan, &graph)` returns the outputs by id, or the failure with the lowest order key.
+
+The ready set is a heap of entry ids whose keys are compared in place, never stored: an `OrderKey` is built only for a
+task handed out, and one of up to five parts (`OrderKey::new`, `as_slice`) is held inline, with no allocation.
+
+An order key (`OrderKey`, also given by `Plan::order_key(node, branch)`) is the (step position, branch index) pairs of
+the expands whose blocks hold a step, outermost first, then the step's position. Keys compare lexicographically, so
+handing out the lowest ready one reproduces reference order: with one worker, stepping one task at a time gives the
+same calls, in the same order, as `Plan::run`. A pull of item `i` is keyed just before that branch's first step.
+
+A `Task` names its node, its branch and its key, and its `Work` is one of:
+
+- `Compute`: run the payload on `args`, each an `ArgValue` by the absence rules (`One`, `Gather` for a collect, or
+  `Omitted`). An expand iterates what it computed on the same worker. A `late` step outside every block is looked up
+  first, and a hit completes it with `Outcome::Hit`.
+- `Iterate`: iterate an expand's override or hit.
+- `Pull`: take an iterator's next item. At most one pull of an iterator is in flight.
+- `Finish`: end an iterator, exhausted or stopped.
+- `Probe`: ask a new branch's hits. `schedule::probe` runs it with your lookup, in the reverse need order `Plan::run`
+  asks, and gives the `Outcome::Needs` to complete it with.
+
+A node skipped by the absence rules becomes no task: it is reported in `Report::skipped` with its key. A collect waits
+for every branch of its block and gathers them in branch order, whatever order they finished in.
+
+- **Limits.** `limits::Limits::new(max_workers, node_caps, node_groups, group_caps)` is a `Grant` of atomic counters
+  only, shared by every run of a driver. A task takes a worker slot when its seat is `Seat::Take`, and none when it is
+  `Held` (a run's caller), `Lent` or `Threadless` (an async node); a compute or a pull also takes its node's slot and
+  its group's. Every cap is a `NonZeroUsize`, since a cap of 0 would refuse for good. `held(Resource)` says how many
+  are taken. `limits::Unlimited` refuses nothing.
+- **In flight.** `Options::in_flight` bounds how many branches of an expand are unfinished at once: its iterator is
+  pulled only while fewer are.
+- **Single-flight.** A probe's `Outcome::Needs` gives each step's key, or `None`. A step whose key a running compute
+  has waits for it and completes as a hit with its value or declared absence (in `Report::hits`); if that compute
+  fails, the step is ready again. Steps without a key never wait.
+- **Stopping.** A failure, or `stop()`, ends the handing out of computes, pulls, iterates and probes. Then one
+  `Finish` is handed out per open iterator with no pull in flight, innermost first; an iterator whose pull is in flight
+  is finished once its pull returns. Failures keep their order keys, and `finish` returns the lowest key's.
+- **Task ids.** A `TaskId` names one hand-out, so `complete` ignores one already completed (a stale or repeated id),
+  releasing its outcome's values and giving back no slot. A layout, a plan or a graph other than the run's is a
+  `RunError::BrokenPlan`, even of the same shape: each plan has its own identity from `prepare`, which a clone keeps.
+- **Events.** A caller that sends observer events sends each report's `hits`, then its `expanded`, then its
+  `skipped`: with one worker they then come in `Plan::run`'s order.
+- `blocked()` names the lowest-key ready task's node when the grant refused it and nothing of the run is in flight,
+  and `lend()` gives the run one lent seat, which `Seat::Lent` tasks take one at a time.
 
 ## Guarantees
 

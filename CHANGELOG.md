@@ -7,6 +7,156 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ## [Unreleased]
 
+### Added
+
+- Rust core: the scheduler. `schedule::Scheduler` runs a plan as a state machine over one run, with no threads, no
+  clock and no locks, and borrows nothing: each method takes the plan and graph, and `new` the plan's
+  `schedule::Layout`, built once per plan and shared. `next` hands out the ready `Task` with the lowest `OrderKey`
+  that a `limits::Grant` lets a `Seat` start (a compute, an iterate, a pull, a finish, or a new branch's probe, which
+  `schedule::probe` runs with the embedder's lookup); `complete` takes its `Outcome` back and adds to a caller-owned
+  `Report`, cleared and reused, the values to drop, the nodes skipped, the expands exhausted and the hits; `recycle`
+  takes a compute's emptied arguments back for reuse; `finish` returns the outputs, or the failure with the lowest
+  key. A `TaskId` names one hand-out, so a stale or repeated one is ignored, and a layout, plan or graph other than
+  the run's is a `RunError::BrokenPlan`, even of the same shape. Stepped one task at a time, it makes the calls
+  `Plan::run` makes, in the same order, and `Plan::run` is unchanged. `Plan::order_key(node, branch)` gives any step's
+  key, and `run::Slot` is public, to seed a scheduler with each value's absence.
+- Rust core: limits, the in-flight bound, single-flight and stopping, in the scheduler. `limits::Limits` caps workers,
+  each node and each group with atomic counters, shared by the schedulers of one driver; every cap is a
+  `NonZeroUsize`, `held(Resource)` says how many units are taken, and a `Seat::Held`, `Lent` or `Threadless` task
+  takes no worker slot. `Options::in_flight` bounds an expand's unfinished branches. A step whose single-flight key a
+  running compute has waits for it and completes as a hit. A failure or `stop()` hands out only the finishes of open
+  iterators, innermost first, an iterator whose pull is in flight once the pull returns, and `finish` returns the
+  lowest key's failure. `blocked()` names the node a run waits for, and `lend()` gives it one lent seat.
+- `Builder.with_threads(max_workers=None)` runs each run's nodes in parallel, on the driver's own pool of
+  `max_workers` workers, `os.process_cpu_count()` by default (Q134). The calling thread is one of them, so the pool
+  starts `max_workers - 1` threads, named `fnloom-worker-<n>`, at the driver's first run, and `with_threads(1)` runs
+  on the calling thread alone. Independent nodes, outside blocks too (Q169), and a block's branches overlap, handed
+  out in reference order; values, `Collect` orders and the exception raised never depend on the worker count. Each
+  node's call runs in its own copy of the context the run started in, with its hooks; an expand's generator keeps
+  one context from its first item to its last, so a variable it sets lasts across its yields. A run's hooks are
+  called one at a time. A
+  failure starts no new node: the run waits for the running ones, then raises the failure first in reference order,
+  once (Q66, Q128). The setting survives pickling, `copy`, `rebuild()` and `build_async()`, each driver with a pool of
+  its own, and a forked child makes a new one. A driver without it runs exactly
+  as before.
+- Hooks under threads. A run's hooks are called one at a time, each on the thread that ran its node (Q168), and its
+  store writes run after them, so a slow store holds up no other node's hooks; each node sees the context variables
+  its caller set (Q167). `NodeStart.order`, `NodeEnd.order` and `ExpandEnd.order` give the step's order key as a
+  tuple, so a parallel run's events sort into the order one worker gives.
+- Single-flight per key within a run. On a driver built `with_threads` with a cache, a block node whose key equals one
+  already running in the same run waits for that value, holding no worker, and reports a hit (Q85); a `recompute` or
+  uncacheable node never does, nor do two runs share one.
+- `@fnloom.limit(n=None, *, group=None)` caps how many calls of a node run at once, across every run of a driver, and
+  `Builder.with_limits({group: size})` sizes the groups nodes share a cap in (Q134). Every driver honours them, with
+  or without `with_threads`. A call
+  takes its slots after its `before_node` hooks and gives them back as it returns, before its `after_node` hooks,
+  and a sequential run waits for one detached, `Ctrl-C` ending the wait; grants are not fair. A group with no size,
+  or a size of a group no node is in, fails the build. A run started inside a node that needs a slot its callers
+  hold every unit of is refused at once with a `RuntimeError` naming the node and the slot, instead of waiting for
+  good, and a run started on a thread that carries a node's context takes its tasks on that node's worker slot.
+  Each driver object has its own counters, through pickling, `copy`, `rebuild()` and a fork.
+- A run of a driver built `with_threads` fails at once on a panic in fnloom's own code outside a node call, instead
+  of ending as a success or waiting for good.
+- The async driver runs on the core scheduler, as a `with_threads` run does, stepped from the event loop through
+  `_core.Plan.start` and its `Stepper` (Q65). Ready nodes start in reference order, `RunEnd.skipped` is sorted by
+  order key, and `NodeStart.order`, `NodeEnd.order` and `ExpandEnd.order` carry the step's key; with
+  `sync_nodes="inline"` and only sync nodes, the events are the sync driver's, orders included. It honours `@limit`
+  and `with_limits`: an `async def` node waiting for a slot holds no thread, and is woken by a release from any
+  thread or loop. A node's slots are given back before its hooks, as on the sync driver, and a run inside a node
+  needing a slot its callers hold is refused at once. A sync node a failed or cancelled run abandons in a thread keeps
+  its slots until its call returns.
+- `with_threads` on `build_async()`: each sync node runs on the driver's own pool, holding a worker slot, so at most
+  `max_workers` run at once, while `async def` nodes hold none (Q65). `sync_nodes="inline"` with it is a
+  `ValueError`. A sync node there that runs its own async driver never waits for the slot it holds. The pool keeps
+  `max_workers` threads from an async run's first sync node, and a thread whose call the run abandons is replaced at
+  once, leaving the pool once the call returns.
+  A failed async run's driver is collected with its run, so its pool stops: the collector follows the
+  run's stepper, which its traceback keeps.
+- Blocks on the async driver (Q132). `build_async()` runs fan-outs as `build()` does, with a block's branches
+  overlapping on the loop and each `Collect` in item order, and an `async def` generator annotated
+  `-> Parallelizable[T]` is an expand there, its items awaited on the loop and checked as a sync expand's are (Q32).
+  A sync generator's items are read where its node runs, and it is closed in the loop's default executor, so its
+  `finally` never waits for a pool thread a hung call holds. A generator keeps one context across its
+  items. A failing branch cancels every running node and pending read once, and the generator is closed once.
+  `build()` refuses an async generator expand, saying to use `build_async()`.
+- Deadlines (Q170). On a driver built `with_threads`, `execute`, `raw_execute`, `PreparedPlan.run` and `run_raw` take
+  `timeout=` in seconds: the run's nodes then run on the pool only, and once the time passes the run raises
+  `TimeoutError` at once, or the failure it already had. The nodes still running are abandoned: their worker and
+  `@limit` slots are given back at once, the pool starts a thread for each, and what each returns later is dropped,
+  with no hook and no store. The caller closes the generators no worker is reading before it raises. A deadline run
+  inside a node lends that node's worker to its own nodes. Without `with_threads`, `timeout=` is a `TypeError`.
+- `fnloom.cancelled()` tells a node whether its parallel run is stopping, by its deadline, another node's failure or
+  an interrupt, so it can return early; `False` outside one. A run started inside a node of a stopping run, on any
+  driver, sees it too, and a parallel or async one stops starting nodes. On the async driver, `cancelled()` turns true
+  once the run fails or its caller is cancelled. It then returns its outputs if they were all computed,
+  or else raises a `RuntimeError`, which the outer run never raises in place of the failure that stopped it.
+- `Ctrl-C` ends a parallel run at once, abandoning its running nodes as a deadline does, so a node hung on a worker
+  thread no longer keeps the run waiting. A `KeyboardInterrupt` a node raises does the same.
+- Partial results (Q133; resolves Q157). `@fnloom.absent_on(*errors)` makes a node absent, instead of failing the
+  run, when its call raises one of `errors` or a subclass, and `Builder.with_absent_on(*errors, tags=None)` does the
+  same for every node of a driver, or the nodes a `tagged` query matches. Each consumer then follows the absence
+  rules, so a `Collect[T]` over a fan-out gets the branches that succeeded and `Collect[T | Absent]` keeps each
+  branch's place; an expand absent on an error, before or while it yields, has no branches. An `@absent_on` node's
+  return annotation must admit `Absent`, checked at build, naming the node, and an unresolved one is refused; a node
+  covered only by `with_absent_on` may be absent whatever its annotation. Only `Exception` subclasses may be listed,
+  so an interrupt, an exit, a generator's close or a cancellation is never absorbed, and neither is a check of
+  fnloom's own (an item refused, an output check, a missing field, a value `ABSENT` it may not be) nor a stopped
+  inner run's `StoppedError`. An expand's item iterator that raises anything but `StopIteration` is now closed at
+  once, and once. `after_node` still reports `ok=False` with the
+  error, so `LogFailures` logs it, and `RunEnd.absent_errors` lists each as `(node, branch, error)`, sorted by order
+  key on every driver (amends Q84). An error absence is no failure: the run's error is still the first real failure
+  in reference order. It is never stored, nothing computed from it in that run is either, and single-flight never
+  shares it, so the next run tries again. It holds on `Driver`, with `with_threads` and on `AsyncDriver`, and the
+  setting survives pickling, `copy`, `rebuild()` and `build_async()`.
+- Rust core: error absences. `NodeSpec.absent_on_error` makes a node may-be-absent without letting it return an
+  absent value itself; `Evaluate::absent_on_error` gives the value its failed call takes, asked only of such a node,
+  and `Observer::absent_error` reports it after `post_node`, in `Plan::run` and in the `Scheduler` through
+  `Outcome::ErrorAbsent`. A plan with no such node runs exactly as before.
+- `ObserverBase.absent_error(node, *, branch, error)`, the binding's forward of `Observer::absent_error`, sent only
+  to an observer whose class overrides it; `_core.Graph(..., absent_on=)` takes each node's exception classes.
+- `PreparedPlan.run_many(inputs_seq, *, overrides=None, timeout=None)` runs a prepared plan once per input set and
+  returns each set's result, in order, as `run` would return it (Q171). `overrides` is shared by every set, and every
+  set is checked before any runs. On a driver built `with_threads`, the sets run on its pool under its limits, at most
+  `max_workers` open at once, in index order. Once one fails, no set opens and the open ones stop, and the failure of
+  the lowest-indexed failing set is raised, noted `while running input set 3 of run_many`. `timeout=` covers every
+  set together. Each set is its own run, with its own hook events; a set that never opened fires none. Without
+  `with_threads`, the sets run one after another on the calling thread. A driver has at most `max_workers - 1`
+  helper threads for `run_many`, however many callers run it at once.
+- `fnloom.StoppedError`, the `RuntimeError` a run stopped by the run that started it raises, is public. A node that
+  sees `fnloom.cancelled()` may raise it to stop: it is never raised in place of the failure that stopped its run.
+
+### Fixed
+
+- On 3.14t, a cached parallel run could, rarely, skip storing a block node's value or an expand's items. Their key
+  read the item versions of an expand that was finishing at that moment, and found none.
+- A `Ctrl-C` that arrived while a parallel run started its pool's threads was lost, and could leave the pool counting
+  a thread that never started.
+- A run started on a thread that carries a parallel task's context takes that task's worker slot only while no other
+  such run has it, so threads a node starts can no longer run more nodes than `max_workers` at once. A fork inside a
+  `before_node` hook, or a `pre_graph` one, of a parallel run no longer touches the parent's locks in the child.
+- A dropped driver's pool threads end at once. A driver and the plans it kept referred to each other, so they
+  lived until the cyclic garbage collector ran. A plan now keeps what its driver pickles as instead of the driver,
+  and an `AsyncDriver` keeps its own async plans; plans pickled with their driver still share one rebuilt driver.
+- At interpreter exit, the pools' idle threads are joined, within the one-second budget, once `threading`'s own
+  cleanup of them has ended too, so finalization no longer finds one half done on 3.14t.
+- An async run started inside a node of a stopping run stops within 50 ms, cancelling its running `async def` nodes,
+  instead of only once one of its own nodes completed.
+- A stopping async run that detached a sync call its pool thread had taken, but not yet begun, could leave that
+  thread busy and unreplaced: such a call now never runs.
+- A caller waiting on a pool no longer passes a queued call's wake on to other waiting callers while every worker
+  is busy.
+- `LogFailures` logs an expand an error made absent while it yielded, from `RunEnd.absent_errors`, as `node 'x'
+  failed while yielding its items`. Such an expand gets no second `after_node`, so it went unlogged.
+
+### Changed
+
+- The Threads section of the running guide is rewritten: what depends on timing and what doesn't, what a run shares
+  and serializes, runs inside runs, thread counts and fork. The thread tests gain stress tests, which the CI `stress`
+  job runs 200 rounds of (`FNLOOM_STRESS_ROUNDS`), with a `stress` hypothesis profile.
+- `RunEnd.skipped` is sorted by order key on the sync driver (Q84). Without threads that is the order it was in.
+  Output checks' results reach `NodeEnd.checks` per node and branch, so two branches checked at once each report
+  their own.
+
 ## [0.5.0] - 2026-11-15
 
 ### Added

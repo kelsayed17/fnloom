@@ -2,10 +2,12 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::error::{MissingInput, OutputInBlock, PlanError};
 use crate::graph::Graph;
 use crate::node::{Node, NodeId, NodeKind, as_u32};
+use crate::schedule::OrderKey;
 
 /// What to compute and what the caller supplies.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -91,6 +93,32 @@ pub struct Plan {
     /// packed; per node, its step's span in it. Both empty without an expand.
     arg_edges: Vec<u32>,
     arg_spans: Vec<(u32, u32)>,
+    /// Per node, its step's position in the steps of its scope, `u32::MAX` for a node that
+    /// isn't planned; empty without an expand, so `prepare` of a plain plan pays nothing.
+    positions: Vec<u32>,
+    /// Per node, the sub-plan whose steps hold its step; empty without an expand.
+    within: Vec<Option<BlockId>>,
+    identity: Identity,
+}
+
+/// Which `prepare` made a plan, for the scheduler's check that a layout and a run are of one
+/// plan. A clone keeps it, and equality leaves it out: two plans of one request compare equal.
+#[derive(Clone, Copy, Debug, Eq)]
+struct Identity(usize);
+
+impl PartialEq for Identity {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+/// The identities given so far.
+static PLANS: AtomicUsize = AtomicUsize::new(0);
+
+impl Identity {
+    fn next() -> Self {
+        Self(PLANS.fetch_add(1, Ordering::Relaxed))
+    }
 }
 
 impl Plan {
@@ -154,6 +182,72 @@ impl Plan {
     pub const fn has_expands(&self) -> bool {
         self.expands
     }
+
+    /// The position of `node`'s step in the steps of its scope: the outer plan, or the
+    /// sub-plan of its innermost block. `usize::MAX` for a node that isn't planned. A plan
+    /// without an expand keeps no table, and scans its steps.
+    fn position(&self, node: NodeId) -> usize {
+        if self.expands {
+            return self
+                .positions
+                .get(node.index())
+                .map_or(usize::MAX, |&at| at as usize);
+        }
+        self.steps
+            .iter()
+            .position(|step| step.node == node)
+            .unwrap_or(usize::MAX)
+    }
+
+    /// Which `prepare` made this plan; a clone has its original's.
+    pub(crate) const fn identity(&self) -> usize {
+        self.identity.0
+    }
+
+    /// The sub-plan whose steps hold `node`'s step; `None` for an outer step.
+    pub(crate) fn within(&self, node: NodeId) -> Option<BlockId> {
+        self.within.get(node.index()).copied().flatten()
+    }
+
+    /// The order key of the step of `node` in `branch`, as the `Scheduler` gives it: the
+    /// (step position, branch index) pairs of the expands whose blocks hold it, outermost
+    /// first, then its own position. `branch` has one index per level of nesting, outermost
+    /// first; a missing index counts as 0. Pure; in a plan with an expand it costs as much as
+    /// the nesting is deep, and in one without, a scan of the steps.
+    #[must_use]
+    pub fn order_key(&self, node: NodeId, branch: &[usize]) -> OrderKey {
+        let mut chain = vec![node];
+        while let Some(block) = chain.last().and_then(|&at| self.within(at)) {
+            match self.blocks.get(block.index()) {
+                Some(sub) => chain.push(sub.expand),
+                None => break,
+            }
+        }
+        let mut key = Vec::with_capacity(chain.len() * 2 - 1);
+        for (level, &at) in chain.iter().rev().enumerate() {
+            if level > 0 {
+                key.push(as_u32(branch.get(level - 1).copied().unwrap_or(0)));
+            }
+            key.push(as_u32(self.position(at)));
+        }
+        OrderKey::new(&key)
+    }
+}
+
+/// Per node, its step's position in the steps of its scope; `u32::MAX` for the rest.
+pub(crate) fn positions<'s>(
+    count: usize,
+    scopes: impl IntoIterator<Item = &'s [Step]>,
+) -> Vec<u32> {
+    let mut positions = vec![u32::MAX; count];
+    for steps in scopes {
+        for (at, step) in steps.iter().enumerate() {
+            if let Some(place) = positions.get_mut(step.node.index()) {
+                *place = as_u32(at);
+            }
+        }
+    }
+    positions
 }
 
 /// A request whose names have been resolved to ids.
@@ -194,8 +288,12 @@ impl<P> Graph<P> {
         }
         let order = self.topological_order(&actions);
         let needs_rules = self.has_absence() && order.iter().any(|&id| self.node(id).may_be_absent);
+        let steps = self.build_steps(&order, &actions, &resolved.outputs);
         Ok(Plan {
-            steps: self.build_steps(&order, &actions, &resolved.outputs),
+            identity: Identity::next(),
+            positions: Vec::new(),
+            within: Vec::new(),
+            steps,
             outputs: resolved.outputs,
             needs_rules,
             blocks: Vec::new(),
@@ -354,6 +452,13 @@ impl<P> Graph<P> {
                 .nodes()
                 .iter()
                 .any(|node| actions[node.id.index()].is_some() && node.may_be_absent);
+        let positions = positions(count, scopes.iter().map(Vec::as_slice));
+        let mut within = vec![None; count];
+        for (at, steps) in scopes.iter().enumerate().skip(1) {
+            for step in steps {
+                within[step.node.index()] = Some(BlockId(as_u32(at - 1)));
+            }
+        }
         let mut scopes = scopes.into_iter();
         let steps = scopes.next().unwrap_or_default();
         let blocks = expands
@@ -368,6 +473,7 @@ impl<P> Graph<P> {
             })
             .collect();
         Plan {
+            identity: Identity::next(),
             steps,
             outputs: resolved.outputs,
             needs_rules,
@@ -377,6 +483,8 @@ impl<P> Graph<P> {
             late,
             arg_edges,
             arg_spans,
+            positions,
+            within,
         }
     }
 
@@ -581,7 +689,7 @@ impl<P> Graph<P> {
     /// The node whose place stands for `read` when the block of `expand` reads it: `read`
     /// itself for a value, or the expand of `read`'s block for the gathered values of a
     /// sibling block, which live in the scope its collects are in.
-    fn read_place(&self, read: NodeId, expand: NodeId) -> NodeId {
+    pub(crate) fn read_place(&self, read: NodeId, expand: NodeId) -> NodeId {
         match self.node(read).block {
             Some(block) if block != expand && !self.block_path(expand).contains(&block) => block,
             _ => read,
@@ -591,7 +699,7 @@ impl<P> Graph<P> {
     /// The unit that stands for `id` in a scope `depth` levels deep that holds it: `id`
     /// itself, or the expand of the nested block holding it. `None` when `id` is outside
     /// the scope, which is then done before the scope runs.
-    fn unit_in(&self, id: NodeId, depth: usize) -> Option<NodeId> {
+    pub(crate) fn unit_in(&self, id: NodeId, depth: usize) -> Option<NodeId> {
         let path = self.block_path(id);
         match path.len().cmp(&depth) {
             std::cmp::Ordering::Less => None,

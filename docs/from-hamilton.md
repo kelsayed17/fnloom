@@ -118,8 +118,8 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `lifecycle.NoEdgeAndInputTypeChecking()` | Turns off the input and edge checks, for the whole graph | `without_edge_type_checks()` for every edge, or `without_edge_type_checks("count")` for the edges into one node, an unknown name failing the build; input checks are `without_input_type_checks()`, apart; the setting is in the export (Q10, Q149) |
 | A `StaticValidator`, refusing a node or the graph at build | `run_to_validate_node` and `run_to_validate_graph` | An `after_build` hook that raises refuses the build, with every problem in one error, carried through `rebuild()` ([`StaticValidator`](#staticvalidator), Q117) |
 | `NodeExecutionMethod` (`run_to_execute_node`) | Replaces how a node is called; one per driver | `with_node_wrappers(*wrappers)`: any number, an ordered chain, each `wrapper(node, call, inputs)` ([Node wrappers](running.md#node-wrappers), Q111) |
-| `lifecycle.default.GracefulErrorAdapter` | Keeps running past a failure, skipping what depends on it | Not yet: on the [roadmap](plans/2026-10-28-roadmap-ahead-of-hamilton.md). A failing node fails the run, and `after_node` sees its error and inputs (Q157) |
-| `Parallelizable[T]` and `Collect[T]` from `hamilton.htypes` | Need `enable_dynamic_execution(allow_experimental_mode=True)` and an executor setting | The same names from `fnloom`, with no flag and no executor setting (Q118, Q137). Items run one after another, in item order; an empty expand gives `[]`, and an expand requested as an output gives its items as a `list` (Q119 to Q121, Q138). Not on `build_async()` until Plan 11 (Q132) ([Fan-out and fan-in](running.md#fan-out-and-fan-in)) |
+| `lifecycle.default.GracefulErrorAdapter` | Keeps running past a failure, giving what depends on it a sentinel | `@fnloom.absent_on(*errors)` on a node, or `Builder.with_absent_on(*errors, tags=None)` for a driver, makes the node `ABSENT` on those errors: each consumer decides by its signature, `Collect[T]` drops the branch and `Collect[T \| Absent]` keeps its place, `after_node` still reports the error, and nothing computed from it is cached ([Partial results](writing-nodes.md#partial-results), Q133, Q157) |
+| `Parallelizable[T]` and `Collect[T]` from `hamilton.htypes` | Need `enable_dynamic_execution(allow_experimental_mode=True)` and an executor setting | The same names from `fnloom`, with no flag and no executor setting (Q118, Q137). Items run one after another, or at once with `Builder.with_threads` (Q134), and collect in item order either way; an empty expand gives `[]`, and an expand requested as an output gives its items as a `list` (Q119 to Q121, Q138). On `build_async()` too, where an `async def` generator may be the expand (Q132) ([Fan-out and fan-in](running.md#fan-out-and-fan-in)) |
 | `TaskExecutionHook` and the other task hooks | Hooks on dynamic execution's tasks | None: `NodeStart.branch` and `NodeEnd.branch` name a block node's branch, and `Hook.after_expand` gets each expand's item count ([The events](hooks.md#the-events), Q130) |
 | `display_all_functions()`, `display_upstream_of(*names)`, `display_downstream_of(*names)` | A `graphviz.Digraph`, or `None` and a logged traceback without the graphviz package; node order follows `PYTHONHASHSEED` | `draw()`, `draw_upstream_of(*names)`, `draw_downstream_of(*names)`: a `fnloom.Drawing`, whose `to_dot()`, `to_mermaid()` and `to_svg()` need nothing installed and give the same text every run ([Drawing](drawing.md), Q90, Q94, Q146) |
 | `visualize_path_between(a, b, strict_path_visualization=True)` | The path, and its nodes' parents unless strict | `draw_path_between(a, b, context=False)`; with `context=True`, the parents are drawn and marked `context` (Q90) |
@@ -145,8 +145,10 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `async def` and generator functions | The coroutine or generator is the value | `ValueError` at `build()`; `build_async()` awaits an `async def` (Q32) |
 | Building an async driver | `await async_driver.Builder()...build()` | `Builder().build_async()`, not awaited (Q12) |
 | An async driver's result | A DataFrame from `AsyncDriver(...)`; a dict, sorted by name, from its builder | The sync driver's dict, in request order (Q11) |
-| A sync node in an async driver | Runs on the event loop, which stops while it does | Runs in a worker thread (`loop.run_in_executor`), or on the loop with `sync_nodes="inline"` (Q65) |
+| A sync node in an async driver | Runs on the event loop, which stops while it does | Runs in a worker thread (`loop.run_in_executor`), on the driver's pool with `with_threads`, or on the loop with `sync_nodes="inline"` (Q65) |
 | A failing node in an async driver | Its siblings keep running after `execute` raises | They're cancelled; its own exception is raised once, noted with its name (Q66) |
+| A node that hangs | `execute` waits for it for good, with no deadline to give | `execute(..., timeout=)` on a driver built `with_threads` raises `TimeoutError` and abandons it; `fnloom.cancelled()` tells a node its run is stopping (Q170) ([Deadlines and cancellation](running.md#deadlines-and-cancellation)) |
+| One request over many input sets | A loop of `execute`, one set at a time | `PreparedPlan.run_many(inputs_seq)`: one result per set, in order, the sets running at once on a driver built `with_threads` (Q171) ([Many input sets](running.md#many-input-sets)) |
 | `None` for an input declared `x: int` | Passes the check; the node then runs with `None` | `ValueError` before anything runs; annotate `x: int \| None` (Q79) |
 | A node with nothing to return | Returns a sentinel such as `None`, and every consumer runs and must test for it | Returns `fnloom.ABSENT`, annotated `-> T \| fnloom.Absent`: a consumer admitting `Absent` receives it, one with a default takes its default, and any other is skipped, all known at build ([Declining](writing-nodes.md#declining), Q135) |
 | A `Parallelizable` inside a block | Not refused, and wrong: an unrelated `TypeError`, a wrong value or a run that never returns | Blocks nest to any depth, on an explicit stack (Q122) |
@@ -466,13 +468,11 @@ checked(fnloom.build(summing))
 fnloom is pre-alpha. The core, the native path, `@parameterize` and its sugar, `@tag`, `@config`, `@extract_fields`,
 `@extract_columns`, `@exclude`, graph inspection, `validate`, graphs from plain functions, namespaces, type checks,
 result caching, the async driver, hooks, result builders, output checks, custom value checks, drawing, export, the
-CLI, `@check_output` validators, step injection, `@inject`, `@resolve`, node wrappers, typed absence and
-sequential fan-out and fan-in (`Parallelizable` and `Collect`) are done. These Hamilton features come next, roughly in
-this order:
+CLI, `@check_output` validators, step injection, `@inject`, `@resolve`, node wrappers, typed absence, partial
+results (`absent_on`) and sequential fan-out and fan-in (`Parallelizable` and `Collect`) are done. These Hamilton
+features come next, roughly in this order:
 
-1. **The parallel executor**: a block runs its items one after another, on the caller's thread, and not yet on the
-   async driver.
-2. **`GracefulErrorAdapter`**. Node wrappers can change how a node is called, but a run still stops at the first
-   failure.
+1. **The rest of the parallel executor**: `Builder.with_threads`, `@limit`, `timeout=` and `run_many` are built, but
+   the stress tests and the benchmarks against Hamilton's thread executor are still to come.
 
 If your pipeline depends on one of these, it's worth waiting for it before you switch.

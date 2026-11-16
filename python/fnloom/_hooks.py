@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from types import MappingProxyType, ModuleType
-from typing import TYPE_CHECKING, Final, override
+from typing import TYPE_CHECKING, ClassVar, Final, cast, override
 
 from fnloom import _checks, _core
 
@@ -59,7 +59,9 @@ class NodeStart:
     to its default is absent, and so is one bound to a `value()`. `cache` is the
     node's cache outcome, `None` on a driver with no cache. `branch` is the
     branch a block node runs in, one item index per block, outermost first, and
-    `()` outside every block.
+    `()` outside every block. `order` is the step's order key on a sync driver,
+    `()` on an async one: sorting events by it puts a parallel run's events in
+    the order one worker runs them (Q84).
     """
 
     run_id: str
@@ -67,6 +69,7 @@ class NodeStart:
     inputs: Mapping[str, object] | None
     cache: CacheOutcome | None
     branch: tuple[int, ...] = ()
+    order: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -89,6 +92,7 @@ class NodeEnd:
     error: BaseException | None
     checks: tuple[CheckResult, ...] = ()
     branch: tuple[int, ...] = ()
+    order: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -98,12 +102,14 @@ class ExpandEnd:
     `node` describes the expand, `branch` is the branch it ran in, `()` outside
     every block, and `items` how many items it gave, so a progress hook knows
     the total. An expand that declines, or whose run fails, has no `ExpandEnd`.
+    `order` is the expand step's order key, as `NodeStart.order` is.
     """
 
     run_id: str
     node: NodeView
     branch: tuple[int, ...]
     items: int
+    order: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -116,9 +122,12 @@ class RunEnd:
     read-only view of the raw outputs in request order, before any result
     builder: `None` when no outputs were computed, and there even when only
     the result builder failed. `skipped` lists each node the run skipped because
-    an argument it needs was `fnloom.ABSENT` (Q135), as `(node, branch)` pairs in
-    the order skipped, `branch` being `()` outside a block: a skipped node fires
-    no node event, and is absent too.
+    an argument it needs was `fnloom.ABSENT` (Q135), as `(node, branch)` pairs
+    sorted by order key, so in the order one worker skips them, `branch` being
+    `()` outside a block: a skipped node fires no node event, and is absent too.
+    `absent_errors` lists each node an error made absent (`fnloom.absent_on`,
+    `Builder.with_absent_on`), as `(node, branch, error)`, sorted the same way:
+    its `after_node` reported `ok=False` with that error, and the run went on.
     """
 
     run_id: str
@@ -130,6 +139,7 @@ class RunEnd:
     error: BaseException | None
     results: Mapping[str, object] | None
     skipped: tuple[tuple[str, tuple[int, ...]], ...] = ()
+    absent_errors: tuple[tuple[str, tuple[int, ...], BaseException], ...] = ()
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -154,20 +164,22 @@ _START_SLOTS = tuple(getattr(NodeStart, f.name).__set__ for f in fields(NodeStar
 _END_SLOTS = tuple(getattr(NodeEnd, f.name).__set__ for f in fields(NodeEnd))
 
 
-def _node_start(
+def _node_start(  # noqa: PLR0913, PLR0917  # `NodeStart`'s fields, in order, on the hot path
     run_id: str,
     node: NodeView,
     inputs: Mapping[str, object] | None,
     cache: CacheOutcome | None,
     branch: tuple[int, ...],
+    order: tuple[int, ...],
 ) -> NodeStart:
     event = _new(NodeStart)
-    a, b, c, d, e = _START_SLOTS
+    a, b, c, d, e, f = _START_SLOTS
     a(event, run_id)
     b(event, node)
     c(event, inputs)
     d(event, cache)
     e(event, branch)
+    f(event, order)
     return event
 
 
@@ -181,9 +193,10 @@ def _node_end(  # noqa: PLR0913, PLR0917  # `NodeEnd`'s fields, in order, on the
     error: BaseException | None,
     checks: tuple[CheckResult, ...],
     branch: tuple[int, ...],
+    order: tuple[int, ...],
 ) -> NodeEnd:
     event = _new(NodeEnd)
-    a, b, c, d, e, f, g, h, i = _END_SLOTS
+    a, b, c, d, e, f, g, h, i, j = _END_SLOTS
     a(event, run_id)
     b(event, node)
     c(event, inputs)
@@ -193,6 +206,7 @@ def _node_end(  # noqa: PLR0913, PLR0917  # `NodeEnd`'s fields, in order, on the
     g(event, error)
     h(event, checks)
     i(event, branch)
+    j(event, order)
     return event
 
 
@@ -472,10 +486,12 @@ class Dispatch:
     """
 
     __slots__ = (
+        "_absent",
         "_errors",
         "_failed_node",
         "_hooks",
         "_kwargs",
+        "_later_errors",
         "_node_error",
         "_owner",
         "_results",
@@ -486,6 +502,7 @@ class Dispatch:
         "_views",
         "late",
         "outcomes",
+        "parallel",
     )
 
     def __init__(
@@ -513,16 +530,27 @@ class Dispatch:
         self._errors: list[BaseException] = []
         self._node_error: BaseException | None = None
         self._failed_node: str | None = None
+        # Node errors after the first, which a parallel run sees: the core raises the
+        # one first in reference order, which leads instead.
+        self._later_errors: list[tuple[BaseException, str]] = []
         # The last node started and its inputs, so its end needn't key them again.
         self._kwargs: Mapping[str, object] | None = None
         self._started: Mapping[str, object] | None = None
-        # Each checked node's check results, collected while the run is on.
-        self._results: dict[str, tuple[CheckResult, ...]] | None = None
+        # Each checked node's check results by branch, collected while the run is on.
+        self._results: (
+            dict[tuple[str, tuple[int, ...]], tuple[CheckResult, ...]] | None
+        ) = None
         self._token: contextvars.Token[_checks.Sink | None] | None = None
-        # The `(node, branch)` pairs skipped so far, in order, for `RunEnd`.
-        self._skipped: list[tuple[str, tuple[int, ...]]] = []
+        # The `(order, node, branch)` of each node skipped so far, for `RunEnd`.
+        self._skipped: list[tuple[tuple[int, ...], str, tuple[int, ...]]] = []
+        # The `(order, node, branch, error)` of each error absence so far, for `RunEnd`.
+        self._absent: list[
+            tuple[tuple[int, ...], str, tuple[int, ...], BaseException]
+        ] = []
         # A cached run's late keys, which give a late node's outcome per branch.
         self.late: LateKeys | None = None
+        # Whether the run is on a pool, so several nodes run between start and end.
+        self.parallel = False
 
     def observers(self) -> tuple[_core.ObserverBase, ...]:
         """What the core run is given: one observer when its events are wanted.
@@ -533,12 +561,18 @@ class Dispatch:
         """
         hooks = self._hooks
         if hooks.nodes:
-            return (_Forward(self),)
+            return (_Running(self) if self.parallel else _Forward(self),)
         if hooks.after_expand or (hooks.after_run and self._views.skips):
             return (_Skips(self),)
         return ()
 
-    def expanded(self, name: str, branch: tuple[int, ...], items: int) -> None:
+    def expanded(
+        self,
+        name: str,
+        branch: tuple[int, ...],
+        items: int,
+        order: tuple[int, ...] = (),
+    ) -> None:
         """Fires `after_expand` for expand `name`, exhausted after `items` items."""
         methods = self._hooks.after_expand
         if not methods:
@@ -548,6 +582,7 @@ class Dispatch:
             node=self._views.view(name),
             branch=branch,
             items=items,
+            order=order,
         )
         self._raised(_called(methods, event))
 
@@ -559,7 +594,13 @@ class Dispatch:
         outcomes = self.outcomes
         return None if outcomes is None else outcomes.get(name)
 
-    def hit(self, name: str, branch: tuple[int, ...], value: object) -> None:
+    def hit(
+        self,
+        name: str,
+        branch: tuple[int, ...],
+        value: object,
+        order: tuple[int, ...] = (),
+    ) -> None:
         """Reports late node `name`, loaded from the store in `branch`, as a hit.
 
         `before_node` and `after_node`, with no inputs and the loaded value, as
@@ -567,13 +608,40 @@ class Dispatch:
         """
         late = self.late
         outcome = None if late is None else late.outcome(name, branch, hit=True)
-        self.node_started(name, None, outcome, branch=branch)
-        self.node_ended(name, None, outcome, value, None, branch=branch)
+        self.node_started(name, None, outcome, branch=branch, order=order)
+        self.node_ended(name, None, outcome, value, None, branch=branch, order=order)
 
-    def skipped(self, name: str, branch: tuple[int, ...]) -> None:
+    def skipped(
+        self, name: str, branch: tuple[int, ...], order: tuple[int, ...] = ()
+    ) -> None:
         """Records that node `name` was skipped in `branch`, for `RunEnd.skipped`."""
         if self._hooks.after_run:
-            self._skipped.append((name, branch))
+            self._skipped.append((order, name, branch))
+
+    def absent_error(
+        self,
+        name: str,
+        branch: tuple[int, ...],
+        error: BaseException,
+        order: tuple[int, ...] = (),
+    ) -> None:
+        """Node `name`'s `error`, just reported, made it absent: the run goes on.
+
+        So it is no longer the run's node error, and `RunEnd.absent_errors` lists it.
+        """
+        if self._node_error is error:
+            if self._later_errors:
+                self._node_error, self._failed_node = self._later_errors.pop(0)
+            else:
+                self._node_error, self._failed_node = None, None
+        else:
+            self._later_errors = [
+                (later, node)
+                for later, node in self._later_errors
+                if later is not error
+            ]
+        if self._hooks.after_run:
+            self._absent.append((order, name, branch, error))
 
     @property
     def refused(self) -> bool:
@@ -655,6 +723,7 @@ class Dispatch:
         outcome: CacheOutcome | None,
         *,
         branch: tuple[int, ...] = (),
+        order: tuple[int, ...] = (),
     ) -> None:
         """Fires `before_node` for node `name`, called with `kwargs` in `branch`.
 
@@ -669,6 +738,7 @@ class Dispatch:
             self._inputs(name, kwargs),
             outcome,
             branch,
+            order,
         )
         self._raised(_called(methods, event))
 
@@ -681,14 +751,18 @@ class Dispatch:
         error: BaseException | None,
         *,
         branch: tuple[int, ...] = (),
+        order: tuple[int, ...] = (),
     ) -> None:
         """Fires `after_node` for node `name`: it returned `value`, or raised `error`.
 
         Records the error, if any, as the run's node error first. `branch` is the
         branch it ran in.
         """
-        if error is not None and self._node_error is None:
-            self._node_error, self._failed_node = error, name
+        if error is not None:
+            if self._node_error is None:
+                self._node_error, self._failed_node = error, name
+            else:
+                self._later_errors.append((error, name))
         methods = self._hooks.after_node
         if not methods:
             return
@@ -702,8 +776,10 @@ class Dispatch:
             ok,
             value if ok else None,
             error,
-            () if results is None else results.pop(name, ()),
+            # Most nodes have no checks: an empty table needs no lookup.
+            results.pop((name, branch), ()) if bool(results) else (),
             branch,
+            order,
         )
         self._raised(_called(methods, event))
 
@@ -717,6 +793,20 @@ class Dispatch:
         except ValueError:
             # Ended in another context than it started in: just stop collecting.
             _checks.RESULTS.set(None)
+
+    def _lead_with(self, error: BaseException | None) -> None:
+        """Makes `error` the run's node error, when it is a later one seen.
+
+        A parallel run sees several node errors in the order they happen; the core
+        raises the one first in reference order, which then leads. When observers
+        raised while handling it, the core raises it first in a group.
+        """
+        lead: BaseException | None = error
+        if isinstance(error, BaseExceptionGroup) and error.exceptions:
+            lead = cast("BaseException", error.exceptions[0])
+        for later, name in self._later_errors:
+            if later is lead:
+                self._node_error, self._failed_node = later, name
 
     def end(
         self,
@@ -733,6 +823,7 @@ class Dispatch:
         computed; a failed run passes them only when its result builder raised.
         """
         self._release()
+        self._lead_with(error)
         if error is not None and self._node_error is None and not self._errors:
             # No node event was wanted, so the node is read off the core's note.
             self._failed_node = _noted_node(error)
@@ -769,7 +860,17 @@ class Dispatch:
                 results=None
                 if results is None or (ok and not succeeded)
                 else MappingProxyType(results),
-                skipped=tuple(self._skipped),
+                # Stable, so skips with no order keep the order they came in.
+                skipped=tuple(
+                    (name, branch)
+                    for _, name, branch in sorted(self._skipped, key=lambda s: s[0])
+                ),
+                absent_errors=tuple(
+                    (name, branch, error)
+                    for _, name, branch, error in sorted(
+                        self._absent, key=lambda a: a[0]
+                    )
+                ),
             )
             found = _called(methods, event)
         if not found:
@@ -782,6 +883,9 @@ class Dispatch:
 class _Forward(_core.ObserverBase):
     """The core observer of a hooked run: sends each node event to its `Dispatch`."""
 
+    # The binding passes each event's branch and order key, by position.
+    orders: ClassVar[bool] = True
+
     def __init__(self, dispatch: Dispatch) -> None:
         """Forwards to `dispatch`."""
         self._dispatch = dispatch
@@ -789,62 +893,146 @@ class _Forward(_core.ObserverBase):
 
     @override
     def pre_node(
-        self, node: str, kwargs: dict[str, object], *, branch: tuple[int, ...] = ()
-    ) -> None:
-        # The core runs one node at a time, so its end is the next `post_node`.
-        self._kwargs = kwargs
-        dispatch = self._dispatch
-        dispatch.node_started(
-            node, kwargs, dispatch.outcome(node, branch), branch=branch
-        )
-
-    @override
-    def post_node(
         self,
         node: str,
-        *,
-        ok: bool,
-        value: object,
-        error: BaseException | None,
+        kwargs: dict[str, object],
         branch: tuple[int, ...] = (),
+        order: tuple[int, ...] = (),
     ) -> None:
+        # One node at a time, so its end is the next `post_node`.
+        self._kwargs = kwargs
         dispatch = self._dispatch
+        # Read only on a cached run: an uncached one has none.
+        outcome = None if dispatch.outcomes is None else dispatch.outcome(node, branch)
+        dispatch.node_started(node, kwargs, outcome, branch=branch, order=order)
+
+    @override
+    def post_node(  # the binding's arguments, by position
+        self,
+        node: str,
+        ok: bool = True,  # the binding passes it by position
+        value: object = None,
+        error: BaseException | None = None,
+        branch: tuple[int, ...] = (),
+        order: tuple[int, ...] = (),
+        kwargs: Mapping[str, object] | None = None,
+    ) -> None:
+        """Ends the node; `kwargs` are its arguments, while the binding lends them.
+
+        Without them, they are the last `pre_node`'s.
+        """
+        del ok
+        dispatch = self._dispatch
+        # Read only on a cached run: an uncached one has none.
+        outcome = None if dispatch.outcomes is None else dispatch.outcome(node, branch)
         dispatch.node_ended(
             node,
-            self._kwargs,
-            dispatch.outcome(node, branch),
+            self._kwargs if kwargs is None else kwargs,
+            outcome,
             value,
             error,
             branch=branch,
+            order=order,
         )
 
     @override
-    def hit_in(self, node: str, *, branch: tuple[int, ...], value: object) -> None:
-        self._dispatch.hit(node, branch, value)
+    def hit_in(
+        self,
+        node: str,
+        branch: tuple[int, ...] = (),
+        value: object = None,
+        order: tuple[int, ...] = (),
+    ) -> None:
+        self._dispatch.hit(node, branch, value, order)
 
     @override
-    def skipped(self, node: str, *, branch: tuple[int, ...]) -> None:
-        self._dispatch.skipped(node, branch)
+    def skipped(
+        self, node: str, branch: tuple[int, ...] = (), order: tuple[int, ...] = ()
+    ) -> None:
+        self._dispatch.skipped(node, branch, order)
 
     @override
-    def post_expand(self, node: str, *, branch: tuple[int, ...], items: int) -> None:
-        self._dispatch.expanded(node, branch, items)
+    def absent_error(  # the binding's arguments, by position
+        self,
+        node: str,
+        branch: tuple[int, ...] = (),
+        error: BaseException | None = None,
+        order: tuple[int, ...] = (),
+    ) -> None:
+        if error is not None:
+            self._dispatch.absent_error(node, branch, error, order)
+
+    @override
+    def post_expand(
+        self,
+        node: str,
+        branch: tuple[int, ...] = (),
+        items: int = 0,
+        order: tuple[int, ...] = (),
+    ) -> None:
+        self._dispatch.expanded(node, branch, items, order)
+
+
+class _Running(_Forward):
+    """`_Forward` for a run whose nodes overlap between their start and their end.
+
+    Each `post_node` gets its node's own arguments from the binding, on a pool or a
+    loop, so nothing is kept between a node's events.
+    """
+
+    @override
+    def pre_node(
+        self,
+        node: str,
+        kwargs: dict[str, object],
+        branch: tuple[int, ...] = (),
+        order: tuple[int, ...] = (),
+    ) -> None:
+        dispatch = self._dispatch
+        # Read only on a cached run: an uncached one has none.
+        outcome = None if dispatch.outcomes is None else dispatch.outcome(node, branch)
+        dispatch.node_started(node, kwargs, outcome, branch=branch, order=order)
 
 
 class _Skips(_core.ObserverBase):
-    """The core observer of a run that wants skips or expands, and no node event."""
+    """The core observer of a run that wants skips or expands, and no node event.
+
+    It hears of error absences too, for `RunEnd.absent_errors`.
+    """
+
+    # The binding passes each event's branch and order key, by position.
+    orders: ClassVar[bool] = True
 
     def __init__(self, dispatch: Dispatch) -> None:
-        """Sends each skip and each exhausted expand to `dispatch`."""
+        """Sends each skip, error absence and exhausted expand to `dispatch`."""
         self._dispatch = dispatch
 
     @override
-    def skipped(self, node: str, *, branch: tuple[int, ...]) -> None:
-        self._dispatch.skipped(node, branch)
+    def skipped(
+        self, node: str, branch: tuple[int, ...] = (), order: tuple[int, ...] = ()
+    ) -> None:
+        self._dispatch.skipped(node, branch, order)
 
     @override
-    def post_expand(self, node: str, *, branch: tuple[int, ...], items: int) -> None:
-        self._dispatch.expanded(node, branch, items)
+    def absent_error(  # the binding's arguments, by position
+        self,
+        node: str,
+        branch: tuple[int, ...] = (),
+        error: BaseException | None = None,
+        order: tuple[int, ...] = (),
+    ) -> None:
+        if error is not None:
+            self._dispatch.absent_error(node, branch, error, order)
+
+    @override
+    def post_expand(
+        self,
+        node: str,
+        branch: tuple[int, ...] = (),
+        items: int = 0,
+        order: tuple[int, ...] = (),
+    ) -> None:
+        self._dispatch.expanded(node, branch, items, order)
 
 
 _CUT: Final = 50
@@ -927,10 +1115,12 @@ class LogFailures(Hook):
     Logs nothing on success or for a cache hit. The record's message names the
     node and lists its inputs sorted by name, `name=repr`, each `repr` cut to 50
     characters and ended with `...` when it was; the node's error is the record's
-    `exc_info`. A node without inputs shows `inputs: none`.
+    `exc_info`. A node without inputs shows `inputs: none`. An expand an error
+    made absent while it yielded, which has no second `after_node`, is logged
+    from `RunEnd.absent_errors` as `node 'x' failed while yielding its items`.
     """
 
-    __slots__ = ("_level", "_logger")
+    __slots__ = ("_level", "_lock", "_logged", "_logger")
 
     def __init__(
         self, logger: logging.Logger | None = None, *, level: int = logging.ERROR
@@ -938,18 +1128,50 @@ class LogFailures(Hook):
         """Logs to `logger`, by default the `fnloom` logger, at `level`."""
         self._logger = logging.getLogger("fnloom") if logger is None else logger
         self._level = level
+        # Per run, the ids of the errors `after_node` logged: `after_run` logs the
+        # run's other error absences. Under the lock, as runs share the hook.
+        self._logged: dict[str, set[int]] = {}
+        self._lock = threading.Lock()
+
+    @override
+    def __getstate__(self) -> tuple[logging.Logger, int]:
+        """The settings: a lock and a run's errors are not pickled."""
+        return (self._logger, self._level)
+
+    def __setstate__(self, state: tuple[logging.Logger, int]) -> None:
+        """Restores the settings, with no run in flight."""
+        self._logger, self._level = state
+        self._logged = {}
+        self._lock = threading.Lock()
 
     @override
     def after_node(self, event: NodeEnd) -> None:
         if event.ok:
             return
-        shown = _inputs_text(event.inputs)
         error = event.error
-        self._logger.log(
-            self._level,
+        if error is not None:
+            with self._lock:
+                self._logged.setdefault(event.run_id, set()).add(id(error))
+        self._log(
+            error,
             "node '%s' failed; inputs: %s",
             event.node.name,
-            shown,
+            _inputs_text(event.inputs),
+        )
+
+    @override
+    def after_run(self, event: RunEnd) -> None:
+        with self._lock:
+            logged = self._logged.pop(event.run_id, ())
+        for name, _, error in event.absent_errors:
+            if id(error) not in logged:
+                self._log(error, "node '%s' failed while yielding its items", name)
+
+    def _log(self, error: BaseException | None, message: str, *args: object) -> None:
+        self._logger.log(
+            self._level,
+            message,
+            *args,
             exc_info=None
             if error is None
             else (type(error), error, error.__traceback__),

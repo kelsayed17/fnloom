@@ -11,6 +11,8 @@ import pickle
 import subprocess
 import sys
 import textwrap
+import threading
+import time
 import types
 import warnings
 from pathlib import Path
@@ -24,6 +26,7 @@ from hamilton.execution import executors
 from hamilton.function_modifiers import hamilton_exclude
 from hamilton.function_modifiers.base import InvalidDecoratorException
 from hamilton.lifecycle import NoEdgeAndInputTypeChecking
+from hamilton.lifecycle import default as hamilton_default
 from harness import (
     FAKE_GRAPHVIZ,
     FIXTURES,
@@ -35,7 +38,9 @@ from harness import (
     nodes_fnloom,
     nodes_hamilton,
     run_fnloom,
+    run_fnloom_blocks,
     run_hamilton,
+    run_hamilton_blocks,
 )
 from test_semantics import (
     DELIBERATE,
@@ -2250,6 +2255,28 @@ def test_q65_sync_nodes_run_off_the_loop() -> None:
             "waits_for_tick": ticked,
             "clock": 1,
         }, sync_nodes
+
+
+_WHERE = """
+import threading
+
+
+def where(x: int) -> str:
+    return threading.current_thread().name
+"""
+
+
+@pytest.mark.deliberate("Q65")
+@pytest.mark.threads
+def test_q65_with_threads_runs_sync_nodes_on_the_drivers_pool() -> None:
+    """Under `with_threads(2)`, a sync node runs on the pool, not in the executor."""
+    module = make_module("differential_q65_pool", _WHERE)
+    pooled = fnloom.Builder().with_modules(module).with_threads(2).build_async()
+    plain = fnloom.Builder().with_modules(module).build_async()
+    pooled_name = asyncio.run(pooled.execute(["where"], inputs={"x": 1}))["where"]
+    plain_name = asyncio.run(plain.execute(["where"], inputs={"x": 1}))["where"]
+    assert str(pooled_name).startswith("fnloom-worker-")
+    assert not str(plain_name).startswith("fnloom-worker-")
 
 
 _FAILING = """
@@ -6079,6 +6106,18 @@ def test_q122_nested_blocks_gather_per_outer_branch() -> None:
     assert ours.execute(["everything"]) == {"everything": [[10], [20, 21]]}
 
 
+@pytest.mark.deliberate("Q122")
+@pytest.mark.threads
+def test_q122_nested_blocks_gather_per_outer_branch_in_parallel() -> None:
+    """Hamilton's default executors never return either; eight workers gather it."""
+    assert (
+        hamilton_blocks_in_subprocess(_NESTED, ["everything"], 5.0, "default") is None
+    )
+    module = block_module("q122_threads_f", _NESTED, "fnloom")
+    ours = fnloom.Builder().with_modules(module).with_threads(8).build()
+    assert ours.execute(["everything"]) == {"everything": [[10], [20, 21]]}
+
+
 _TWO_COLLECTS = """
 def picked() -> Parallelizable[int]:
     yield from [1, 2]
@@ -6101,6 +6140,11 @@ def count(details: Collect[int]) -> int:
 def test_q123_two_collects_of_one_block() -> None:
     """Hamilton's two groups clash in its cache; fnloom collects a block twice."""
     hamilton, ours = both_blocks(_TWO_COLLECTS, ["total", "count"], {})
+    assert hamilton == Outcome(None, "KeyError")
+    assert ours == Outcome({"total": 3, "count": 2}, None)
+    hamilton, ours = both_blocks(
+        _TWO_COLLECTS, ["total", "count"], {}, "default", threads=8
+    )
     assert hamilton == Outcome(None, "KeyError")
     assert ours == Outcome({"total": 3, "count": 2}, None)
 
@@ -6159,15 +6203,18 @@ def test_q127_items_are_checked_as_inputs() -> None:
 
 
 @pytest.mark.deliberate("Q132")
-def test_q132_build_async_refuses_blocks_until_plan_11() -> None:
-    """Hamilton's async builder refuses the flag; fnloom's refuses the graph."""
+def test_q132_the_async_driver_runs_blocks() -> None:
+    """Hamilton's async builder refuses dynamic execution; fnloom's runs the block.
+
+    Its value is the sync driver's, which is Hamilton's sync one's (Q119).
+    """
     with pytest.raises(ValueError, match="not supported for the async driver"):
         hamilton_async.Builder().enable_dynamic_execution(allow_experimental_mode=True)
+    hamilton, _ = both_blocks(PICKED, ["summary"], {"n": 3, "rate": 2})
     module = block_module("q132_f", PICKED, "fnloom")
-    with pytest.raises(
-        TypeError, match="blocks run on the async driver from Plan 11; 'picked' expands"
-    ):
-        fnloom.Builder().with_modules(module).build_async()
+    driver = fnloom.Builder().with_modules(module).build_async()
+    ours = asyncio.run(driver.execute(["summary"], inputs={"n": 3, "rate": 2}))
+    assert hamilton == Outcome(ours, None)
 
 
 _BOTH_KINDS = """
@@ -6219,6 +6266,323 @@ def test_q137_no_executor_settings() -> None:
         "enable_dynamic_execution",
     ):
         assert not hasattr(fnloom.Builder, name)
+
+
+# Threads (Plan 11, task 3). "At once" is a barrier that passes only when every party
+# waits on it together; "one at a time" is a lock never found held.
+_FOUR_BRANCHES = """
+import threading
+import time
+
+MEET = threading.Barrier(4, timeout=5)
+ALONE = threading.Lock()
+OVERLAPPED = []
+
+
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+def met(picked: int) -> int:
+    MEET.wait()
+    return picked
+
+
+def alone(picked: int) -> int:
+    if not ALONE.acquire(blocking=False):
+        OVERLAPPED.append(picked)
+        return picked
+    try:
+        time.sleep(0.02)
+    finally:
+        ALONE.release()
+    return picked
+
+
+def all_met(met: Collect[int]) -> list[int]:
+    return list(met)
+
+
+def all_alone(alone: Collect[int]) -> list[int]:
+    return list(alone)
+"""
+
+
+@pytest.mark.deliberate("Q134")
+@pytest.mark.threads
+def test_q134_branches_overlap_only_with_threads() -> None:
+    """Hamilton's default executor runs branches at once; fnloom only with threads."""
+    inputs = {"n": 4}
+    hamilton = block_module("q134_h", _FOUR_BRANCHES, "hamilton")
+    assert run_hamilton_blocks(
+        hamilton, ["all_met"], inputs, executor="default"
+    ) == Outcome({"all_met": [0, 1, 2, 3]}, None)
+    plain = block_module("q134_plain_f", _FOUR_BRANCHES, "fnloom")
+    assert run_fnloom_blocks([plain], ["all_alone"], inputs) == Outcome(
+        {"all_alone": [0, 1, 2, 3]}, None
+    )
+    assert plain.OVERLAPPED == []
+    threaded = block_module("q134_threads_f", _FOUR_BRANCHES, "fnloom")
+    assert run_fnloom_blocks([threaded], ["all_met"], inputs, threads=4) == Outcome(
+        {"all_met": [0, 1, 2, 3]}, None
+    )
+
+
+_TWO_SLOW = """
+import threading
+import time
+
+MEET = threading.Barrier(2, timeout=5)
+ALONE = threading.Lock()
+OVERLAPPED = []
+
+
+def _alone(n: int) -> int:
+    if not ALONE.acquire(blocking=False):
+        OVERLAPPED.append(n)
+        return n
+    try:
+        time.sleep(0.05)
+    finally:
+        ALONE.release()
+    return n
+
+
+def left(n: int) -> int:
+    return _alone(n)
+
+
+def right(n: int) -> int:
+    return _alone(n)
+
+
+def met_left(n: int) -> int:
+    MEET.wait()
+    return n
+
+
+def met_right(n: int) -> int:
+    MEET.wait()
+    return n
+"""
+
+
+@pytest.mark.deliberate("Q169")
+@pytest.mark.threads
+def test_q169_nodes_outside_blocks_overlap_with_threads() -> None:
+    """Hamilton runs nodes outside blocks one at a time; fnloom's threads don't."""
+    hamilton = block_module("q169_h", _TWO_SLOW, "hamilton")
+    assert run_hamilton_blocks(
+        hamilton, ["left", "right"], {"n": 1}, executor="default"
+    ) == Outcome({"left": 1, "right": 1}, None)
+    assert hamilton.OVERLAPPED == []
+    ours = block_module("q169_f", _TWO_SLOW, "fnloom")
+    assert run_fnloom_blocks(
+        [ours], ["met_left", "met_right"], {"n": 1}, threads=2
+    ) == Outcome({"met_left": 1, "met_right": 1}, None)
+
+
+# Hooks and contexts under threads (Plan 11, task 4).
+_CONTEXTS = """
+import contextvars
+
+VAR = contextvars.ContextVar("caller_var", default="unset")
+
+
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+def seen(picked: int) -> str:
+    return VAR.get()
+
+
+def all_seen(seen: Collect[str]) -> list[str]:
+    return list(seen)
+
+
+def outside(n: int) -> str:
+    return VAR.get()
+"""
+
+
+@pytest.mark.deliberate("Q167")
+@pytest.mark.threads
+def test_q167_block_nodes_see_the_callers_context_variables() -> None:
+    """Hamilton's thread executor drops the caller's context; fnloom's threads don't.
+
+    Unless threads inherit their starter's context, as on 3.14t by default: then
+    the pool threads Hamilton starts during the run copy the caller's.
+    """
+    hamilton = block_module("q167_h", _CONTEXTS, "hamilton")
+    ours = block_module("q167_f", _CONTEXTS, "fnloom")
+    outputs, inputs = ["all_seen", "outside"], {"n": 4}
+    branches = "caller" if sys.flags.thread_inherit_context else "unset"
+    token = hamilton.VAR.set("caller")
+    try:
+        assert run_hamilton_blocks(
+            hamilton, outputs, inputs, executor="default"
+        ) == Outcome({"all_seen": [branches] * 4, "outside": "caller"}, None)
+    finally:
+        hamilton.VAR.reset(token)
+    token = ours.VAR.set("caller")
+    try:
+        assert run_fnloom_blocks([ours], outputs, inputs, threads=4) == Outcome(
+            {"all_seen": ["caller"] * 4, "outside": "caller"}, None
+        )
+    finally:
+        ours.VAR.reset(token)
+
+
+# A node that hangs until the test releases it (Plan 11, task 9).
+_HUNG = """
+import threading
+
+RELEASE = threading.Event()
+
+
+def hung(n: int) -> int:
+    RELEASE.wait(5)
+    return n
+"""
+
+
+@pytest.mark.deliberate("Q170")
+@pytest.mark.threads
+def test_q170_a_run_has_a_deadline() -> None:
+    """Hamilton's `execute` takes no timeout; fnloom's abandons a hung node at one."""
+    for method in (hamilton_driver.Driver.execute, hamilton_driver.Driver.raw_execute):
+        assert "timeout" not in inspect.signature(method).parameters
+    ours = block_module("q170_f", _HUNG, "fnloom")
+    driver = fnloom.Builder().with_modules(ours).with_threads(2).build()
+    start = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError):
+            driver.execute(["hung"], inputs={"n": 1}, timeout=0.2)
+        assert time.monotonic() - start < 1
+    finally:
+        ours.RELEASE.set()
+
+
+_BATCHED = """
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+def squared(picked: int) -> int:
+    return picked * picked
+
+
+def summed(squared: Collect[int]) -> int:
+    return sum(squared)
+"""
+
+
+@pytest.mark.deliberate("Q171")
+@pytest.mark.threads
+@pytest.mark.parametrize("threads", [None, 4])
+def test_q171_one_request_runs_over_many_input_sets(threads: int | None) -> None:
+    """Hamilton has only a loop of `execute`; fnloom's `run_many` equals that loop."""
+    given = [{"n": n} for n in range(50)]
+    hamilton = block_module("q171_h", _BATCHED, "hamilton")
+    built = (
+        hamilton_driver.Builder()
+        .with_modules(hamilton)
+        .enable_dynamic_execution(allow_experimental_mode=True)
+        .build()
+    )
+    public = {name for name in dir(built) if not name.startswith("_")}
+    assert not any("many" in name or "batch" in name for name in public)
+    looped = [built.execute(["summed"], inputs=inputs) for inputs in given]
+    ours = block_module("q171_f", _BATCHED, "fnloom")
+    builder = fnloom.Builder().with_modules(ours)
+    if threads is not None:
+        builder = builder.with_threads(threads)
+    plan = builder.build().prepare(["summed"], inputs={"n": 0})
+    assert plan.run_many(given) == [plan.run(inputs=inputs) for inputs in given]
+    assert plan.run_many(given) == looped
+
+
+_MET_BRANCHES = """
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+def details(picked: int) -> int:
+    return picked
+
+
+def summary(details: Collect[int]) -> list[int]:
+    return list(details)
+"""
+
+
+class _MeetingHamiltonHook(lifecycle.NodeExecutionHook):
+    """Waits for four `details` calls of `run_before_node_execution` at once."""
+
+    def __init__(self) -> None:
+        """A barrier of four."""
+        self.meet = threading.Barrier(4, timeout=5)
+
+    @override
+    def run_before_node_execution(self, **kwargs: Any) -> None:
+        if kwargs["node_name"] == "details":
+            self.meet.wait()
+
+    @override
+    def run_after_node_execution(self, **kwargs: Any) -> None:
+        pass
+
+
+class _AloneHook(fnloom.Hook):
+    """Takes a lock without blocking in each node event, noting any overlap."""
+
+    def __init__(self) -> None:
+        """No overlap yet."""
+        self.lock = threading.Lock()
+        self.overlapped: list[str] = []
+
+    def _alone(self, name: str) -> None:
+        if not self.lock.acquire(blocking=False):
+            self.overlapped.append(name)
+            return
+        try:
+            time.sleep(0.005)
+        finally:
+            self.lock.release()
+
+    @override
+    def before_node(self, event: fnloom.NodeStart) -> None:
+        self._alone(event.node.name)
+
+    @override
+    def after_node(self, event: fnloom.NodeEnd) -> None:
+        self._alone(event.node.name)
+
+
+@pytest.mark.deliberate("Q168")
+@pytest.mark.threads
+def test_q168_one_runs_hooks_never_overlap() -> None:
+    """Hamilton's pool threads call a hook at once; fnloom's run calls it in turn."""
+    module = block_module("q168_h", _MET_BRANCHES, "hamilton")
+    built = (
+        hamilton_driver.Builder()
+        .enable_dynamic_execution(allow_experimental_mode=True)
+        .with_modules(module)
+        .with_adapters(_MeetingHamiltonHook())
+        .build()
+    )
+    assert built.execute(["summary"], inputs={"n": 4}) == {"summary": [0, 1, 2, 3]}
+    hook = _AloneHook()
+    ours = (
+        fnloom.Builder()
+        .with_modules(block_module("q168_f", _MET_BRANCHES, "fnloom"))
+        .with_hooks(hook)
+        .with_threads(4)
+        .build()
+    )
+    assert ours.execute(["summary"], inputs={"n": 16}) == {"summary": list(range(16))}
+    assert hook.overlapped == []
 
 
 # Overrides and outputs around blocks (Plan 10, task 9).
@@ -6483,3 +6847,77 @@ def a(x: int) -> int:
         fnloom.step(_add, extra=fnloom.group(fnloom.value(1)))
     with pytest.raises(TypeError, match=r"_add: group\(\) binds a parameterize row"):
         fnloom.mutate(fnloom.apply_to(_add, extra=fnloom.group(fnloom.value(1))))(_add)
+
+
+_GRACEFUL = """
+def picked(items: list[int]) -> Parallelizable[int]:
+    yield from items
+
+
+def detail(picked: int) -> int:
+    if picked == 2:
+        raise KeyError(picked)
+    return picked
+
+
+def total(detail: Collect[int]) -> list[int]:
+    return list(detail)
+"""
+
+_ABSENT_ON = """
+from fnloom import Absent, absent_on
+
+
+def picked(items: list[int]) -> Parallelizable[int]:
+    yield from items
+
+
+@absent_on(KeyError)
+def detail(picked: int) -> int | Absent:
+    if picked == 2:
+        raise KeyError(picked)
+    return picked
+
+
+def total(detail: Collect[int]) -> list[int]:
+    return list(detail)
+
+
+def every(detail: Collect[int | Absent]) -> list[object]:
+    return list(detail)
+"""
+
+
+@pytest.mark.deliberate("Q133")
+@pytest.mark.threads
+@pytest.mark.parametrize("threads", [None, 8])
+def test_q133_an_error_absence_is_absent_not_a_sentinel(threads: int | None) -> None:
+    """Hamilton gives a sentinel like a value; fnloom an absence, dropped or kept."""
+    theirs = block_module(f"q133_h_{threads}", _GRACEFUL, "hamilton")
+    graceful = hamilton_default.GracefulErrorAdapter(error_to_catch=KeyError)
+    for executor in ("synchronous", "default"):
+        builder = (
+            hamilton_driver.Builder()
+            .enable_dynamic_execution(allow_experimental_mode=True)
+            .with_modules(theirs)
+            .with_adapters(graceful)
+        )
+        if executor == "synchronous":
+            builder = builder.with_local_executor(
+                executors.SynchronousLocalTaskExecutor()
+            ).with_remote_executor(executors.SynchronousLocalTaskExecutor())
+        got = builder.build().execute(["total"], inputs={"items": [1, 2, 3]})
+        # The failed branch is `None`, as a branch returning `None` would be.
+        assert got == {"total": [1, None, 3]}
+    ours = block_module(f"q133_f_{threads}", _ABSENT_ON, "fnloom")
+    builder = fnloom.Builder().with_modules(ours)
+    if threads is not None:
+        builder = builder.with_threads(threads)
+    assert builder.build().execute(["total", "every"], inputs={"items": [1, 2, 3]}) == {
+        "total": [1, 3],
+        "every": [1, fnloom.ABSENT, 3],
+    }
+    # With no policy, the error fails the run.
+    plain = block_module(f"q133_plain_{threads}", _GRACEFUL, "fnloom")
+    with pytest.raises(KeyError):
+        fnloom.build(plain).execute(["total"], inputs={"items": [1, 2, 3]})

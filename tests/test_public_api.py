@@ -71,6 +71,7 @@ def test_the_regressed_callables_are_covered() -> None:
         "Builder.with_result_builder",
         "Driver.raw_execute",
         "PreparedPlan.run_raw",
+        "PreparedPlan.run_many",
         "AsyncDriver.raw_execute",
         "AsyncPreparedPlan.run_raw",
         "Builder.with_output_type_checks",
@@ -94,4 +95,9 @@ def test_the_regressed_callables_are_covered() -> None:
         "Builder.with_node_wrappers",
         "Validator",
         "Drawing.to_mermaid",
+        "limit",
+        "Builder.with_limits",
+        "cancelled",
+        "absent_on",
+        "Builder.with_absent_on",
     }

@@ -737,30 +737,348 @@ These are safe to call from several threads at once:
 
 - on a `Driver`: `execute`, `prepare`, `validate`, `explain_cache`, and the inspection methods: `nodes`, `inputs()`,
   `outputs()`, `modules`, `what_is_the_path_between` and the lineage methods;
-- `PreparedPlan.run`, on one plan shared between threads;
+- `PreparedPlan.run` and `run_many`, on one plan shared between threads;
 - a `Builder`, whose methods return new builders, its `build`, and `rebuild`;
 - `MemoryCache` and `DiskCache`, so a cached driver can be shared too.
 
 An `AsyncDriver`'s synchronous methods, `prepare`, `validate` and inspection, are the `Driver`'s, and as safe.
 
-A run itself stays on the thread that called it, one node at a time, blocks included: a
-[fan-out](#fan-out-and-fan-in) runs its items one after another. Running one run's nodes and branches on several
-threads is *Planned*, with `with_threads`, in Plan 11; until then, the default is the only mode.
+By default a run stays on the thread that called it, one node at a time, blocks included: a
+[fan-out](#fan-out-and-fan-in) runs its items one after another.
+
+### Running in parallel
+
+`Builder.with_threads(max_workers=None)` runs each run's nodes in parallel instead, on the driver's own pool of
+`max_workers` workers, `os.process_cpu_count()` by default. The calling thread is one of them, so the pool starts
+`max_workers - 1` threads at the first run, named `fnloom-worker-<n>`, and `with_threads(1)` runs on the calling
+thread alone. Independent nodes and a block's branches overlap, handed out in reference order as workers free up:
+
+```python
+threaded = fnloom.Builder().with_modules(catalog_api).with_threads(8).build()
+threaded.execute(["summary"], inputs={"category": "furniture", "endpoint": endpoint})
+# -> {'summary': ['https://api.test/chair', 'https://api.test/desk', 'https://api.test/lamp']}
+```
+
+- **The GIL build.** On `3.14`, nodes that release the GIL (I/O, `time.sleep`, many C extensions) overlap, and pure
+  Python nodes take turns, so they gain nothing; on `3.14t` they all run at once. fnloom gives no warning on `3.14`:
+  the results are the same on both.
+- **`max_workers` caps the driver, not the run.** Every run of the driver, from any thread, shares its workers, so
+  two runs at once of a `with_threads(4)` driver run at most four nodes between them, the calling threads included.
+- **Lazy generators.** An expand's generator is read only while fewer than `2 * max_workers` of its branches are
+  unfinished, so a large one is never read far ahead.
+- **Limits, deadlines and many input sets** come with it: [`@fnloom.limit`](#limits) caps a node's calls on any
+  driver, and [`timeout=`](#deadlines-and-cancellation) and [`run_many`](#many-input-sets) run on the pool.
+- **The async driver.** An `AsyncDriver` built from such a builder runs its sync nodes on the driver's pool, and its
+  `async def` nodes on the loop, holding no worker ([Async](#async)).
+
+### What depends on timing
+
+Results never depend on the worker count or on timing. For the same inputs, a run with no `with_threads`, with one
+worker or with eight gives:
+
+- the same values, and each `Collect` in item order;
+- the same exception, when one node fails. After a failure no new node starts, the run waits for the running ones,
+  then raises the failure that comes first in reference order, as one exception. A `fnloom.StoppedError`, which says
+  only that a node was stopped, is never raised in place of the failure that stopped the run;
+- the same cache keys, and the same values stored under them;
+- the same [`RunEnd.skipped`](hooks.md#the-events) and `RunEnd.absent_errors`, sorted by order key, and the same
+  branches made absent by [`absent_on`](writing-nodes.md#partial-results): an error absence is no failure, so the
+  run goes on as with one worker.
+
+What can depend on timing:
+
+- the order hooks hear nodes start and end, and the thread each node runs on. Each node event carries `order`, so a
+  hook can sort them into the order one worker gives, which is exactly the order without `with_threads`;
+- with several failing nodes, which of them ran before the stop, and so what their side effects did. The exception
+  is the first in reference order of those that ran;
+- when `fnloom.cancelled()` turns `True` in a running node, and whether a run inside a stopping run finished its
+  outputs first, so returns them, or raises `StoppedError`;
+- whether a branch waiting on an equal key's value shares it or, once that value is in, computes it again
+  ([Blocks](caching.md#blocks)): either way it gets the same value;
+- which of several calls waiting for a [limit](#limits) gets a freed slot, and whether a run finishes inside its
+  `timeout=`;
+- in [`run_many`](#many-input-sets), which failing sets ran before the batch stopped. With one failing set, its
+  failure is always the one raised.
+
+### What a run shares, and what it serializes
+
+- **Contexts.** Each node's call runs in its own copy of the context the run started in: a `ContextVar` you set
+  before `execute` is seen by every node and its hooks, and one a node sets is seen by no other node. An expand's
+  generator runs every item in one context, so `decimal.localcontext()` or a variable it sets lasts across its
+  yields.
+- **Hooks.** A run's hooks are called one at a time, each on the thread that ran its node, in the node's context
+  ([With threads](hooks.md#with-threads)). Nothing else of a run is serialized.
+- **Stores.** A node's value is stored from its worker, after its hooks and with no fnloom lock held, before any node
+  reading it runs ([Stores](caching.md#stores)).
+- **Single-flight.** Within a run, a block node whose key equals one already running waits for that value instead of
+  computing it, and reports a hit. It holds within one run only: two runs, or two `run_many` sets, that need one key
+  both compute it ([Blocks](caching.md#blocks)). It never shares an error absence: a branch waiting on one runs
+  itself.
+- **Each driver has its own** pool and limit counters. A copy, a rebuilt or an unpickled driver starts its own, and
+  never shares a worker or a slot with the driver it came from.
 
 fnloom can't make your own code safe:
 
 - **Your values.** A mutable value you pass, such as a list, is shared by every thread you pass it to, and a cached
   result is shared by every run that hits it.
-- **Nodes that mutate.** A node that changes its arguments, or a module global, races with every other run that
-  reads them.
+- **Nodes that mutate.** A node that changes its arguments, or a module global, races with its sibling branches now,
+  as it raced with other threads' runs before.
 - **Your store.** A store of your own must be safe to call from several threads at once
   ([Stores](caching.md#stores)).
 - **Your hooks and result builder.** A hook sees the runs of every thread that uses its driver, and the result
-  builder builds each of their results, so one that keeps state must be safe to call from several threads at once
-  ([Hooks](hooks.md), [Result builders](#result-builders)).
+  builder builds each of their results, so one that keeps state across runs must be safe to call from several threads
+  at once ([Hooks](hooks.md), [Result builders](#result-builders)).
 - **Your value checks.** An output check, and so a custom value check (`with_value_check`) it calls, runs with its
-  node: for a plain function on an `AsyncDriver` with `sync_nodes="thread"`, in the worker thread, so a value check
-  that keeps state must be safe to call from several threads at once.
+  node, on its worker, so a value check that keeps state must be safe to call from several threads at once.
+
+### Runs inside runs
+
+A node may run a driver, its own or another, and the inner run knows the runs that called it:
+
+- **It never waits for a worker its caller holds.** Its tasks start on the worker the node holds. That holds on a
+  thread or task the node starts and waits for too, when it carries the node's context: `asyncio.to_thread`,
+  `threading.Thread(context=contextvars.copy_context())`, or any thread on `3.14t`, which inherits its starter's
+  context by default. A run lends that worker to one such inner run at a time: a second one, started meanwhile, takes
+  a free worker if there is one, or the lent one once the first has ended.
+- **On `3.14`, a plain `threading.Thread` doesn't carry the context.** A run it starts waits for a free worker like
+  any other run, and under `with_threads(1)` waits for good for the one its node holds. Start the thread with
+  `context=contextvars.copy_context()`, or use `asyncio.to_thread`.
+- **A slot its callers hold is refused at once.** A nested run that needs a [limit](#limits) slot whose every unit
+  the runs that called it hold raises `RuntimeError` naming the node and the slot, at any depth and on any thread,
+  instead of waiting for good.
+- **Unrelated runs are not.** Two runs that each hold part of a group, and each wait for the other's part, are not
+  detected: they wait until a [deadline](#deadlines-and-cancellation) ends one, or for good without one.
+- **It stops with its caller**, as [Deadlines and cancellation](#deadlines-and-cancellation) says.
+- **An inner run with a `timeout=`** lends the worker to its own nodes, which run on the pool, since its caller only
+  waits.
+
+### Thread counts
+
+A driver's threads are its pool's, and a few more:
+
+- **The pool** keeps `max_workers - 1` threads from its first run. A run with a `timeout=`, or an `AsyncDriver`'s
+  first sync node, makes it keep `max_workers`, for good, since its caller runs no node. Each run lending its worker
+  to its own nodes (an inner run with a deadline) adds one while it runs.
+- **An abandoned call** keeps its thread until it returns, and the pool starts another in its place at once. So the
+  process has one thread more for each abandoned call still running, and more for each that never returns.
+- **`run_many`** starts at most `max_workers - 1` short-lived helper threads per driver, named
+  `fnloom-run-many-<n>`, to open its sets. They are not pool threads.
+- **Without `with_threads`**, an `AsyncDriver`'s sync nodes run in the loop's default executor, whose threads are
+  asyncio's.
+- **The pool's life.** Its threads leave once the driver is dropped, and with it each of its prepared plans that you
+  kept: a kept plan keeps the pool, and still runs. At interpreter exit, idle threads leave and are joined, waiting at
+  most a second in all. A busy thread is never waited for: it doesn't keep the interpreter from exiting, and CPython
+  parks it once finalization begins.
+
+### Fork
+
+Each driver records the process that made its pool and limits. In a child made by `os.fork()`, its next run starts a
+fresh pool and limits, with every slot free, and the inherited ones are never touched, since threads the child doesn't
+have may hold their locks.
+
+- **A run doesn't survive a fork.** A node that forks on the run's calling thread returns, in the child, into a run
+  that belongs to the parent: it raises `RuntimeError: this run was started in process <pid>; a run doesn't survive
+  os.fork()`, and the child's next run works. The parent's run goes on.
+- **A fork on a pool thread** leaves the child with no thread to return to, since only the forking thread survives a
+  fork. Once the node returns there, its thread ends, and with it the child. A node that forks on a worker should
+  `exec` or `os._exit` in the child itself, as after any fork from a thread.
+- **Without `with_threads`**, a run in the child simply finishes, as it does without threads. Only a limited node's
+  grant checks the process, and raises the inherited-run error rather than touch the parent's counters.
+- `os.fork` doesn't exist on Windows; `multiprocessing`'s `spawn` and `forkserver` start methods pickle the driver
+  instead ([Pickling and process pools](#pickling-and-process-pools)).
+
+## Limits
+
+`@fnloom.limit(n)` caps how many calls of a node run at once, across every run of a driver. `@fnloom.limit(group=...)`
+puts a node in a group whose members share one cap, and `Builder.with_limits({group: size})` sizes each group. Give
+`limit` either or both; a call then needs a slot of each:
+
+```python
+# file: catalog_limits.py
+from fnloom import Collect, Parallelizable, limit
+
+
+def picked(items: list[str]) -> Parallelizable[str]:
+    """Every item asked for."""
+    yield from items
+
+
+@limit(4, group="api")
+def details(picked: str) -> str:
+    """One item's details: at most four calls at once, and a slot of `api`."""
+    return f"https://api.test/{picked}"
+
+
+@limit(group="api")
+def reviews(picked: str) -> int:
+    """How many reviews the item has, from the same endpoint."""
+    return len(picked)
+
+
+def summary(details: Collect[str], reviews: Collect[int]) -> list[tuple[str, int]]:
+    """Each item's details and review count, in the order asked."""
+    return list(zip(details, reviews, strict=True))
+```
+
+```python
+import fnloom
+import catalog_limits
+
+limited = (
+    fnloom.Builder()
+    .with_modules(catalog_limits)
+    .with_threads(8)
+    .with_limits({"api": 6})
+    .build()
+)
+limited.execute(["summary"], inputs={"items": ["chair", "desk"]})
+# -> {'summary': [('https://api.test/chair', 5), ('https://api.test/desk', 4)]}
+```
+
+Here at most four `details` calls, and six calls of `details` and `reviews` together, run at once.
+
+- **Every driver honours limits**, with or without `with_threads`. A driver shared by several threads runs a
+  `@limit(1)` node one call at a time: a call waits until a slot is free, and `Ctrl-C` ends the wait.
+- **A slot is held while the node's call runs.** It is taken as the call starts, after the node's `before_node` hooks,
+  and given back as it returns, before its `after_node` hooks run or its value is stored, waking whoever waits for it.
+  A generator node takes its slots for each item it yields.
+- **Slow hooks hold workers.** With `with_threads`, a limited node's task takes its slots, gives them back while its
+  `before_node` hooks run, then takes them again for the call, so no hook ever runs holding a slot. With slow hooks,
+  more tasks of its group wait there to take their slots back, each holding a worker, and ready nodes outside the
+  group start later.
+- **Grants aren't fair.** A freed slot goes to whichever waiting call asks first, not the one that waited longest, so
+  under steady contention one call can wait long while others pass it.
+- **Each driver has its own counters.** A copy, a rebuilt or an unpickled driver starts with every slot free, and so
+  does a forked child. Two drivers never share a slot, even over the same modules.
+- **Checked at build**, on every driver: a group a node is in that has no size, or a size of a group no node is in, is
+  a `ValueError` naming it.
+- **Runs inside runs.** A node that runs a driver may need a slot its own call holds, which would wait for good. A
+  run started inside a node knows the slots of the runs that called it, so it fails at once instead, with a
+  `RuntimeError` naming the node and the slot: a `@limit(1)` node that runs its own driver on a request needing
+  itself, or a node in a full group whose inner run needs that group. Two unrelated runs that each hold part of a
+  group and wait for each other are not detected.
+- **On an `AsyncDriver`**, an `async def` node waiting for a slot holds no thread: its run awaits the release on the
+  loop, woken by a release from any thread or loop, while its other nodes go on.
+
+## Deadlines and cancellation
+
+On a driver built `with_threads`, `execute(..., timeout=seconds)` bounds the run, and so does the keyword on
+`raw_execute`, `PreparedPlan.run` and `PreparedPlan.run_raw`. Once that many seconds pass, the run stops and raises
+`TimeoutError` at once, without waiting for the nodes still running (Q170). A node that runs long can ask
+`fnloom.cancelled()` whether its run is stopping, and return early:
+
+```python
+# file: lookups.py
+import time
+
+import fnloom
+
+
+def answer(question: str) -> str:
+    """Asks a slow service, giving up once the run is stopping."""
+    for _ in range(100):
+        if fnloom.cancelled():
+            return "gave up"
+        time.sleep(0.01)
+    return f"the answer to {question}"
+```
+
+```python
+import lookups
+
+patient = fnloom.Builder().with_modules(lookups).with_threads(2).build()
+patient.execute(["answer"], inputs={"question": "why"}, timeout=0.1)
+# raises TimeoutError: the run did not finish within its timeout of 0.1 s
+fnloom.build(lookups).execute(["answer"], inputs={"question": "why"}, timeout=0.1)
+# raises TypeError: timeout= needs Builder.with_threads(...)
+```
+
+- **Only with `with_threads`.** The calling thread can't abandon a node it runs itself, so a run with a deadline runs
+  every node on the pool, which grows to `max_workers` threads for it, and the caller only waits. Without
+  `with_threads`, `timeout=` is a `TypeError`. An `AsyncDriver` takes none: wrap its `execute` in `asyncio.timeout`,
+  which cancels the run (Q66).
+- **Abandoned nodes.** A node still running at the deadline is abandoned. Its worker and its `@limit` slots are given
+  back at once, so later runs never wait for it, and the pool starts a thread in its place. Python can't interrupt a
+  running function, so the call goes on until it returns, and what it returns is dropped: no hook hears of it, and
+  nothing is stored. That has two costs. While an abandoned call still runs, its node's limit may be exceeded, and the
+  process keeps one more thread for each abandoned call that never returns. Such a thread doesn't keep the
+  interpreter from exiting.
+- **Generators.** At the deadline the caller closes each expand's generator that isn't reading an item, before it
+  raises. One that is gets closed by its worker once the item comes.
+- **A failure first.** A run that had failed and was waiting for its running nodes raises that failure at the
+  deadline, not `TimeoutError`.
+- **`fnloom.cancelled()`** is `True` inside a node once its run is stopping: its deadline passed, another node failed,
+  or it was interrupted. On an `AsyncDriver`, with or without `with_threads`, it turns `True` once the run fails or
+  its caller is cancelled. It is `False` outside a run, and in a run of a `Driver` without `with_threads`. A node
+  that sees it should return early, or raise `fnloom.StoppedError`, which says only that the node was stopped and is
+  never raised in place of the failure that stopped the run. Any other error the node raises counts as a failure of
+  its own, and in [`run_many`](#many-input-sets) a stopped set that raises one at a lower index outranks the set that
+  failed first.
+- **Runs inside runs** stop with the run that started them. A node of a run started inside a node of a stopping run,
+  on any driver and at any depth, sees `cancelled()` turn `True` too. A parallel or async inner run also starts no new
+  node, and an async one cancels its running `async def` nodes within 50 ms, even while it waits on one alone. Once
+  its running nodes return, it returns its outputs if they were all computed. Otherwise it raises
+  `fnloom.StoppedError`, a `RuntimeError`: `the run that started this one has stopped or ended, so this one
+  stopped`. The outer run never raises that error in place of the failure that stopped it. A context that outlives a
+  stopped run, such as one a thread copied, keeps it stopped, so a run started from it later stops at once.
+- **`Ctrl-C`** stops a parallel run the same way, with or without a deadline: the nodes still running are abandoned,
+  and `KeyboardInterrupt` is raised at once.
+- **Cached runs.** On a driver with a cache, the deadline covers the whole run, the `recompute` nodes run first
+  included.
+- **Hooks.** `after_run` gets `ok=False` and the `TimeoutError`, and fires once any hook call already going on has
+  returned, so a run's hook calls never overlap.
+
+## Many input sets
+
+`PreparedPlan.run_many(inputs_seq, *, overrides=None, timeout=None)` runs a [prepared plan](#prepared-plans) once per
+input set, and returns each set's result, in order (Q171):
+
+```python
+# file: words.py
+def shouted(word: str) -> str:
+    return word.upper()
+
+
+def length(shouted: str) -> int:
+    return len(shouted)
+```
+
+```python
+import words
+
+batch = fnloom.Builder().with_modules(words).with_threads(4).build()
+lengths = batch.prepare(["length"], inputs={"word": ""})
+lengths.run_many([{"word": "tea"}, {"word": "coffee"}, {"word": "cocoa"}])
+# -> [{'length': 3}, {'length': 6}, {'length': 5}]
+lengths.run_many([{"word": "tea"}, {"word": 3}])
+# raises ValueError: word: expected str, got int
+```
+
+- **Each set is its own run**, as `run` would run it: its result is what `run` returns, the result builder's included,
+  and it fires its own hook events, with its own `run_id`. `overrides` is shared by every set.
+- **Checks first.** Every set is checked as `run` checks it before any runs. A set that fails the checks raises, with
+  the note `in input set 1 of run_many` (counting from 0), and no set runs.
+- **Where the sets run.** On a driver built `with_threads`, the sets run on its pool, under its limits: at most
+  `max_workers` sets are open at once, opening in index order as earlier ones end, and `max_workers` caps the nodes of
+  all of them together. Without `with_threads`, the sets run one after another on the calling thread, so the same code
+  works on either driver. Called inside a node of its own driver, `run_many` runs its sets one after another on the
+  worker that node holds.
+- **Failures.** Once a set fails, no set opens, and every open set stops as a failed run does: its running nodes
+  finish, `fnloom.cancelled()` turns `True` in them, and it starts no new node. Then the failure of the
+  lowest-indexed failing set seen is raised, with the note `while running input set 3 of run_many`; with one failing
+  set, that is always its failure. A set that was stopped before its outputs were in raises the
+  `fnloom.StoppedError` of a [run inside a run](#deadlines-and-cancellation), which is never raised in place of the
+  failure that stopped it. A set that never opened fires no hook event.
+- **`timeout=`** covers every set together, and needs `with_threads`. Each set gets what is left of it as it opens,
+  and a set not open when it passes never opens.
+- **`Ctrl-C`** stops every open set and is raised at once. A set the calling thread is running abandons its running
+  nodes, as a run does; the other open sets start no new node, and their running nodes finish in the background,
+  keeping their workers until they return.
+- **Hooks.** Two sets' hook calls may overlap, as two threads' runs do, so a hook that keeps state across runs must be
+  safe to call from several threads at once.
+- **Caching.** Single-flight is per run: two open sets that need the same cached value both compute it. A set that
+  opens after one stored it hits it.
+- **On the async driver** there is no `run_many`: `asyncio.gather` over `AsyncPreparedPlan.run` does the same.
 
 ## Rebuilding after an edit
 
@@ -916,11 +1234,69 @@ your context variables, so the event loop keeps running while it does. A thread 
 more than a cheap node such as `converted`. For a graph of cheap sync nodes, `build_async(sync_nodes="inline")` runs
 them on the loop instead. The nodes `@extract_fields` and `@extract_columns` generate always run on the loop.
 
+**With `with_threads`,** a sync node runs on the driver's own pool instead of the loop's default executor, so at most
+`max_workers` of them run at once, on threads named `fnloom-worker-<n>`, while `async def` nodes take no worker and
+await on the loop as before ([Threads](#threads)). `sync_nodes="inline"` can't apply then, and is a `ValueError`.
+Either way the run is scheduled as the sync driver's is: ready nodes start in reference order, `@limit` and
+`with_limits` hold ([Limits](#limits)), and each `NodeStart` and `NodeEnd` carries its `order`. With
+`sync_nodes="inline"` and no `async def` node, its events come exactly as the sync driver's do.
+
+**Blocks** run on the async driver as on `Driver` ([Fan-out and fan-in](#fan-out-and-fan-in)), with every branch's
+nodes overlapping, and each `Collect` in item order. The expand may be an `async def` generator, whose items are
+awaited on the loop:
+
+```python
+# file: catalog_async.py
+import asyncio
+
+from fnloom import Collect, Parallelizable
+
+
+async def picked(items: list[str]) -> Parallelizable[str]:
+    """Each item, as a paged listing would stream it."""
+    for item in items:
+        await asyncio.sleep(0)
+        yield item
+
+
+async def details(picked: str) -> str:
+    """One item's details, fetched concurrently with the others'."""
+    await asyncio.sleep(0)
+    return picked.upper()
+
+
+def summary(details: Collect[str]) -> list[str]:
+    """Every item's details, in the order the items came."""
+    return details
+```
+
+```python
+import catalog_async
+
+streamed = fnloom.Builder().with_modules(catalog_async).build_async()
+asyncio.run(streamed.execute(["summary"], inputs={"items": ["chair", "desk"]}))
+# -> {'summary': ['CHAIR', 'DESK']}
+```
+
+A sync generator's items are read where its node would run: in a thread, on the pool, or on the loop. It is closed
+on the loop when its node is inline, and else in the loop's default executor, which a hung call never holds. A
+generator keeps one context from its first item to its last. When a branch fails, every running node and
+every pending read of an async generator is cancelled once, and the generator is closed once, after any read of it in
+a thread returns.
+
+An expand is read only while fewer than `2 * max_workers` of its branches are unfinished, or `2 *
+os.process_cpu_count()` without `with_threads`, as on the sync driver ([Threads](#threads)). That bounds how many
+branches overlap, `async def` ones too: under `with_threads(1)` two at a time. Give a fan-out of slow `async def`
+branches enough workers for the overlap you want.
+
 **When a node fails,** the run cancels every node still running, waits for each `async def` node to stop, and raises
 the failed node's own exception, with the same note naming the node as the sync driver adds. There's no
 `ExceptionGroup`, so `except ZeroDivisionError` works as it does with `Driver`. A sync node in a thread can't be
-interrupted: the run doesn't wait for it, and drops its result when it comes. `asyncio.run` still waits for running
-threads when the loop shuts down, since it shuts the default executor down. If the caller is cancelled, as by
+interrupted: the run doesn't wait for it, and drops its result when it comes, but its `@limit` and worker slots stay
+taken until it returns. On the driver's pool, its thread is replaced at once, and leaves the pool once the call
+returns. An expand's end, which holds no slot, runs in the loop's default executor, so a generator's `finally` never
+waits for a hung call's thread. `asyncio.run` still waits for running threads when the loop shuts down, since it
+shuts the default executor down. If the caller is cancelled, as by
 `asyncio.timeout`, the run cancels its nodes the same way, and the cancellation reaches the caller once each
 `async def` node has stopped. Each node is cancelled once: a second cancellation of the caller, or one after a node
 failed, doesn't interrupt a node's cleanup, and the caller still waits for it.

@@ -1374,7 +1374,8 @@ def test_two_async_drivers_over_one_driver_keep_their_own_plans() -> None:
     )
     assert _run(threaded.execute(["a"], inputs={"x": 1}))["a"] != "MainThread"
     assert _run(inline.execute(["a"], inputs={"x": 1})) == {"a": "MainThread"}
-    assert inline.prepare(["a"], inputs={"x": 1})._driver is inline  # noqa: SLF001  # what a pickle rebuilds
+    plan = inline.prepare(["a"], inputs={"x": 1})
+    assert plan._rebuilt is inline._rebuilt  # noqa: SLF001  # what a pickle rebuilds
 
 
 def test_alternating_async_drivers_keep_their_plans() -> None:
@@ -1426,5 +1427,53 @@ def test_short_lived_async_drivers_over_one_driver_are_freed() -> None:
         made.append(weakref.ref(driver))
     del driver
     gc.collect()
-    alive = sum(ref() is not None for ref in made)
-    assert alive <= fnloom.driver.ASYNC_PLANS_PER_PLAN
+    # Each keeps its own form of the plan, which holds none of them.
+    assert sum(ref() is not None for ref in made) == 0
+
+
+RACING = """
+import asyncio
+
+GATE = []
+STARTED = []
+
+
+async def a(x: int) -> int:
+    STARTED[0].set()
+    await GATE[0].wait()
+    return x
+
+
+async def b(x: int) -> int:
+    await asyncio.sleep(0.3)
+    return x
+"""
+
+
+def test_a_caller_cancelled_as_a_node_finishes_still_ends() -> None:
+    """A node's completion queued before the caller's cancellation lands still counts.
+
+    A sibling of the caller cancels it as `a`'s gate opens, so `a`'s done callback runs
+    between the cancellation and the run hearing of it: the run still ends, cancelled.
+    """
+    module = make_module("async_cancel_race", RACING)
+    driver = fnloom.Builder().with_modules(module).build_async()
+
+    async def scenario() -> bool:
+        module.GATE.append(asyncio.Event())
+        module.STARTED.append(asyncio.Event())
+        run = asyncio.create_task(driver.execute(["a", "b"], inputs={"x": 1}))
+        await module.STARTED[0].wait()
+
+        async def sibling() -> None:
+            await module.GATE[0].wait()
+            run.cancel()
+
+        cancelling = asyncio.create_task(sibling())
+        await asyncio.sleep(0)
+        module.GATE[0].set()
+        done, _ = await asyncio.wait({run}, timeout=PATIENCE)
+        await cancelling
+        return run in done and run.cancelled()
+
+    assert _run(asyncio.wait_for(scenario(), 2 * PATIENCE))

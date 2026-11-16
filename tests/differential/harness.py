@@ -1,5 +1,6 @@
 """Runs one request through Hamilton and through fnloom, as `Outcome`s."""
 
+import asyncio
 import importlib.util
 import itertools
 import json
@@ -119,6 +120,36 @@ def run_fnloom(
     return Outcome(dict(result), None)
 
 
+def run_fnloom_blocks(
+    modules: Sequence[ModuleType],
+    outputs: Sequence[str],
+    inputs: Mapping[str, object] | None = None,
+    overrides: Mapping[str, object] | None = None,
+    *,
+    threads: Workers = None,
+) -> Outcome:
+    """`run_fnloom`, on a driver built `with_threads(threads)` when it is given.
+
+    `"async"` runs on `build_async()`, and `"async-8"` there with `with_threads(8)`.
+    """
+    builder = fnloom.Builder().with_modules(*modules)
+    if isinstance(threads, int) or threads == "async-8":
+        builder = builder.with_threads(threads if isinstance(threads, int) else 8)
+    try:
+        if isinstance(threads, str):
+            run = builder.build_async().execute(
+                outputs, inputs=inputs, overrides=overrides
+            )
+            result = asyncio.run(run)
+        else:
+            result = builder.build().execute(
+                outputs, inputs=inputs, overrides=overrides
+            )
+    except Exception as error:  # noqa: BLE001  # the exception class is the thing being compared
+        return Outcome(None, type(error).__name__)
+    return Outcome(dict(result), None)
+
+
 def nodes_hamilton(modules: Sequence[ModuleType]) -> Nodes:
     """Builds with Hamilton and lists every node, inputs included."""
     try:
@@ -169,9 +200,14 @@ BLOCK_IMPORTS: dict[str, str] = {
     "fnloom": "from fnloom import Collect, Parallelizable\n",
 }
 
-# Hamilton's two executors a block program is run on: synchronous and threads.
-type Executor = Literal["synchronous", "threads"]
-EXECUTORS: tuple[Executor, ...] = ("synchronous", "threads")
+# Hamilton's executors a block program is run on: synchronous, the builder's default
+# (`MultiThreadingExecutor(10)`), and `("threads", n)`, `MultiThreadingExecutor(n)`.
+type Executor = Literal["synchronous", "default"] | tuple[Literal["threads"], int]
+EXECUTORS: tuple[Executor, ...] = ("synchronous", "default", ("threads", 8))
+# fnloom's runs: a worker count, `None` for a driver without `with_threads`, and the
+# async driver, without and with `with_threads(8)`.
+type Workers = int | Literal["async", "async-8"] | None
+THREADS: tuple[Workers, ...] = (None, 1, 2, 8, "async", "async-8")
 
 
 def block_module(name: str, source: str, runtime: str) -> ModuleType:
@@ -192,20 +228,22 @@ def run_hamilton_blocks(
     executor: Executor = "synchronous",
 ) -> Outcome:
     """Builds `module` with dynamic execution on, then executes, as `run_hamilton`."""
-    remote = (
-        executors.SynchronousLocalTaskExecutor()
-        if executor == "synchronous"
-        else executors.MultiThreadingExecutor(4)
-    )
     try:
-        built = (
+        builder = (
             hamilton_driver.Builder()
             .enable_dynamic_execution(allow_experimental_mode=True)
             .with_modules(module)
-            .with_local_executor(executors.SynchronousLocalTaskExecutor())
-            .with_remote_executor(remote)
-            .build()
         )
+        if executor != "default":
+            remote = (
+                executors.SynchronousLocalTaskExecutor()
+                if executor == "synchronous"
+                else executors.MultiThreadingExecutor(executor[1])
+            )
+            builder = builder.with_local_executor(
+                executors.SynchronousLocalTaskExecutor()
+            ).with_remote_executor(remote)
+        built = builder.build()
         result = built.execute(
             list(outputs), inputs=dict(inputs or {}), overrides=dict(overrides or {})
         )
@@ -219,18 +257,20 @@ import json, os, sys, types
 os.environ["HAMILTON_AUTOLOAD_EXTENSIONS"] = "0"
 from hamilton import driver
 from hamilton.execution import executors
-source, outputs = json.loads(sys.argv[1])
+source, outputs, synchronous = json.loads(sys.argv[1])
 module = types.ModuleType("blocks")
 sys.modules["blocks"] = module
 exec(source, module.__dict__)
-built = (
+builder = (
     driver.Builder()
     .enable_dynamic_execution(allow_experimental_mode=True)
     .with_modules(module)
-    .with_local_executor(executors.SynchronousLocalTaskExecutor())
-    .with_remote_executor(executors.SynchronousLocalTaskExecutor())
-    .build()
 )
+if synchronous:
+    builder = builder.with_local_executor(
+        executors.SynchronousLocalTaskExecutor()
+    ).with_remote_executor(executors.SynchronousLocalTaskExecutor())
+built = builder.build()
 try:
     print(repr(built.execute(outputs)))
 except Exception as error:
@@ -239,16 +279,21 @@ except Exception as error:
 
 
 def hamilton_blocks_in_subprocess(
-    source: str, outputs: Sequence[str], timeout: float = 2.0
+    source: str,
+    outputs: Sequence[str],
+    timeout: float = 2.0,
+    executor: Literal["synchronous", "default"] = "synchronous",
 ) -> str | None:
     """What Hamilton prints running `source`'s `outputs`; `None` when it never returns.
 
     In a subprocess, so a run that spins forever is stopped after `timeout` seconds.
+    `executor` is its synchronous executors, or the builder's default ones.
     """
     code = BLOCK_IMPORTS["hamilton"] + textwrap.dedent(source)
+    request = json.dumps([code, list(outputs), executor == "synchronous"])
     try:
         done = subprocess.run(  # noqa: S603  # our own interpreter and script
-            [sys.executable, "-c", _IN_SUBPROCESS, json.dumps([code, list(outputs)])],
+            [sys.executable, "-c", _IN_SUBPROCESS, request],
             capture_output=True,
             text=True,
             timeout=timeout,

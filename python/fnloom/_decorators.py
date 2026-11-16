@@ -121,6 +121,20 @@ class CachePolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class LimitPolicy:
+    """What `@limit` recorded: how many calls of the node may run at once.
+
+    Attributes:
+        n: The node's own cap, or None for none.
+        group: The group the node shares a cap with, sized by
+            `Builder.with_limits`, or None for none.
+    """
+
+    n: int | None
+    group: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class DefaultsPolicy:
     """What `@defaults` recorded: the parameters whose default the build may not refuse.
 
@@ -140,7 +154,8 @@ class Decorations:
     """What the decorators recorded on one function.
 
     Its rows, tags, cache policy, config conditions, extraction, defaults, whether
-    `@exclude` marked it, its output checks, in the order they run, and its steps.
+    `@exclude` marked it, its output checks, in the order they run, its steps, its
+    limit, and the errors `@absent_on` makes it absent on, in the order first given.
     """
 
     rows: Mapping[str, Mapping[str, Binding]] | None
@@ -158,6 +173,8 @@ class Decorations:
     mutates: tuple[Callable[..., object], ...] = ()
     injected: Mapping[str, Binding] | None = None
     resolvers: tuple[Callable[..., object], ...] = ()
+    limit: LimitPolicy | None = None
+    absent_on: tuple[type[Exception], ...] = ()
 
 
 def source(name: str) -> Source:
@@ -773,6 +790,107 @@ def cache[F: Callable[..., object]](
             msg = f"the function does not have the parameters named by ignore: {listed}"
             raise ValueError(msg)
         setattr(fn, _ATTRIBUTE, replace(current, cache=policy))
+        return fn
+
+    return apply
+
+
+def limit[F: Callable[..., object]](
+    n: int | None = None, *, group: str | None = None
+) -> Callable[[F], F]:
+    """Caps how many calls of the node run at once, across every run of a driver.
+
+    `n` caps the node's own calls; `group` puts it in a group whose members share
+    one cap, sized by `Builder.with_limits({group: size})`. Give either or both:
+    a call then needs a slot of each. Every driver honours it, with or without
+    `with_threads`: a call waits until a slot is free, in no fair order. The
+    slots are taken after the node's `before_node` hooks and given back as the
+    call returns, before its `after_node` hooks; a generator's are taken for
+    each item it yields. Only records the policy, so it stacks with
+    the other decorators in either order.
+
+    `TypeError` for an `n` that is no `int` (a `bool` included) or a `group`
+    that is no `str`; `ValueError` for neither given, an `n` under 1, an empty
+    `group`, or a second `@limit` on one function.
+    """
+    if n is not None and (isinstance(n, bool) or not isinstance(n, int)):
+        msg = f"limit n must be an int or None, not {n!r}"
+        raise TypeError(msg)
+    if group is not None and not isinstance(group, str):
+        msg = f"limit group must be a str or None, not {group!r}"
+        raise TypeError(msg)
+    if n is None and group is None:
+        msg = "limit needs n, group or both"
+        raise ValueError(msg)
+    if n is not None and n < 1:
+        msg = f"limit n must be at least 1, not {n}"
+        raise ValueError(msg)
+    if group == "":
+        msg = "limit group must be a non-empty str"
+        raise ValueError(msg)
+    policy = LimitPolicy(n, group)
+
+    def apply(fn: F) -> F:
+        current = decorations(fn)
+        if current.limit is not None:
+            msg = "function already has a limit; apply limit once"
+            raise ValueError(msg)
+        setattr(fn, _ATTRIBUTE, replace(current, limit=policy))
+        return fn
+
+    return apply
+
+
+def checked_errors(
+    errors: tuple[object, ...], where: str
+) -> tuple[type[Exception], ...]:
+    """`errors`, for `where`: each a subclass of `Exception`, at least one, none twice.
+
+    `TypeError` naming the first that is no class, or no `Exception` subclass:
+    `BaseException` itself, `KeyboardInterrupt`, `SystemExit`, `GeneratorExit` and
+    `asyncio.CancelledError` among them, so an error absence never swallows an
+    interrupt, an exit, a generator's close or a cancellation.
+    """
+    if not errors:
+        msg = f"{where} needs at least one exception class"
+        raise TypeError(msg)
+    for error in errors:
+        if not isinstance(error, type):
+            msg = f"{where} takes exception classes, not {error!r}"
+            raise TypeError(msg)
+        if not issubclass(error, Exception):
+            msg = (
+                f"{where} takes subclasses of Exception, not {error.__qualname__}, "
+                "so an interrupt, an exit, a generator's close or a cancellation is "
+                "never made absent"
+            )
+            raise TypeError(msg)
+    return tuple(dict.fromkeys(typing.cast("tuple[type[Exception], ...]", errors)))
+
+
+def absent_on[F: Callable[..., object]](*errors: type[Exception]) -> Callable[[F], F]:
+    """Makes the node absent, not failed, when its call raises one of `errors` (Q133).
+
+    A subclass counts. The node's outcome is then `fnloom.ABSENT`, and each node
+    reading it decides by its own signature, as for a node that declines: a
+    `Collect[T]` over a fan-out gets the branches that succeeded. `after_node`
+    still reports `ok=False` with the error, and `RunEnd.absent_errors` lists it.
+    For an expand, an error while it yields makes it absent too, its branches so
+    far dropped. An error absence is never stored, and nothing computed from it
+    is stored in that run, so the next run tries again.
+
+    The node's return annotation must admit `fnloom.Absent`, checked at build, so
+    its type says what can happen. Only records the policy, so it stacks with the
+    other decorators in either order; given twice, the classes add up.
+
+    `TypeError` for no class, or one that is no subclass of `Exception`.
+    """
+    checked = checked_errors(errors, "absent_on")
+
+    def apply(fn: F) -> F:
+        current = decorations(fn)
+        joined = tuple(dict.fromkeys((*current.absent_on, *checked)))
+        setattr(fn, _ATTRIBUTE, replace(current, absent_on=joined))
         return fn
 
     return apply

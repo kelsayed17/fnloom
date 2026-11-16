@@ -7,9 +7,15 @@ mod errors;
 mod fingerprint;
 mod graph;
 mod keys;
+mod limits;
 mod observer;
+mod parallel;
 mod plan;
+mod pool;
+mod shared;
+mod stepper;
 mod store;
+mod task;
 
 use pyo3::prelude::*;
 
@@ -37,7 +43,17 @@ fn panic_for_test() {
 fn core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(core_version, module)?)?;
     #[cfg(feature = "test-hooks")]
-    module.add_function(wrap_pyfunction!(panic_for_test, module)?)?;
+    {
+        module.add_function(wrap_pyfunction!(panic_for_test, module)?)?;
+        module.add_function(wrap_pyfunction!(pool::live_workers, module)?)?;
+        module.add_function(wrap_pyfunction!(parallel::arm_worker_panic, module)?)?;
+        module.add_function(wrap_pyfunction!(parallel::arm_hook_panic, module)?)?;
+        module.add_function(wrap_pyfunction!(parallel::arm_report_panic, module)?)?;
+        module.add_function(wrap_pyfunction!(parallel::arm_perform_panic, module)?)?;
+        module.add_function(wrap_pyfunction!(stepper::arm_stepper_panic, module)?)?;
+        module.add_function(wrap_pyfunction!(limits::held_slots, module)?)?;
+        module.add_function(wrap_pyfunction!(parallel::arm_state_panic, module)?)?;
+    }
     module.add_function(wrap_pyfunction!(fingerprint::fingerprint, module)?)?;
     module.add_function(wrap_pyfunction!(fingerprint::hash_parts, module)?)?;
     module.add(
@@ -50,6 +66,15 @@ fn core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add("ABSENT", absent::singleton(module.py())?)?;
     module.add_class::<graph::Graph>()?;
     module.add_class::<plan::Plan>()?;
+    module.add_class::<limits::Limits>()?;
+    module.add_class::<pool::Threads>()?;
+    module.add_class::<stepper::Stepper>()?;
+    module.add_class::<stepper::Held>()?;
+    module.add_class::<parallel::Stop>()?;
+    module.add(
+        "StoppedError",
+        module.py().get_type::<parallel::StoppedError>(),
+    )?;
     module.add_class::<keys::KeyPlan>()?;
     module.add_class::<keys::Keys>()?;
     module.add_class::<store::MemoryStore>()?;

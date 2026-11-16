@@ -444,7 +444,88 @@ nodes, up to the `Collect` parameters that gather them. A block node may also re
   absent expand isn't an empty one, which gives `[]`. A default on a `Collect` parameter whose expand can't decline
   is never used, and is refused as a [shadowed default](#defaults-the-build-refuses). A cached branch that declined
   replays its absence, so the block nodes reading it skip again.
-- `build_async()` refuses a graph with an expand until Plan 11.
+- `build_async()` runs blocks too ([Async](running.md#async)), and there an expand may also be an `async def`
+  generator annotated `-> Parallelizable[T]`: its items are awaited on the event loop, its branches overlap there,
+  and its `finally` runs once, when it is exhausted or the run stops. `build()` refuses one, as it refuses any
+  `async def` node.
+
+## Partial results
+
+A node may be absent on an error. `@fnloom.absent_on(*errors)` makes a node whose call raises one of `errors`, or a
+subclass, absent instead of failing the run, so a `Collect` over a fan-out gets the branches that succeeded:
+
+```python
+# file: inventory.py
+from fnloom import Absent, Collect, Parallelizable, absent_on
+
+STOCK = {"chair": 4, "desk": 0}
+
+
+def item(names: list[str]) -> Parallelizable[str]:
+    """Each item asked about."""
+    yield from names
+
+
+@absent_on(LookupError)
+def stock(item: str) -> int | Absent:
+    """How many are in stock; an item the store doesn't list has no count."""
+    return STOCK[item]
+
+
+def counts(stock: Collect[int]) -> list[int]:
+    """The counts found, in item order."""
+    return stock
+
+
+def report(stock: Collect[int | Absent]) -> list[object]:
+    """One entry per item, `ABSENT` where no count was found."""
+    return stock
+```
+
+```python
+import fnloom
+import inventory
+
+driver = fnloom.build(inventory)
+driver.execute(["counts", "report"], inputs={"names": ["chair", "lamp", "desk"]})
+# -> {'counts': [4, 0], 'report': [4, fnloom.ABSENT, 0]}
+```
+
+The `KeyError` for `lamp` is a `LookupError`, so its branch is absent: each node reading it decides by its own
+signature, as for a node that [declines](#declining). `Collect[int]` drops the branch, and `Collect[int | Absent]`
+keeps its place. Any other error fails the run as before.
+
+- The node's return annotation must admit `Absent`, so its type says what can happen; the build refuses one that
+  doesn't, naming the node, and one whose annotation [didn't resolve](#annotations), since it can't tell. The node
+  still may not return `ABSENT` itself unless that annotation admits it, and a `TypeError` fnloom raises for a
+  value, such as that one, never becomes an absence.
+- `Builder.with_absent_on(*errors, tags=None)` does the same for every node of a driver, or the nodes a tag query
+  matches, as [`NodeViews.tagged`](running.md#inspecting-a-graph) reads it: `with_absent_on(TimeoutError, tags={"io":
+  "net"})`. A node it covers may be absent whatever its annotation, since the absence is the driver's doing. A node
+  covered by both is absent on either list. Each call adds a rule, and the rules survive pickling, `copy`,
+  `rebuild()` and `build_async()`.
+- Only subclasses of `Exception` may be listed. `BaseException`, `KeyboardInterrupt`, `SystemExit`, `GeneratorExit`
+  and `asyncio.CancelledError` are a `TypeError`, so an interrupt, an exit, a generator's close or a cancellation
+  never becomes an absence. Nor does the `StoppedError` of a run that stopped because the run that started it did,
+  nor a run's own `timeout=`, which raises `TimeoutError` from `execute`: a node's own `TimeoutError` is listed
+  as any other.
+- What counts is what the node's own code raises, its [wrappers](running.md#node-wrappers) included. A check of
+  fnloom's never becomes an absence, whatever is listed: an item refused, an output check or output type check
+  failed, or a field missing from what an `@extract_fields` producer returned fails the run as before. The mark is on
+  the exception itself, so it holds across drivers: a node that runs another driver, and lists `ValueError`, still
+  fails when the inner driver's `@check_output` raises its `ValueError` through it.
+- An expand absent on an error, before or while it yields, has no branches: the branches it already ran are
+  dropped, as when it [declines](#fan-out-and-fan-in), and each `Collect` of its block follows the three rules as a
+  whole. An iterator that raised is closed at once, so a custom one's `close()` runs.
+- A `@tag` query of `with_absent_on` covers a `@pipe_output` or `@mutate` function's own call, which has its
+  tags.
+- Its `after_node` still reports `ok=False` with the error, so [`LogFailures`](hooks.md#logging-failures) logs it, and
+  [`RunEnd.absent_errors`](hooks.md#the-events) lists each one as `(node, branch, error)`, in reference order on every
+  driver. An error absence is no failure: with several workers, the run's error is still the first real failure in
+  reference order.
+- An error absence is never [cached](caching.md#declared-absences), and nor is anything computed from it in that run,
+  so the next run calls the node again, and a partial result is never served as a whole one. Within a run, a branch
+  waiting on another branch's equal key runs itself rather than share its absence.
 
 ## Annotations
 
@@ -1692,7 +1773,7 @@ be called that way are refused when you build, each with a `ValueError` naming t
 | A positional-only parameter (`def f(a, /)`) | It cannot be passed by keyword. |
 | `*args` or `**kwargs` | Neither binds one named argument as a parameter. |
 | A missing parameter or return annotation | Every edge is typed where it is declared. |
-| A generator function, sync or async, and an `async def` given to `build()` | Calling one returns a generator or a coroutine, not the node's value. [`build_async()`](running.md#async) awaits an `async def`. |
+| A generator function, sync or async, that is no expand, and an `async def` given to `build()` | Calling one returns a generator or a coroutine, not the node's value. [`build_async()`](running.md#async) awaits an `async def`, and the items of an async generator expand. |
 | A dependency cycle, including a function reading itself | A cycle has no order to run in; the error names the cycle. |
 
 Hamilton silently accepts the first, second and fourth, and overflows the stack on a cycle. See

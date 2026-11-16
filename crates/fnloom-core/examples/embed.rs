@@ -43,6 +43,7 @@ fn node(name: &str, reads: &[&str], constant: i64) -> NodeSpec<i64> {
         payload: constant,
         declines: false,
         expands: false,
+        absent_on_error: false,
     }
 }
 

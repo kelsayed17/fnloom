@@ -1,3 +1,5 @@
+import concurrent.futures
+import contextvars
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Final, Literal, Never, NoReturn, Self, final, override
 
@@ -5,16 +7,30 @@ __all__ = [
     "ABSENT",
     "Absent",
     "Graph",
+    "Held",
     "KeyPlan",
     "Keys",
+    "Limits",
     "MemoryStore",
     "ObserverBase",
     "Plan",
+    "Stepper",
+    "Stop",
+    "StoppedError",
+    "Threads",
     "UnfingerprintableError",
     "_panic_for_test",
+    "arm_hook_panic",
+    "arm_perform_panic",
+    "arm_report_panic",
+    "arm_state_panic",
+    "arm_stepper_panic",
+    "arm_worker_panic",
     "core_version",
     "fingerprint",
     "hash_parts",
+    "held_slots",
+    "live_workers",
 ]
 
 def core_version() -> str: ...
@@ -22,6 +38,10 @@ def fingerprint(
     value: object, fallback: Callable[[object], object | None]
 ) -> bytes: ...
 def hash_parts(parts: Sequence[bytes]) -> bytes: ...
+
+class StoppedError(RuntimeError):
+    # A parallel run stopped because the run that started it stopped or ended.
+    ...
 
 class UnfingerprintableError(TypeError):
     path: str
@@ -44,6 +64,14 @@ type CollectMode = Literal["present", "all"]
 
 # Compiled only with the `test-hooks` feature, which release builds never enable.
 def _panic_for_test() -> None: ...
+def live_workers() -> int: ...
+def arm_worker_panic() -> None: ...
+def arm_hook_panic() -> None: ...
+def arm_report_panic() -> None: ...
+def arm_perform_panic() -> None: ...
+def arm_stepper_panic() -> None: ...
+def arm_state_panic() -> None: ...
+def held_slots(limits: Limits) -> tuple[int, dict[str, int], dict[str, int]]: ...
 
 @final
 class Graph:
@@ -60,9 +88,11 @@ class Graph:
             ]
         ],
         renames: dict[str, dict[str, str]] | None = None,
+        absent_on: dict[str, tuple[type[BaseException], ...]] | None = None,
     ) -> Self: ...
     def node_names(self) -> list[str]: ...
     def may_be_absent(self) -> list[str]: ...
+    def absent_on_nodes(self) -> list[str]: ...
     def blocks(self) -> dict[str, list[str]]: ...
     def upstream_of(self, names: list[str]) -> list[str]: ...
     def downstream_of(self, names: list[str]) -> list[str]: ...
@@ -80,10 +110,81 @@ class Plan:
         observers: Sequence[ObserverBase] = (),
         on_value: Callable[[str, object], None] | Keys | None = None,
         late: object | None = None,
+        *,
+        threads: Threads | None = None,
+        limits: Limits | None = None,
+        timeout: float | None = None,
     ) -> dict[str, object]: ...
     def steps(self) -> list[tuple[str, str]]: ...
     def late(self) -> list[str]: ...
     def blocks(self) -> dict[str, list[tuple[str, str]]]: ...
+    def start(
+        self,
+        inputs: dict[str, Any],
+        overrides: dict[str, Any],
+        observers: Sequence[ObserverBase] = (),
+        on_value: Callable[[str, object], None] | None = None,
+        late: object | None = None,
+        *,
+        limits: Limits | None = None,
+        threads: Threads | None = None,
+        pooled: Sequence[str] = (),
+        in_flight: int = ...,
+    ) -> Stepper: ...
+
+type Work = Literal["compute", "pull", "finish", "close"]
+type Completion = Literal["value", "error", "refused", "done", "dropped"]
+type Handed = tuple[int, str, tuple[int, ...], Work, Any, contextvars.Context | None]
+
+@final
+class Held:
+    def release(self) -> None: ...
+
+@final
+class Stepper:
+    def next(self) -> Handed | int: ...
+    def complete(self, task: int, kind: Completion, value: object, /) -> bool: ...
+    def stop(self) -> None: ...
+    def detach(self, task: int, /) -> Held | None: ...
+    @property
+    def pooling(self) -> bool: ...
+    @property
+    def cancelled(self) -> Stop: ...
+    def outputs(self) -> dict[str, object]: ...
+
+@final
+class Limits:
+    def __new__(
+        cls,
+        graph: Graph,
+        max_workers: int | None = None,
+        node_caps: Mapping[str, int] | None = None,
+        node_groups: Mapping[str, str] | None = None,
+        group_caps: Mapping[str, int] | None = None,
+    ) -> Self: ...
+    def add_waker(self, waker: Callable[[], object], /) -> None: ...
+
+@final
+class Threads:
+    def __new__(cls, limits: Limits, max_workers: int) -> Self: ...
+    @property
+    def max_workers(self) -> int: ...
+    def close(self, timeout: float = 1.0) -> list[int]: ...
+    def submit(
+        self, function: Callable[[], object], context: contextvars.Context, /
+    ) -> concurrent.futures.Future[Any]: ...
+    def nested(self) -> bool: ...
+    def abandon(self) -> None: ...
+    @staticmethod
+    def leave() -> None: ...
+
+@final
+class Stop:
+    # A run's stop flag: true once the run is stopping, or one that started it is.
+    # Made here, it is `run_many`'s, under the run the current context is in, and
+    # only such a flag may be `set`: a run's own raises `RuntimeError`.
+    def __bool__(self) -> bool: ...
+    def set(self) -> None: ...
 
 @final
 class KeyPlan:
@@ -137,6 +238,9 @@ class ObserverBase:
     ) -> None: ...
     def hit_in(self, node: str, *, branch: tuple[int, ...], value: object) -> None: ...
     def skipped(self, node: str, *, branch: tuple[int, ...]) -> None: ...
+    def absent_error(
+        self, node: str, *, branch: tuple[int, ...], error: BaseException
+    ) -> None: ...
     def post_expand(
         self, node: str, *, branch: tuple[int, ...], items: int
     ) -> None: ...

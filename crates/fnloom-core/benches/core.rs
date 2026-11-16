@@ -2,7 +2,8 @@
 //! each on chain, fan-in and layered graphs of 1,000 and 10,000 nodes, `Plan::run` on a
 //! 200-node chain whose first node declines (`skip_chain_200`), and `Plan::run` on a block run
 //! once per item of 1, 100 and 10,000 items (`fan_out_1` and so on), and over 10 items whose
-//! block reads 1,000 outer inputs (`wide_1000`).
+//! block reads 1,000 outer inputs (`wide_1000`). `schedule` runs the chain and layered shapes
+//! on the `Scheduler` with one worker; its rows have no baseline yet, so they are reported.
 //!
 //! Wall-clock time is too noisy on shared CI runners to gate on, so the regression gate
 //! compares instruction counts measured under callgrind (see `scripts/bench_gate.py`).
@@ -36,10 +37,15 @@ mod suite {
     use std::hint::black_box;
 
     use fnloom_core::graph::Graph;
+    use fnloom_core::limits::Unlimited;
     use fnloom_core::node::{Collect, Dependency, InputSpec, Node, NodeId, NodeSpec};
-    use fnloom_core::plan::{Plan, Request};
-    use fnloom_core::run::{Arg, Blocks, Evaluate, Item};
+    use fnloom_core::plan::{Action, Plan, Request};
+    use fnloom_core::run::{Arg, Blocks, Evaluate, Item, Outputs, RunError, Slot};
+    use fnloom_core::schedule::{
+        ArgValue, Layout, Next, Options, Outcome, Report, Scheduler, Seat, Work,
+    };
     use gungraun::prelude::*;
+    use std::sync::Arc;
 
     /// Row width of the layered shape, as in `benches/generate.py`.
     const LAYER_WIDTH: usize = 10;
@@ -206,6 +212,7 @@ mod suite {
             payload: (),
             declines: false,
             expands: false,
+            absent_on_error: false,
         }
     }
 
@@ -337,6 +344,7 @@ mod suite {
                 payload: i == 0,
                 declines: i == 0,
                 expands: false,
+                absent_on_error: false,
             })
             .collect();
         let graph = Graph::build(specs).expect("generated specs form a valid graph");
@@ -379,6 +387,7 @@ mod suite {
             payload,
             declines: false,
             expands: matches!(payload, Fan::Items(_)),
+            absent_on_error: false,
         };
         let outer: Vec<String> = (0..width).map(|i| format!("x{i}")).collect();
         let branch_reads = std::iter::once(("items".to_owned(), None))
@@ -454,9 +463,79 @@ mod suite {
         (graph, plan, values)
     }
 
+    /// Runs `plan` on the `Scheduler` with one worker, seeding its inputs by name as
+    /// `Plan::run` does, and computing each task as `Sum` does.
+    fn scheduled(
+        graph: &Graph<()>,
+        plan: &Plan,
+        layout: &Arc<Layout>,
+        inputs: &BTreeMap<String, u64>,
+    ) -> Result<Outputs<u64>, RunError<Infallible>> {
+        let mut seeded = vec![None; graph.nodes().len()];
+        for step in plan.steps() {
+            if step.action == Action::UseInput {
+                seeded[step.node.index()] =
+                    inputs.get(&graph.node(step.node).name).map(|&value| Slot {
+                        value,
+                        absent: false,
+                    });
+            }
+        }
+        // One report and one argument buffer for the whole run, as a binding keeps them.
+        let mut report = Report::default();
+        let mut scheduler = Scheduler::<u64, Infallible, ()>::new(
+            plan,
+            graph,
+            Arc::clone(layout),
+            seeded,
+            Options::default(),
+            &mut report,
+        );
+        while let Next::Task(task) = scheduler.next(plan, graph, &Unlimited, Seat::Take) {
+            let Work::Compute { mut args, .. } = task.work else {
+                continue;
+            };
+            let value = args.iter().fold(0_u64, |sum, (_, arg)| match arg {
+                ArgValue::One(value) => sum.wrapping_add(*value),
+                ArgValue::Gather(_) | ArgValue::Omitted => sum,
+            });
+            let outcome = Outcome::Value {
+                value,
+                absent: false,
+            };
+            args.clear();
+            report.clear();
+            scheduler.complete(plan, graph, &Unlimited, task.id, outcome, &mut report);
+            scheduler.recycle(args);
+        }
+        scheduler.finish(plan, graph)
+    }
+
+    /// `planned`, with the plan's scheduler layout, built once per plan as `prepare` is.
+    fn laid_out(shape: Shape, n: usize) -> Laid {
+        let (graph, plan, inputs) = planned(shape, n);
+        let layout = Arc::new(Layout::new(&plan, &graph));
+        (graph, plan, layout, inputs)
+    }
+
+    /// A graph, its plan, the plan's layout and the inputs.
+    type Laid = (Graph<()>, Plan, Arc<Layout>, BTreeMap<String, u64>);
+
+    // The scheduler with one worker on the shapes `run` measures: what it adds per node.
+    // Reported, not gated, until its baseline is committed (Plan 11, Task 13).
+    #[library_benchmark]
+    #[bench::chain_1000(args = (Shape::Chain, 1_000), setup = laid_out)]
+    #[bench::chain_10000(args = (Shape::Chain, 10_000), setup = laid_out)]
+    #[bench::layered_1000(args = (Shape::Layered, 1_000), setup = laid_out)]
+    #[bench::layered_10000(args = (Shape::Layered, 10_000), setup = laid_out)]
+    fn schedule((graph, plan, layout, inputs): Laid) -> impl Sized {
+        let values = scheduled(&graph, &plan, &layout, black_box(&inputs));
+        (graph, plan, layout, values)
+    }
+
     library_benchmark_group!(
         name = engine;
-        benchmarks = build, prepare, run, run_skips, run_blocks
+        benchmarks = build, prepare, run, run_skips, run_blocks, schedule
     );
 }
 

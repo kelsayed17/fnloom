@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any, ClassVar, Final, Literal, final, override
 
 from fnloom import _types
-from fnloom._absence import without_absent
+from fnloom._absence import own, without_absent
 from fnloom._blocks import expands
 from fnloom._decorators import (
     _ATTRIBUTE,
@@ -143,7 +143,7 @@ class _Extractor:
             msg = (
                 f"{self._producer!r} returned no field {field!r}; {_returned(mapping)}"
             )
-            raise ValueError(msg)
+            raise own(ValueError(msg))
         return self._checked(found)
 
     def _holds(self, value: Mapping[object, object]) -> bool:
@@ -155,7 +155,7 @@ class _Extractor:
                 f"{self._producer!r} returned {type(value).__name__}, "
                 f"which has no {self.noun} {self._field!r}"
             )
-            raise TypeError(msg) from None
+            raise own(TypeError(msg)) from None
 
     def _checked(self, found: object) -> object:
         """`found`, when it matches the declared type; `ValueError` otherwise."""
@@ -168,13 +168,13 @@ class _Extractor:
                 return found
         except _types.UnresolvedError as error:
             msg = f"{self._producer!r} returned {self.noun} {self._field!r}: {error}"
-            raise TypeError(msg) from None
+            raise own(TypeError(msg)) from None
         msg = (
             f"{self._producer!r} returned {self.noun} {self._field!r} as "
             f"{inspect.formatannotation(type(found))}, but it is declared "
             f"{inspect.formatannotation(self._declared)}"
         )
-        raise ValueError(msg)
+        raise own(ValueError(msg))
 
 
 @final
@@ -204,7 +204,7 @@ class _ColumnExtractor(_Extractor):
                 f"{self._producer!r} returned no column {column!r}; "
                 f"{_returned_columns(frame)}"
             )
-            raise ValueError(msg)
+            raise own(ValueError(msg))
         return self._checked(self._filled(frame))
 
     def _filled(self, frame: object) -> object:
@@ -230,7 +230,7 @@ class _ColumnExtractor(_Extractor):
             "only a mapping, a pandas DataFrame or a polars DataFrame, "
             f"not {_qualified(type(frame))}"
         )
-        raise TypeError(msg)
+        raise own(TypeError(msg))
 
 
 # The frame classes `column_type` knows, by (`__module__`, `__qualname__`), with

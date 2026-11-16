@@ -1,5 +1,6 @@
 """Caching blocks: content-addressed branch keys, stored items, ordered collects."""
 
+import threading
 import warnings
 from typing import TYPE_CHECKING, override
 
@@ -7,6 +8,7 @@ import pytest
 
 import fnloom
 from fnloom import CacheOutcome, MemoryCache
+from fnloom._caching import CacheRun
 from fnloom._stores import MISSING
 from helpers import make_module
 
@@ -596,3 +598,228 @@ def test_a_replayed_declined_branch_skips_its_consumers(
     }
     # `odd` replays 2's absence, so `tenfold` runs for 3 only; the collect hits.
     assert _called(capsys) == ["tenfold 3"]
+
+
+# Single-flight (Plan 11, task 5): a branch's step whose key a running step of the same
+# run has waits for its value, and reports a hit, instead of computing it again.
+FLIGHT = """
+import threading
+import time
+
+from fnloom import Collect, Parallelizable, cache
+
+LOCK = threading.Lock()
+CALLS = []
+# Set by a test: each call waits on it, so calls that meet prove they overlapped.
+MEET = []
+
+
+def picked(items: list[str]) -> Parallelizable[str]:
+    yield from items
+
+
+# A version of its own: its code reads the mutable `CALLS`.
+@cache(version="1")
+def details(picked: str, pause: float, fail: tuple[str, ...]) -> str:
+    with LOCK:
+        CALLS.append(picked)
+        first = CALLS.count(picked) == 1
+    if MEET:
+        MEET[0].wait()
+    time.sleep(pause)
+    if picked in fail and first:
+        raise ValueError(picked)
+    return picked.upper()
+
+
+@cache(behavior="recompute", version="1")
+def again(picked: str, pause: float) -> str:
+    with LOCK:
+        CALLS.append(picked)
+    time.sleep(pause)
+    return picked * 2
+
+
+def summary(details: Collect[str]) -> list[str]:
+    return list(details)
+
+
+def doubled(again: Collect[str]) -> list[str]:
+    return list(again)
+"""
+
+
+def _flight(
+    name: str, threads: int, *, cached: bool = True, hooks: Sequence[fnloom.Hook] = ()
+) -> tuple[Driver, ModuleType]:
+    """The single-flight module's driver on `threads` workers, with a memory cache."""
+    module = make_module(name, FLIGHT)
+    builder = fnloom.Builder().with_modules(module).with_threads(threads)
+    if cached:
+        builder = builder.with_cache(MemoryCache())
+    return builder.with_hooks(*hooks).build(), module
+
+
+@pytest.mark.threads
+def test_equal_items_compute_once_per_run() -> None:
+    """The second `a` waits for the first's value and reports a hit (Q85)."""
+    recorder = _Recorder()
+    driver, module = _flight("flight_once", 4, hooks=(recorder,))
+    result = driver.execute(
+        ["summary"], inputs={"items": ["a", "a", "b"], "pause": 0.2, "fail": ()}
+    )
+    assert result == {"summary": ["A", "A", "B"]}
+    assert sorted(module.CALLS) == ["a", "b"]
+    details = {
+        (event, branch): status
+        for event, node, branch, status in recorder.events
+        if node == "details"
+    }
+    assert {details["after", (0,)], details["after", (1,)]} == {"miss", "hit"}
+    assert details["after", (2,)] == "miss"
+
+
+class _Failures(fnloom.Hook):
+    """Records the branch of each `details` that failed."""
+
+    def __init__(self) -> None:
+        """No failure yet."""
+        self.branches: list[tuple[int, ...]] = []
+
+    @override
+    def after_node(self, event: fnloom.NodeEnd) -> None:
+        if event.node.name == "details" and not event.ok:
+            self.branches.append(event.branch)
+
+
+@pytest.mark.threads
+def test_a_failed_original_does_not_fail_its_duplicate_by_itself() -> None:
+    """Only the step that ran fails: its duplicate reports no failure of its own."""
+    failures = _Failures()
+    driver, module = _flight("flight_failed", 4, hooks=(failures,))
+    with pytest.raises(ValueError, match="a") as info:
+        driver.execute(
+            ["summary"], inputs={"items": ["a", "a"], "pause": 0.2, "fail": ("a",)}
+        )
+    assert module.CALLS == ["a"]
+    assert len(failures.branches) == 1
+    assert any(f"branch {failures.branches[0]}" in n for n in info.value.__notes__)
+
+
+@pytest.mark.threads
+def test_recompute_nodes_are_never_deduplicated() -> None:
+    """A `recompute` step has no single-flight key: each branch calls it."""
+    driver, module = _flight("flight_recompute", 4)
+    result = driver.execute(["doubled"], inputs={"items": ["a", "a"], "pause": 0.1})
+    assert result == {"doubled": ["aa", "aa"]}
+    assert module.CALLS == ["a", "a"]
+
+
+@pytest.mark.threads
+def test_without_a_cache_both_run() -> None:
+    """Without a cache no step has a key, so equal items both compute."""
+    driver, module = _flight("flight_uncached", 4, cached=False)
+    result = driver.execute(
+        ["summary"], inputs={"items": ["a", "a"], "pause": 0.1, "fail": ()}
+    )
+    assert result == {"summary": ["A", "A"]}
+    assert module.CALLS == ["a", "a"]
+
+
+@pytest.mark.threads
+def test_two_runs_do_not_share_single_flight() -> None:
+    """Two runs of one driver that need one key both compute it: they meet."""
+    driver, module = _flight("flight_two_runs", 2)
+    module.MEET.append(threading.Barrier(2, timeout=5))
+    results: list[object] = []
+    inputs = {"items": ["a"], "pause": 0.0, "fail": ()}
+
+    def run() -> None:
+        results.append(driver.execute(["summary"], inputs=inputs))
+
+    threads = [threading.Thread(target=run) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert results == [{"summary": ["A"]}] * 2
+    assert module.CALLS == ["a", "a"]
+
+
+@pytest.mark.threads
+def test_single_flight_never_waits_a_worker() -> None:
+    """A duplicate holds no worker: the other runs `b`, which meets the first `a`."""
+    driver, module = _flight("flight_free_worker", 2)
+    module.MEET.append(threading.Barrier(2, timeout=5))
+    result = driver.execute(
+        ["summary"], inputs={"items": ["a", "a", "b"], "pause": 0.0, "fail": ()}
+    )
+    assert result == {"summary": ["A", "A", "B"]}
+    assert sorted(module.CALLS) == ["a", "b"]
+
+
+def test_an_items_version_is_known_while_its_expand_finishes() -> None:
+    """A key read while `finished` moves an expand's items still finds them.
+
+    `_item` reads `_items`, then `_pulling`, without the lock: `finished` writes the
+    first before it empties the second, so a reader between the two finds one.
+    """
+    module = make_module("finishing_items", ORDERED)
+    driver = fnloom.Builder().with_modules(module).with_cache(MemoryCache()).build()
+    inputs: dict[str, object] = {"order": [3], "rate": 2}
+    runnable = driver.prepare(["summary"], inputs=inputs)._plan  # noqa: SLF001  # the cached run
+    assert isinstance(runnable, CacheRun)
+    late = runnable.begin(inputs, {}).late
+    assert late is not None
+    late.pulled("picked", (), 3)
+    seen: list[object] = []
+
+    class Watched(dict[object, object]):
+        """A dict that reads the item's version as each entry is written."""
+
+        @override
+        def __setitem__(self, key: object, value: object) -> None:
+            assert late is not None
+            seen.append(late._item("picked", (), 0, [], set()))  # noqa: SLF001  # the race's reader
+            super().__setitem__(key, value)
+
+    late._items = Watched()  # noqa: SLF001  # watch the write  # ty: ignore[invalid-assignment]
+    late.finished("picked", (), [3])
+    assert len(seen) == 1
+    assert isinstance(seen[0], bytes)
+
+
+def test_an_items_version_is_known_when_its_expand_finishes_between_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reader that missed `_items`, then misses `_pulling`, reads `_items` again.
+
+    The whole of `finished` runs between the reader's two reads, so `_pulling` is
+    empty when it looks, and the items are in `_items` only: the expand's items
+    aren't stored here, so the store can't answer instead, as it may not have yet
+    in a real race.
+    """
+    module = make_module("finished_between_reads", ORDERED)
+    driver = fnloom.Builder().with_modules(module).with_cache(MemoryCache()).build()
+    inputs: dict[str, object] = {"order": [3], "rate": 2}
+    runnable = driver.prepare(["summary"], inputs=inputs)._plan  # noqa: SLF001  # the cached run
+    assert isinstance(runnable, CacheRun)
+    late = runnable.begin(inputs, {}).late
+    assert late is not None
+    late.pulled("picked", (), 3)
+    finishing = [True]
+
+    class Watched(dict[object, object]):
+        """A dict whose first `get` lets `finished` run before it reads."""
+
+        @override
+        def get(self, key: object, default: object = None) -> object:
+            if finishing and finishing.pop():
+                assert late is not None
+                late.finished("picked", (), [3])
+            return super().get(key, default)
+
+    monkeypatch.setattr(late, "_stores", lambda _name: False)
+    late._pulling = Watched(late._pulling)  # noqa: SLF001  # watch the reads  # ty: ignore[invalid-assignment]
+    seen = late._item("picked", (), 0, [], set())  # noqa: SLF001  # the race's reader
+    assert isinstance(seen, bytes)

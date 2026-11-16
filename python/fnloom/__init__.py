@@ -12,17 +12,19 @@ from fnloom._checks import (
     check_output_custom,
 )
 from fnloom._config import Condition, config
-from fnloom._core import ABSENT, Absent, UnfingerprintableError
+from fnloom._core import ABSENT, Absent, StoppedError, UnfingerprintableError
 from fnloom._decorators import (
     CachePolicy,
     FieldCache,
     Group,
     Source,
     Value,
+    absent_on,
     cache,
     defaults,
     exclude,
     group,
+    limit,
     parameterize,
     parameterize_sources,
     parameterize_values,
@@ -66,6 +68,7 @@ from fnloom._stores import (
 )
 from fnloom._style import Style
 from fnloom._tags import ANY
+from fnloom._threads import cancelled
 from fnloom._types import ValueCheck, type_matches, value_matches
 from fnloom._view import InputView, NodeView, Param
 from fnloom.driver import (
@@ -120,6 +123,7 @@ __all__ = [
     "RunStart",
     "Source",
     "Step",
+    "StoppedError",
     "Style",
     "Target",
     "UnfingerprintableError",
@@ -127,9 +131,11 @@ __all__ = [
     "Validator",
     "Value",
     "ValueCheck",
+    "absent_on",
     "apply_to",
     "build",
     "cache",
+    "cancelled",
     "check_output",
     "check_output_custom",
     "config",
@@ -142,6 +148,7 @@ __all__ = [
     "frame",
     "group",
     "inject",
+    "limit",
     "mutate",
     "node",
     "parameterize",

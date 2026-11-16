@@ -8,23 +8,26 @@ branch order. The core finds the blocks and runs them; this module reads the
 annotations, checks the items and holds the branch a node runs in.
 """
 
+import contextlib
 import inspect
 import types
 import typing
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import AsyncIterable, AsyncIterator, Callable, Iterable, Iterator
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Annotated, Final, Literal, Union, override
 
-from fnloom._absence import ABSENT, admits_absent, without_absent
+from fnloom._absence import ABSENT, admits_absent, own, without_absent
 from fnloom._types import Rules, ValueCheck, admitting, checks_of
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
+    from fnloom._caching import LateKeys
     from fnloom._scan import NodeDef
 
 __all__ = [
     "BRANCH",
+    "AsyncItems",
     "Collect",
     "Items",
     "Parallelizable",
@@ -33,6 +36,7 @@ __all__ = [
     "expanded_type",
     "expands",
     "item_check",
+    "items",
     "refuse",
 ]
 
@@ -135,28 +139,30 @@ def refuse(nodes: Sequence[NodeDef], *, awaits: bool) -> None:
     """`ValueError` for each node that can't be what its annotation says, sorted.
 
     A generator function that is no expand stays refused (Q32), with the message
-    the scan gave before an expand could be one; an expand whose items may be
-    absent is refused. With `awaits`, a graph with any expand is a `TypeError`,
-    since blocks run on the async driver from Plan 11 (Q132).
+    the scan gave before an expand could be one, and so does an async generator
+    function that is no expand; an expand whose items may be absent is refused.
+    The scan refuses an async generator expand on `build` (Q32).
     """
     lines: list[str] = []
-    expanding: list[str] = []
     for node in nodes:
         item = expanded_type(node.returns)
         if item is None:
             # Read off the code's flags, as the scan does: far cheaper per node.
             code = getattr(node.origin, "__code__", None)
-            if code is not None and code.co_flags & inspect.CO_GENERATOR:
+            flags = 0 if code is None else code.co_flags
+            if flags & (inspect.CO_GENERATOR | inspect.CO_ASYNC_GENERATOR):
+                kind = (
+                    "async generator"
+                    if flags & inspect.CO_ASYNC_GENERATOR
+                    else "generator"
+                )
                 tail = (
                     "calling it returns a generator, not the node's value"
                     if awaits
                     else "nodes are called synchronously"
                 )
-                lines.append(
-                    f"{node.name!r}: generator function is not supported; {tail}"
-                )
+                lines.append(f"{node.name!r}: {kind} function is not supported; {tail}")
             continue
-        expanding.append(node.name)
         if admits_absent(item):
             shown = inspect.formatannotation(item)
             present = inspect.formatannotation(without_absent(item))
@@ -167,10 +173,6 @@ def refuse(nodes: Sequence[NodeDef], *, awaits: bool) -> None:
             )
     if lines:
         raise ValueError("; ".join(sorted(lines)))
-    if awaits and expanding:
-        listed = ", ".join(f"{name!r}" for name in sorted(expanding))
-        msg = f"blocks run on the async driver from Plan 11; {listed} expands"
-        raise TypeError(msg)
 
 
 def item_check(
@@ -201,19 +203,25 @@ class Items(Iterator[object]):
     value is then the `list` of them (Q121); otherwise none is held.
     """
 
-    __slots__ = ("_branch", "_check", "_index", "_items", "_iterator", "_node")
+    __slots__ = ("_branch", "_check", "_index", "_items", "_iterator", "_late", "_node")
 
-    def __init__(
+    def __init__(  # noqa: PLR0913, PLR0917  # the factory's two, then the binding's four
         self,
         node: str,
         check: Callable[[object], str | None] | None,
         iterable: Iterable[object],
         record: bool,  # noqa: FBT001  # the binding passes it by position
         branch: tuple[int, ...] = (),
+        late: LateKeys | None = None,
     ) -> None:
-        """Iterates `iterable`, the items of `node`, which runs in `branch`."""
+        """Iterates `iterable`, the items of `node`, which runs in `branch`.
+
+        `late`, a cached run's late keys, hears of each item and of the end, with
+        `branch`, so branches read at once each key their own items.
+        """
         self._node = node
         self._branch = branch
+        self._late = late
         self._check = check
         self._iterator = iter(iterable)
         self._index = 0
@@ -221,8 +229,25 @@ class Items(Iterator[object]):
 
     @override
     def __next__(self) -> object:
-        """The next item, checked; `StopIteration` as the iterable raised it."""
-        item = self._in_branch(next, self._iterator)
+        """The next item, checked; `StopIteration` as the iterable raised it.
+
+        An iterator that raised anything else is closed at once, and only once: the
+        run's end may not close it, when the error makes the expand absent (Q133).
+        """
+        try:
+            item = self._in_branch(next, self._iterator)
+        except StopIteration:
+            raise
+        except Exception:
+            # What closing raises is dropped, as for a stopped run's iterator.
+            with contextlib.suppress(Exception):
+                self.close()
+            self._iterator = iter(())
+            raise
+        return self._kept(item)
+
+    def _kept(self, item: object) -> object:
+        """`item`, the next one read, once checked, recorded and reported."""
         index = self._index
         self._index += 1
         if item is ABSENT:
@@ -230,12 +255,14 @@ class Items(Iterator[object]):
                 f"item {index} of {self._node!r} is fnloom.ABSENT, which an item "
                 "can't be"
             )
-            raise TypeError(msg)
+            raise own(TypeError(msg))
         if self._check is not None and (problem := self._check(item)) is not None:
             msg = f"item {index} of {self._node!r}: {problem}"
-            raise TypeError(msg)
+            raise own(TypeError(msg))
         if self._items is not None:
             self._items.append(item)
+        if self._late is not None:
+            self._late.pulled(self._node, self._branch, item)
         return item
 
     def close(self) -> None:
@@ -263,4 +290,91 @@ class Items(Iterator[object]):
         """Ends the iteration, closing it unless `exhausted`; the items, if recorded."""
         if not exhausted:
             self.close()
+        elif self._late is not None:
+            self._late.finished(self._node, self._branch, self._items)
         return self._items
+
+
+async def _nothing() -> AsyncIterator[object]:
+    """An async iterator with no items: what a closed `AsyncItems` reads."""
+    return
+    yield
+
+
+class AsyncItems(Items):
+    """`Items` of an async generator expand, read with `__anext__` by the async driver.
+
+    `current_branch()` is the expand's in each read, since the driver awaits every
+    read of one iterator in one context, in the expand's branch.
+    """
+
+    __slots__ = ("_aiterator",)
+
+    def __init__(  # noqa: PLR0913, PLR0917  # as `Items`
+        self,
+        node: str,
+        check: Callable[[object], str | None] | None,
+        iterable: AsyncIterable[object],
+        record: bool,  # noqa: FBT001  # the binding passes it by position
+        branch: tuple[int, ...] = (),
+        late: LateKeys | None = None,
+    ) -> None:
+        """Iterates `iterable`, as `Items` does."""
+        super().__init__(node, check, (), record, branch, late)
+        self._aiterator = aiter(iterable)
+
+    @override
+    def __next__(self) -> object:
+        """`TypeError`: async items are read only by the async driver."""
+        msg = (
+            f"the items of {self._node!r} are an async iterable, which only "
+            "build_async() reads"
+        )
+        raise TypeError(msg)
+
+    async def __anext__(self) -> object:
+        """The next item, checked; `StopAsyncIteration` at the end.
+
+        An iterator that raised anything else is closed at once, and only once, as
+        `Items.__next__` closes one.
+        """
+        try:
+            item = await anext(self._aiterator)
+        except StopAsyncIteration:
+            raise
+        except Exception:
+            with contextlib.suppress(Exception):
+                await self.afinish(False)  # noqa: FBT003  # `afinish`'s flag, by position
+            self._aiterator = _nothing()
+            raise
+        return self._kept(item)
+
+    async def afinish(self, exhausted: bool) -> list[object] | None:  # noqa: FBT001  # as `finish`
+        """Ends the iteration, closing it unless `exhausted`; the items, if recorded.
+
+        An async generator is closed with `aclose()`, so its `finally` runs.
+        """
+        if not exhausted:
+            close = getattr(self._aiterator, "aclose", None)
+            if callable(close):
+                await close()
+            return self._items
+        return self.finish(exhausted)
+
+
+def items(  # noqa: PLR0913, PLR0917  # the factory's two, then the binding's four
+    node: str,
+    check: Callable[[object], str | None] | None,
+    iterable: Iterable[object] | AsyncIterable[object],
+    record: bool,  # noqa: FBT001  # the binding passes it by position
+    branch: tuple[int, ...] = (),
+    late: LateKeys | None = None,
+) -> Items:
+    """The item iterator of one run of expand `node`, `Items` or `AsyncItems`.
+
+    `AsyncItems` over an async iterable that is not also a sync one, which only the
+    async driver reads; an object that is both is read as `Items`, on either driver.
+    """
+    if isinstance(iterable, AsyncIterable) and not isinstance(iterable, Iterable):
+        return AsyncItems(node, check, iterable, record, branch, late)
+    return Items(node, check, iterable, record, branch, late)

@@ -26,6 +26,7 @@ run as without the cache, and nothing is stored for that node.
 import functools
 import os
 import threading
+import time
 import typing
 import warnings
 from collections import abc
@@ -60,6 +61,7 @@ if TYPE_CHECKING:
     from fnloom._config import Condition
     from fnloom._hooks import Dispatch
     from fnloom._scan import NodeDef
+    from fnloom._threads import Workers
 
 # fnloom's own files, which a build warning points past.
 _PACKAGE = f"{Path(__file__).parent}{os.sep}"
@@ -860,6 +862,7 @@ class Cache:
         formats: The `Format` of each node that names one, by name.
         collects: The sources each node collects, by name.
         expands: The expand nodes.
+        absent_on: The nodes an error may make absent (Q133).
     """
 
     store: CacheStore
@@ -869,6 +872,7 @@ class Cache:
     formats: Mapping[str, Format]
     collects: Mapping[str, frozenset[str]]
     expands: frozenset[str]
+    absent_on: frozenset[str] = frozenset()
 
     @classmethod
     def of(
@@ -876,8 +880,11 @@ class Cache:
         store: CacheStore,
         nodes: Sequence[NodeDef],
         settings: CacheSettings = NO_SETTINGS,
+        graph: _core.Graph | None = None,
     ) -> Cache:
         """The cache over `store` for the built `nodes`, with `with_cache`'s lists.
+
+        `graph`, the nodes' native graph, says which nodes an error may make absent.
 
         Raises:
             ValueError: A list or `ignore` names no node, or a parameter the
@@ -904,6 +911,7 @@ class Cache:
                 for name, read in inputs.items()
             },
             frozenset(n.name for n in nodes if _blocks.expands(n.returns)),
+            frozenset(() if graph is None else graph.absent_on_nodes()),
         )
 
 
@@ -929,6 +937,8 @@ class Begun:
         computed: For a reported run, the nodes `plan` computes, in its order.
         late: The keys of the nodes downstream of an expand, made as the run
             asks for them; `None` for a plan with no expand.
+        poison: The run's error absences, which nothing computed from is
+            stored; `None` for a plan no error can make a node absent in.
     """
 
     plan: _core.Plan
@@ -942,6 +952,13 @@ class Begun:
     loaded: tuple[str, ...] = ()
     computed: tuple[str, ...] = ()
     late: LateKeys | None = None
+    poison: Poison | None = None
+
+    def observers(
+        self, given: Sequence[_core.ObserverBase] = ()
+    ) -> Sequence[_core.ObserverBase]:
+        """`given`, and the observer hearing of the run's error absences, if any."""
+        return given if self.poison is None else (*given, self.poison)
 
 
 class _Preparer(Protocol):
@@ -989,12 +1006,17 @@ class CacheRun:
         input_names: frozenset[str],
         override_names: frozenset[str],
         fresh: Mapping[str, str] | None = None,
+        *,
+        workers: Workers | None = None,
     ) -> None:
         """Holds the request's plan, compiled with no hits, and its key plan.
 
         `fresh` holds the producers an enclosing run's `recompute` fields need
         fresh, so a nested run computing one never looks it up either.
+        `workers`, when given, is the driver's pool and limits, which every core
+        run uses.
         """
+        self._workers = workers
         self._store = cache.store
         self._formats = cache.formats
         self._graph = graph
@@ -1066,8 +1088,11 @@ class CacheRun:
         # A plain `MemoryCache` is walked and written in the binding, with no call
         # into Python per node; a subclass may override its methods, so it is not.
         # Nor is a plan with an expand, whose value is stored as its items.
+        # The nodes an error may make absent: then what reads one is stored only once
+        # the run heard of each absence, in Python (`Poison`).
+        covered = cache.absent_on.intersection(computed)
         store = cache.store
-        native = type(store) is MemoryCache and not self._expands
+        native = type(store) is MemoryCache and not self._expands and not covered
         self._native = store.native if native else None
         # In plan order.
         self._node_keys = dict(zip(computed, keys, strict=True))
@@ -1110,9 +1135,24 @@ class CacheRun:
             first = list(self._first)
             nested = graph.prepare(first, self._inputs, sorted(override_names))
             self._nested = CacheRun(
-                cache, graph, nested, first, input_names, override_names, self._fresh
+                cache,
+                graph,
+                nested,
+                first,
+                input_names,
+                override_names,
+                self._fresh,
+                workers=workers,
             )
             self._levels = (self, *self._nested._levels)  # noqa: SLF001  # the same class
+        # Whether an error may make a node absent here, or in a level run first.
+        self._erring = (
+            bool(covered)
+            or any(
+                level._erring  # noqa: SLF001  # the same class
+                for level in self._levels[1:]
+            )
+        )
         self._blocks = (
             _Blocks(
                 self._expands,
@@ -1138,6 +1178,15 @@ class CacheRun:
         self._plans_lock = threading.Lock()
 
     @property
+    def threaded(self) -> bool:
+        """Whether its core runs are on a driver's pool."""
+        return self._workers is not None and self._workers.max_workers is not None
+
+    def workers(self) -> Workers | None:
+        """The driver's limits and pool; `None` with neither."""
+        return self._workers
+
+    @property
     def blocks(self) -> _Blocks | None:
         """What the plan knows of its late nodes; `None` with no expand."""
         return self._blocks
@@ -1147,33 +1196,78 @@ class CacheRun:
         """The run of the `recompute` nodes something reads, which goes first."""
         return self._nested
 
+    def _poison(self, errors: Errors) -> Poison | None:
+        """This level's observer of `errors`, once an inner level added its own.
+
+        A `recompute` node an inner level made from an error absence taints what
+        reads it here. `None` for a level no error can make a node absent in.
+        """
+        if not self._erring:
+            return None
+        for name in self._first:
+            if name in errors.outer:
+                errors.outer.update(self.downstream(name))
+        return Poison(self, errors)
+
+    @functools.cached_property
+    def _readers(self) -> dict[str, list[str]]:
+        """Each node, mapped to every computed node whose key reads it."""
+        return _readers(self._node_keys)
+
+    def downstream(self, name: str) -> set[str]:
+        """`name` and every computed node whose key chains from it, in this plan."""
+        found = {name}
+        todo = [name]
+        readers = self._readers
+        while todo:
+            for reader in readers.get(todo.pop(), ()):
+                if reader not in found:
+                    found.add(reader)
+                    todo.append(reader)
+        return found
+
     def run(
         self,
         inputs: dict[str, object],
         overrides: dict[str, object],
         observers: Sequence[_core.ObserverBase] = (),
         /,
+        *,
+        timeout: float | None = None,
     ) -> dict[str, object]:
         """Runs the plan, already checked, through the store; the outputs, sorted.
 
         `observers` see the nodes the final core run computes: not a hit, nor a
-        node of the nested run.
+        node of the nested run. `timeout`, in seconds, bounds both core runs
+        together, on a driver's pool only.
         """
-        return self._finished(self.begin(inputs, overrides), inputs, observers)
+        deadline = None if timeout is None else time.monotonic() + timeout
+        begun = self.begin(inputs, overrides, deadline=deadline)
+        return self._finished(begun, inputs, observers, deadline=deadline)
 
-    def _execute(
+    def _execute(  # noqa: PLR0913, PLR0917  # a nested run's request, and its deadline
         self,
         inputs: dict[str, object],
         overrides: dict[str, object],
         versions: dict[str, bytes | None],
         warned: set[str],
         values: dict[str, object],
+        deadline: float | None,
+        errors: Errors | None,
     ) -> dict[str, object]:
-        """A nested run; `values` receives every value it computed or loaded."""
+        """A nested run; `values` receives every value it computed or loaded.
+
+        `errors` gathers its error absences, for the run enclosing it.
+        """
         begun = self.begin(
-            inputs, overrides, versions=versions, warned=warned, values=values
+            inputs,
+            overrides,
+            versions=versions,
+            warned=warned,
+            values=values,
+            errors=errors,
         )
-        return self._finished(begun, inputs)
+        return self._finished(begun, inputs, deadline=deadline)
 
     def _finished(
         self,
@@ -1181,23 +1275,38 @@ class CacheRun:
         inputs: dict[str, object],
         observers: Sequence[_core.ObserverBase] = (),
         on_value: Callable[[str, object], None] | _core.Keys | None = None,
+        *,
+        deadline: float | None = None,
     ) -> dict[str, object]:
         """Runs a begun run's plan, storing each value as its node succeeds.
 
         `on_value`, when given, takes each value instead: by default the binding's
-        keys store it, or else `finish` does.
+        keys store it, or else `finish` does. `deadline`, a `time.monotonic()`
+        time, is when a run on a driver's pool is abandoned.
         """
         if on_value is None:
             on_value = begun.pending
-        result = begun.plan.run(
-            inputs,
-            begun.overrides,
-            observers,
-            on_value=functools.partial(self.finish, begun)
-            if on_value is None
-            else on_value,
-            late=begun.late,
-        )
+        if on_value is None:
+            on_value = functools.partial(self.finish, begun)
+        workers = self._workers
+        observers = begun.observers(observers)
+        if workers is None:
+            result = begun.plan.run(
+                inputs, begun.overrides, observers, on_value=on_value, late=begun.late
+            )
+        else:
+            result = begun.plan.run(
+                inputs,
+                begun.overrides,
+                observers,
+                on_value=on_value,
+                late=begun.late,
+                threads=workers.threads(),
+                limits=workers.limits(),
+                timeout=None
+                if deadline is None
+                else max(0.0, deadline - time.monotonic()),
+            )
         if begun.values is not None:
             begun.values.update(begun.hits)
             begun.values.update(result)
@@ -1214,11 +1323,14 @@ class CacheRun:
         values: dict[str, object] | None = None,
         native: bool = True,
         reasons: dict[str, str] | None = None,
+        deadline: float | None = None,
+        errors: Errors | None = None,
     ) -> Begun:
         """Everything a cached run does before its core run: versions, keys, hits.
 
         `known` holds the values of the nested run, when the caller ran it; when
-        it is `None`, the nested run, if any, runs here, synchronously. `versions`
+        it is `None`, the nested run, if any, runs here, synchronously, abandoned
+        at `deadline`, a `time.monotonic()` time. `versions`
         are the inputs' and overrides' when the caller already has them, and
         `warned` the nodes it already warned about. `values`, when given, receives
         every value the run computes or loads. With `native`, a plain
@@ -1229,15 +1341,21 @@ class CacheRun:
         has none, from `versions`, and makes the run a reported one: it is walked
         in Python, so its keys are known, and `Begun` carries the outcome of each
         node it reports, its hits and the nodes it computes. It receives why each
-        `recompute` node run first has no version, if so.
+        `recompute` node run first has no version, if so. `errors` gathers the
+        error absences of every level of one run: pass the same to each level.
         """
         warned = set() if warned is None else warned
+        if errors is None and self._erring:
+            errors = Errors()
         if versions is None:
             versions = self._versions(inputs, overrides, warned)
         if known is None:
             known = {}
             if self._nested is not None:
-                self._nested._execute(inputs, overrides, dict(versions), warned, known)  # noqa: SLF001  # the same class
+                self._nested._execute(  # noqa: SLF001  # the same class
+                    inputs, overrides, dict(versions), warned, known, deadline, errors
+                )
+        poison = None if errors is None else self._poison(errors)
         if reasons is None:
             for name in self._first:
                 versions[name] = _version(known[name], name, warned)
@@ -1257,18 +1375,38 @@ class CacheRun:
         else:
             keys = self._key_plan.keys(versions)
             hits = self._frontier(keys, known, warned)
-        late = LateKeys(self, keys, versions, hits, warned) if self._expands else None
+        late = (
+            LateKeys(self, keys, versions, hits, warned, errors)
+            if self._expands
+            else None
+        )
         if reasons is not None:
             return self._reported_begun(
-                overrides, hits, keys, warned, values, reasons, known, late
+                overrides, hits, keys, warned, values, reasons, known, late, poison
             )
         if not hits:
             return Begun(
-                self._plan, overrides, hits, keys, pending, warned, values, late=late
+                self._plan,
+                overrides,
+                hits,
+                keys,
+                pending,
+                warned,
+                values,
+                late=late,
+                poison=poison,
             )
         plan = self._plan_for(frozenset(hits))
         return Begun(
-            plan, {**overrides, **hits}, hits, keys, pending, warned, values, late=late
+            plan,
+            {**overrides, **hits},
+            hits,
+            keys,
+            pending,
+            warned,
+            values,
+            late=late,
+            poison=poison,
         )
 
     def _first_versions(
@@ -1298,6 +1436,7 @@ class CacheRun:
         reasons: Mapping[str, str],
         known: Mapping[str, object],
         late: LateKeys | None,
+        poison: Poison | None,
     ) -> Begun:
         """A reported run's `Begun`: its hits, the nodes it computes, their outcomes.
 
@@ -1322,6 +1461,7 @@ class CacheRun:
             loaded,
             computed,
             late,
+            poison,
         )
 
     def versions(
@@ -1351,10 +1491,11 @@ class CacheRun:
         warned: set[str] = set()
         reasons: dict[str, str] = {}
         known: dict[str, object] = {}
+        errors = Errors() if self._erring else None
         try:
             versions = self._versions(inputs, overrides, warned, reasons)
             begun = self._begin_reported(
-                levels[-1], inputs, overrides, known, versions, warned, reasons
+                levels[-1], inputs, overrides, known, versions, warned, reasons, errors
             )
         except BaseException:
             start(())
@@ -1363,7 +1504,7 @@ class CacheRun:
         for at, level in enumerate(reversed(levels)):
             if at:
                 begun = self._begin_reported(
-                    level, inputs, overrides, known, versions, warned, reasons
+                    level, inputs, overrides, known, versions, warned, reasons, errors
                 )
             dispatch.loaded(begun)
             known = yield level, begun
@@ -1377,11 +1518,13 @@ class CacheRun:
         versions: dict[str, bytes | None],
         warned: set[str],
         reasons: dict[str, str],
+        errors: Errors | None,
     ) -> Begun:
         """`level.begin` for a reported run whose outermost level is this one.
 
         `known` holds the values of the level run before it; an inner level gets
         copies of `versions` and `reasons`, and collects its values for the next.
+        `errors` gathers every level's error absences.
         """
         outer = level is self
         return level.begin(
@@ -1393,6 +1536,7 @@ class CacheRun:
             values=None if outer else {},
             native=False,
             reasons=reasons if outer else dict(reasons),
+            errors=errors,
         )
 
     def _reported(self, begun: Begun, level: CacheRun) -> tuple[str, ...]:
@@ -1415,12 +1559,16 @@ class CacheRun:
         overrides: dict[str, object],
         dispatch: Dispatch,
         start: Callable[[tuple[str, ...]], None],
+        *,
+        timeout: float | None = None,
     ) -> dict[str, object]:
         """`run`, reporting every node to `dispatch`, a run's own dispatcher.
 
         Runs `reported_levels`: each level's nodes report through `dispatch`'s
         observers, and a node whose `after_node` raised is not stored (`kept`).
+        `timeout`, in seconds, bounds every level's core run together.
         """
+        deadline = None if timeout is None else time.monotonic() + timeout
         levels = self.reported_levels(inputs, overrides, dispatch, start)
         level, begun = next(levels)
         while True:
@@ -1432,6 +1580,7 @@ class CacheRun:
                 inputs,
                 dispatch.observers(),
                 functools.partial(level.kept, begun, dispatch),
+                deadline=deadline,
             )
             try:
                 level, begun = levels.send(
@@ -1465,6 +1614,9 @@ class CacheRun:
         key = begun.keys[name]
         # An expand's value is its iterable: its items are stored once read.
         if key is None or not self._stored[name] or name in self._expands:
+            return
+        # Computed from an error absence: a partial result is never stored (Q133).
+        if begun.poison is not None and name in begun.poison.errors.outer:
             return
         self.put(key, name, value, begun.warned)
 
@@ -1736,12 +1888,13 @@ def _late_outcome(k: NodeKey, key: object) -> CacheOutcome:
 class LateKeys:
     """One cached run's keys of the nodes downstream of an expand, by branch.
 
-    Made per run, never shared. The core asks `lookup` of each late node before it
-    would compute it (in a branch, from the block's exits back), tells `pulled` of
-    each item and `finished` of each exhausted expand, and hands `store` each value
-    a late node computes. It runs one branch at a time, in reference order, so an
-    expand's items arrive in order, and the enclosing branch of an expand being read
-    is the one last asked about.
+    Made per run, never shared between runs, but safe for one run's workers. The
+    core asks `lookup` of each late node before it would compute it (in a branch,
+    from the block's exits back) and hands `store` each value a late node computes;
+    each expand's item iterator tells `pulled` of each item and `finished` of its
+    end. Every call names its branch, an expand's being the branch it ran in, so
+    branches may run at once; one iterator's items still arrive in order. The tables
+    are guarded by one lock, and no store call or fingerprint is made under it.
 
     A late node's key is its ordinary key, over the versions of what it reads: the
     item, for an expand it is in the block of; an earlier late node's key, in its
@@ -1757,18 +1910,20 @@ class LateKeys:
     expand's items are stored.
     """
 
-    def __init__(
+    def __init__(  # noqa: PLR0913, PLR0917  # what the run knows before it starts
         self,
         run: CacheRun,
         keys: Mapping[str, bytes | None],
         versions: Mapping[str, bytes | None],
         hits: Mapping[str, object],
         warned: set[str],
+        errors: Errors | None = None,
     ) -> None:
         """The late keys of one run of `run`, whose outer keys and versions are known.
 
         `hits` are the outer values the run loaded: an expand among them replays
-        its items.
+        its items. `errors` are the run's error absences, if it may have any:
+        nothing computed from one is stored.
         """
         shape = run.blocks
         if shape is None:
@@ -1779,6 +1934,7 @@ class LateKeys:
         self._keys = keys
         self._versions = versions
         self._warned = warned
+        self._errors = errors
         # Set by a hooked run: a value its hooks refused is not stored (R8).
         self.dispatch: Dispatch | None = None
         self._memo: dict[_Task, bytes | None] = {}
@@ -1790,24 +1946,24 @@ class LateKeys:
         }
         # The item versions of an expand, once exhausted or read from its entry.
         self._items: dict[_Task, tuple[bytes | None, ...]] = {}
-        # Per expand being read: its enclosing branch, and its item versions so far.
-        self._pulling: dict[str, tuple[_Branch, list[bytes | None]]] = {}
-        # The branch last asked about.
-        self._current: _Branch = ()
+        # Per expand being read, by expand and its branch: its item versions so far.
+        self._pulling: dict[_Task, list[bytes | None]] = {}
+        # Guards the tables above, for the workers of a parallel run.
+        self._lock = threading.Lock()
 
     def has(self, name: str) -> bool:
         """Whether `name` is a late node, keyed per branch."""
         return name in self._shape.plans
 
-    def records(self, name: str) -> bool:
-        """Whether expand `name`'s items are kept, to be stored once exhausted.
+    def records(self, name: str, branch: _Branch) -> bool:
+        """Whether expand `name`'s items in `branch` are kept, to be stored at the end.
 
-        Not when they were replayed, nor when its key in the branch last asked
-        about is not known: then nothing could store them.
+        Not when they were replayed, nor when its key in `branch`, the branch it
+        ran in, is not known: then nothing could store them.
         """
         if not self._stores(name):
             return False
-        prefix = self._current[: len(self._shape.paths.get(name, ()))]
+        prefix = tuple(branch)
         if (name, prefix) in self._replayed:
             return False
         return isinstance(self._expand_key(name, prefix), bytes)
@@ -1818,7 +1974,6 @@ class LateKeys:
 
     def lookup(self, name: str, branch: _Branch) -> tuple[object] | None:
         """Late node `name`'s stored value in `branch`, as a 1-tuple; or `None`."""
-        self._current = branch
         if not self._shape.stored.get(name, False):
             return None
         key = self.key(name, branch)
@@ -1830,7 +1985,8 @@ class LateKeys:
         if name in self._shape.expands:
             if not isinstance(value, list):
                 return None
-            self._replayed[name, branch] = value
+            with self._lock:
+                self._replayed[name, branch] = value
         return (value,)
 
     def store(self, name: str, branch: _Branch, value: object) -> None:
@@ -1843,31 +1999,96 @@ class LateKeys:
             return
         if name in self._shape.expands or not self._shape.stored.get(name, False):
             return
+        if self._errors is not None and self._poisoned(name, tuple(branch)):
+            return
         key = self.key(name, branch)
         if isinstance(key, bytes):
             self._run.put(key, name, value, self._warned)
 
-    def pulled(self, name: str, item: object) -> None:
-        """Takes the next item of expand `name`, in the branch last asked about."""
-        prefix = self._current[: len(self._shape.paths.get(name, ()))]
-        pulling = self._pulling.get(name)
-        if pulling is None or pulling[0] != prefix:
-            pulling = (prefix, [])
-            self._pulling[name] = pulling
-        versions = pulling[1]
-        versions.append(self._item_version(name, prefix, len(versions), item))
+    def pulled(self, name: str, branch: _Branch, item: object) -> None:
+        """Takes the next item of expand `name`, which runs in `branch`.
 
-    def finished(self, name: str, value: object) -> None:
-        """Expand `name` is exhausted: its items are known, and stored when kept."""
-        prefix = self._current[: len(self._shape.paths.get(name, ()))]
-        pulling = self._pulling.pop(name, None)
-        versions = pulling[1] if pulling is not None and pulling[0] == prefix else []
-        self._items[name, prefix] = tuple(versions)
+        One iterator's items arrive one at a time, so the index is known before
+        the lock; the version, which may run a registered fingerprint, is made
+        outside it.
+        """
+        prefix = tuple(branch)
+        with self._lock:
+            versions = self._pulling.setdefault((name, prefix), [])
+            index = len(versions)
+        version = self._item_version(name, prefix, index, item)
+        with self._lock:
+            versions.append(version)
+
+    def finished(self, name: str, branch: _Branch, value: object) -> None:
+        """Expand `name` in `branch` is exhausted: its items are known, and stored."""
+        prefix = tuple(branch)
+        with self._lock:
+            # `_items` first: `_item` reads it, then `_pulling`, without the lock, so
+            # it always finds one of them.
+            versions = self._pulling.get((name, prefix), [])
+            self._items[name, prefix] = tuple(versions)
+            self._pulling.pop((name, prefix), None)
         if (name, prefix) in self._replayed or not self._stores(name):
+            return
+        if self._errors is not None and self._poisoned(name, prefix):
             return
         key = self._expand_key(name, prefix)
         if isinstance(key, bytes) and isinstance(value, list):
             self._run.put(key, name, value, self._warned)
+
+    def _poisoned(self, name: str, branch: _Branch) -> bool:
+        """Whether late node `name`'s key in `branch` chains from an error absence.
+
+        Walks what its key reads, as `_read` does, back through the run's tasks: an
+        item reads its expand, a collect each branch it gathered. Every one of them
+        has run by now, so the answer is final. Only once the run had one.
+        """
+        errors = typing.cast("Errors", self._errors)
+        if name in errors.outer:
+            return True
+        if not errors.late:
+            return False
+        shape = self._shape
+        seen: set[_Task] = set()
+        todo: list[_Task] = [(name, branch)]
+        while todo:
+            task = todo.pop()
+            if task in seen:
+                continue
+            seen.add(task)
+            node, at = task
+            if task in errors.late or node in errors.outer:
+                return True
+            if node not in shape.plans:
+                continue
+            path = shape.paths.get(node, ())
+            for source in shape.reads[node]:
+                if source in shape.collects[node]:
+                    expand = shape.paths[source][-1]
+                    todo.append((expand, at))
+                    count = len(self._items.get((expand, at), ()))
+                    todo.extend((source, (*at, index)) for index in range(count))
+                elif source in path:
+                    todo.append((source, at[: path.index(source)]))
+                else:
+                    todo.append((source, at[: len(shape.paths.get(source, ()))]))
+        return False
+
+    def probe(self, name: str, branch: _Branch) -> tuple[object] | bytes | None:
+        """`lookup` of late node `name` in `branch`; on a miss, its single-flight key.
+
+        A hit as a 1-tuple; else the key a stored node is stored under, which the
+        run's steps of an equal key wait on; else `None`: a node that is not
+        stored, such as a `recompute` one, or whose key is uncacheable or not
+        known yet, is never shared. One call per step a parallel run probes.
+        """
+        found = self.lookup(name, branch)
+        if found is not None or not self._stores(name):
+            return found
+        # `lookup` keyed it: a known key is in the memo, an unknown one is not.
+        key = self._memo.get((name, branch))
+        return key if isinstance(key, bytes) else None
 
     def outcome(self, name: str, branch: _Branch, *, hit: bool) -> CacheOutcome:
         """Late node `name`'s cache outcome in `branch`, for its node events."""
@@ -1902,7 +2123,9 @@ class LateKeys:
                 unknown.add(top)
             else:
                 node = top[0]
-                self._memo[top] = self._shape.plans[node].keys(versions)[node]
+                found = self._shape.plans[node].keys(versions)[node]
+                with self._lock:
+                    self._memo[top] = found
         return _UNKNOWN if task in unknown else self._memo[task]
 
     def _dep(self, task: _Task, needed: list[_Task], unknown: set[_Task]) -> object:
@@ -1968,9 +2191,13 @@ class LateKeys:
         """The version of item `index` of expand `name` in the branch `prefix`."""
         found = self._items.get((name, prefix))
         if found is None:
-            pulling = self._pulling.get(name)
-            if pulling is not None and pulling[0] == prefix and index < len(pulling[1]):
-                return pulling[1][index]
+            pulling = self._pulling.get((name, prefix))
+            if pulling is not None and index < len(pulling):
+                return pulling[index]
+            # `finished` writes `_items` before it empties `_pulling`: once this read
+            # of `_pulling` missed, a second read of `_items` finds what it moved.
+            found = self._items.get((name, prefix))
+        if found is None:
             listed = self._listed(name, prefix, needed, unknown)
             if not isinstance(listed, tuple):
                 return listed
@@ -2029,7 +2256,8 @@ class LateKeys:
             self._item_version(name, prefix, index, item, key)
             for index, item in enumerate(items)
         )
-        self._items[name, prefix] = found
+        with self._lock:
+            self._items[name, prefix] = found
         return found
 
     def _item_version(
@@ -2144,6 +2372,55 @@ class LateKeys:
             return "miss"
         found = self._run.load(key, name, self._warned) is not MISSING
         return "hit" if found else "miss"
+
+
+def _readers(keys: Mapping[str, NodeKey]) -> dict[str, list[str]]:
+    """Each node, mapped to every node of `keys` whose key reads it."""
+    readers: dict[str, list[str]] = {}
+    for name, k in keys.items():
+        for _, source, _ in k.params:
+            if source is not None:
+                readers.setdefault(source, []).append(name)
+    return readers
+
+
+class Errors:
+    """One cached run's error absences, shared by its levels (Q133).
+
+    `outer` holds every node whose key, in every branch, chains from an error
+    absence outside a block; `late` each late node and branch an error made
+    absent. Sets, so a parallel run's workers add to them safely.
+    """
+
+    __slots__ = ("late", "outer")
+
+    def __init__(self) -> None:
+        """Starts with none."""
+        self.outer: set[str] = set()
+        self.late: set[_Task] = set()
+
+
+class Poison(_core.ObserverBase):
+    """Hears of one cached run level's error absences: nothing made of one is stored.
+
+    An error absence's version is a fresh one each run, which no key can repeat.
+    """
+
+    def __init__(self, level: CacheRun, errors: Errors) -> None:
+        """Records `level`'s error absences in `errors`."""
+        self._level = level
+        self.errors = errors
+
+    @typing.override
+    def absent_error(
+        self, node: str, *, branch: tuple[int, ...], error: BaseException
+    ) -> None:
+        del error
+        blocks = self._level.blocks
+        if blocks is not None and node in blocks.plans:
+            self.errors.late.add((node, tuple(branch)))
+        else:
+            self.errors.outer.update(self._level.downstream(node))
 
 
 def _exits(

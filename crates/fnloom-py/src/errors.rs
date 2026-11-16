@@ -30,7 +30,7 @@ pub fn caught<T>(call: impl FnOnce() -> PyResult<T>) -> PyResult<T> {
 
 /// A `PanicException` carrying the panic's message, extracted the way the binding library
 /// extracts it.
-fn panic_error(payload: &(dyn Any + Send)) -> PyErr {
+pub fn panic_error(payload: &(dyn Any + Send)) -> PyErr {
     let message = payload
         .downcast_ref::<String>()
         .cloned()

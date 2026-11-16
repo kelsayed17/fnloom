@@ -35,6 +35,7 @@ from fnloom import (
     _core,
     _hooks,
     _steps,
+    _threads,
     _types,
     _wrappers,
 )
@@ -52,7 +53,7 @@ from fnloom._decorators import CacheBehavior, Source, Value
 from fnloom._defaults import default_problems, same_value
 from fnloom._drawing import Drawing, Mark, display, drawing, with_context
 from fnloom._export import export
-from fnloom._extract import is_generated
+from fnloom._extract import extractor, is_generated
 from fnloom._functions import (
     FunctionReference,
     FunctionSource,
@@ -69,6 +70,7 @@ from fnloom._requests import NO_NODE, requested, suggest
 from fnloom._requests import output_names as _requested_names
 from fnloom._scan import LeftOut, NodeDef, core_inputs, resolve, scan
 from fnloom._stores import CacheStore
+from fnloom._tags import Query
 from fnloom._types import ValueCheck
 from fnloom._view import (
     InputView,
@@ -96,8 +98,50 @@ type _Check = tuple[str, object, _types.Classes | None, _types.Matcher]
 
 # How many compiled plans a driver keeps; the least recently used one goes first.
 PLAN_CACHE_SIZE = 128
-# How many AsyncDrivers over one Driver keep their own form of a plan at once.
-ASYNC_PLANS_PER_PLAN = 8
+
+_NATIVE = (
+    "cannot pickle a Driver made from a native graph; "
+    "make it with Builder or build to pickle it"
+)
+_NATIVE_ASYNC = (
+    "cannot pickle an AsyncDriver made from a Driver; "
+    "make it with Builder.build_async to pickle it"
+)
+
+
+class _Rebuilt:
+    """What a driver pickles as, held by its plans in place of the driver.
+
+    A driver keeps its plans, so a plan holding its driver would make a cycle,
+    and a dropped driver's pool would wait for the cyclic collector to stop.
+    Loaded, this is the driver built again by `builder`, with `sync_nodes` for
+    an `AsyncDriver`. A driver and its plans pickled together share it, so they
+    load as one driver and its plans.
+    """
+
+    __slots__ = ("builder", "sync_nodes")
+
+    def __init__(self, sync_nodes: str | None = None) -> None:
+        """No builder yet: the one building the driver sets it."""
+        self.builder: Builder[Any] | None = None
+        self.sync_nodes = sync_nodes
+
+    @override
+    def __reduce__(
+        self,
+    ) -> tuple[Callable[..., Driver[Any] | AsyncDriver[Any]], tuple[object, ...]]:
+        """The driver, built again on load; `TypeError` without a builder."""
+        if self.builder is None:
+            msg = _NATIVE if self.sync_nodes is None else _NATIVE_ASYNC
+            raise TypeError(msg)
+        if self.sync_nodes is None:
+            return Builder.build, (self.builder,)
+        return _build_async_again, (self.builder, self.sync_nodes)
+
+
+def _loaded[T](driver: T) -> T:
+    """The driver its `_Rebuilt` loaded as."""
+    return driver
 
 
 class _Runnable(Protocol):
@@ -109,12 +153,79 @@ class _Runnable(Protocol):
         overrides: dict[str, Any],
         observers: Sequence[_core.ObserverBase] = (),
         /,
+        *,
+        timeout: float | None = None,
     ) -> dict[str, object]:
         """Runs with checked values; exactly the outputs, keyed by name, sorted.
 
-        `observers` see each node the core computes.
+        `observers` see each node the core computes. `timeout`, in seconds, is
+        given only to a run on a driver's pool (`_threaded`).
         """
         ...
+
+
+class _Threaded:
+    """A native plan whose runs run on a driver's pool, or are granted by its limits.
+
+    A pool is `Builder.with_threads`'; limits are `limit`'s and `with_limits`'.
+    """
+
+    __slots__ = ("_plan", "_workers")
+
+    def __init__(self, plan: _core.Plan, workers: _threads.Workers) -> None:
+        """Runs `plan` on `workers`' pool, or granted by its limits."""
+        self._plan = plan
+        self._workers = workers
+
+    @property
+    def threaded(self) -> bool:
+        """Whether its runs are on a driver's pool."""
+        return self._workers.max_workers is not None
+
+    @property
+    def plan(self) -> _core.Plan:
+        """The native plan."""
+        return self._plan
+
+    def workers(self) -> _threads.Workers:
+        """The driver's limits and pool."""
+        return self._workers
+
+    def run(
+        self,
+        inputs: dict[str, Any],
+        overrides: dict[str, Any],
+        observers: Sequence[_core.ObserverBase] = (),
+        /,
+        *,
+        timeout: float | None = None,
+    ) -> dict[str, object]:
+        """Runs as the native plan does, its tasks on the pool and the caller.
+
+        With `timeout`, its tasks run on the pool alone, and the run is abandoned
+        once `timeout` seconds pass.
+        """
+        workers = self._workers
+        return self._plan.run(
+            inputs,
+            overrides,
+            observers,
+            threads=workers.threads(),
+            limits=workers.limits(),
+            timeout=timeout,
+        )
+
+
+def _timeout(plan: _Runnable, timeout: object) -> float:
+    """`timeout=` in seconds, for a run of `plan`; a `TypeError` off a pool.
+
+    A run on the calling thread can't abandon the node it runs itself, so a
+    deadline needs `Builder.with_threads` (O7).
+    """
+    if not (isinstance(plan, (_Threaded, CacheRun)) and plan.threaded):
+        msg = "timeout= needs Builder.with_threads(...)"
+        raise TypeError(msg)
+    return _threads.checked_timeout(timeout)
 
 
 class _GraphLike(Protocol):
@@ -376,13 +487,13 @@ def _returning(
                 return value
         except _types.UnresolvedError as error:
             msg = f"{name}: {error}"
-            raise TypeError(msg) from None
+            raise _absence.own(TypeError(msg)) from None
         msg = (
             f"{name}: returned {inspect.formatannotation(type(value))}, "
             f"expected {inspect.formatannotation(declared)}"
             f"{_inside(declared, value)}"
         )
-        raise TypeError(msg)
+        raise _absence.own(TypeError(msg))
 
     if _async.awaits(node):
         awaited = typing.cast("Callable[..., Awaitable[object]]", payload)
@@ -555,22 +666,22 @@ class PreparedPlan[R = dict[str, object]]:
         self._absent_overrides: frozenset[str] = _NO_NAMES
         # The driver's result builder, which only a subclass applies.
         self._build: _ResultBuilder[R] | None = None
-        # The driver that prepared this plan, which pickling rebuilds it through.
-        self._driver: Driver[R] | None = None
-        # This plan as each of the last few `AsyncDriver`s over its driver ran it,
-        # made on first use: kept here, so it goes when the driver drops this plan.
-        self._async: dict[AsyncDriver[R], AsyncPreparedPlan[R]] = {}
+        # How the driver that prepared this plan pickles, which pickling rebuilds
+        # it through: never the driver itself, which keeps this plan (`_Rebuilt`).
+        self._rebuilt: _Rebuilt | None = None
+        # What its driver's output checks report results under: see `_checks`.
+        self._checks_owner: object = None
 
     @override
     def __reduce__(
         self,
-    ) -> tuple[Callable[..., PreparedPlan[R]], tuple[Driver[R], _PlanKey]]:
+    ) -> tuple[Callable[..., PreparedPlan[R]], tuple[_Rebuilt, _PlanKey]]:
         """The driver and the request, prepared again on load; see the class."""
-        if self._driver is None:
+        if self._rebuilt is None:
             msg = "cannot pickle a PreparedPlan made without a Driver"
             raise TypeError(msg)
         return _prepare_again, (
-            self._driver,
+            self._rebuilt,
             (self._outputs, self._input_names, self._override_names),
         )
 
@@ -583,6 +694,7 @@ class PreparedPlan[R = dict[str, object]]:
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
+        timeout: float | None = None,
     ) -> R:
         """Runs the plan; raises `ValueError` if the input or override names differ.
 
@@ -592,10 +704,18 @@ class PreparedPlan[R = dict[str, object]]:
         checked against an annotation that did not resolve at build (Q81). The
         result holds each requested output once, in the order first requested,
         or is what the driver's result builder makes of that dict (Q19).
+
+        `timeout`, in seconds, needs `Builder.with_threads`, else it is a
+        `TypeError`. Once it passes, the run stops, abandons the nodes still
+        running, and raises `TimeoutError` (Q170).
         """
         # This class runs only without a result builder, so `R` is the raw dict.
         given_inputs, given_overrides = self._checked(inputs, overrides)
-        values = self._plan.run(given_inputs, given_overrides)
+        if timeout is None:
+            values = self._plan.run(given_inputs, given_overrides)
+        else:
+            seconds = _timeout(self._plan, timeout)
+            values = self._plan.run(given_inputs, given_overrides, timeout=seconds)
         if self._sorted:
             return values  # ty: ignore[invalid-return-type]  # `R` is the raw dict here
         return {name: values[name] for name in self._outputs}  # ty: ignore[invalid-return-type]  # `R` is the raw dict here
@@ -605,13 +725,95 @@ class PreparedPlan[R = dict[str, object]]:
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
+        timeout: float | None = None,
     ) -> dict[str, object]:
         """Runs as `run` does, but returns the raw dict, skipping any result builder.
 
         Every hook fires, as for `run` (Q19).
         """
         given_inputs, given_overrides = self._checked(inputs, overrides)
-        values = self._plan.run(given_inputs, given_overrides)
+        if timeout is None:
+            values = self._plan.run(given_inputs, given_overrides)
+        else:
+            seconds = _timeout(self._plan, timeout)
+            values = self._plan.run(given_inputs, given_overrides, timeout=seconds)
+        if self._sorted:
+            return values
+        return {name: values[name] for name in self._outputs}
+
+    def run_many(
+        self,
+        inputs_seq: Iterable[Mapping[str, object] | None],
+        *,
+        overrides: Mapping[str, object] | None = None,
+        timeout: float | None = None,
+    ) -> list[R]:
+        """Runs the plan once per input set: each set's result, in order (Q171).
+
+        Each set is its own run, as `run` would run it, with `overrides` shared by
+        all of them. Every set is checked as `run` checks it before any runs, and
+        a set that fails the checks raises, noted with its index, running none.
+
+        On a driver built `with_threads`, the sets run on its pool, under its
+        limits, at most `max_workers` open at once, opening in index order. Once
+        one fails, no set opens and every open set stops, as a failed run stops;
+        the failure of the lowest-indexed failing set is raised, noted with its
+        index. Without `with_threads`, the sets run one after another on the
+        calling thread, and the first failure is raised. `timeout`, in seconds,
+        covers every set together, and needs `Builder.with_threads`.
+        """
+        if isinstance(inputs_seq, Mapping):
+            msg = (
+                "run_many takes an iterable of input mappings, one per run, "
+                "not one mapping"
+            )
+            raise TypeError(msg)
+        sets: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for index, inputs in enumerate(inputs_seq):
+            try:
+                # A copy: the iterable may hand out one dict, changed for each set.
+                given = None if inputs is None else dict(inputs)
+                sets.append(self._checked(given, overrides))
+            except BaseException as error:
+                error.add_note(f"in input set {index} of run_many")
+                raise
+        plan = self._plan
+        seconds = None if timeout is None else _timeout(plan, timeout)
+        runners = 1
+        workers = plan.workers() if isinstance(plan, (_Threaded, CacheRun)) else None
+        threads = None if workers is None else workers.threads()
+        # Inside a task of this driver, the sets share that task's worker slot.
+        if threads is not None and not threads.nested():
+            runners = min(threads.max_workers, len(sets))
+
+        def one(index: int, left: float | None) -> R:
+            given_inputs, given_overrides = sets[index]
+            return self._run_checked(given_inputs, given_overrides, left)
+
+        permits = None if workers is None else workers.helpers()
+        return _threads.run_sets(one, len(sets), runners, seconds, permits)
+
+    def _run_checked(
+        self,
+        given_inputs: dict[str, Any],
+        given_overrides: dict[str, Any],
+        timeout: float | None,
+    ) -> R:
+        """`run` with values `_checked` already passed, for `run_many`."""
+        # This class runs only without a result builder, so `R` is the raw dict.
+        return self._raw_checked(given_inputs, given_overrides, timeout)  # ty: ignore[invalid-return-type]  # `R` is the raw dict here
+
+    def _raw_checked(
+        self,
+        given_inputs: dict[str, Any],
+        given_overrides: dict[str, Any],
+        timeout: float | None,
+    ) -> dict[str, object]:
+        """`run_raw` with values `_checked` already passed, for `run_many`."""
+        if timeout is None:
+            values = self._plan.run(given_inputs, given_overrides)
+        else:
+            values = self._plan.run(given_inputs, given_overrides, timeout=timeout)
         if self._sorted:
             return values
         return {name: values[name] for name in self._outputs}
@@ -695,9 +897,22 @@ class _BuiltPlan[R](PreparedPlan[R]):
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
+        timeout: float | None = None,
     ) -> R:
         """Runs as `PreparedPlan.run_raw` does, then builds the result."""
-        return self._finish(self.run_raw(inputs=inputs, overrides=overrides))
+        return self._finish(
+            self.run_raw(inputs=inputs, overrides=overrides, timeout=timeout)
+        )
+
+    @override
+    def _run_checked(
+        self,
+        given_inputs: dict[str, Any],
+        given_overrides: dict[str, Any],
+        timeout: float | None,
+    ) -> R:
+        """`run` with values already checked, for `run_many`: the built result."""
+        return self._finish(self._raw_checked(given_inputs, given_overrides, timeout))
 
 
 class _HookedPlan[R](PreparedPlan[R]):
@@ -738,9 +953,10 @@ class _HookedPlan[R](PreparedPlan[R]):
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
+        timeout: float | None = None,
     ) -> R:
         """Runs the plan as `PreparedPlan.run` does, firing the hooks' events."""
-        return self._fired(inputs, overrides, self._build)  # ty: ignore[invalid-return-type]  # the raw dict is `R` when there is no builder
+        return self._fired(inputs, overrides, self._build, timeout)  # ty: ignore[invalid-return-type]  # the raw dict is `R` when there is no builder
 
     @override
     def run_raw(
@@ -748,34 +964,64 @@ class _HookedPlan[R](PreparedPlan[R]):
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
+        timeout: float | None = None,
     ) -> dict[str, object]:
         """Runs as `run` does, firing every hook, but skips the result builder."""
-        return typing.cast("dict[str, object]", self._fired(inputs, overrides, None))
+        return typing.cast(
+            "dict[str, object]", self._fired(inputs, overrides, None, timeout)
+        )
+
+    @override
+    def _run_checked(
+        self,
+        given_inputs: dict[str, Any],
+        given_overrides: dict[str, Any],
+        timeout: float | None,
+    ) -> R:
+        """`run` for `run_many`, firing the hooks' events: the set is its own run."""
+        return self._fired(given_inputs, given_overrides, self._build, timeout)  # ty: ignore[invalid-return-type]  # the raw dict is `R` when there is no builder
 
     def _fired(
         self,
         inputs: Mapping[str, object] | None,
         overrides: Mapping[str, object] | None,
         build: _ResultBuilder[object] | None,
+        timeout: float | None,
     ) -> object:
-        """A run that fires the hooks' events, and its outputs as `build` makes them."""
+        """A run that fires the hooks' events, and its outputs as `build` makes them.
+
+        A bad `timeout` is raised before any event fires.
+        """
         given_inputs, given_overrides, mismatches = self._opened(inputs, overrides)
         plan = self._plan
+        if timeout is not None:
+            timeout = _timeout(plan, timeout)
         cached = isinstance(plan, CacheRun)
-        owner = None if self._driver is None else self._driver._checks_owner  # noqa: SLF001  # the plan's own driver
         dispatch = _hooks.Dispatch(
-            self._hooks, self._views, {} if cached else None, checks_owner=owner
+            self._hooks,
+            self._views,
+            {} if cached else None,
+            checks_owner=self._checks_owner,
         )
+        dispatch.parallel = isinstance(plan, (_Threaded, CacheRun)) and plan.threaded
         error: BaseException | None = None
         try:
             if mismatches:
                 self._refuse_values(dispatch, given_inputs, given_overrides, mismatches)
             start = self._starter(dispatch, given_inputs, given_overrides)
             if isinstance(plan, CacheRun):
-                values = plan.hooked(given_inputs, given_overrides, dispatch, start)
+                values = plan.hooked(
+                    given_inputs, given_overrides, dispatch, start, timeout=timeout
+                )
             else:
                 start(self._views.names)
-                values = plan.run(given_inputs, given_overrides, dispatch.observers())
+                observers = dispatch.observers()
+                if timeout is None:
+                    values = plan.run(given_inputs, given_overrides, observers)
+                else:
+                    values = plan.run(
+                        given_inputs, given_overrides, observers, timeout=timeout
+                    )
         except BaseException as caught:  # noqa: BLE001  # raised by `end`, after `after_run`
             error = caught
         else:
@@ -941,6 +1187,8 @@ class Driver[R = dict[str, object]]:
         hooks: Sequence[Hook] = (),
         result_builder: _ResultBuilder[R] | None = None,
         value_checks: Sequence[ValueCheck] = (),
+        threads: int | None = None,
+        limits: _threads.Caps | None = None,
     ) -> None:
         """Wraps a native graph; `Builder` is the way to make one from modules.
 
@@ -954,9 +1202,19 @@ class Driver[R = dict[str, object]]:
         `Builder.with_result_builder` sets it. `value_checks` admit an input or
         override the default check refuses, as `Builder.with_value_check` adds
         them; the output checks and extracted fields' checks are in the graph's
-        payloads already.
+        payloads already. `threads`, when given, is `Builder.with_threads`'
+        `max_workers`: each run's tasks run on this driver's own pool. `limits`
+        are the nodes' caps, as `limit` and `Builder.with_limits` give them,
+        which this driver's own counters hold across its runs.
         """
         self._graph = graph
+        # This driver's own pool, started at its first run, and limits; `None` runs
+        # `Plan::run`, with no limit.
+        self._workers = (
+            None
+            if threads is None and limits is None
+            else _threads.Workers(typing.cast("_core.Graph", graph), threads, limits)
+        )
         # The modules it was built from, each once: `Builder` sets them.
         self._modules: tuple[ModuleType, ...] = ()
         # Made on first use and kept: a graph with many inputs pays only if asked.
@@ -998,23 +1256,28 @@ class Driver[R = dict[str, object]]:
         # The last request and its plan, which is the most recently used one, so a
         # repeat of it, the common case in a loop, skips the key and the lock.
         self._last: _LastRequest[R] | None = None
-        # The builder that built this driver, which pickling rebuilds it from.
-        self._builder: Builder[R] | None = None
+        # How this driver pickles: its builder, which its plans share (`_Rebuilt`).
+        self._rebuilt = _Rebuilt()
         # What its nodes' output checks report results under: see `_checks`.
         self._checks_owner: object = None
+
+    @property
+    def _builder(self) -> Builder[R] | None:
+        """The builder that built this driver, which pickling rebuilds it from."""
+        return typing.cast("Builder[R] | None", self._rebuilt.builder)
+
+    @_builder.setter
+    def _builder(self, builder: Builder[R] | None) -> None:
+        self._rebuilt.builder = builder
 
     @override
     def __reduce__(
         self,
-    ) -> tuple[Callable[[Builder[Any]], Driver[Any]], tuple[Builder[R]]]:
+    ) -> tuple[Callable[[Driver[Any]], Driver[Any]], tuple[_Rebuilt]]:
         """The builder, built again on load; see the class."""
         if self._builder is None:
-            msg = (
-                "cannot pickle a Driver made from a native graph; "
-                "make it with Builder or build to pickle it"
-            )
-            raise TypeError(msg)
-        return Builder.build, (self._builder,)
+            raise TypeError(_NATIVE)
+        return _loaded, (self._rebuilt,)
 
     def rebuild(self) -> Driver[R]:
         """A new driver, built again from this driver's builder (Q83).
@@ -1053,6 +1316,8 @@ class Driver[R = dict[str, object]]:
             hooks=self._hook_list,
             result_builder=self._build,
             value_checks=self._value_checks,
+            threads=None if self._workers is None else self._workers.max_workers,
+            limits=None if self._workers is None else self._workers.caps,
         )
         copied._modules = self._modules
         copied._builder = self._builder
@@ -1146,10 +1411,19 @@ class Driver[R = dict[str, object]]:
             raise ValueError(_strict(refused))
         checks = self._checks(plan, override_names) if self._check_inputs else ((), ())
         runnable: _Runnable = plan
+        workers = self._workers
         if self._cache is not None:
             runnable = CacheRun(
-                self._cache, self._graph, plan, outputs, input_names, override_names
+                self._cache,
+                self._graph,
+                plan,
+                outputs,
+                input_names,
+                override_names,
+                workers=workers,
             )
+        elif workers is not None:
+            runnable = _Threaded(plan, workers)
         build = self._build
         prepared: PreparedPlan[R]
         if self._hooks is not None:
@@ -1172,7 +1446,8 @@ class Driver[R = dict[str, object]]:
                 runnable, outputs, input_names, override_names, checks
             )
         prepared._absent_overrides = self._may_be_absent(override_names)  # noqa: SLF001  # the driver's own plan
-        prepared._driver = self  # noqa: SLF001  # the driver's own plan
+        prepared._rebuilt = self._rebuilt  # noqa: SLF001  # the driver's own plan
+        prepared._checks_owner = self._checks_owner  # noqa: SLF001  # the driver's own plan
         return prepared
 
     def _may_be_absent(self, names: AbstractSet[str]) -> frozenset[str]:
@@ -1520,6 +1795,7 @@ class Driver[R = dict[str, object]]:
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
+        timeout: float | None = None,
     ) -> R:
         """Computes `final_vars`, reusing the cached plan for the same request shape.
 
@@ -1529,12 +1805,16 @@ class Driver[R = dict[str, object]]:
         matched by identity (Q30): the result is still keyed by the node's name.
         `TypeError` when it makes several nodes, as a `@parameterize` function does,
         and `ValueError` when it makes none.
+
+        `timeout`, in seconds, needs `Builder.with_threads`, else it is a
+        `TypeError`. Once it passes, the run stops, abandons the nodes still
+        running, and raises `TimeoutError` (Q170).
         """
         try:
             plan = self.prepare(final_vars, inputs=inputs, overrides=overrides)
         except ValueError as error:
             self._refuse(final_vars, inputs, overrides, error)
-        return plan.run(inputs=inputs, overrides=overrides)
+        return plan.run(inputs=inputs, overrides=overrides, timeout=timeout)
 
     def raw_execute(
         self,
@@ -1542,6 +1822,7 @@ class Driver[R = dict[str, object]]:
         *,
         inputs: Mapping[str, object] | None = None,
         overrides: Mapping[str, object] | None = None,
+        timeout: float | None = None,
     ) -> dict[str, object]:
         """Computes `final_vars` as `execute` does, skipping the result builder.
 
@@ -1552,7 +1833,7 @@ class Driver[R = dict[str, object]]:
             plan = self.prepare(final_vars, inputs=inputs, overrides=overrides)
         except ValueError as error:
             self._refuse(final_vars, inputs, overrides, error)
-        return plan.run_raw(inputs=inputs, overrides=overrides)
+        return plan.run_raw(inputs=inputs, overrides=overrides, timeout=timeout)
 
     def _refuse(
         self,
@@ -1968,16 +2249,21 @@ class AsyncPreparedPlan[R = dict[str, object]]:
         driver: AsyncDriver[R],
         schedule: _async.Schedule | _async.CachedSchedule,
     ) -> None:
-        """The async form of `prepared`, run by `schedule`, for `driver`."""
+        """The async form of `prepared`, run by `schedule`, for `driver`.
+
+        It holds how `driver` pickles, never `driver` itself, which keeps it.
+        """
         self._prepared = prepared
-        self._driver = driver
+        self._rebuilt = driver._rebuilt  # noqa: SLF001  # the driver making it
+        # Whether its nodes all run inline, one at a time.
+        self._sequential = driver._runner.sequential  # noqa: SLF001  # the driver making it
         self._schedule = schedule
         self._outputs = prepared._outputs  # noqa: SLF001  # the plan this wraps
 
     @override
     def __reduce__(
         self,
-    ) -> tuple[Callable[..., AsyncPreparedPlan[R]], tuple[AsyncDriver[R], _PlanKey]]:
+    ) -> tuple[Callable[..., AsyncPreparedPlan[R]], tuple[_Rebuilt, _PlanKey]]:
         """The driver and the request, prepared again on load; see the class."""
         prepared = self._prepared
         key: _PlanKey = (
@@ -1985,7 +2271,7 @@ class AsyncPreparedPlan[R = dict[str, object]]:
             prepared._input_names,  # noqa: SLF001  # the plan this wraps
             prepared._override_names,  # noqa: SLF001  # the plan this wraps
         )
-        return _prepare_async_again, (self._driver, key)
+        return _prepare_async_again, (self._rebuilt, key)
 
     def __copy__(self) -> AsyncPreparedPlan[R]:
         """The plan itself: nothing about a plan changes once it is compiled."""
@@ -2104,11 +2390,12 @@ class _HookedAsyncPlan[R](AsyncPreparedPlan[R]):
         schedule = self._schedule
         cached = isinstance(schedule, _async.CachedSchedule)
         hooks, views = prepared._hooks, prepared._views  # noqa: SLF001  # the plan this wraps
-        driver = prepared._driver  # noqa: SLF001  # the plan this wraps
-        owner = None if driver is None else driver._checks_owner  # noqa: SLF001  # its driver
+        owner = prepared._checks_owner  # noqa: SLF001  # the plan this wraps
         dispatch = _hooks.Dispatch(
             hooks, views, {} if cached else None, checks_owner=owner
         )
+        # Its nodes overlap between their start and their end, unless all run inline.
+        dispatch.parallel = not self._sequential
         error: BaseException | None = None
         try:
             if mismatches:
@@ -2156,26 +2443,42 @@ class AsyncDriver[R = dict[str, object]]:
         *,
         sync_nodes: Literal["thread", "inline"] = "thread",
     ) -> None:
-        """Runs `driver`'s plans; `nodes` are its graph's nodes, by name."""
+        """Runs `driver`'s plans, on its pool and limits; `nodes` are its graph's nodes.
+
+        `ValueError` for `sync_nodes="inline"` on a driver with `with_threads`.
+        """
+        workers = driver._workers  # noqa: SLF001  # the driver this one runs
+        threaded = workers is not None and workers.max_workers is not None
         self._driver = driver
         self._nodes = nodes
-        self._sync_nodes: Literal["thread", "inline"] = sync_nodes
-        self._calls = _async.calls(nodes, sync_nodes)
-        # The builder that built this driver, which pickling rebuilds it from.
-        self._builder: Builder[R] | None = None
+        self._sync_nodes = _async.checked_sync_nodes(sync_nodes, threaded=threaded)
+        self._runner = _async.Runner(_async.calls(nodes, self._sync_nodes), workers)
+        # How this driver pickles: its builder and `sync_nodes` (`_Rebuilt`).
+        self._rebuilt = _Rebuilt(self._sync_nodes)
+        # Each plan of `driver` as this driver runs it, made on first use; the
+        # oldest go first. Kept here, not on the plan, which would make a cycle
+        # through this driver's own `driver`.
+        self._plans: dict[PreparedPlan[R], AsyncPreparedPlan[R]] = {}
+        # Held to read or change `_plans`, which threads preparing at once share.
+        self._plans_lock = threading.Lock()
+
+    @property
+    def _builder(self) -> Builder[R] | None:
+        """The builder that built this driver, which pickling rebuilds it from."""
+        return typing.cast("Builder[R] | None", self._rebuilt.builder)
+
+    @_builder.setter
+    def _builder(self, builder: Builder[R] | None) -> None:
+        self._rebuilt.builder = builder
 
     @override
     def __reduce__(
         self,
-    ) -> tuple[Callable[..., AsyncDriver[R]], tuple[Builder[R], str]]:
+    ) -> tuple[Callable[[AsyncDriver[Any]], AsyncDriver[Any]], tuple[_Rebuilt]]:
         """The builder and `sync_nodes`, built again on load; see the class."""
         if self._builder is None:
-            msg = (
-                "cannot pickle an AsyncDriver made from a Driver; "
-                "make it with Builder.build_async to pickle it"
-            )
-            raise TypeError(msg)
-        return _build_async_again, (self._builder, self._sync_nodes)
+            raise TypeError(_NATIVE_ASYNC)
+        return _loaded, (self._rebuilt,)
 
     def rebuild(self) -> AsyncDriver[R]:
         """A new driver, built again from this driver's builder and `sync_nodes`.
@@ -2367,14 +2670,19 @@ class AsyncDriver[R = dict[str, object]]:
         keeps them.
         """
         prepared = self._driver.prepare(final_vars, inputs=inputs, overrides=overrides)
-        plan = prepared._async.get(self)  # noqa: SLF001  # this driver's own plan
+        kept = self._plans
+        lock = self._plans_lock
+        with lock:
+            plan = kept.get(prepared)
         if plan is None:
             runnable = prepared._plan  # noqa: SLF001  # this driver's own plan
+            if isinstance(runnable, _Threaded):
+                runnable = runnable.plan
             schedule: _async.Schedule | _async.CachedSchedule
             if isinstance(runnable, CacheRun):
-                schedule = _async.CachedSchedule(runnable, self._calls)
+                schedule = _async.CachedSchedule(runnable, self._runner)
             elif isinstance(runnable, _core.Plan):
-                schedule = _async.Schedule(runnable, self._calls)
+                schedule = _async.Schedule(runnable, self._runner)
             else:
                 msg = f"an AsyncDriver cannot run {type(runnable).__name__}"
                 raise TypeError(msg)
@@ -2386,12 +2694,11 @@ class AsyncDriver[R = dict[str, object]]:
             else:
                 plan = AsyncPreparedPlan(prepared, self, schedule)
             # Two threads may both get here: either plan will do, and one is kept.
-            kept = prepared._async  # noqa: SLF001  # this driver's own plan
-            kept[self] = plan
-            # A few, the oldest dropped: an AsyncDriver made per request over one
-            # long-lived Driver would otherwise stay alive with each hot plan.
-            while len(kept) > ASYNC_PLANS_PER_PLAN:
-                kept.pop(next(iter(kept)), None)
+            with lock:
+                kept[prepared] = plan
+                # As many as `driver` keeps, the oldest dropped.
+                while len(kept) > PLAN_CACHE_SIZE:
+                    kept.pop(next(iter(kept)), None)
         return plan
 
     def validate(
@@ -2614,14 +2921,16 @@ def _prepare_again[R](driver: Driver[R], key: _PlanKey) -> PreparedPlan[R]:
 def _graph_of(
     nodes: list[NodeDef],
     items: Callable[[NodeDef], Callable[..., object]] | None = None,
+    absent_on: Mapping[str, tuple[type[Exception], ...]] | None = None,
 ) -> _core.Graph:
     """Builds the native graph for scanned nodes: their core inputs and payloads.
 
     Each node says whether it declines: its return annotation admits
     `fnloom.Absent` (Q135). Each expand gets its item iterator factory from
-    `items`, or the unchecked `_blocks.Items` when it is not given.
+    `items`, or the unchecked `_blocks.items` when it is not given. `absent_on`
+    holds the errors each node covered is absent on (Q133).
     """
-    make = items or (lambda n: functools.partial(_blocks.Items, n.name, None))
+    make = items or (lambda n: functools.partial(_blocks.items, n.name, None))
     return _core.Graph(
         [
             (
@@ -2635,6 +2944,7 @@ def _graph_of(
             for n in nodes
         ],
         {n.name: dict(n.renames) for n in nodes if n.renames},
+        None if absent_on is None else dict(absent_on),
     )
 
 
@@ -2649,7 +2959,7 @@ def _item_factory(
     def factory(node: NodeDef) -> Callable[..., object]:
         item = _blocks.expanded_type(node.returns)
         check = _blocks.item_check(item, rules, value_checks) if checked else None
-        return functools.partial(_blocks.Items, node.name, check)
+        return functools.partial(_blocks.items, node.name, check)
 
     return factory
 
@@ -2981,6 +3291,9 @@ class _Changes(TypedDict, total=False):
     node_wrappers: tuple[NodeWrapper, ...]
     edge_checks: bool
     loose_edges: tuple[str, ...]
+    threads: int | None
+    limits: Mapping[str, int]
+    absent_on: tuple[_absence.AbsentOn, ...]
 
 
 class _Settings(TypedDict):
@@ -3002,6 +3315,9 @@ class _Settings(TypedDict):
     node_wrappers: tuple[NodeWrapper, ...]
     edge_checks: bool
     loose_edges: tuple[str, ...]
+    threads: int | None
+    limits: Mapping[str, int]
+    absent_on: tuple[_absence.AbsentOn, ...]
 
 
 class Builder[R = dict[str, object]]:
@@ -3040,6 +3356,9 @@ class Builder[R = dict[str, object]]:
         replaces: Sequence[Sequence[str]] = (),
         edge_checks: bool = True,
         loose_edges: Sequence[str] = (),
+        threads: int | None = None,
+        limits: Mapping[str, int] | None = None,
+        absent_on: Sequence[_absence.AbsentOn] = (),
     ) -> None:
         """Starts with the given modules (none by default), checking input types.
 
@@ -3058,7 +3377,11 @@ class Builder[R = dict[str, object]]:
         `without_override_type_checks`, `with_strict_overrides`,
         `with_declared_inputs`, `with_deep_type_checks`,
         `with_numeric_widening`, `with_hooks`, `with_result_builder`,
-        `with_output_type_checks`, `with_value_check` and `with_node_wrappers`.
+        `with_output_type_checks`, `with_value_check`, `with_node_wrappers` and
+        `with_threads`, whose `max_workers` `threads` is, `None` for none,
+        `with_limits`, whose group sizes `limits` are, and `with_absent_on`, each
+        of whose calls is one of `absent_on`, checked: its errors and its tag
+        query, `None` for every node.
         `TypeError` when an item of `modules` is not a module, or of
         `declared_inputs` is not a `str`; see `with_functions` for the errors
         `functions` raises, `with_hooks` for those of `hooks`,
@@ -3083,6 +3406,14 @@ class Builder[R = dict[str, object]]:
         self._output_type_checks = output_type_checks
         self._value_checks = _checked_value_checks(value_checks)
         self._wrappers = _wrappers.checked(node_wrappers)
+        self._threads = (
+            None if threads is None else _threads.checked_max_workers(threads)
+        )
+        self._limits = _threads.checked_groups({} if limits is None else limits)
+        self._absent_on = tuple(
+            _absence.checked_absent_on(errors, None if query is None else dict(query))
+            for errors, query in absent_on
+        )
         self._store = store
         self._cache_settings = cache_settings
         # Never changed once made: `with_config` makes a new dict.
@@ -3152,6 +3483,9 @@ class Builder[R = dict[str, object]]:
             "node_wrappers": self._wrappers,
             "edge_checks": self._edge_checks,
             "loose_edges": self._loose_edges,
+            "threads": self._threads,
+            "limits": self._limits,
+            "absent_on": self._absent_on,
         }
 
     def _edge_setting(self) -> str | list[str]:
@@ -3471,6 +3805,68 @@ class Builder[R = dict[str, object]]:
         checked = _wrappers.checked(wrappers)
         return self._with(node_wrappers=(*self._wrappers, *checked))
 
+    def with_threads(self, max_workers: int | None = None) -> Builder[R]:
+        """Returns a new builder whose driver runs each run's nodes in parallel.
+
+        Each driver has its own pool of `max_workers` workers, `None` meaning
+        `os.process_cpu_count() or 1`: `max_workers - 1` threads, started at its
+        first run, and the run's calling thread, which works too, so
+        `with_threads(1)` runs every node on the calling thread. Nodes run in
+        reference order as workers free up, independent nodes and a block's
+        branches at once; results never depend on the worker count (Q134).
+
+        Each node's call runs in its own copy of the context the run started in,
+        so a `ContextVar` the caller set is seen, and one a node sets is seen by
+        no other node. A run's hooks are called one at a time, each on the thread
+        that ran its node. On a failure no new node starts: the run waits for the
+        running ones, then raises the failure that comes first in reference order
+        (Q128). On the GIL build nodes that release the GIL overlap, and pure
+        Python nodes take turns; on the free-threaded build they all overlap.
+
+        A `bool` or another non-`int` is a `TypeError`, and a value under 1 a
+        `ValueError`. An `AsyncDriver` built from it ignores the setting for now.
+        """
+        return self._with(threads=_threads.checked_max_workers(max_workers))
+
+    def with_limits(self, groups: Mapping[str, int]) -> Builder[R]:
+        """Returns a new builder whose drivers size the groups `@limit` puts nodes in.
+
+        `groups` maps each group's name to how many calls of its nodes may run at
+        once, across every run of a driver, with or without `with_threads`.
+        Cumulative: a group sized again takes the new size. Each driver object has
+        its own counters: a copy, a rebuilt or an unpickled driver starts free.
+
+        A non-mapping, a name that is no `str` or a size that is no `int` is a
+        `TypeError`, and an empty name or a size under 1 a `ValueError`. The build
+        refuses, with a `ValueError`, a group a node is in that has no size, and a
+        size of a group no node is in, on every driver.
+        """
+        checked = _threads.checked_groups(groups)
+        return self._with(limits={**self._limits, **checked})
+
+    def with_absent_on(
+        self, *errors: type[Exception], tags: Mapping[str, Query] | None = None
+    ) -> Builder[R]:
+        """Returns a new builder whose drivers make a node absent on one of `errors`.
+
+        When a covered node's call raises one of `errors`, or a subclass, its
+        outcome is `fnloom.ABSENT` instead of a failure, as `@absent_on` makes it:
+        `after_node` still reports `ok=False` with the error, `RunEnd.absent_errors`
+        lists it, and each node reading it decides by its own signature, so a
+        `Collect[T]` over a fan-out gets the branches that succeeded (Q133). It
+        covers every node, or with `tags` the nodes matching that query, by
+        `NodeViews.tagged`'s rules (Q141). A covered node may be absent whatever its
+        annotation, since the absence is the driver's doing; it still may not
+        return `fnloom.ABSENT` itself unless its annotation admits it. A node with
+        its own `@absent_on` too is absent on both lists.
+
+        Cumulative: each call adds a rule. An error absence is never stored, and
+        nothing computed from it is stored in that run. `TypeError` for no class,
+        one that is no subclass of `Exception`, or a malformed `tags` query.
+        """
+        rule = _absence.checked_absent_on(errors, tags)
+        return self._with(absent_on=(*self._absent_on, rule))
+
     def with_result_builder[T](self, build: _ResultBuilder[T]) -> Builder[T]:
         """Returns a new builder whose drivers' `execute` returns `build(outputs)`.
 
@@ -3569,13 +3965,14 @@ class Builder[R = dict[str, object]]:
         `@config.default` gives, are a `ValueError` naming each (Q57, Q58).
         """
         nodes, views, graph, unmatched, left_out, owner = self._scanned(awaits=False)
+        caps = _threads.caps_of(nodes, self._limits)
         # Called here, so a `CacheWarning` points at the caller's `build`.
         cache = (
             None
             if self._store is None
-            else Cache.of(self._store, nodes, self._cache_settings)
+            else Cache.of(self._store, nodes, self._cache_settings, graph)
         )
-        return self._driver(graph, views, unmatched, left_out, cache, owner)
+        return self._driver(graph, views, unmatched, left_out, cache, owner, caps=caps)
 
     def build_async(
         self, *, sync_nodes: Literal["thread", "inline"] = "thread"
@@ -3593,16 +3990,19 @@ class Builder[R = dict[str, object]]:
         store (Q68): each node is stored as it succeeds, and a node that fails,
         or that a failure cancels, stores nothing. Store calls run on the loop.
         """
-        checked = _async.checked_sync_nodes(sync_nodes)
+        checked = _async.checked_sync_nodes(
+            sync_nodes, threaded=self._threads is not None
+        )
         nodes, views, graph, unmatched, left_out, owner = self._scanned(awaits=True)
+        caps = _threads.caps_of(nodes, self._limits)
         # Called here, so a `CacheWarning` points at the caller's `build_async`.
         cache = (
             None
             if self._store is None
-            else Cache.of(self._store, nodes, self._cache_settings)
+            else Cache.of(self._store, nodes, self._cache_settings, graph)
         )
         built = AsyncDriver(
-            self._driver(graph, views, unmatched, left_out, cache, owner),
+            self._driver(graph, views, unmatched, left_out, cache, owner, caps=caps),
             {node.name: node for node in nodes},
             sync_nodes=checked,
         )
@@ -3654,7 +4054,14 @@ class Builder[R = dict[str, object]]:
             unmatched = {n: why for n, why in unmatched.items() if n not in names}
             if absent := _unmatched_edges(nodes, unmatched):
                 raise ValueError(absent)
-        blocks, absent = self._blocks_and_absence(nodes)
+        # An extracted field and a `@pipe_output` relay call no function of the user's:
+        # the node calling it is the one `@absent_on` covers.
+        others = relays | {n.name for n in nodes if extractor(n) is not None}
+        _absence.refuse_unadmitted(nodes, others)
+        # A relay's `.raw` node calls the function: a tag query reads the relay's tags.
+        tags = {f"{n.name}.raw": n.tags for n in nodes if n.name in relays}
+        absent_on = _absence.covered(nodes, self._absent_on, others, tags)
+        blocks, absent = self._blocks_and_absence(nodes, absent_on)
         _refuse_bound_block_nodes(self._bound, blocks, nodes)
         views = node_views(
             nodes,
@@ -3674,6 +4081,7 @@ class Builder[R = dict[str, object]]:
         graph = _graph_of(
             nodes,
             _item_factory(self._rules, self._value_checks, checked=self._check_inputs),
+            absent_on,
         )
         _absence.refuse_mixed(nodes, absent)
         if (
@@ -3695,17 +4103,20 @@ class Builder[R = dict[str, object]]:
         return nodes, views, graph, unmatched, scanned.left_out, owner
 
     def _blocks_and_absence(
-        self, nodes: list[NodeDef]
+        self,
+        nodes: list[NodeDef],
+        absent_on: Mapping[str, tuple[type[Exception], ...]],
     ) -> tuple[dict[str, list[str]], frozenset[str]]:
         """Each block node's block path, and the nodes that may be absent.
 
         With no expand, there are no blocks, and absence is found here. With one,
         the core finds both, since a collect passes absence on only from an absent
-        expand (§7.4 of the dynamic execution design).
+        expand (§7.4 of the dynamic execution design). A node in `absent_on` may
+        be absent on an error.
         """
         if not any(_blocks.expands(n.returns) for n in nodes):
-            return {}, _absence.may_be_absent(nodes)
-        found = _graph_of(nodes)
+            return {}, _absence.may_be_absent(nodes, absent_on.keys())
+        found = _graph_of(nodes, absent_on=absent_on)
         return found.blocks(), frozenset(found.may_be_absent())
 
     def _chained(
@@ -3737,8 +4148,13 @@ class Builder[R = dict[str, object]]:
         left_out: LeftOut,
         cache: Cache | None,
         owner: object,
+        *,
+        caps: _threads.Caps | None = None,
     ) -> Driver[R]:
-        """This builder's driver over a scanned graph."""
+        """This builder's driver over a scanned graph.
+
+        On its pool, with `with_threads`, its limited nodes granted by `caps`.
+        """
         driver = Driver(
             graph,
             views,
@@ -3751,6 +4167,8 @@ class Builder[R = dict[str, object]]:
             hooks=self._hooks,
             result_builder=self._result_builder,
             value_checks=self._value_checks,
+            threads=self._threads,
+            limits=caps,
         )
         driver._modules = tuple(dict.fromkeys(self._modules))  # noqa: SLF001  # the builder's own driver
         driver._unmatched = unmatched  # noqa: SLF001  # the builder's own driver
