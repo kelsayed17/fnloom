@@ -92,6 +92,12 @@ struct State {
     /// Runs with a lent seat registered: the pool keeps a thread more for each, since the
     /// caller that lent its slot runs none of its tasks.
     lenders: usize,
+    /// The native ids of the threads that left as the pool stopped, which `close` hands
+    /// to its caller to join: a thread counted in `exited` may still be in `threading`'s
+    /// own cleanup.
+    left: Vec<u64>,
+    /// Threads waiting for work in `wait`.
+    idle: usize,
 }
 
 impl Pool {
@@ -143,11 +149,12 @@ impl Pool {
                 return true;
             }
             if state.generation == generation && !self.stopping.load(Ordering::Acquire) {
-                drop(
-                    self.wake
-                        .wait_timeout(state, IDLE)
-                        .unwrap_or_else(PoisonError::into_inner),
-                );
+                state.idle += 1;
+                let (mut state, _) = self
+                    .wake
+                    .wait_timeout(state, IDLE)
+                    .unwrap_or_else(PoisonError::into_inner);
+                state.idle -= 1;
             }
             false
         })
@@ -163,8 +170,9 @@ impl Pool {
                     .wake
                     .wait_timeout(state, slice)
                     .unwrap_or_else(PoisonError::into_inner);
-                // `submit` wakes one waiter, which may be this one: pass it on to a worker.
-                if !state.jobs.is_empty() {
+                // `submit` wakes one waiter, which may be this one: pass it on, if a
+                // worker is idle to take the job, so callers never wake each other in turn.
+                if !state.jobs.is_empty() && state.idle > 0 {
                     self.wake.notify_one();
                 }
             }
@@ -322,14 +330,15 @@ impl Pool {
         self.wake.notify_all();
     }
 
-    /// Stops the threads, then waits, detached, at most a second for the idle ones to
-    /// leave. A busy thread is never waited for past that. Idempotent.
-    pub fn close(&self, py: Python<'_>) {
+    /// Stops the threads, then waits, detached, at most `budget` for the idle ones to
+    /// leave. A busy thread is never waited for past that. Idempotent. The native ids of
+    /// the threads that left since the last call, for the caller to join.
+    pub fn close(&self, py: Python<'_>, budget: Duration) -> Vec<u64> {
         self.stop();
         self.with_state(py, |state| state.generation += 1);
         self.wake.notify_all();
         py.detach(|| {
-            let deadline = Instant::now() + CLOSING;
+            let deadline = Instant::now() + budget;
             let mut state = self.locked();
             while state.exited < state.started {
                 let now = Instant::now();
@@ -342,7 +351,8 @@ impl Pool {
                     .unwrap_or_else(PoisonError::into_inner)
                     .0;
             }
-        });
+            std::mem::take(&mut state.left)
+        })
     }
 
     /// The runs that want work, the generation, whether the pool is stopping, and the
@@ -390,13 +400,15 @@ impl Pool {
         }
     }
 
-    /// Whether a stopping thread leaves: only once no job is queued, counted as it leaves
-    /// under the same lock, so a job queued meanwhile is taken back by `submit`.
-    fn leaves(&self, py: Python<'_>) -> bool {
+    /// Whether a stopping thread, of native id `id`, leaves: only once no job is queued,
+    /// counted as it leaves under the same lock, so a job queued meanwhile is taken back by
+    /// `submit`.
+    fn leaves(&self, py: Python<'_>, id: u64) -> bool {
         let leaves = self.with_state(py, |state| {
             let leaves = state.jobs.is_empty();
             if leaves {
                 state.exited += 1;
+                state.left.push(id);
             }
             leaves
         });
@@ -427,6 +439,14 @@ fn interrupt_again(py: Python<'_>) {
         py.import(intern!(py, "_thread"))
             .and_then(|thread| thread.call_method0(intern!(py, "interrupt_main"))),
     );
+}
+
+/// This thread's native id, as `threading.get_native_id()` gives it; 0 if that fails.
+fn native_id(py: Python<'_>) -> u64 {
+    py.import(intern!(py, "threading"))
+        .and_then(|threading| threading.call_method0(intern!(py, "get_native_id")))
+        .and_then(|id| id.extract())
+        .unwrap_or(0)
 }
 
 /// Why a pool thread leaves.
@@ -478,7 +498,7 @@ fn work(py: Python<'_>, pool: &Arc<Pool>) {
             }
             // A job queued as the pool stopped is still run, so its future resolves.
             if stopping {
-                if pool.leaves(py) {
+                if pool.leaves(py, native_id(py)) {
                     return Leave::Stopped;
                 }
                 continue;
@@ -550,6 +570,8 @@ impl Threads {
                     exited: 0,
                     floor: max_workers - 1,
                     lenders: 0,
+                    left: Vec::new(),
+                    idle: 0,
                 }),
                 wake: Condvar::new(),
                 stopping: AtomicBool::new(false),
@@ -559,10 +581,17 @@ impl Threads {
     }
 
     /// Stops the pool's threads; idempotent. A run still going finishes on its caller.
-    fn close(&self, py: Python<'_>) {
-        if self.pool.pid == std::process::id() {
-            self.pool.close(py);
+    ///
+    /// Waits at most `timeout` seconds for the idle ones to leave, and returns the native
+    /// ids of those that left since the last call: each may still be in `threading`'s own
+    /// cleanup, so `_threads.close_all` joins them.
+    #[pyo3(signature = (timeout = CLOSING.as_secs_f64()))]
+    fn close(&self, py: Python<'_>, timeout: f64) -> Vec<u64> {
+        if self.pool.pid != std::process::id() {
+            return Vec::new();
         }
+        let budget = Duration::try_from_secs_f64(timeout).unwrap_or(Duration::ZERO);
+        self.pool.close(py, budget)
     }
 
     /// `max_workers`.

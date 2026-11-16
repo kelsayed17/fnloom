@@ -497,13 +497,30 @@ class _Batch[T]:
         return self._results  # ty: ignore[invalid-return-type]  # every set's result is in
 
 
-def close_all() -> None:
-    """Stops every pool's threads: idle ones at once, busy ones after their task.
+# How long interpreter exit waits for the pools' idle threads to end, in all.
+_CLOSING: Final = 1.0
 
-    A pool inherited across a fork is left alone by `close` itself.
+
+def close_all(pools: Sequence[_core.Threads] | None = None) -> None:
+    """Stops every pool's threads, and joins the idle ones within `_CLOSING` s.
+
+    Busy threads end after their task, and are never waited for past that. A
+    thread the pool counts as gone may still be in `threading`'s own cleanup,
+    which finalization would hang it in, so it is joined too. `pools` are every
+    live pool by default. A pool inherited across a fork is left alone by
+    `close` itself.
     """
-    for threads in list(_LIVE):
-        threads.close()
+    pools = list(_LIVE) if pools is None else pools
+    deadline = time.monotonic() + _CLOSING
+    # Taken first: `enumerate` drops a thread as its cleanup begins, not as it ends.
+    running = {thread.native_id: thread for thread in threading.enumerate()}
+    # Every pool stopped first, so their threads all leave at once.
+    left = {key for threads in pools for key in threads.close(0.0)}
+    for threads in pools:
+        left.update(threads.close(max(0.0, deadline - time.monotonic())))
+    for key in left:
+        if (thread := running.get(key)) is not None:
+            thread.join(max(0.0, deadline - time.monotonic()))
 
 
 atexit.register(close_all)

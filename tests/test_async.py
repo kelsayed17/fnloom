@@ -1374,7 +1374,8 @@ def test_two_async_drivers_over_one_driver_keep_their_own_plans() -> None:
     )
     assert _run(threaded.execute(["a"], inputs={"x": 1}))["a"] != "MainThread"
     assert _run(inline.execute(["a"], inputs={"x": 1})) == {"a": "MainThread"}
-    assert inline.prepare(["a"], inputs={"x": 1})._driver is inline  # noqa: SLF001  # what a pickle rebuilds
+    plan = inline.prepare(["a"], inputs={"x": 1})
+    assert plan._rebuilt is inline._rebuilt  # noqa: SLF001  # what a pickle rebuilds
 
 
 def test_alternating_async_drivers_keep_their_plans() -> None:
@@ -1426,8 +1427,8 @@ def test_short_lived_async_drivers_over_one_driver_are_freed() -> None:
         made.append(weakref.ref(driver))
     del driver
     gc.collect()
-    alive = sum(ref() is not None for ref in made)
-    assert alive <= fnloom.driver.ASYNC_PLANS_PER_PLAN
+    # Each keeps its own form of the plan, which holds none of them.
+    assert sum(ref() is not None for ref in made) == 0
 
 
 RACING = """

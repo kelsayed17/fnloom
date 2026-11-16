@@ -10,6 +10,7 @@ import asyncio
 import contextvars
 import gc
 import os
+import pickle
 import subprocess
 import sys
 import textwrap
@@ -20,7 +21,7 @@ from typing import TYPE_CHECKING, NoReturn, override
 import pytest
 
 import fnloom
-from fnloom import _core
+from fnloom import _core, _threads
 from helpers import make_module
 
 if TYPE_CHECKING:
@@ -522,6 +523,59 @@ def test_a_run_inside_a_stopping_run_sees_it_cancelled(inner: str) -> None:
     assert issubclass(_core.StoppedError, RuntimeError)
 
 
+# A node running an async run whose one node, `long`, awaits for long.
+LONG = """
+import asyncio
+
+
+async def long(x: int) -> int:
+    await asyncio.sleep(2)
+    return x
+"""
+AWAITED = """
+import asyncio
+import threading
+import time
+
+INNER = []
+ENDED = []
+DONE = threading.Event()
+
+
+def outer(x: int) -> int:
+    start = time.monotonic()
+    try:
+        return asyncio.run(INNER[0].execute(["long"], inputs={"x": x}))["long"]
+    except Exception as error:
+        ENDED.append((type(error), time.monotonic() - start))
+        raise
+    finally:
+        DONE.set()
+"""
+
+
+@pytest.mark.parametrize("threads", [None, 2])
+def test_an_async_run_inside_a_stopping_run_stops_while_a_node_awaits(
+    threads: int | None,
+) -> None:
+    """It stops once its caller's run does, though no node of its own completes.
+
+    Before, it looked only as a task completed, so it awaited `long` to its end.
+    """
+    module = make_module(f"stop_awaited_{threads}", AWAITED)
+    driver = fnloom.Builder().with_modules(module).with_threads(2).build()
+    inner = fnloom.Builder().with_modules(make_module(f"stop_long_{threads}", LONG))
+    module.INNER.append(
+        (inner if threads is None else inner.with_threads(threads)).build_async()
+    )
+    with pytest.raises(TimeoutError):
+        driver.execute(["outer"], inputs={"x": 1}, timeout=0.2)
+    assert module.DONE.wait(SLOW)
+    ((raised, took),) = module.ENDED
+    assert raised is _core.StoppedError
+    assert took < PROMPT
+
+
 # Branch 0, first in key order, runs a run of its own; branch 1 fails meanwhile.
 # `slow` sleeps through the stop; `finishing` returns its value as it sees it.
 MASKED = """
@@ -777,6 +831,7 @@ def test_a_failure_during_a_pull_closes_the_generator_after_it() -> None:
 # A generator over many items whose branches hang, recording the thread that closed it.
 CLOSING = """
 import os
+import pickle
 import threading
 
 from fnloom import Collect, Parallelizable
@@ -945,6 +1000,69 @@ def test_a_collected_driver_stops_its_threads() -> None:
     hang[1].set()
     assert hang[2].wait(5)
     assert settled(_core.live_workers, before) == before
+
+
+@pytest.mark.parametrize("kind", ["driver", "plan", "async"])
+def test_a_dropped_driver_stops_its_threads_without_the_collector(kind: str) -> None:
+    """A driver and its plans make no cycle, so its pool ends once the last goes.
+
+    The collector is off: before, the driver and its plan cache kept each
+    other, and the pool's threads lived until the next collection.
+    """
+    before = settled_workers()
+    module = make_module(
+        f"stop_dropped_{kind}", "def a(x: int) -> int:\n    return x\n"
+    )
+    builder = fnloom.Builder().with_modules(module).with_threads(3)
+    gc.disable()
+    try:
+        if kind == "async":
+            driver = builder.build_async()
+            assert asyncio.run(driver.execute(["a"], inputs={"x": 1})) == {"a": 1}
+            del driver
+        elif kind == "driver":
+            driver = builder.build()
+            assert driver.execute(["a"], inputs={"x": 1}) == {"a": 1}
+            del driver
+        else:
+            # The plan alone keeps its driver's pool, and still runs and pickles.
+            plan = builder.build().prepare(["a"], inputs={"x": 0})
+            assert plan.run(inputs={"x": 1}) == {"a": 1}
+            assert _core.live_workers() > before
+            again = pickle.loads(pickle.dumps(plan))  # noqa: S301  # our own pickle
+            assert again.run(inputs={"x": 2}) == {"a": 2}
+            del again, plan
+        assert settled(_core.live_workers, before) == before
+    finally:
+        gc.enable()
+
+
+def _worker_threads() -> dict[int | None, threading.Thread]:
+    """Every pool thread `threading` knows of, by native id."""
+    return {
+        thread.native_id: thread
+        for thread in threading.enumerate()
+        if thread.name.startswith("fnloom-worker-")
+    }
+
+
+def test_closing_at_exit_joins_the_pools_threads() -> None:
+    """`close_all` returns once its pools' idle threads have ended, cleanup and all.
+
+    A thread the pool counts as gone may still be in `threading`'s own cleanup,
+    where interpreter finalization would hang it.
+    """
+    before = set(_worker_threads())
+    driver = nodes("stop_joined", 8)
+    assert driver.execute(["quick"], inputs={"x": 1}) == {"quick": 2}
+    workers = driver._workers  # noqa: SLF001  # the pool under test
+    assert workers is not None
+    pool = workers.threads()
+    assert pool is not None
+    mine = [thread for key, thread in _worker_threads().items() if key not in before]
+    assert len(mine) == 7  # noqa: PLR2004  # max_workers - 1
+    _threads.close_all([pool])
+    assert [thread.name for thread in mine if thread.is_alive()] == []
 
 
 def settled_workers() -> int:

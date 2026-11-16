@@ -970,8 +970,11 @@ impl Stepper {
     /// collected with its driver, whose pool stops.
     ///
     /// shortcut: the values the scheduler and report hold are not visited, as each is an
-    /// `Arc` they may share; a node value referring back to its driver keeps the run alive
-    /// until that value is dropped, so visit them once values are owned in one place.
+    /// `Arc` they may share, and a value visited by two owners would be counted twice. Nor
+    /// are the errors in `failures`: a `PyErr` gives its exception only to an attached
+    /// caller, and `__traverse__` must not attach. A node value or a stored traceback
+    /// referring back to its driver keeps the run alive until it is dropped; visit them
+    /// once values are owned in one place and errors are kept as `Py` exceptions.
     fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
         visit.call(&self.plan)?;
         visit.call(&self.held)?;
