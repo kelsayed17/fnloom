@@ -143,8 +143,14 @@ distribute or schedule work, so pair it with an orchestrator if you need that.
 
 ## Install
 
-fnloom isn't on PyPI yet. Build it from source with Python 3.14 or newer, [uv](https://docs.astral.sh/uv/) and a
-stable Rust toolchain:
+fnloom needs Python 3.14 or newer; the free-threaded `3.14t` works too. Install it from PyPI:
+
+```bash
+pip install fnloom
+```
+
+PyPI has wheels for Linux (glibc and musl) on x86_64 and aarch64, macOS on arm64 and x86_64, and Windows on x86_64.
+To build from source instead, you need [uv](https://docs.astral.sh/uv/) and a stable Rust toolchain:
 
 ```bash
 git clone https://github.com/kelsayed17/fnloom.git

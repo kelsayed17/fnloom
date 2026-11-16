@@ -10,7 +10,8 @@ week, and a fix or a plan within 30 days for a confirmed issue.
 
 ## Supported versions
 
-fnloom has not been released. Until it is, only `main` receives fixes.
+fnloom is pre-alpha. Fixes go to `main` and ship in the next release; only the latest release on
+[PyPI](https://pypi.org/project/fnloom/) is supported, and earlier releases do not get backported fixes.
 
 ## Scope
 
