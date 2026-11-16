@@ -157,6 +157,13 @@ impl Pool {
         kwargs.set_item(intern!(py, "target"), target)?;
         kwargs.set_item(intern!(py, "name"), format!("fnloom-worker-{number}"))?;
         kwargs.set_item(intern!(py, "daemon"), true)?;
+        // An empty context: a worker runs every call in its task's copy of the run's, and
+        // inherits nothing from the run that happened to start it (3.14t's default).
+        let empty = py
+            .import(intern!(py, "contextvars"))?
+            .getattr(intern!(py, "Context"))?
+            .call0()?;
+        kwargs.set_item(intern!(py, "context"), empty)?;
         let thread = py
             .import(intern!(py, "threading"))?
             .getattr(intern!(py, "Thread"))?

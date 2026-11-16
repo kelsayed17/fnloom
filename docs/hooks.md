@@ -460,6 +460,8 @@ Hamilton fires the hooks of a hit, and of every node upstream of it, as if they 
 On a driver built with [`with_threads`](running.md#threads), a run's nodes run on several threads, and its hooks:
 
 - are called one at a time for the run, so a hook needs no lock to keep state for one run;
+- run in the node's own copy of the context the run started in, so a hook reads the caller's context variables on
+  every worker;
 - run on the thread that ran the node, so `threading.current_thread()` in `after_node` is the node's worker;
 - report nodes in the order they start and finish, as on the async driver: sort by `order` for the order one worker
   gives. With `with_threads(1)` the events come exactly as without threads, orders included.

@@ -24,6 +24,7 @@ from fnloom import _core
 from helpers import make_module
 
 if TYPE_CHECKING:
+    import types
     from collections.abc import Callable, Sequence
 
 pytestmark = pytest.mark.threads
@@ -946,3 +947,266 @@ def test_check_results_are_per_branch() -> None:
     assert {
         branch: [c.passes for c in found] for branch, found in hook.checks.items()
     } == {(i,): [i <= CHECKED_TOP] for i in range(8)}
+
+
+# Review fixes: iterator contexts, forks under hooks, hooks' context, guards, leads.
+
+GENERATOR_CONTEXT = """
+import contextvars
+import decimal
+
+from fnloom import Collect, Parallelizable
+
+VAR = contextvars.ContextVar("generator_var", default="unset")
+
+
+def picked(n: int) -> Parallelizable[str]:
+    token = VAR.set("inside")
+    try:
+        for i in range(n):
+            yield VAR.get()
+    finally:
+        VAR.reset(token)
+
+
+def seen(picked: str) -> str:
+    return picked
+
+
+def all_seen(seen: Collect[str]) -> list[str]:
+    return list(seen)
+
+
+def ratios(n: int) -> Parallelizable[str]:
+    with decimal.localcontext(prec=3):
+        for i in range(1, n + 1):
+            yield str(decimal.Decimal(1) / decimal.Decimal(7 * i))
+
+
+def ratio(ratios: str) -> str:
+    return ratios
+
+
+def all_ratios(ratio: Collect[str]) -> list[str]:
+    return list(ratio)
+"""
+
+
+@pytest.mark.parametrize("workers", [1, 4])
+def test_a_generators_context_lasts_across_its_items(workers: int) -> None:
+    """Every pull of a generator runs in the one context its body started in."""
+    module = make_module(f"generator_context_{workers}", GENERATOR_CONTEXT)
+    driver = fnloom.Builder().with_modules(module).with_threads(workers).build()
+    assert driver.execute(["all_seen", "all_ratios"], inputs={"n": 3}) == {
+        "all_seen": ["inside"] * 3,
+        "all_ratios": ["0.143", "0.0714", "0.0476"],
+    }
+
+
+# `a` forks while a worker holds the run's busy flag in `b`'s `before_node`.
+FORK_UNDER_HOOK = """
+import os
+import threading
+
+IN_HOOK = threading.Event()
+FORKED = []
+
+
+def a(x: int) -> int:
+    assert IN_HOOK.wait(5)
+    if not FORKED:
+        FORKED.append(os.getpid())
+        return os.fork()
+    return x
+
+
+def b(x: int) -> int:
+    return x
+"""
+
+
+class HoldsTheFlag(fnloom.Hook):
+    """Holds the busy flag in `b`'s `before_node` while `a` forks."""
+
+    def __init__(self, module: types.ModuleType) -> None:
+        """Signals `module.IN_HOOK`."""
+        self.module = module
+
+    @override
+    def before_node(self, event: fnloom.NodeStart) -> None:
+        if event.node.name == "b" and not self.module.FORKED:
+            self.module.IN_HOOK.set()
+            time.sleep(0.5)
+
+
+@forks
+@pytest.mark.filterwarnings(
+    "ignore:This process .* is multi-threaded:DeprecationWarning"
+)
+def test_a_fork_while_a_worker_holds_the_busy_flag_does_not_hang_the_child() -> None:
+    """The child skips the forking node's hooks, so it never waits for that flag."""
+    module = make_module("fork_under_hook", FORK_UNDER_HOOK)
+    driver = (
+        fnloom.Builder()
+        .with_modules(module)
+        .with_hooks(HoldsTheFlag(module))
+        .with_threads(2)
+        .build()
+    )
+    parent = os.getpid()
+    try:
+        result = driver.execute(["a", "b"], inputs={"x": 7})
+    except RuntimeError as error:
+        if os.getpid() == parent:
+            raise
+        survived = "a run doesn't survive os.fork()" in str(error)
+        _child(lambda: survived)
+    child = result["a"]
+    assert isinstance(child, int)
+    assert child > 0
+    assert _waited(child) == 0
+
+
+HOOK_CONTEXT = """
+import contextvars
+import time
+
+from fnloom import Collect, Parallelizable
+
+REQUEST = contextvars.ContextVar("request", default="unset")
+
+
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+def details(picked: int) -> int:
+    time.sleep(0.005)
+    return picked
+
+
+def summary(details: Collect[int]) -> list[int]:
+    return list(details)
+"""
+
+
+class Requests(fnloom.Hook):
+    """Records what a worker's `before_node` reads of the caller's `REQUEST`."""
+
+    def __init__(self, module: types.ModuleType) -> None:
+        """Reads `module.REQUEST`."""
+        self.module = module
+        self.seen: set[tuple[bool, str]] = set()
+        self.lock = threading.Lock()
+
+    @override
+    def before_node(self, event: fnloom.NodeStart) -> None:
+        if event.node.name == "details":
+            worker = threading.current_thread().name.startswith("fnloom-worker-")
+            with self.lock:
+                self.seen.add((worker, self.module.REQUEST.get()))
+
+
+def test_hooks_see_the_callers_context_on_every_worker() -> None:
+    """Each run's hooks read its caller's variables, on the pool's threads too."""
+    module = make_module("hook_context", HOOK_CONTEXT)
+    hook = Requests(module)
+    driver = (
+        fnloom.Builder().with_modules(module).with_hooks(hook).with_threads(4).build()
+    )
+    for request in ("first", "second"):
+        hook.seen = set()
+        token = module.REQUEST.set(request)
+        try:
+            driver.execute(["summary"], inputs={"n": 32})
+        finally:
+            module.REQUEST.reset(token)
+        assert (True, request) in hook.seen
+        assert {seen for _, seen in hook.seen} == {request}
+
+
+def test_a_panic_holding_the_busy_flag_fails_the_run_and_frees_the_flag() -> None:
+    """A Rust panic under the busy flag fails the run once; no hook waits for good."""
+    hook = Alone(pause=0.0)
+    driver = fan("busy_panic", 4, (hook,))
+    inputs = {"n": 16, "fail": (), "pause": 0.002}
+    _core.arm_hook_panic()
+    with pytest.raises(BaseException, match="deliberate panic") as info:
+        driver.execute(["summary"], inputs=inputs)
+    assert type(info.value).__name__ == "PanicException"
+    assert driver.execute(["summary"], inputs=inputs) == {
+        "summary": [i * 10 for i in range(16)]
+    }
+
+
+class RaisesForOne(fnloom.Hook):
+    """Raises in `after_node` for branch (1,) of `details`."""
+
+    @override
+    def after_node(self, event: fnloom.NodeEnd) -> None:
+        if event.node.name == "details" and event.branch == (1,):
+            msg = "hook after branch 1"
+            raise LookupError(msg)
+
+
+def test_the_lowest_failure_leads_when_its_hooks_raised_too() -> None:
+    """Branch 2 fails first; branch 1's, grouped with its hook's error, still leads."""
+    driver = fan("grouped_lead", 4, (RaisesForOne(),))
+    with pytest.raises(BaseExceptionGroup) as info:
+        driver.execute(["summary"], inputs={"n": 4, "fail": (1, 2), "pause": 0.05})
+    first, *rest = info.value.exceptions
+    assert isinstance(first, ValueError)
+    assert first.args == (1,)
+    assert [type(error) for error in rest] == [LookupError]
+
+
+class Inputs(fnloom.Hook):
+    """Keeps each `details` branch's `NodeEnd.inputs`."""
+
+    def __init__(self) -> None:
+        """No node yet."""
+        self.inputs: dict[tuple[int, ...], dict[str, object]] = {}
+        self.lock = threading.Lock()
+
+    @override
+    def after_node(self, event: fnloom.NodeEnd) -> None:
+        if event.node.name == "details" and event.inputs is not None:
+            with self.lock:
+                self.inputs[event.branch] = dict(event.inputs)
+
+
+def test_each_running_branch_reports_its_own_inputs() -> None:
+    """Branches between their start and end at once each end with their own inputs."""
+    hook = Inputs()
+    driver = fan("own_inputs", 8, (hook,))
+    driver.execute(["summary"], inputs={"n": 32, "fail": (), "pause": 0.002})
+    assert {branch: found["picked"] for branch, found in hook.inputs.items()} == {
+        (i,): i for i in range(32)
+    }
+
+
+class Expands(fnloom.Hook):
+    """Counts `after_expand`, which fires as a pull or finish completes."""
+
+    def __init__(self) -> None:
+        """None yet."""
+        self.count = 0
+        self.lock = threading.Lock()
+
+    @override
+    def after_expand(self, event: fnloom.ExpandEnd) -> None:
+        with self.lock:
+            self.count += 1
+
+
+def test_an_iterators_hooks_never_enter_its_context_while_it_pulls() -> None:
+    """Expand events fire while the next pull runs, in another context than its own."""
+    hook = Expands()
+    module = make_module("expand_events", NESTED)
+    driver = (
+        fnloom.Builder().with_modules(module).with_hooks(hook).with_threads(8).build()
+    )
+    expected = driver.execute(["everything"], inputs={"n": 8})
+    for _ in range(19):
+        assert driver.execute(["everything"], inputs={"n": 8}) == expected
+    assert hook.count == 20 * 9

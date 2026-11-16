@@ -91,6 +91,36 @@ pub enum Step {
     Done,
     /// The scheduler's lock is poisoned: the run is broken.
     Broken,
+    /// A node forked, and this is the child: the run's other threads are gone, so nothing
+    /// it inherited is locked again.
+    Forked,
+}
+
+/// Holds the run's busy flag, and clears it when dropped, a panic included.
+struct Busy<'a, 'py> {
+    run: &'a Run,
+    py: Python<'py>,
+}
+
+impl Drop for Busy<'_, '_> {
+    fn drop(&mut self) {
+        self.run.release(self.py);
+    }
+}
+
+/// Counts a task of the run as running, until dropped, a panic included: then the run's
+/// waiters are woken, since it may have ended.
+struct Active<'a, 'py> {
+    run: &'a Run,
+    pool: &'a Pool,
+    py: Python<'py>,
+}
+
+impl Drop for Active<'_, '_> {
+    fn drop(&mut self) {
+        self.run.active.fetch_sub(1, Ordering::AcqRel);
+        self.pool.notify(self.py);
+    }
 }
 
 thread_local! {
@@ -122,22 +152,77 @@ fn holds(limits: &Arc<CoreLimits>) -> bool {
 }
 
 /// The calls of one task, in its own copy of the run's context, with
-/// `fnloom.current_branch()` set to its branch.
+/// `fnloom.current_branch()` set to its branch. Its hooks, `on_value` and `late.store`
+/// run in it too.
+///
+/// An expand's iterator keeps a copy of the context it was made in: the scheduler holds
+/// it as the pair `(iterator, context)`, so each pull and the finish run where the
+/// generator's body started, and a context variable it sets lasts from one item to the
+/// next. One iterator has at most one pull or finish in flight, and their hooks run in a
+/// fresh copy of the run's, so its context is never entered twice at once.
 struct Copied<'py> {
-    /// The copy's `run` method.
+    context: Bound<'py, PyAny>,
+    /// The context's `run` method.
     run: Bound<'py, PyAny>,
 }
 
 impl<'py> Copied<'py> {
     fn new(py: Python<'py>, snapshot: &Py<PyAny>, branch: &[usize]) -> PyResult<Self> {
-        let copy = snapshot.bind(py).call_method0(intern!(py, "copy"))?;
-        let run = copy.getattr(intern!(py, "run"))?;
+        let copied = Self::of(snapshot.bind(py).call_method0(intern!(py, "copy"))?)?;
         if !branch.is_empty() {
             let set = branch_variable(py)?.bind(py).getattr(intern!(py, "set"))?;
-            run.call1((set, PyTuple::new(py, branch)?))?;
+            copied.run.call1((set, PyTuple::new(py, branch)?))?;
         }
-        Ok(Self { run })
+        Ok(copied)
     }
+
+    /// The calls in `context` itself.
+    fn of(context: Bound<'py, PyAny>) -> PyResult<Self> {
+        let run = context.getattr(intern!(context.py(), "run"))?;
+        Ok(Self { context, run })
+    }
+
+    /// The calls of a task: an iterator's own context for a pull or a finish, else a new
+    /// copy of the run's.
+    fn of_task(
+        py: Python<'py>,
+        snapshot: &Py<PyAny>,
+        branch: &[usize],
+        work: &Work<Shared>,
+    ) -> PyResult<Self> {
+        match work {
+            Work::Pull { iterator } | Work::Finish { iterator, .. } => {
+                Self::of(iterator.bind(py).get_item(1)?)
+            }
+            _ => Self::new(py, snapshot, branch),
+        }
+    }
+
+    /// `iterator`, paired with a copy of this context, as the scheduler keeps it: a copy,
+    /// since the task that made it still fires its hooks here while the first pull may
+    /// already run.
+    fn paired(&self, iterator: Bound<'py, PyAny>) -> PyResult<Shared> {
+        let py = self.context.py();
+        let own = self.context.call_method0(intern!(py, "copy"))?;
+        let pair = PyTuple::new(py, [iterator, own])?;
+        Ok(shared(pair.into_any()))
+    }
+}
+
+/// Whether a report settled anything the hooks hear of.
+trait Events {
+    fn has_events(&self) -> bool;
+}
+
+impl Events for Report<Shared> {
+    fn has_events(&self) -> bool {
+        !(self.hits.is_empty() && self.expanded.is_empty() && self.skipped.is_empty())
+    }
+}
+
+/// The iterator of a pair `Copied::paired` made.
+fn unpaired<'py>(pair: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+    pair.get_item(0)
 }
 
 impl<'py> Calls<'py> for Copied<'py> {
@@ -240,8 +325,20 @@ impl Run {
         );
     }
 
-    /// Sets the busy flag, waiting detached while another thread holds it.
-    fn acquire(&self, py: Python<'_>) {
+    /// Sets the busy flag, waiting detached while another thread holds it; cleared when
+    /// the guard drops.
+    fn acquire<'a, 'py>(&'a self, py: Python<'py>) -> Busy<'a, 'py> {
+        self.set_busy(py);
+        let busy = Busy { run: self, py };
+        #[cfg(feature = "test-hooks")]
+        assert!(
+            !HOOK_ARMED.swap(false, Ordering::AcqRel),
+            "deliberate panic while holding a run's busy flag"
+        );
+        busy
+    }
+
+    fn set_busy(&self, py: Python<'_>) {
         if let Ok(mut busy) = self.busy.try_lock() {
             if !*busy {
                 *busy = true;
@@ -272,39 +369,41 @@ impl Run {
         self.clear.notify_one();
     }
 
-    /// Fires one event to the observers under the busy flag; the errors raised.
+    /// Fires one event to the observers under the busy flag, in the task's context; the
+    /// errors raised.
     fn hooked<'py>(
         &self,
         py: Python<'py>,
+        calls: &Copied<'py>,
         kwargs: &Kwargs<'py, '_>,
         event: impl FnMut(&mut dyn Observer<Value<'py>, PyErr>) -> PyResult<()>,
     ) -> Vec<PyErr> {
         if !self.observers.any() {
             return Vec::new();
         }
-        self.acquire(py);
-        let errors = self.observers.fire(py, kwargs, event);
-        self.release(py);
+        let busy = self.acquire(py);
+        let errors = self.observers.fire(py, kwargs, Some(&calls.run), event);
+        drop(busy);
         errors
     }
 
     /// Fires what a report settled, hits, then expands, then skips, as `Report` says, under
-    /// one hold of the busy flag. The first event an observer raised in stops the run.
-    fn report(&self, py: Python<'_>, report: &Report<Shared>) {
-        let nothing =
-            report.hits.is_empty() && report.expanded.is_empty() && report.skipped.is_empty();
-        if nothing || !self.observers.any() {
+    /// one hold of the busy flag, in `calls`' context or else the current one. The first
+    /// event an observer raised in stops the run.
+    fn report(&self, py: Python<'_>, calls: Option<&Copied<'_>>, report: &Report<Shared>) {
+        if !report.has_events() || !self.observers.any() {
             return;
         }
         let plan = self.plan.get();
         let graph = plan.graph().get();
         let core = graph.core();
-        let kwargs = Kwargs::new(py, plan.core(), graph);
-        self.acquire(py);
+        let kwargs = Kwargs::new(py, plan, graph);
+        let context = calls.map(|calls| &calls.run);
+        let busy = self.acquire(py);
         let mut failed = None;
         for (node, branch, value) in &report.hits {
             let name = &core.node(*node).name;
-            let errors = self.observers.fire(py, &kwargs, |hook| {
+            let errors = self.observers.fire(py, &kwargs, context, |hook| {
                 hook.hit_in(name, branch, value.bind(py))
             });
             if !errors.is_empty() {
@@ -315,9 +414,9 @@ impl Run {
         if failed.is_none() {
             for (node, branch, items) in &report.expanded {
                 let name = &core.node(*node).name;
-                let errors = self
-                    .observers
-                    .fire(py, &kwargs, |hook| hook.post_expand(name, branch, *items));
+                let errors = self.observers.fire(py, &kwargs, context, |hook| {
+                    hook.post_expand(name, branch, *items)
+                });
                 if !errors.is_empty() {
                     failed = Some((plan.core().order_key(*node, branch), "post_expand", errors));
                     break;
@@ -329,14 +428,14 @@ impl Run {
                 let name = &core.node(*node).name;
                 let errors = self
                     .observers
-                    .fire(py, &kwargs, |hook| hook.skipped(name, branch));
+                    .fire(py, &kwargs, context, |hook| hook.skipped(name, branch));
                 if !errors.is_empty() {
                     failed = Some((key.clone(), "skipped", errors));
                     break;
                 }
             }
         }
-        self.release(py);
+        drop(busy);
         if let Some((key, event, errors)) = failed {
             self.fail_at(py, key, RunError::Observers { event, errors });
         }
@@ -375,15 +474,20 @@ pub fn step(
         Some(Next::Wait) => Step::Wait,
         Some(Next::Done) => Step::Done,
         Some(Next::Task(task)) => {
-            perform(py, run, pool, seat, task, report);
-            run.active.fetch_sub(1, Ordering::AcqRel);
-            pool.notify(py);
+            let active = Active { run, pool, py };
+            if perform(py, run, pool, seat, task, report) {
+                // The child of a fork: no lock it inherited is touched again.
+                std::mem::forget(active);
+                return Step::Forked;
+            }
+            drop(active);
             Step::Worked
         }
     }
 }
 
 /// Runs `task`, completes it, and sends what its completion settled to the hooks.
+/// `true` when the task's node forked and this is the child, which then does none of that.
 fn perform(
     py: Python<'_>,
     run: &Run,
@@ -391,7 +495,7 @@ fn perform(
     seat: Seat,
     task: Task<Shared>,
     report: &mut Report<Shared>,
-) {
+) -> bool {
     let plan = run.plan.get();
     let core = plan.core();
     let graph = plan.graph().get();
@@ -403,9 +507,17 @@ fn perform(
         key,
         work,
     } = task;
-    let landed =
-        caught(|| Ok(land(py, run, graph, node, &branch, work))).unwrap_or_else(Landed::failed);
+    let iterating = matches!(work, Work::Pull { .. } | Work::Finish { .. });
+    let calls = Copied::of_task(py, &run.snapshot, &branch, &work);
+    let landed = match &calls {
+        Ok(calls) => caught(|| Ok(land(py, run, graph, node, &branch, work, calls)))
+            .unwrap_or_else(Landed::failed),
+        Err(error) => Landed::failed(error.clone_ref(py)),
+    };
     drop(held);
+    if std::process::id() != run.pid {
+        return true;
+    }
     let Landed {
         outcome,
         failure,
@@ -430,9 +542,17 @@ fn perform(
             scheduler.complete(core, graph.core(), limits, id, outcome, report_in);
         }
     });
-    run.report(py, report);
+    if iterating && report.has_events() && run.observers.any() {
+        // Once completed, the iterator's next pull may be in its context already: its
+        // hooks run in a fresh copy of the run's.
+        let fresh = Copied::new(py, &run.snapshot, &branch).ok();
+        run.report(py, fresh.as_ref(), report);
+    } else {
+        run.report(py, calls.as_ref().ok(), report);
+    }
     // The values no step reads any more are dropped here, attached.
     report.clear();
+    false
 }
 
 /// Runs a task's work: its node's call, or a pull, a finish, an iterate or a probe.
@@ -443,6 +563,7 @@ fn land(
     id: NodeId,
     branch: &[usize],
     work: Work<Shared>,
+    calls: &Copied<'_>,
 ) -> Landed {
     let plan = run.plan.get();
     let node = graph.core().node(id);
@@ -456,23 +577,22 @@ fn land(
         late: late.as_ref(),
         absent: absent.bind(py),
     };
-    let calls = match Copied::new(py, &run.snapshot, branch) {
-        Ok(calls) => calls,
-        Err(error) => return Landed::failed(error),
-    };
     match work {
         Work::Compute {
             args,
             expands,
             late,
-        } => compute(py, run, &scope, &calls, node, branch, args, expands, late),
-        Work::Iterate { iterable } => {
-            match scope.iterate(&calls, node, iterable.bind(py), branch) {
-                Ok(iterator) => Landed::done(Outcome::Iterator(shared(iterator))),
-                Err(error) => Landed::failed(error),
-            }
-        }
-        Work::Pull { iterator } => match scope.next_item(&calls, node, iterator.bind(py)) {
+        } => compute(py, run, &scope, calls, node, branch, args, expands, late),
+        Work::Iterate { iterable } => match scope
+            .iterate(calls, node, iterable.bind(py), branch)
+            .and_then(|iterator| calls.paired(iterator))
+        {
+            Ok(iterator) => Landed::done(Outcome::Iterator(iterator)),
+            Err(error) => Landed::failed(error),
+        },
+        Work::Pull { iterator } => match unpaired(iterator.bind(py))
+            .and_then(|iterator| scope.next_item(calls, node, &iterator))
+        {
             Ok(item) => Landed::done(Outcome::Item(match item {
                 Item::Next(value) => Item::Next(shared(value)),
                 Item::Declined(value) => Item::Declined(shared(value)),
@@ -483,7 +603,9 @@ fn land(
         Work::Finish {
             iterator,
             exhausted,
-        } => match scope.finish_items(&calls, iterator.bind(py), exhausted) {
+        } => match unpaired(iterator.bind(py))
+            .and_then(|iterator| scope.finish_items(calls, &iterator, exhausted))
+        {
             Ok(value) => Landed::done(Outcome::Finished(shared(value))),
             // What closing a stopped run's iterator raises is dropped, as `Plan::run` does.
             Err(error) if !exhausted => Landed::done(Outcome::Failed(error)),
@@ -494,7 +616,7 @@ fn land(
             let mut wanted = Vec::new();
             let outcome = schedule::probe(plan.core(), core, block, &mut wanted, |step| {
                 let node = core.node(step);
-                scope.lookup(&calls, node, branch).map(|hit| {
+                scope.lookup(calls, node, branch).map(|hit| {
                     let hit = hit.map(|value| {
                         let absent = node.may_be_absent && value.is(scope.absent);
                         (shared(value), absent)
@@ -570,13 +692,13 @@ fn compute<'py>(
             node.name
         )));
     };
-    let blank = Kwargs::new(py, plan.core(), graph);
+    let blank = Kwargs::new(py, plan, graph);
     let kwargs = match blank.build(node.id, &built) {
         Ok(kwargs) => kwargs,
         Err(error) => return Landed::failed(error),
     };
-    let lent = Kwargs::lending(py, plan.core(), graph, node.id, Some(kwargs.clone()));
-    let errors = run.hooked(py, &lent, |hook| {
+    let lent = Kwargs::lending(py, plan, graph, node.id, Some(kwargs.clone()));
+    let errors = run.hooked(py, calls, &lent, |hook| {
         hook.pre_node_in(&node.name, branch, &built)
     });
     if !errors.is_empty() {
@@ -584,11 +706,16 @@ fn compute<'py>(
     }
     let result = caught(|| calls.call(payload.bind(py), Vec::new(), Some(&kwargs)))
         .and_then(|value| scope.checked(node, value));
-    let mut errors = run.hooked(py, &lent, |hook| {
+    if std::process::id() != run.pid {
+        // The node forked, and this is the child: `perform` returns at once.
+        return Landed::hooks(py, "fork", Vec::new());
+    }
+    let mut errors = run.hooked(py, calls, &lent, |hook| {
         hook.post_node_in(&node.name, branch, result.as_ref())
     });
     errors.extend(run.observers.stored(
         py,
+        &calls.run,
         plan.core(),
         graph,
         &node.name,
@@ -605,8 +732,11 @@ fn compute<'py>(
         Ok(value) => {
             let absent = node.declines && value.is(scope.absent);
             if expands && !absent {
-                match scope.iterate(calls, node, &value, branch) {
-                    Ok(iterator) => Landed::done(Outcome::Iterator(shared(iterator))),
+                match scope
+                    .iterate(calls, node, &value, branch)
+                    .and_then(|iterator| calls.paired(iterator))
+                {
+                    Ok(iterator) => Landed::done(Outcome::Iterator(iterator)),
                     Err(error) => Landed::failed(error),
                 }
             } else {
@@ -761,12 +891,14 @@ pub fn run<'py>(
         observers: SharedObservers::new(observers, on_value, late),
         pid,
     });
-    let kwargs = Kwargs::new(py, core, graph);
-    let errors = run.observers.fire(py, &kwargs, |hook| hook.pre_graph());
+    let kwargs = Kwargs::new(py, plan, graph);
+    let errors = run
+        .observers
+        .fire(py, &kwargs, None, |hook| hook.pre_graph());
     if !errors.is_empty() {
         let closing = run
             .observers
-            .fire(py, &kwargs, |hook| hook.post_graph(false));
+            .fire(py, &kwargs, None, |hook| hook.post_graph(false));
         let failure = RunError::Observers {
             event: "pre_graph",
             errors,
@@ -786,7 +918,7 @@ pub fn run<'py>(
         &mut report,
     );
     run.with_state(py, move |state| state.scheduler = Some(scheduler));
-    run.report(py, &report);
+    run.report(py, None, &report);
     report.clear();
     pool.register(py, &run);
     let seat = if holds(&pool.limits) {
@@ -814,7 +946,7 @@ fn ended<'py>(slf: &Bound<'py, Plan>, run: &Run, broke: bool) -> PyResult<Bound<
     let plan = slf.get();
     let graph = plan.graph().get();
     let core = plan.core();
-    let kwargs = Kwargs::new(py, core, graph);
+    let kwargs = Kwargs::new(py, plan, graph);
     let taken = if broke {
         None
     } else {
@@ -825,7 +957,7 @@ fn ended<'py>(slf: &Bound<'py, Plan>, run: &Run, broke: bool) -> PyResult<Bound<
     let Some((Some(scheduler), failures)) = taken else {
         let closing = run
             .observers
-            .fire(py, &kwargs, |hook| hook.post_graph(false));
+            .fire(py, &kwargs, None, |hook| hook.post_graph(false));
         drop(closing);
         return Err(broken());
     };
@@ -834,7 +966,7 @@ fn ended<'py>(slf: &Bound<'py, Plan>, run: &Run, broke: bool) -> PyResult<Bound<
         Ok(outputs) => {
             let errors = run
                 .observers
-                .fire(py, &kwargs, |hook| hook.post_graph(true));
+                .fire(py, &kwargs, None, |hook| hook.post_graph(true));
             if !errors.is_empty() {
                 let failure = RunError::Observers {
                     event: "post_graph",
@@ -852,7 +984,7 @@ fn ended<'py>(slf: &Bound<'py, Plan>, run: &Run, broke: bool) -> PyResult<Bound<
         Err(failure) => {
             let closing = run
                 .observers
-                .fire(py, &kwargs, |hook| hook.post_graph(false));
+                .fire(py, &kwargs, None, |hook| hook.post_graph(false));
             Err(run_error(py, closed(failure, closing)))
         }
     }
@@ -881,7 +1013,15 @@ fn drive(
         }
         match step {
             Step::Worked => {}
-            Step::Broken => return step,
+            Step::Forked => return step,
+            Step::Broken => {
+                // The tasks still running end on their own, their counts dropped by guards.
+                while run.active.load(Ordering::Acquire) > 0 {
+                    let generation = pool.generation(py);
+                    pool.wait_slice(py, generation, SLICE);
+                }
+                return step;
+            }
             Step::Done if run.active.load(Ordering::Acquire) == 0 => return step,
             Step::Done | Step::Wait => {
                 pool.wait_slice(py, generation, SLICE);
@@ -896,6 +1036,17 @@ fn drive(
 /// Armed by `_core.arm_worker_panic()`: the next worker-loop iteration panics.
 #[cfg(feature = "test-hooks")]
 static ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Armed by `_core.arm_hook_panic()`: the next hold of a busy flag panics.
+#[cfg(feature = "test-hooks")]
+static HOOK_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Makes the next hold of any run's busy flag panic, in Rust, while it holds it.
+#[cfg(feature = "test-hooks")]
+#[pyfunction]
+pub fn arm_hook_panic() {
+    HOOK_ARMED.store(true, Ordering::Release);
+}
 
 /// Makes the next iteration of any worker loop panic outside a node call.
 #[cfg(feature = "test-hooks")]

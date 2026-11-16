@@ -56,7 +56,6 @@ jobs:
         python: ["3.14", "3.14t"]
     env:
       PYTHON: ${{ matrix.python }}
-      FNLOOM_STRESS_ROUNDS: "200"
       HYPOTHESIS_PROFILE: stress
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

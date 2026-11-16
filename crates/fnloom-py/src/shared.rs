@@ -52,27 +52,39 @@ impl SharedObservers {
     }
 
     /// Sends `event` to every observer, in order, each bound for this event, with
-    /// `kwargs` lending a node's dict to `pre_node`; the errors they raised, in order.
+    /// `kwargs` lending a node's dict to `pre_node`, and called through `context`, a
+    /// `Context.run`, when given; the errors they raised, in order.
     pub fn fire<'py>(
         &self,
         py: Python<'py>,
         kwargs: &Kwargs<'py, '_>,
+        context: Option<&Bound<'py, PyAny>>,
         mut event: impl FnMut(&mut dyn Observer<Value<'py>, PyErr>) -> PyResult<()>,
     ) -> Vec<PyErr> {
         self.observers
             .iter()
             .filter_map(|(observer, flags)| {
-                let mut adapter = PyObserver::flagged(observer.bind(py).clone(), kwargs, *flags);
+                let mut adapter = PyObserver::flagged(
+                    observer.bind(py).clone(),
+                    kwargs,
+                    *flags,
+                    context.cloned(),
+                );
                 event(&mut adapter).err()
             })
             .collect()
     }
 
     /// Hands a computed node's outcome to `on_value` and `late.store`, as `Plan::run`'s
-    /// last observers; the errors they raised.
+    /// last observers, called through `context`, a `Context.run`; the errors they raised.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the node's event, and where its stores run"
+    )]
     pub fn stored<'py>(
         &self,
         py: Python<'py>,
+        context: &Bound<'py, PyAny>,
         plan: &CorePlan,
         graph: &Graph,
         node: &str,
@@ -89,6 +101,7 @@ impl SharedObservers {
                 },
                 graph,
                 keywords: graph.keywords(),
+                context: Some(context),
             };
             errors.extend(hook.post_node_in(node, branch, outcome).err());
         }
@@ -99,6 +112,7 @@ impl SharedObservers {
                 plan,
                 graph,
                 keywords: graph.keywords(),
+                context: Some(context),
             };
             errors.extend(hook.post_node_in(node, branch, outcome).err());
         }

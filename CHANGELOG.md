@@ -32,7 +32,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
   starts `max_workers - 1` threads, named `fnloom-worker-<n>`, at the driver's first run, and `with_threads(1)` runs
   on the calling thread alone. Independent nodes, outside blocks too (Q169), and a block's branches overlap, handed
   out in reference order; values, `Collect` orders and the exception raised never depend on the worker count. Each
-  node's call runs in its own copy of the context the run started in, and a run's hooks are called one at a time. A
+  node's call runs in its own copy of the context the run started in, with its hooks; an expand's generator keeps
+  one context from its first item to its last, so a variable it sets lasts across its yields. A run's hooks are
+  called one at a time. A
   failure starts no new node: the run waits for the running ones, then raises the failure first in reference order,
   once (Q66, Q128). The setting survives pickling, `copy`, `rebuild()` and `build_async()`, each driver with a pool of
   its own, and a forked child makes a new one; an `AsyncDriver` ignores it for now. A driver without it runs exactly

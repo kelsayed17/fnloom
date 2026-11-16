@@ -41,6 +41,9 @@ pub struct Plan {
     /// What every parallel run of this plan starts from, made by the first one, so a plan
     /// that never runs in parallel never makes it.
     layout: OnceLock<Arc<Layout>>,
+    /// By node id, the order key of the node's step outside every block, as a tuple: made
+    /// by the first run whose observers want orders.
+    orders: OnceLock<Vec<Py<PyTuple>>>,
 }
 
 /// The keywords a computed step's function is called with, made when the plan is.
@@ -80,6 +83,7 @@ impl Plan {
             core: plan,
             calls,
             layout: OnceLock::new(),
+            orders: OnceLock::new(),
         })
     }
 
@@ -91,6 +95,22 @@ impl Plan {
     /// The core plan.
     pub const fn core(&self) -> &CorePlan {
         &self.core
+    }
+
+    /// `id`'s order key outside every block, as a tuple, the table made on first use.
+    fn outer_order<'py>(&self, py: Python<'py>, id: NodeId) -> PyResult<Bound<'py, PyTuple>> {
+        if self.orders.get().is_none() {
+            let count = self.graph.get().core().nodes().len();
+            let made = (0..count)
+                .map(|index| {
+                    let id = NodeId(u32::try_from(index).unwrap_or(u32::MAX));
+                    PyTuple::new(py, self.core.order_key(id, &[]).as_slice()).map(Bound::unbind)
+                })
+                .collect::<PyResult<Vec<_>>>()?;
+            drop(self.orders.set(made));
+        }
+        let found = self.orders.get().and_then(|orders| orders.get(id.index()));
+        Ok(found.map_or_else(|| PyTuple::empty(py), |order| order.bind(py).clone()))
     }
 
     /// The plan's scheduler layout, made on first use.
@@ -113,7 +133,7 @@ impl Plan {
     ) -> PyResult<Bound<'py, PyDict>> {
         let graph = self.graph.get();
         let keywords = graph.keywords();
-        let kwargs = Kwargs::new(py, &self.core, graph);
+        let kwargs = Kwargs::new(py, self, graph);
         let mut adapters: Vec<PyObserver<'py, '_>> = observers
             .into_iter()
             .map(|observer| PyObserver::new(observer, &kwargs))
@@ -126,12 +146,14 @@ impl Plan {
             },
             graph,
             keywords,
+            context: None,
         });
         let mut late_hook = late.map(|late| LateHook {
             late,
             plan: &self.core,
             graph,
             keywords,
+            context: None,
         });
         let mut hooks: Vec<&mut dyn Observer<Value<'py>, PyErr>> = adapters
             .iter_mut()
@@ -346,21 +368,28 @@ pub fn keyword_for<'py>(
 pub struct Kwargs<'py, 'g> {
     py: Python<'py>,
     /// The plan, for its steps' order keys.
-    plan: &'g CorePlan,
+    plan: &'g Plan,
     /// The graph, for the keywords a `@parameterize` row renames.
     graph: &'g Graph,
     /// The dict built for the observers of the node about to run, until its call.
     pending: RefCell<Option<(NodeId, Bound<'py, PyDict>)>>,
+    /// The last order key made, by the address of the node name it was made for and the
+    /// branch: a node's events come one after another, so `post_node` reuses `pre_node`'s.
+    order: RefCell<Option<LastOrder<'py>>>,
 }
+
+/// An order key made, with the address of its node's name and its branch.
+type LastOrder<'py> = (usize, Vec<usize>, Bound<'py, PyTuple>);
 
 impl<'py, 'g> Kwargs<'py, 'g> {
     /// The keyword arguments of a run of `plan` over `graph`, none built yet.
-    pub fn new(py: Python<'py>, plan: &'g CorePlan, graph: &'g Graph) -> Self {
+    pub fn new(py: Python<'py>, plan: &'g Plan, graph: &'g Graph) -> Self {
         Self {
             py,
             plan,
             graph,
             pending: RefCell::new(None),
+            order: RefCell::new(None),
         }
     }
 
@@ -368,7 +397,7 @@ impl<'py, 'g> Kwargs<'py, 'g> {
     /// lent to its observers.
     pub fn lending(
         py: Python<'py>,
-        plan: &'g CorePlan,
+        plan: &'g Plan,
         graph: &'g Graph,
         consumer: NodeId,
         kwargs: Option<Bound<'py, PyDict>>,
@@ -399,12 +428,25 @@ impl<'py> Kwargs<'py, '_> {
 
     /// `node`'s order key in `branch`, as a tuple (`Plan::order_key`).
     pub fn order(&self, node: &str, branch: &[usize]) -> PyResult<Bound<'py, PyTuple>> {
+        // The core passes each node's own name, so its address names the node.
+        let address = node.as_ptr() as usize;
+        if let Some((at, of, order)) = self.order.borrow().as_ref() {
+            if *at == address && of.as_slice() == branch {
+                return Ok(order.clone());
+            }
+        }
         let Some(id) = self.graph.core().id_of(node) else {
             return Err(PyRuntimeError::new_err(format!(
                 "broken plan: node '{node}' is not in the graph"
             )));
         };
-        PyTuple::new(self.py, self.plan.order_key(id, branch).as_slice())
+        let order = if branch.is_empty() {
+            self.plan.outer_order(self.py, id)?
+        } else {
+            PyTuple::new(self.py, self.plan.core.order_key(id, branch).as_slice())?
+        };
+        *self.order.borrow_mut() = Some((address, branch.to_vec(), order.clone()));
+        Ok(order)
     }
 
     /// The dict `node`'s function is about to be called with, built by the first
@@ -590,6 +632,8 @@ pub struct ValueHook<'py, 'g> {
     pub graph: &'g Graph,
     /// The graph's interned node names, by node id.
     pub keywords: &'g [Py<PyString>],
+    /// The `run` method of the context `on_value` is called in; `None` for the current one.
+    pub context: Option<&'g Bound<'py, PyAny>>,
 }
 
 impl<'py> Observer<Value<'py>, PyErr> for ValueHook<'py, '_> {
@@ -618,7 +662,10 @@ impl<'py> Observer<Value<'py>, PyErr> for ValueHook<'py, '_> {
                     || PyString::intern(py, node),
                     |id| keyword(py, self.keywords, id, node),
                 );
-                caught(|| callback.call1((name, value)).map(drop))
+                caught(|| match self.context {
+                    None => callback.call1((name, value)).map(drop),
+                    Some(run) => run.call1((callback, name, value)).map(drop),
+                })
             }
             Sink::Store(keys) => caught(|| keys.get().store(keys.py(), node, value.as_unbound())),
         }
@@ -631,6 +678,8 @@ pub struct LateHook<'py, 'g> {
     pub plan: &'g CorePlan,
     pub graph: &'g Graph,
     pub keywords: &'g [Py<PyString>],
+    /// The `run` method of the context `late.store` is called in; `None` for the current one.
+    pub context: Option<&'g Bound<'py, PyAny>>,
 }
 
 impl<'py> Observer<Value<'py>, PyErr> for LateHook<'py, '_> {
@@ -654,12 +703,17 @@ impl<'py> Observer<Value<'py>, PyErr> for LateHook<'py, '_> {
         let py = self.late.py();
         let name = keyword(py, self.keywords, id, node);
         caught(|| {
-            self.late
-                .call_method1(
-                    intern!(py, "store"),
-                    (name, PyTuple::new(py, branch)?, value),
-                )
-                .map(drop)
+            let branch = PyTuple::new(py, branch)?;
+            match self.context {
+                None => self
+                    .late
+                    .call_method1(intern!(py, "store"), (name, branch, value))
+                    .map(drop),
+                Some(run) => {
+                    let store = self.late.getattr(intern!(py, "store"))?;
+                    run.call1((store, name, branch, value)).map(drop)
+                }
+            }
         })
     }
 }

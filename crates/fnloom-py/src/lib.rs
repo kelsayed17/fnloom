@@ -46,6 +46,7 @@ fn core(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module.add_function(wrap_pyfunction!(panic_for_test, module)?)?;
         module.add_function(wrap_pyfunction!(pool::live_workers, module)?)?;
         module.add_function(wrap_pyfunction!(parallel::arm_worker_panic, module)?)?;
+        module.add_function(wrap_pyfunction!(parallel::arm_hook_panic, module)?)?;
     }
     module.add_function(wrap_pyfunction!(fingerprint::fingerprint, module)?)?;
     module.add_function(wrap_pyfunction!(fingerprint::hash_parts, module)?)?;

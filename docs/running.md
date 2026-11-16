@@ -760,12 +760,18 @@ threaded.execute(["summary"], inputs={"category": "furniture", "endpoint": endpo
 - **Results never depend on the worker count.** Values, `Collect` orders and the exception raised are the same with
   one worker, eight, or none.
 - **Contexts.** Each node's call runs in its own copy of the context the run started in: a `ContextVar` you set
-  before `execute` is seen by every node, and one a node sets is seen by no other node.
+  before `execute` is seen by every node and its hooks, and one a node sets is seen by no other node. An expand's
+  generator runs every item in one context, so `decimal.localcontext()` or a variable it sets lasts across its
+  yields.
 - **Hooks.** A run's hooks are called one at a time, each on the thread that ran its node.
 - **Failures.** After a failure no new node starts; the run waits for the running ones, then raises the failure
   that comes first in reference order, as one exception.
 - **The GIL build.** On `3.14`, nodes that release the GIL (I/O, `time.sleep`, many C extensions) overlap, and pure
   Python nodes take turns; on `3.14t` they all run at once.
+- **`Ctrl-C`** stops a run between nodes, but can't end a node that hangs on a worker thread: the run waits for it.
+  Deadlines that abandon a hung node come with a later release.
+- **The pool's life.** A driver's worker threads leave once the driver is collected. A discarded driver caught in a
+  reference cycle keeps its idle threads until the cyclic garbage collector frees it.
 - An `AsyncDriver` built from such a builder ignores the setting for now.
 
 fnloom can't make your own code safe:

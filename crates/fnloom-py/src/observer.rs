@@ -1,6 +1,7 @@
 //! Run observers: the subclassable Python base class and its adapter to the core trait.
 
 use fnloom_core::run::{Arg, Observer};
+use pyo3::BoundObject;
 use pyo3::call::PyCallArgs;
 use pyo3::intern;
 use pyo3::prelude::*;
@@ -124,6 +125,8 @@ pub struct PyObserver<'py, 's> {
     kwargs: &'s Kwargs<'py, 's>,
     /// The hooks its class overrides.
     flags: Flags,
+    /// The `run` method of the context the hooks are called in; `None` for the current one.
+    context: Option<Bound<'py, PyAny>>,
 }
 
 /// Which hooks an observer's class overrides, found once per observer.
@@ -168,19 +171,22 @@ impl<'py, 's> PyObserver<'py, 's> {
     /// Wraps a Python observer for one run.
     pub fn new(observer: Bound<'py, ObserverBase>, kwargs: &'s Kwargs<'py, 's>) -> Self {
         let flags = Flags::of(&observer);
-        Self::flagged(observer, kwargs, flags)
+        Self::flagged(observer, kwargs, flags, None)
     }
 
-    /// Wraps a Python observer whose `flags` are already known, for one event.
+    /// Wraps a Python observer whose `flags` are already known, for one event, its hooks
+    /// called through `context`, a `Context.run`, when given.
     pub const fn flagged(
         observer: Bound<'py, ObserverBase>,
         kwargs: &'s Kwargs<'py, 's>,
         flags: Flags,
+        context: Option<Bound<'py, PyAny>>,
     ) -> Self {
         Self {
             observer,
             kwargs,
             flags,
+            context,
         }
     }
 
@@ -219,7 +225,8 @@ impl<'py, 's> PyObserver<'py, 's> {
         Ok(kwargs)
     }
 
-    /// Calls the hook `name` with `args` and the keyword arguments `kwargs`.
+    /// Calls the hook `name` with `args` and the keyword arguments `kwargs`, in the
+    /// observer's context, if it has one.
     fn call<A>(
         &self,
         name: &Bound<'py, PyString>,
@@ -227,13 +234,19 @@ impl<'py, 's> PyObserver<'py, 's> {
         kwargs: Option<&Bound<'py, PyDict>>,
     ) -> PyResult<()>
     where
-        A: PyCallArgs<'py>,
+        A: PyCallArgs<'py> + IntoPyObject<'py, Target = PyTuple>,
     {
+        let hook = self.observer.as_any();
+        let Some(run) = &self.context else {
+            // Called in place, so a Rust tuple goes by vectorcall, as before contexts.
+            return caught(|| hook.call_method(name, args, kwargs).map(drop));
+        };
+        let py = self.observer.py();
+        let args = args.into_pyobject(py).map_err(Into::into)?.into_bound();
         caught(|| {
-            self.observer
-                .as_any()
-                .call_method(name, args, kwargs)
-                .map(drop)
+            let mut all = vec![hook.getattr(name)?];
+            all.extend(args.iter());
+            run.call(PyTuple::new(py, all)?, kwargs).map(drop)
         })
     }
 

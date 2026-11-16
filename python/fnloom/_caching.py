@@ -1150,6 +1150,11 @@ class CacheRun:
         self._plans_lock = threading.Lock()
 
     @property
+    def threaded(self) -> bool:
+        """Whether its core runs are on a driver's pool."""
+        return self._workers is not None
+
+    @property
     def blocks(self) -> _Blocks | None:
         """What the plan knows of its late nodes; `None` with no expand."""
         return self._blocks

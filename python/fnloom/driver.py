@@ -790,6 +790,9 @@ class _HookedPlan[R](PreparedPlan[R]):
         dispatch = _hooks.Dispatch(
             self._hooks, self._views, {} if cached else None, checks_owner=owner
         )
+        dispatch.parallel = isinstance(plan, _Threaded) or (
+            isinstance(plan, CacheRun) and plan.threaded
+        )
         error: BaseException | None = None
         try:
             if mismatches:

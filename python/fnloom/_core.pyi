@@ -14,6 +14,7 @@ __all__ = [
     "Threads",
     "UnfingerprintableError",
     "_panic_for_test",
+    "arm_hook_panic",
     "arm_worker_panic",
     "core_version",
     "fingerprint",
@@ -50,6 +51,7 @@ type CollectMode = Literal["present", "all"]
 def _panic_for_test() -> None: ...
 def live_workers() -> int: ...
 def arm_worker_panic() -> None: ...
+def arm_hook_panic() -> None: ...
 
 @final
 class Graph:

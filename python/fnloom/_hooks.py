@@ -17,7 +17,7 @@ import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, fields
 from types import MappingProxyType, ModuleType
-from typing import TYPE_CHECKING, ClassVar, Final, override
+from typing import TYPE_CHECKING, ClassVar, Final, cast, override
 
 from fnloom import _checks, _core
 
@@ -497,6 +497,7 @@ class Dispatch:
         "_views",
         "late",
         "outcomes",
+        "parallel",
     )
 
     def __init__(
@@ -539,6 +540,8 @@ class Dispatch:
         self._skipped: list[tuple[tuple[int, ...], str, tuple[int, ...]]] = []
         # A cached run's late keys, which give a late node's outcome per branch.
         self.late: LateKeys | None = None
+        # Whether the run is on a pool, so several nodes run between start and end.
+        self.parallel = False
 
     def observers(self) -> tuple[_core.ObserverBase, ...]:
         """What the core run is given: one observer when its events are wanted.
@@ -549,7 +552,7 @@ class Dispatch:
         """
         hooks = self._hooks
         if hooks.nodes:
-            return (_Forward(self),)
+            return (_Running(self) if self.parallel else _Forward(self),)
         if hooks.after_expand or (hooks.after_run and self._views.skips):
             return (_Skips(self),)
         return ()
@@ -739,7 +742,8 @@ class Dispatch:
             ok,
             value if ok else None,
             error,
-            () if results is None else results.pop((name, branch), ()),
+            # Most nodes have no checks: an empty table needs no lookup.
+            results.pop((name, branch), ()) if bool(results) else (),
             branch,
             order,
         )
@@ -760,10 +764,14 @@ class Dispatch:
         """Makes `error` the run's node error, when it is a later one seen.
 
         A parallel run sees several node errors in the order they happen; the core
-        raises the one first in reference order, which then leads.
+        raises the one first in reference order, which then leads. When observers
+        raised while handling it, the core raises it first in a group.
         """
+        lead: BaseException | None = error
+        if isinstance(error, BaseExceptionGroup) and error.exceptions:
+            lead = cast("BaseException", error.exceptions[0])
         for later, name in self._later_errors:
-            if later is error:
+            if later is lead:
                 self._node_error, self._failed_node = later, name
 
     def end(
@@ -841,9 +849,7 @@ class _Forward(_core.ObserverBase):
     def __init__(self, dispatch: Dispatch) -> None:
         """Forwards to `dispatch`."""
         self._dispatch = dispatch
-        # Each running node's arguments, by node and branch: a parallel run has
-        # several nodes between their start and their end.
-        self._kwargs: dict[tuple[str, tuple[int, ...]], Mapping[str, object]] = {}
+        self._kwargs: Mapping[str, object] | None = None
 
     @override
     def pre_node(
@@ -854,7 +860,8 @@ class _Forward(_core.ObserverBase):
         branch: tuple[int, ...] = (),
         order: tuple[int, ...] = (),
     ) -> None:
-        self._kwargs[node, branch] = kwargs
+        # One node at a time, so its end is the next `post_node`.
+        self._kwargs = kwargs
         dispatch = self._dispatch
         dispatch.node_started(
             node, kwargs, dispatch.outcome(node, branch), branch=branch, order=order
@@ -874,7 +881,7 @@ class _Forward(_core.ObserverBase):
         dispatch = self._dispatch
         dispatch.node_ended(
             node,
-            self._kwargs.pop((node, branch), None),
+            self._kwargs,
             dispatch.outcome(node, branch),
             value,
             error,
@@ -909,6 +916,52 @@ class _Forward(_core.ObserverBase):
         order: tuple[int, ...] = (),
     ) -> None:
         self._dispatch.expanded(node, branch, items, order)
+
+
+class _Running(_Forward):
+    """`_Forward` for a run on a pool, whose nodes overlap between start and end."""
+
+    def __init__(self, dispatch: Dispatch) -> None:
+        """Forwards to `dispatch`, keeping each running node's arguments."""
+        super().__init__(dispatch)
+        self._running: dict[tuple[str, tuple[int, ...]], Mapping[str, object]] = {}
+
+    @override
+    def pre_node(
+        self,
+        node: str,
+        kwargs: dict[str, object],
+        *,
+        branch: tuple[int, ...] = (),
+        order: tuple[int, ...] = (),
+    ) -> None:
+        self._running[node, branch] = kwargs
+        dispatch = self._dispatch
+        dispatch.node_started(
+            node, kwargs, dispatch.outcome(node, branch), branch=branch, order=order
+        )
+
+    @override
+    def post_node(
+        self,
+        node: str,
+        *,
+        ok: bool,
+        value: object,
+        error: BaseException | None,
+        branch: tuple[int, ...] = (),
+        order: tuple[int, ...] = (),
+    ) -> None:
+        dispatch = self._dispatch
+        dispatch.node_ended(
+            node,
+            self._running.pop((node, branch), None),
+            dispatch.outcome(node, branch),
+            value,
+            error,
+            branch=branch,
+            order=order,
+        )
 
 
 class _Skips(_core.ObserverBase):
