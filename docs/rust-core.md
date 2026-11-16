@@ -144,6 +144,43 @@ aborts the run, and `post_graph(false)` still runs so observers can close what t
   branch as `run::branch_text` writes it, a Python tuple such as `(0, 1)`. Run a plan only on the graph it was
   prepared from: on another graph it may read the wrong nodes, or panic.
 
+## The scheduler
+
+`schedule::Scheduler` is the second way to run a plan. It is a state machine over one run, with no threads, no clock
+and no locks, and it borrows nothing: every method takes the plan and graph it was made with, so a caller with several
+workers keeps it behind one lock. `Plan::run` stays the reference it is tested against.
+
+- `Scheduler::new(&plan, &graph, seeded, options)` takes each input's and override's value by node id, as a
+  `run::Slot` that says whether it is absent, and returns the scheduler and a first `Report`.
+- `next(&plan, &graph, &grant, seat)` hands out the ready task with the lowest **order key** that the `Grant` lets the
+  `Seat` start, skipping over the ones it refuses. It gives `Next::Wait` while tasks are in flight or refused, and
+  `Next::Done` when nothing is left.
+- `complete(&plan, &graph, &grant, id, outcome)` takes back a task's `Outcome` and returns a `Report`: the values no
+  step reads any more (`released`, for the caller to drop, so no value is dropped under its lock), and the nodes
+  skipped, the expands exhausted and the hits that completion settled, for the observer events.
+- `finish(&plan, &graph)` returns the outputs by id, or the failure with the lowest order key.
+
+An order key (`OrderKey`, also given by `Plan::order_key(node, branch)`) is the (step position, branch index) pairs of
+the expands whose blocks hold a step, outermost first, then the step's position. Keys compare lexicographically, so
+handing out the lowest ready one reproduces reference order: with one worker, stepping one task at a time gives the
+same calls, in the same order, as `Plan::run`. A pull of item `i` is keyed just before that branch's first step.
+
+A `Task` names its node, its branch and its key, and its `Work` is one of:
+
+- `Compute`: run the payload on `args`, each an `ArgValue` by the absence rules (`One`, `Gather` for a collect, or
+  `Omitted`). An expand iterates what it computed on the same worker. A `late` step outside every block is looked up
+  first, and a hit completes it with `Outcome::Hit`.
+- `Iterate`: iterate an expand's override or hit.
+- `Pull`: take an iterator's next item. At most one pull of an iterator is in flight.
+- `Finish`: end an iterator, exhausted or stopped.
+- `Probe`: ask a new branch's hits. `schedule::probe` runs it with your lookup, in the reverse need order `Plan::run`
+  asks, and gives the `Outcome::Needs` to complete it with.
+
+A node skipped by the absence rules becomes no task: it is reported in `Report::skipped` with its key. A collect waits
+for every branch of its block and gathers them in branch order, whatever order they finished in. A failure stops the
+run: nothing but `Finish` is handed out after it, one per open iterator with no pull in flight, innermost first.
+`stop()` does the same from outside.
+
 ## Guarantees
 
 - **No recursion over graph depth or nesting depth.** Build, cycle detection, block discovery, the lineage queries,

@@ -8,9 +8,11 @@ mod block;
 mod branch;
 pub mod error;
 pub mod graph;
+pub mod limits;
 pub mod node;
 pub mod plan;
 pub mod run;
+pub mod schedule;
 
 #[cfg(test)]
 mod testing;

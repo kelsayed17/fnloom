@@ -621,10 +621,15 @@ impl Plan {
     }
 }
 
-/// A slot of the absence-aware loop: a value, and whether it is absent.
-pub(crate) struct Slot<V> {
-    pub(crate) value: V,
-    pub(crate) absent: bool,
+/// A value, and whether it is absent: a slot of the absence-aware loop, and what a
+/// `Scheduler` is seeded with.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Slot<V> {
+    /// The value.
+    pub value: V,
+    /// Whether it is absent; only a node that may be absent (`Node::may_be_absent`) has an
+    /// absent value.
+    pub absent: bool,
 }
 
 /// A step's arguments under the absence rules, or the absent value that skips it.

@@ -2,7 +2,8 @@
 //! each on chain, fan-in and layered graphs of 1,000 and 10,000 nodes, `Plan::run` on a
 //! 200-node chain whose first node declines (`skip_chain_200`), and `Plan::run` on a block run
 //! once per item of 1, 100 and 10,000 items (`fan_out_1` and so on), and over 10 items whose
-//! block reads 1,000 outer inputs (`wide_1000`).
+//! block reads 1,000 outer inputs (`wide_1000`). `schedule` runs the chain and layered shapes
+//! on the `Scheduler` with one worker; its rows have no baseline yet, so they are reported.
 //!
 //! Wall-clock time is too noisy on shared CI runners to gate on, so the regression gate
 //! compares instruction counts measured under callgrind (see `scripts/bench_gate.py`).
@@ -36,9 +37,11 @@ mod suite {
     use std::hint::black_box;
 
     use fnloom_core::graph::Graph;
+    use fnloom_core::limits::Unlimited;
     use fnloom_core::node::{Collect, Dependency, InputSpec, Node, NodeId, NodeSpec};
-    use fnloom_core::plan::{Plan, Request};
-    use fnloom_core::run::{Arg, Blocks, Evaluate, Item};
+    use fnloom_core::plan::{Action, Plan, Request};
+    use fnloom_core::run::{Arg, Blocks, Evaluate, Item, Outputs, RunError, Slot};
+    use fnloom_core::schedule::{ArgValue, Next, Options, Outcome, Scheduler, Seat, Work};
     use gungraun::prelude::*;
 
     /// Row width of the layered shape, as in `benches/generate.py`.
@@ -454,9 +457,57 @@ mod suite {
         (graph, plan, values)
     }
 
+    /// Runs `plan` on the `Scheduler` with one worker, seeding its inputs by name as
+    /// `Plan::run` does, and computing each task as `Sum` does.
+    fn scheduled(
+        graph: &Graph<()>,
+        plan: &Plan,
+        inputs: &BTreeMap<String, u64>,
+    ) -> Result<Outputs<u64>, RunError<Infallible>> {
+        let mut seeded = vec![None; graph.nodes().len()];
+        for step in plan.steps() {
+            if step.action == Action::UseInput {
+                seeded[step.node.index()] =
+                    inputs.get(&graph.node(step.node).name).map(|&value| Slot {
+                        value,
+                        absent: false,
+                    });
+            }
+        }
+        let (mut scheduler, _) =
+            Scheduler::<u64, Infallible, ()>::new(plan, graph, seeded, Options::default());
+        while let Next::Task(task) = scheduler.next(plan, graph, &Unlimited, Seat::Take) {
+            let Work::Compute { args, .. } = task.work else {
+                continue;
+            };
+            let value = args.iter().fold(0_u64, |sum, (_, arg)| match arg {
+                ArgValue::One(value) => sum.wrapping_add(*value),
+                ArgValue::Gather(_) | ArgValue::Omitted => sum,
+            });
+            let outcome = Outcome::Value {
+                value,
+                absent: false,
+            };
+            scheduler.complete(plan, graph, &Unlimited, task.id, outcome);
+        }
+        scheduler.finish(plan, graph)
+    }
+
+    // The scheduler with one worker on the shapes `run` measures: what it adds per node.
+    // Reported, not gated, until its baseline is committed (Plan 11, Task 13).
+    #[library_benchmark]
+    #[bench::chain_1000(args = (Shape::Chain, 1_000), setup = planned)]
+    #[bench::chain_10000(args = (Shape::Chain, 10_000), setup = planned)]
+    #[bench::layered_1000(args = (Shape::Layered, 1_000), setup = planned)]
+    #[bench::layered_10000(args = (Shape::Layered, 10_000), setup = planned)]
+    fn schedule((graph, plan, inputs): (Graph<()>, Plan, BTreeMap<String, u64>)) -> impl Sized {
+        let values = scheduled(&graph, &plan, black_box(&inputs));
+        (graph, plan, values)
+    }
+
     library_benchmark_group!(
         name = engine;
-        benchmarks = build, prepare, run, run_skips, run_blocks
+        benchmarks = build, prepare, run, run_skips, run_blocks, schedule
     );
 }
 
