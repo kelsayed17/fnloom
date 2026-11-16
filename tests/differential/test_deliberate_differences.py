@@ -11,6 +11,8 @@ import pickle
 import subprocess
 import sys
 import textwrap
+import threading
+import time
 import types
 import warnings
 from pathlib import Path
@@ -6352,6 +6354,135 @@ def test_q169_nodes_outside_blocks_overlap_with_threads() -> None:
     assert run_fnloom_blocks(
         [ours], ["met_left", "met_right"], {"n": 1}, threads=2
     ) == Outcome({"met_left": 1, "met_right": 1}, None)
+
+
+# Hooks and contexts under threads (Plan 11, task 4).
+_CONTEXTS = """
+import contextvars
+
+VAR = contextvars.ContextVar("caller_var", default="unset")
+
+
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+def seen(picked: int) -> str:
+    return VAR.get()
+
+
+def all_seen(seen: Collect[str]) -> list[str]:
+    return list(seen)
+
+
+def outside(n: int) -> str:
+    return VAR.get()
+"""
+
+
+@pytest.mark.deliberate("Q167")
+@pytest.mark.threads
+def test_q167_block_nodes_see_the_callers_context_variables() -> None:
+    """Hamilton's thread executor drops the caller's context; fnloom's threads don't."""
+    hamilton = block_module("q167_h", _CONTEXTS, "hamilton")
+    ours = block_module("q167_f", _CONTEXTS, "fnloom")
+    outputs, inputs = ["all_seen", "outside"], {"n": 4}
+    token = hamilton.VAR.set("caller")
+    try:
+        assert run_hamilton_blocks(
+            hamilton, outputs, inputs, executor="default"
+        ) == Outcome({"all_seen": ["unset"] * 4, "outside": "caller"}, None)
+    finally:
+        hamilton.VAR.reset(token)
+    token = ours.VAR.set("caller")
+    try:
+        assert run_fnloom_blocks([ours], outputs, inputs, threads=4) == Outcome(
+            {"all_seen": ["caller"] * 4, "outside": "caller"}, None
+        )
+    finally:
+        ours.VAR.reset(token)
+
+
+_MET_BRANCHES = """
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+def details(picked: int) -> int:
+    return picked
+
+
+def summary(details: Collect[int]) -> list[int]:
+    return list(details)
+"""
+
+
+class _MeetingHamiltonHook(lifecycle.NodeExecutionHook):
+    """Waits for four `details` calls of `run_before_node_execution` at once."""
+
+    def __init__(self) -> None:
+        """A barrier of four."""
+        self.meet = threading.Barrier(4, timeout=5)
+
+    @override
+    def run_before_node_execution(self, **kwargs: Any) -> None:
+        if kwargs["node_name"] == "details":
+            self.meet.wait()
+
+    @override
+    def run_after_node_execution(self, **kwargs: Any) -> None:
+        pass
+
+
+class _AloneHook(fnloom.Hook):
+    """Takes a lock without blocking in each node event, noting any overlap."""
+
+    def __init__(self) -> None:
+        """No overlap yet."""
+        self.lock = threading.Lock()
+        self.overlapped: list[str] = []
+
+    def _alone(self, name: str) -> None:
+        if not self.lock.acquire(blocking=False):
+            self.overlapped.append(name)
+            return
+        try:
+            time.sleep(0.005)
+        finally:
+            self.lock.release()
+
+    @override
+    def before_node(self, event: fnloom.NodeStart) -> None:
+        self._alone(event.node.name)
+
+    @override
+    def after_node(self, event: fnloom.NodeEnd) -> None:
+        self._alone(event.node.name)
+
+
+@pytest.mark.deliberate("Q168")
+@pytest.mark.threads
+def test_q168_one_runs_hooks_never_overlap() -> None:
+    """Hamilton's pool threads call a hook at once; fnloom's run calls it in turn."""
+    module = block_module("q168_h", _MET_BRANCHES, "hamilton")
+    built = (
+        hamilton_driver.Builder()
+        .enable_dynamic_execution(allow_experimental_mode=True)
+        .with_modules(module)
+        .with_adapters(_MeetingHamiltonHook())
+        .build()
+    )
+    assert built.execute(["summary"], inputs={"n": 4}) == {"summary": [0, 1, 2, 3]}
+    hook = _AloneHook()
+    ours = (
+        fnloom.Builder()
+        .with_modules(block_module("q168_f", _MET_BRANCHES, "fnloom"))
+        .with_hooks(hook)
+        .with_threads(4)
+        .build()
+    )
+    assert ours.execute(["summary"], inputs={"n": 16}) == {"summary": list(range(16))}
+    assert hook.overlapped == []
 
 
 # Overrides and outputs around blocks (Plan 10, task 9).

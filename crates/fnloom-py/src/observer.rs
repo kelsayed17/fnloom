@@ -142,6 +142,9 @@ pub struct Flags {
     hits: bool,
     /// Whether the class overrides `skipped`, which is sent only then.
     skips: bool,
+    /// Whether the class sets `orders = True`: its node, expand and skip events then get
+    /// `order`, the step's order key, as a tuple.
+    orders: bool,
 }
 
 impl Flags {
@@ -152,6 +155,11 @@ impl Flags {
             expands: overrides(observer, "post_expand"),
             hits: overrides(observer, "hit_in"),
             skips: overrides(observer, "skipped"),
+            orders: observer
+                .get_type()
+                .getattr(intern!(observer.py(), "orders"))
+                .and_then(|orders| orders.is_truthy())
+                .unwrap_or(false),
         }
     }
 }
@@ -174,6 +182,16 @@ impl<'py, 's> PyObserver<'py, 's> {
             kwargs,
             flags,
         }
+    }
+
+    /// Adds `order`, `node`'s order key in `branch`, to `kwargs`, for an observer that
+    /// wants it.
+    fn ordered(&self, kwargs: &Bound<'py, PyDict>, node: &str, branch: &[usize]) -> PyResult<()> {
+        if self.flags.orders {
+            let py = self.observer.py();
+            kwargs.set_item(intern!(py, "order"), self.kwargs.order(node, branch)?)?;
+        }
+        Ok(())
     }
 
     /// `post_node`'s keyword arguments, with `branch` when it is not empty.
@@ -259,6 +277,11 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
         }
         let py = self.observer.py();
         let kwargs = self.kwargs.for_observers(node, args)?;
+        if self.flags.orders {
+            let keywords = PyDict::new(py);
+            self.ordered(&keywords, node, &[])?;
+            return self.call(intern!(py, "pre_node"), (node, kwargs), Some(&keywords));
+        }
         self.call(intern!(py, "pre_node"), (node, kwargs), None)
     }
 
@@ -282,6 +305,7 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
         let kwargs = self.kwargs.for_observers(node, args)?;
         let keywords = PyDict::new(py);
         keywords.set_item(intern!(py, "branch"), PyTuple::new(py, branch)?)?;
+        self.ordered(&keywords, node, branch)?;
         self.call(intern!(py, "pre_node"), (node, kwargs), Some(&keywords))
     }
 
@@ -296,6 +320,7 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
         }
         let py = self.observer.py();
         let kwargs = self.outcome(branch, outcome)?;
+        self.ordered(&kwargs, node, branch)?;
         self.call(intern!(py, "post_node"), (node,), Some(&kwargs))
     }
 
@@ -307,6 +332,7 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "branch"), PyTuple::new(py, branch)?)?;
         kwargs.set_item(intern!(py, "items"), items)?;
+        self.ordered(&kwargs, node, branch)?;
         self.call(intern!(py, "post_expand"), (node,), Some(&kwargs))
     }
 
@@ -318,6 +344,7 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "branch"), PyTuple::new(py, branch)?)?;
         kwargs.set_item(intern!(py, "value"), value)?;
+        self.ordered(&kwargs, node, branch)?;
         self.call(intern!(py, "hit_in"), (node,), Some(&kwargs))
     }
 
@@ -328,6 +355,7 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
         let py = self.observer.py();
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "branch"), PyTuple::new(py, branch)?)?;
+        self.ordered(&kwargs, node, branch)?;
         self.call(intern!(py, "skipped"), (node,), Some(&kwargs))
     }
 

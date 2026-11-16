@@ -37,6 +37,16 @@ change the public API; such changes are listed under **Changed** and **Removed**
   once (Q66, Q128). The setting survives pickling, `copy`, `rebuild()` and `build_async()`, each driver with a pool of
   its own, and a forked child makes a new one; an `AsyncDriver` ignores it for now. A driver without it runs exactly
   as before.
+- Hooks under threads. A run's hooks are called one at a time, each on the thread that ran its node (Q168), and its
+  store writes run after them, so a slow store holds up no other node's hooks; each node sees the context variables
+  its caller set (Q167). `NodeStart.order`, `NodeEnd.order` and `ExpandEnd.order` give the step's order key as a
+  tuple, so a parallel run's events sort into the order one worker gives; `()` on the async driver.
+
+### Changed
+
+- `RunEnd.skipped` is sorted by order key on the sync driver (Q84). Without threads that is the order it was in.
+  Output checks' results reach `NodeEnd.checks` per node and branch, so two branches checked at once each report
+  their own.
 
 ## [0.5.0] - 2026-11-15
 

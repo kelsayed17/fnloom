@@ -26,6 +26,7 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING, Any, Literal, cast
 
 from fnloom import _async, _types
+from fnloom._blocks import BRANCH
 from fnloom._core import ABSENT
 from fnloom._decorators import _ATTRIBUTE, decorations
 from fnloom._extract import extractor
@@ -776,8 +777,9 @@ def check_output_custom[F: Callable[..., object]](
 
 # ---- running the checks inside a node ------------------------------------------------
 
-# A hooked run's collector: its driver's token, and each node's check results.
-type Sink = tuple[object, dict[str, tuple[CheckResult, ...]]]
+# A hooked run's collector: its driver's token, and each node's check results, by
+# node and branch, since a parallel run checks several branches of a node at once.
+type Sink = tuple[object, dict[tuple[str, tuple[int, ...]], tuple[CheckResult, ...]]]
 
 # Where a hooked run collects its nodes' check results, for its `after_node`.
 RESULTS: contextvars.ContextVar[Sink | None] = contextvars.ContextVar(
@@ -826,7 +828,7 @@ def verdict(
     given = inputs() if any(c.wants_inputs for c in checks) else _NO_DIAGNOSTICS
     results = tuple(_ran(check, value, given) for check in checks)
     if (sink := RESULTS.get()) is not None and sink[0] is owner:
-        sink[1][node] = results
+        sink[1][node, BRANCH.get()] = results
     failed: list[CheckResult] = []
     for result in results:
         if result.passes:

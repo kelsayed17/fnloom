@@ -299,7 +299,7 @@ impl Run {
         let plan = self.plan.get();
         let graph = plan.graph().get();
         let core = graph.core();
-        let kwargs = Kwargs::new(py, graph);
+        let kwargs = Kwargs::new(py, plan.core(), graph);
         self.acquire(py);
         let mut failed = None;
         for (node, branch, value) in &report.hits {
@@ -571,12 +571,12 @@ fn compute<'py>(
             node.name
         )));
     };
-    let blank = Kwargs::new(py, graph);
+    let blank = Kwargs::new(py, plan.core(), graph);
     let kwargs = match blank.build(node.id, &built) {
         Ok(kwargs) => kwargs,
         Err(error) => return Landed::failed(error),
     };
-    let lent = Kwargs::lending(py, graph, node.id, Some(kwargs.clone()));
+    let lent = Kwargs::lending(py, plan.core(), graph, node.id, Some(kwargs.clone()));
     let errors = run.hooked(py, &lent, |hook| {
         hook.pre_node_in(&node.name, branch, &built)
     });
@@ -762,7 +762,7 @@ pub fn run<'py>(
         observers: SharedObservers::new(observers, on_value, late),
         pid,
     });
-    let kwargs = Kwargs::new(py, graph);
+    let kwargs = Kwargs::new(py, core, graph);
     let errors = run.observers.fire(py, &kwargs, |hook| hook.pre_graph());
     if !errors.is_empty() {
         let closing = run
@@ -815,7 +815,7 @@ fn ended<'py>(slf: &Bound<'py, Plan>, run: &Run, broke: bool) -> PyResult<Bound<
     let plan = slf.get();
     let graph = plan.graph().get();
     let core = plan.core();
-    let kwargs = Kwargs::new(py, graph);
+    let kwargs = Kwargs::new(py, core, graph);
     let taken = if broke {
         None
     } else {

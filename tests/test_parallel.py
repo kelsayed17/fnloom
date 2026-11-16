@@ -495,3 +495,451 @@ def test_a_cached_parallel_run_hits_as_a_sequential_one() -> None:
         "summary": [*expected["summary"], 60]
     }
     assert sorted(module.CALLS) == [0, 1, 2, 3, 4, 5, 6]
+
+
+# Hooks per run, contexts, order keys, branch-safe keys and checks (Plan 11, task 4).
+
+
+class Alone(fnloom.Hook):
+    """Takes a lock without blocking in each node event, noting any overlap."""
+
+    def __init__(self, pause: float = 0.005) -> None:
+        """No overlap yet; each event holds the lock for `pause` seconds."""
+        self.lock = threading.Lock()
+        self.pause = pause
+        self.overlapped = 0
+        self.threads: dict[tuple[str, tuple[int, ...]], int] = {}
+
+    def _alone(self, event: fnloom.NodeStart | fnloom.NodeEnd) -> None:
+        if not self.lock.acquire(blocking=False):
+            self.overlapped += 1
+            return
+        try:
+            self.threads[event.node.name, event.branch] = threading.get_ident()
+            time.sleep(self.pause)
+        finally:
+            self.lock.release()
+
+    @override
+    def before_node(self, event: fnloom.NodeStart) -> None:
+        self._alone(event)
+
+    @override
+    def after_node(self, event: fnloom.NodeEnd) -> None:
+        self._alone(event)
+
+
+def test_hook_calls_of_one_run_never_overlap() -> None:
+    """Over 200 branches on eight workers, no two hook calls of the run overlap."""
+    hook = Alone()
+    driver = fan("alone", 8, (hook,))
+    result = driver.execute(["summary"], inputs={"n": 200, "fail": (), "pause": 0.0})
+    assert result == {"summary": [i * 10 for i in range(200)]}
+    assert hook.overlapped == 0
+
+
+def test_a_hook_runs_on_the_thread_that_ran_the_node() -> None:
+    """`after_node` of each branch runs on the thread its node ran on."""
+    hook = Alone(pause=0.0)
+    driver = fan("hook_thread", 4, (hook,))
+    module = sys.modules["hook_thread"]
+    driver.execute(["summary"], inputs={"n": 32, "fail": (), "pause": 0.002})
+    ran = {(item,): ident for item, ident, _, _ in module.SEEN}
+    assert {branch: hook.threads["details", branch] for branch in ran} == ran
+    assert len(set(ran.values())) > 1
+
+
+class Events(fnloom.Hook):
+    """Records every event as a comparable tuple, under a lock."""
+
+    def __init__(self) -> None:
+        """No event yet."""
+        self.events: list[tuple[object, ...]] = []
+        self.skipped: tuple[tuple[str, tuple[int, ...]], ...] = ()
+        self.lock = threading.Lock()
+
+    def _add(self, *event: object) -> None:
+        with self.lock:
+            self.events.append(event)
+
+    @override
+    def before_node(self, event: fnloom.NodeStart) -> None:
+        self._add("start", event.node.name, event.branch, event.order)
+
+    @override
+    def after_node(self, event: fnloom.NodeEnd) -> None:
+        self._add("end", event.node.name, event.branch, event.order, event.ok)
+
+    @override
+    def after_expand(self, event: fnloom.ExpandEnd) -> None:
+        self._add("expand", event.node.name, event.branch, event.order, event.items)
+
+    @override
+    def after_run(self, event: fnloom.RunEnd) -> None:
+        self.skipped = event.skipped
+
+
+# A block of two nodes, a skip in some branches, and a second block after it.
+ORDERED = """
+from fnloom import ABSENT, Absent, Collect, Parallelizable
+
+
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+def first(picked: int) -> int | Absent:
+    return ABSENT if picked % 3 == 1 else picked
+
+
+def second(first: int) -> int:
+    return first * 2
+
+
+def gathered(second: Collect[int]) -> list[int]:
+    return list(second)
+
+
+def again(gathered: list[int]) -> Parallelizable[int]:
+    yield from gathered
+
+
+def last(again: int) -> int:
+    return again + 1
+
+
+def ends(last: Collect[int]) -> list[int]:
+    return list(last)
+"""
+
+
+def ordered_events(
+    threads: int | None, n: int = 6
+) -> tuple[list[tuple[object, ...]], Events]:
+    """The `ORDERED` program's events, without threads or on `threads` workers."""
+    hook = Events()
+    builder = (
+        fnloom.Builder().with_modules(make_module("ordered", ORDERED)).with_hooks(hook)
+    )
+    if threads is not None:
+        builder = builder.with_threads(threads)
+    builder.build().execute(["ends"], inputs={"n": n})
+    return hook.events, hook
+
+
+def test_with_one_worker_events_equal_the_sequential_run() -> None:
+    """With one worker, every event and its order come as without threads."""
+    sequential, plain = ordered_events(None)
+    one, threaded = ordered_events(1)
+    assert one == sequential
+    assert threaded.skipped == plain.skipped
+    assert all(event[3] for event in sequential)
+
+
+def test_order_sorts_parallel_events_into_reference_order() -> None:
+    """Sorted by order, eight workers' events are the sequential run's, a0 b0 a1 b1."""
+    sequential, _ = ordered_events(None, 12)
+    parallel, _ = ordered_events(8, 12)
+    ends = [e for e in sequential if e[0] == "end"]
+    assert sorted((e for e in parallel if e[0] == "end"), key=lambda e: e[3]) == ends
+    names = [(e[1], e[2]) for e in ends if e[1] in {"first", "second"}][:4]
+    assert names == [
+        ("first", (0,)),
+        ("second", (0,)),
+        ("first", (1,)),
+        ("first", (2,)),
+    ]
+
+
+def test_skipped_is_sorted_by_order_on_both_paths() -> None:
+    """`RunEnd.skipped` is in order key order, with or without threads."""
+    _, plain = ordered_events(None, 12)
+    _, threaded = ordered_events(8, 12)
+    assert plain.skipped == tuple(("second", (i,)) for i in range(12) if i % 3 == 1)
+    assert threaded.skipped == plain.skipped
+
+
+CONTEXTS = """
+import contextvars
+
+VAR = contextvars.ContextVar("parallel_var", default="unset")
+
+
+def setter(x: int) -> str:
+    VAR.set("setter")
+    return VAR.get()
+
+
+def reader(setter: str) -> str:
+    return VAR.get()
+"""
+
+
+@pytest.mark.parametrize("workers", [1, 2, 8])
+def test_a_contextvar_set_in_one_node_is_not_seen_by_another(workers: int) -> None:
+    """A node sees the caller's variables, and none another node set."""
+    module = make_module(f"contexts_{workers}", CONTEXTS)
+    driver = fnloom.Builder().with_modules(module).with_threads(workers).build()
+    token = module.VAR.set("caller")
+    try:
+        result = driver.execute(["setter", "reader"], inputs={"x": 1})
+    finally:
+        module.VAR.reset(token)
+    assert result == {"setter": "setter", "reader": "caller"}
+    assert module.VAR.get() == "unset"
+
+
+BRANCHES = """
+import time
+
+import fnloom
+from fnloom import Collect, Parallelizable
+
+
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+def where(picked: int) -> tuple[int, ...]:
+    time.sleep(0.002)
+    return fnloom.current_branch()
+
+
+def all_where(where: Collect[tuple[int, ...]]) -> list[tuple[int, ...]]:
+    return list(where)
+"""
+
+
+def test_current_branch_on_workers_is_each_nodes_own() -> None:
+    """Each branch's node sees its own branch, on whatever worker ran it."""
+    module = make_module("branches", BRANCHES)
+    driver = fnloom.Builder().with_modules(module).with_threads(8).build()
+    result = driver.execute(["all_where"], inputs={"n": 40})
+    assert result == {"all_where": [(i,) for i in range(40)]}
+
+
+class Raising(fnloom.Hook):
+    """Raises in `after_node` for one branch; counts `after_run`."""
+
+    def __init__(self) -> None:
+        """No run yet."""
+        self.runs: list[bool] = []
+        self.lock = threading.Lock()
+
+    @override
+    def after_node(self, event: fnloom.NodeEnd) -> None:
+        if event.branch == (3,):
+            msg = "hook says no"
+            raise LookupError(msg)
+
+    @override
+    def after_run(self, event: fnloom.RunEnd) -> None:
+        with self.lock:
+            self.runs.append(event.ok)
+
+
+def test_a_raising_hook_stops_a_parallel_run_once() -> None:
+    """The run stops once, `after_run` sees `ok=False`, the hook's error is raised."""
+    hook = Raising()
+    driver = fan("raising_hook", 8, (hook,))
+    inputs = {"n": 32, "fail": (), "pause": 0.002}
+    with pytest.raises(LookupError, match="hook says no") as info:
+        driver.execute(["summary"], inputs=inputs)
+    assert not isinstance(info.value, BaseExceptionGroup)
+    assert hook.runs == [False]
+    module = sys.modules["raising_hook"]
+    assert module.RUNNING == []
+    # The busy flag was cleared: the next run is not held up by it.
+    assert fan("after_raising", 8).execute(["summary"], inputs=inputs) == {
+        "summary": [i * 10 for i in range(32)]
+    }
+
+
+class SlowStore(fnloom.MemoryCache):
+    """A store whose first write waits until a hook runs while it writes."""
+
+    def __init__(self) -> None:
+        """Not writing yet."""
+        super().__init__()
+        self.first = True
+        self.writing = threading.Event()
+        self.hooked = threading.Event()
+        self.overlapped = False
+
+    @override
+    def put(self, key: bytes, value: object) -> None:
+        if self.first:
+            self.first = False
+            self.writing.set()
+            # A store's own error is only warned about, so the outcome is kept.
+            self.overlapped = self.hooked.wait(5)
+        super().put(key, value)
+
+
+class WhileWriting(fnloom.Hook):
+    """Tells the store a `before_node` ran while its first write was waiting."""
+
+    def __init__(self, store: SlowStore) -> None:
+        """Watches `store`."""
+        self.store = store
+
+    @override
+    def before_node(self, event: fnloom.NodeStart) -> None:
+        if self.store.writing.is_set():
+            self.store.hooked.set()
+
+
+def test_a_slow_store_does_not_hold_the_busy_flag() -> None:
+    """While a store writes, another branch's hook runs."""
+    store = SlowStore()
+    driver = (
+        fnloom.Builder()
+        .with_modules(make_module("slow_store", CACHED))
+        .with_cache(store)
+        .with_hooks(WhileWriting(store))
+        .with_threads(2)
+        .build()
+    )
+    assert driver.execute(["summary"], inputs={"n": 8}) == {
+        "summary": [i * 10 for i in range(8)]
+    }
+    assert store.overlapped
+
+
+def test_print_nodes_and_log_failures_under_threads(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The bundled hooks print and log each branch once, from any worker."""
+    lines: list[str] = []
+    printed = threading.Lock()
+
+    def show(line: str) -> None:
+        with printed:
+            lines.append(line)
+
+    driver = fan("bundled", 8, (fnloom.PrintNodes(print_fn=show), fnloom.LogFailures()))
+    with pytest.raises(ValueError, match="5"):
+        driver.execute(["summary"], inputs={"n": 16, "fail": (5,), "pause": 0.002})
+    ran = [line for line in lines if line.startswith("node 'details' (branch")]
+    assert len(ran) == len({line.split(")")[0] for line in ran})
+    assert any("(branch (5,)) failed" in line for line in ran)
+    assert [r for r in caplog.records if "details" in r.getMessage()]
+
+
+NESTED = """
+from fnloom import Collect, Parallelizable
+
+
+def outer(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+def inner(outer: int) -> Parallelizable[int]:
+    yield from range(outer, outer + 3)
+
+
+def leaf(inner: int) -> int:
+    return inner * 2
+
+
+def per_outer(leaf: Collect[int]) -> list[int]:
+    return list(leaf)
+
+
+def everything(per_outer: Collect[list[int]]) -> list[list[int]]:
+    return list(per_outer)
+"""
+
+
+class Written(fnloom.MemoryCache):
+    """A memory store that records the key of each write."""
+
+    def __init__(self) -> None:
+        """An empty store."""
+        super().__init__()
+        self.keys: list[bytes] = []
+        self.lock = threading.Lock()
+
+    @override
+    def put(self, key: bytes, value: object) -> None:
+        with self.lock:
+            self.keys.append(key)
+        super().put(key, value)
+
+
+def nested_keys(threads: int | None) -> tuple[object, list[bytes]]:
+    """`NESTED`'s result and its stores' keys, without threads or on `threads`."""
+    store = Written()
+    builder = (
+        fnloom.Builder()
+        .with_modules(make_module("nested_keys", NESTED))
+        .with_cache(store)
+    )
+    if threads is not None:
+        builder = builder.with_threads(threads)
+    result = builder.build().execute(["everything"], inputs={"n": 8})
+    return result, sorted(store.keys)
+
+
+def test_nested_expands_pulled_concurrently_key_each_branch() -> None:
+    """Inner expands of different outer branches, pulled at once, key as in sequence."""
+    reference = nested_keys(None)
+    assert reference[1]
+    for _ in range(5):
+        assert nested_keys(8) == reference
+
+
+CHECKED = """
+import time
+
+from fnloom import Collect, Parallelizable, check_output
+
+
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+@check_output(range=(0, 4), importance="warn")
+def details(picked: int) -> int:
+    time.sleep(0.005 * (8 - picked))
+    return picked
+
+
+def summary(details: Collect[int]) -> list[int]:
+    return list(details)
+"""
+
+
+# The top of `CHECKED`'s range check.
+CHECKED_TOP = 4
+
+
+class Checks(fnloom.Hook):
+    """Keeps each branch's `NodeEnd.checks`."""
+
+    def __init__(self) -> None:
+        """No check yet."""
+        self.checks: dict[tuple[int, ...], tuple[fnloom.CheckResult, ...]] = {}
+        self.lock = threading.Lock()
+
+    @override
+    def after_node(self, event: fnloom.NodeEnd) -> None:
+        if event.node.name == "details":
+            with self.lock:
+                self.checks[event.branch] = event.checks
+
+
+def test_check_results_are_per_branch() -> None:
+    """Two branches of a checked node at once each report their own checks."""
+    hook = Checks()
+    driver = (
+        fnloom.Builder()
+        .with_modules(make_module("checked_branches", CHECKED))
+        .with_hooks(hook)
+        .with_threads(8)
+        .build()
+    )
+    assert driver.execute(["summary"], inputs={"n": 8}) == {"summary": list(range(8))}
+    assert {
+        branch: [c.passes for c in found] for branch, found in hook.checks.items()
+    } == {(i,): [i <= CHECKED_TOP] for i in range(8)}

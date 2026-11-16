@@ -119,6 +119,9 @@ event by position, so a new field never breaks a hook.
     - `cache`: the node's [cache outcome](caching.md#explaining-a-run); `None` on a driver with no cache.
     - `branch`: the branch a [block](writing-nodes.md#fan-out-and-fan-in) node runs in, one item index per block,
       outermost first; `()` outside every block. A block node fires its events once per item.
+    - `order`: the step's order key, a tuple of ints. Sorting a run's events by it puts them in the order one worker
+      runs them, across blocks too, so a hook can rebuild that order from a [parallel run](#with-threads).
+      `()` on the async driver.
 - **`NodeEnd`**: `NodeStart`'s fields, plus:
     - `ok`: whether the node returned.
     - `result`: what it returned; `None` unless `ok`.
@@ -129,6 +132,7 @@ event by position, so a new field never breaks a hook.
     - `node`: the expand's `NodeView`.
     - `branch`: the branch the expand ran in; `()` outside every block.
     - `items`: how many items it gave.
+    - `order`: the expand step's order key, as `NodeStart.order`.
 - **`RunEnd`**: `RunStart`'s fields, plus:
     - `ok`: whether the run succeeded.
     - `error`: what stopped it, as `execute` raises it unless an `after_run` hook raises too; `None` if `ok`.
@@ -137,9 +141,10 @@ event by position, so a new field never breaks a hook.
       what the caller later changes in the dict `execute` returned. `None` when the run failed before they were all
       in. A run that only its result builder failed has them, with `ok=False` and the builder's error.
     - `skipped`: each node the run [skipped](writing-nodes.md#declining) because an argument it needs was
-      `fnloom.ABSENT`, as `(node, branch)` pairs in the order skipped. `branch` is `()` outside a block. `()` when
-      nothing was skipped. The sync driver skips in plan order; the async driver in the order its walk reaches each
-      node, as its node events report, which can vary between runs when nodes run in threads.
+      `fnloom.ABSENT`, as `(node, branch)` pairs. `branch` is `()` outside a block. `()` when nothing was skipped.
+      The sync driver sorts them by order key, which is plan order, with or without threads; the async driver lists
+      them in the order its walk reaches each node, as its node events report, which can vary between runs when
+      nodes run in threads.
 
 ```python
 class Ends(fnloom.Hook):
@@ -449,6 +454,20 @@ cached.execute(["total"], inputs={"price": 2.5, "quantity": 4})
 
 Hamilton fires the hooks of a hit, and of every node upstream of it, as if they ran, with nothing saying they didn't
 (Q85). An `AsyncDriver` fires the same events as a `Driver` does.
+
+## With threads
+
+On a driver built with [`with_threads`](running.md#threads), a run's nodes run on several threads, and its hooks:
+
+- are called one at a time for the run, so a hook needs no lock to keep state for one run;
+- run on the thread that ran the node, so `threading.current_thread()` in `after_node` is the node's worker;
+- report nodes in the order they start and finish, as on the async driver: sort by `order` for the order one worker
+  gives. With `with_threads(1)` the events come exactly as without threads, orders included.
+
+A store write runs after the hooks of its node, outside that one-at-a-time section, so a slow store never holds up
+another node's hooks. A hook shared by several runs, from several threads or of several drivers, sees their events
+interleaved, as before: one that keeps state across runs must be safe to call from several threads at once. Hamilton
+calls its hooks from its pool threads at once (Q168).
 
 ## On the async driver
 

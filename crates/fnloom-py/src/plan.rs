@@ -113,7 +113,7 @@ impl Plan {
     ) -> PyResult<Bound<'py, PyDict>> {
         let graph = self.graph.get();
         let keywords = graph.keywords();
-        let kwargs = Kwargs::new(py, graph);
+        let kwargs = Kwargs::new(py, &self.core, graph);
         let mut adapters: Vec<PyObserver<'py, '_>> = observers
             .into_iter()
             .map(|observer| PyObserver::new(observer, &kwargs))
@@ -345,6 +345,8 @@ pub fn keyword_for<'py>(
 /// built once.
 pub struct Kwargs<'py, 'g> {
     py: Python<'py>,
+    /// The plan, for its steps' order keys.
+    plan: &'g CorePlan,
     /// The graph, for the keywords a `@parameterize` row renames.
     graph: &'g Graph,
     /// The dict built for the observers of the node about to run, until its call.
@@ -352,10 +354,11 @@ pub struct Kwargs<'py, 'g> {
 }
 
 impl<'py, 'g> Kwargs<'py, 'g> {
-    /// The keyword arguments of a run over `graph`, none built yet.
-    pub fn new(py: Python<'py>, graph: &'g Graph) -> Self {
+    /// The keyword arguments of a run of `plan` over `graph`, none built yet.
+    pub fn new(py: Python<'py>, plan: &'g CorePlan, graph: &'g Graph) -> Self {
         Self {
             py,
+            plan,
             graph,
             pending: RefCell::new(None),
         }
@@ -365,11 +368,12 @@ impl<'py, 'g> Kwargs<'py, 'g> {
     /// lent to its observers.
     pub fn lending(
         py: Python<'py>,
+        plan: &'g CorePlan,
         graph: &'g Graph,
         consumer: NodeId,
         kwargs: Option<Bound<'py, PyDict>>,
     ) -> Self {
-        let this = Self::new(py, graph);
+        let this = Self::new(py, plan, graph);
         *this.pending.borrow_mut() = kwargs.map(|kwargs| (consumer, kwargs));
         this
     }
@@ -391,6 +395,16 @@ impl<'py> Kwargs<'py, '_> {
             kwargs.set_item(keyword, &arg.value)?;
         }
         Ok(kwargs)
+    }
+
+    /// `node`'s order key in `branch`, as a tuple (`Plan::order_key`).
+    pub fn order(&self, node: &str, branch: &[usize]) -> PyResult<Bound<'py, PyTuple>> {
+        let Some(id) = self.graph.core().id_of(node) else {
+            return Err(PyRuntimeError::new_err(format!(
+                "broken plan: node '{node}' is not in the graph"
+            )));
+        };
+        PyTuple::new(self.py, self.plan.order_key(id, branch).as_slice())
     }
 
     /// The dict `node`'s function is about to be called with, built by the first

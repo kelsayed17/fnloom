@@ -11,7 +11,7 @@
 //! misses the change.
 
 use std::panic::{self, AssertUnwindSafe};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -33,6 +33,9 @@ static NEXT: AtomicUsize = AtomicUsize::new(1);
 
 /// How long closing a pool waits for its idle threads, in all.
 const CLOSING: Duration = Duration::from_secs(1);
+/// How long an idle thread sleeps before it looks at the stop flag again, should a stop
+/// that could not take the lock have woken no one.
+const IDLE: Duration = Duration::from_secs(1);
 
 /// A driver's pool: its caps, its threads and the runs that want work.
 pub struct Pool {
@@ -44,6 +47,8 @@ pub struct Pool {
     pub max_workers: usize,
     state: Mutex<State>,
     wake: Condvar,
+    /// Set once, by `stop`: no thread starts, and every thread leaves.
+    stopping: AtomicBool,
     /// The process that made it: a forked child never locks what it inherited.
     pub pid: u32,
 }
@@ -57,8 +62,6 @@ struct State {
     /// Threads started, and threads ended.
     started: usize,
     exited: usize,
-    /// Set once by `close`: no thread starts, and every thread leaves.
-    stopping: bool,
     handles: Vec<JoinHandle<()>>,
 }
 
@@ -94,11 +97,12 @@ impl Pool {
     fn wait(&self, py: Python<'_>, generation: u64) {
         py.detach(|| {
             let mut state = self.locked();
-            while state.generation == generation && !state.stopping {
+            while state.generation == generation && !self.stopping.load(Ordering::Acquire) {
                 state = self
                     .wake
-                    .wait(state)
-                    .unwrap_or_else(PoisonError::into_inner);
+                    .wait_timeout(state, IDLE)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
             }
         });
     }
@@ -125,7 +129,7 @@ impl Pool {
         self.with_state(py, move |state| {
             state.runs.push(run);
             state.generation += 1;
-            while state.started < pool.size && !state.stopping {
+            while state.started < pool.size && !pool.stopping.load(Ordering::Acquire) {
                 let number = NEXT.fetch_add(1, Ordering::Relaxed);
                 let worker = Arc::clone(&pool);
                 LIVE.fetch_add(1, Ordering::AcqRel);
@@ -160,11 +164,22 @@ impl Pool {
         drop(removed);
     }
 
-    /// Stops the threads: idle ones leave at once, busy ones once their task is done. Waits,
-    /// detached, at most a second for them, and joins those that ended. Idempotent.
+    /// Tells the threads to stop, waiting for nothing: idle ones leave at once, busy ones
+    /// once their task is done. Never blocks, so a collected pool may call it during a
+    /// garbage collection.
+    fn stop(&self) {
+        self.stopping.store(true, Ordering::Release);
+        if let Ok(mut state) = self.state.try_lock() {
+            state.generation += 1;
+        }
+        self.wake.notify_all();
+    }
+
+    /// Stops the threads, then waits, detached, at most a second for them, and joins those
+    /// that ended. Idempotent.
     pub fn close(&self, py: Python<'_>) {
+        self.stop();
         let handles = self.with_state(py, |state| {
-            state.stopping = true;
             state.generation += 1;
             std::mem::take(&mut state.handles)
         });
@@ -193,9 +208,9 @@ impl Pool {
 
     /// The runs that want work, the generation, and whether the pool is stopping.
     fn snapshot(&self, py: Python<'_>) -> (u64, bool, Vec<Arc<Run>>) {
-        self.with_state(py, |state| {
-            (state.generation, state.stopping, state.runs.clone())
-        })
+        let (generation, runs) =
+            self.with_state(py, |state| (state.generation, state.runs.clone()));
+        (generation, self.stopping.load(Ordering::Acquire), runs)
     }
 
     /// A thread ended.
@@ -293,10 +308,10 @@ impl Threads {
                     runs: Vec::new(),
                     started: 0,
                     exited: 0,
-                    stopping: false,
                     handles: Vec::new(),
                 }),
                 wake: Condvar::new(),
+                stopping: AtomicBool::new(false),
                 pid: std::process::id(),
             }),
         })
@@ -324,11 +339,13 @@ impl Threads {
 }
 
 impl Drop for Threads {
+    /// Tells the threads to stop, and waits for none: a collector may run this inside a
+    /// garbage collection, which another thread's `gc.collect()` would then skip.
     fn drop(&mut self) {
         // Inherited across a fork: its locks may be held by threads the child doesn't
         // have, so nothing of it is touched.
         if self.pool.pid == std::process::id() {
-            Python::attach(|py| self.pool.close(py));
+            self.pool.stop();
         }
     }
 }
