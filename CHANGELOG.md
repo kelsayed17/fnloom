@@ -43,6 +43,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
   store writes run after them, so a slow store holds up no other node's hooks; each node sees the context variables
   its caller set (Q167). `NodeStart.order`, `NodeEnd.order` and `ExpandEnd.order` give the step's order key as a
   tuple, so a parallel run's events sort into the order one worker gives; `()` on the async driver.
+- Single-flight per key within a run. On a driver built `with_threads` with a cache, a block node whose key equals one
+  already running in the same run waits for that value, holding no worker, and reports a hit (Q85); a `recompute` or
+  uncacheable node never does, nor do two runs share one.
 
 ### Changed
 

@@ -183,6 +183,29 @@ impl<'py> Scope<'_, 'py> {
         Ok(Some(found.get_item(0)?))
     }
 
+    /// `node`'s single-flight key in `branch`, from `late.flight`: its 32-byte cache key
+    /// when it is stored, or `None` for an uncacheable or `recompute` step, or uncached.
+    pub fn flight(
+        &self,
+        calls: &impl Calls<'py>,
+        node: &Node<Py<PyAny>>,
+        branch: &[usize],
+    ) -> PyResult<Option<[u8; 32]>> {
+        let Some(late) = self.late else {
+            return Ok(None);
+        };
+        let py = self.absent.py();
+        let args = vec![
+            self.name(node).into_any(),
+            PyTuple::new(py, branch)?.into_any(),
+        ];
+        let key = caught(|| calls.call_method(late, intern!(py, "flight"), args))?;
+        if key.is_none() {
+            return Ok(None);
+        }
+        key.extract::<[u8; 32]>().map(Some)
+    }
+
     /// `result` of `node`'s call, once it passes the return check: `fnloom.ABSENT` only
     /// from a node that declines.
     pub fn checked(

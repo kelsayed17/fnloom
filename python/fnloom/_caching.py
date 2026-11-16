@@ -1899,6 +1899,17 @@ class LateKeys:
         if isinstance(key, bytes) and isinstance(value, list):
             self._run.put(key, name, value, self._warned)
 
+    def flight(self, name: str, branch: _Branch) -> bytes | None:
+        """Late node `name`'s single-flight key in `branch`: its key, when it is stored.
+
+        `None` for a node that is not stored, such as a `recompute` one, or whose
+        key is uncacheable or not known yet: such a step is never shared.
+        """
+        if not self._stores(name):
+            return None
+        key = self.key(name, branch)
+        return key if isinstance(key, bytes) else None
+
     def outcome(self, name: str, branch: _Branch, *, hit: bool) -> CacheOutcome:
         """Late node `name`'s cache outcome in `branch`, for its node events."""
         k = self._shape.keys[name]
