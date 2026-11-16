@@ -60,6 +60,11 @@ def cancelled() -> bool:
     or its caller was cancelled. `False` outside a run, and in a run of a
     `Driver` without `with_threads`, unless that run was started by a node of a
     stopping one.
+
+    A node that sees it should return early, or raise `fnloom.StoppedError`,
+    which says only that the node was stopped. Any other error it raises counts
+    as a failure of its own, and may be raised in place of the one that stopped
+    the run, in `run_many` when its input set comes first.
     """
     stop = CANCELLED.get()
     return stop is not None and bool(stop)
@@ -204,7 +209,15 @@ class Workers:
     unpickled driver makes new ones.
     """
 
-    __slots__ = ("_caps", "_graph", "_limits", "_pid", "_threads", "max_workers")
+    __slots__ = (
+        "_caps",
+        "_graph",
+        "_helpers",
+        "_limits",
+        "_pid",
+        "_threads",
+        "max_workers",
+    )
 
     def __init__(
         self, graph: _core.Graph, max_workers: int | None, caps: Caps | None
@@ -218,6 +231,7 @@ class Workers:
         self._caps = caps
         self._pid = os.getpid()
         self._limits, self._threads = self._made()
+        self._helpers = _permits(max_workers)
 
     def _made(self) -> tuple[_core.Limits, _core.Threads | None]:
         limits = make_limits(self._graph, self._caps, self.max_workers)
@@ -230,8 +244,9 @@ class Workers:
         pid = os.getpid()
         if pid != self._pid:
             # Their locks may be held by threads the child doesn't have: never touched.
-            _INHERITED.append((self._limits, self._threads))
+            _INHERITED.append((self._limits, self._threads, self._helpers))
             self._limits, self._threads = self._made()
+            self._helpers = _permits(self.max_workers)
             self._pid = pid
 
     @property
@@ -249,6 +264,20 @@ class Workers:
         self._current()
         return self._limits
 
+    def helpers(self) -> threading.Semaphore:
+        """The permits for `run_many`'s helper threads: `max_workers - 1` per driver.
+
+        So however many callers run `run_many` at once, the driver has at most
+        that many helpers; a caller without a permit runs its sets itself.
+        """
+        self._current()
+        return self._helpers
+
+
+def _permits(max_workers: int | None) -> threading.Semaphore:
+    """`max_workers - 1` helper permits, none without a pool."""
+    return threading.Semaphore(0 if max_workers is None else max_workers - 1)
+
 
 # How long `run_many`'s caller waits for its other runners before it checks for
 # signals again (O22).
@@ -262,6 +291,7 @@ def run_sets[T](
     count: int,
     runners: int,
     timeout: float | None,
+    permits: threading.Semaphore | None = None,
 ) -> list[T]:
     """`run_many`'s input sets 0 to `count - 1`, each run by `one(index, timeout)`.
 
@@ -270,11 +300,13 @@ def run_sets[T](
     raises `TimeoutError`. With one runner, the sets run one after another on the
     calling thread, as a loop of `run` would, and the first failure is raised.
 
-    With more, the caller and `runners - 1` threads each open the next set, by
-    index, as their last one closes, so at most `runners` sets are open at once
-    (O17). Each set runs in its own copy of the caller's context, whose
-    `CANCELLED` is the batch's stop flag: once a set fails, no set opens, and
-    every open set stops, its running nodes finishing first. Then the failure of
+    With more, the caller and up to `runners - 1` threads each open the next
+    set, by index, as their last one closes, so at most `runners` sets are open
+    at once (O17). Each helper thread takes one of the driver's `permits` first,
+    so concurrent callers never have more helpers than it has permits. Each set
+    runs in its own copy of the caller's context, whose `CANCELLED` is the
+    batch's stop flag: once a set fails, no set opens, and every open set stops,
+    its running nodes finishing first. Then the failure of
     the lowest-indexed failing set seen is raised (`_Batch.outcome`). A
     `KeyboardInterrupt` in the caller stops the open sets and is raised at once.
     """
@@ -286,20 +318,26 @@ def run_sets[T](
             try:
                 results.append(one(index, left))
             except BaseException as error:
-                _noted(error, index)
+                _noted(error, index, timeout)
                 raise
         return results
     batch = _Batch(one, count, deadline, timeout)
     helpers: list[threading.Thread] = []
     try:
         for number in range(1, runners):
+            # No permit, or no thread to be had: the sets run on the runners there are.
+            if permits is None or not permits.acquire(blocking=False):
+                break
             thread = threading.Thread(
-                target=batch.work, name=f"fnloom-run-many-{number}", daemon=True
+                target=_helping,
+                args=(batch, permits),
+                name=f"fnloom-run-many-{number}",
+                daemon=True,
             )
             try:
                 thread.start()
             except RuntimeError:
-                # No thread to be had: the sets run on the runners there are.
+                permits.release()
                 break
             helpers.append(thread)
         batch.work(caller=True)
@@ -326,9 +364,32 @@ def _left(deadline: float | None, timeout: float | None, index: int) -> float | 
     return left
 
 
-def _noted(error: BaseException, index: int) -> None:
-    """Notes on `error` which input set of `run_many` raised it."""
+def _helping(batch: _Batch[object], permits: threading.Semaphore) -> None:
+    """A helper thread's part of `batch`, giving its permit back as it ends.
+
+    A forked child gives nothing back: its driver makes new permits, and the
+    inherited ones' lock may be held by a thread the child doesn't have.
+    """
+    pid = os.getpid()
+    try:
+        batch.work()
+    finally:
+        if os.getpid() == pid:
+            permits.release()
+
+
+def _noted(error: BaseException, index: int, timeout: float | None) -> None:
+    """Notes on `error` which input set of `run_many` raised it.
+
+    A set's own `TimeoutError` gives what was left of `run_many`'s `timeout`
+    as it opened, so a second note names the `timeout` itself.
+    """
     error.add_note(f"while running input set {index} of run_many")
+    if timeout is not None and isinstance(error, TimeoutError):
+        error.add_note(
+            f"run_many's timeout={timeout} covers every input set; "
+            "each set gets what is left of it as it opens"
+        )
 
 
 def _derived(error: BaseException) -> bool:
@@ -407,7 +468,7 @@ class _Batch[T]:
                     # Under the lock: no runner opens a set once one has failed.
                     self.stop.set()
                 if caller and isinstance(error, KeyboardInterrupt):
-                    _noted(error, index)
+                    _noted(error, index, self._timeout)
                     raise
 
     def outcome(self) -> list[T]:
@@ -428,7 +489,7 @@ class _Batch[T]:
                 ),
             )
             if opened:
-                _noted(error, index)
+                _noted(error, index, self._timeout)
             raise error
         if any(result is _MISSING for result in self._results):
             msg = "the run that started this run_many has stopped, so it stopped"

@@ -27,6 +27,8 @@ WAIT = 5.0
 # How many sets the counting tests run, and on how many workers.
 SETS = 20
 WORKERS = 2
+# The helper threads `with_threads(4)` allows `run_many`.
+HELPERS = 3
 
 # A small graph each test drives with its own gates. `TOOLS` is a dict the test
 # fills: `meet` a barrier, `gate` an event, `calls` a list, `lock` a lock.
@@ -68,6 +70,8 @@ def stepped(x: int) -> int:
     while time.monotonic() < deadline:
         if fnloom.cancelled():
             TOOLS.setdefault("seen", []).append(x)
+            if TOOLS.get("raise_stop"):
+                raise fnloom.StoppedError(x)
             return -1
         if "gate" in TOOLS and TOOLS["gate"].is_set():
             return x
@@ -114,6 +118,17 @@ def counted(x: int) -> int:
     time.sleep(0.01)
     with TOOLS["lock"]:
         TOOLS["now"] -= 1
+    return x
+
+
+def helpers_seen(x: int) -> int:
+    helpers = sum(t.name.startswith("fnloom-run-many") for t in threading.enumerate())
+    with TOOLS["lock"]:
+        TOOLS["helpers"] = max(TOOLS.get("helpers", 0), helpers)
+    if TOOLS.get("meet") is not None:
+        TOOLS["meet"].wait()
+    else:
+        time.sleep(0.02)
     return x
 
 
@@ -376,6 +391,61 @@ def test_a_stopped_set_never_hides_the_failure_that_stopped_it() -> None:
     assert raised.value.__notes__[-1] == "while running input set 1 of run_many"
 
 
+def test_a_node_raising_stopped_error_never_hides_the_failure() -> None:
+    """Set 0's node sees `cancelled()` and raises `fnloom.StoppedError`: set 1 leads."""
+    nodes = module("rm_raises_stop")
+    nodes.TOOLS.update(fails={1}, started=threading.Event(), raise_stop=True)
+    plan = driver(nodes, 2).prepare(["stepped"], inputs={"x": 0})
+    with pytest.raises(ValueError, match="1") as raised:
+        plan.run_many(sets(0, 1))
+    assert raised.value.__notes__[-1] == "while running input set 1 of run_many"
+    assert nodes.TOOLS["seen"] == [0]
+
+
+def test_only_a_batch_stop_flag_may_be_set() -> None:
+    """A node can't set its own run's flag; `run_many`'s own flag can be set."""
+    source = """
+from fnloom import _threads
+
+
+def setter(x: int) -> int:
+    _threads.CANCELLED.get().set()
+    return x
+"""
+    plan = driver(make_module("rm_setter", source), 2).prepare(
+        ["setter"], inputs={"x": 0}
+    )
+    with pytest.raises(RuntimeError, match="set by its run only"):
+        plan.run(inputs={"x": 1})
+    stop = _core.Stop()
+    assert not stop
+    stop.set()
+    assert stop
+
+
+def test_concurrent_callers_share_the_drivers_helper_threads() -> None:
+    """Any number of callers, the driver has `max_workers - 1` helpers."""
+    nodes = module("rm_callers")
+    nodes.TOOLS["lock"] = threading.Lock()
+    plan = driver(nodes, 4).prepare(["helpers_seen"], inputs={"x": 0})
+    results: list[object] = []
+
+    def call() -> None:
+        results.append(plan.run_many(sets(*range(8))))
+
+    callers = [threading.Thread(target=call) for _ in range(12)]
+    for thread in callers:
+        thread.start()
+    for thread in callers:
+        thread.join(WAIT * 4)
+    assert results == [[{"helpers_seen": x} for x in range(8)]] * 12
+    assert 0 < nodes.TOOLS["helpers"] <= HELPERS
+    # Every permit came back: a lone caller gets its three helpers again.
+    nodes.TOOLS["helpers"] = 0
+    nodes.TOOLS["meet"] = threading.Barrier(4, timeout=WAIT)
+    assert plan.run_many(sets(*range(4))) == [{"helpers_seen": x} for x in range(4)]
+
+
 def test_a_stopped_sets_hook_errors_never_hide_the_failure() -> None:
     """A hook raising on every failed run groups set 0's stop with its error.
 
@@ -494,7 +564,13 @@ def test_run_many_with_timeout() -> None:
         assert time.monotonic() - start < 0.2 + PROMPT
     finally:
         nodes.TOOLS["gate"].set()
-    assert raised.value.__notes__[-1] == "while running input set 0 of run_many"
+    assert raised.value.__notes__ == [
+        "while running input set 0 of run_many",
+        (
+            "run_many's timeout=0.2 covers every input set; "
+            "each set gets what is left of it as it opens"
+        ),
+    ]
     assert runs.opened() == [0, 1]
     assert all(not end.ok for end in runs.ends.values())
 

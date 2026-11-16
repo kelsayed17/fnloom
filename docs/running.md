@@ -917,13 +917,17 @@ fnloom.build(lookups).execute(["answer"], inputs={"question": "why"}, timeout=0.
   deadline, not `TimeoutError`.
 - **`fnloom.cancelled()`** is `True` inside a node once its run is stopping: its deadline passed, another node failed,
   or it was interrupted. On an `AsyncDriver`, with or without `with_threads`, it turns `True` once the run fails or
-  its caller is cancelled. It is `False` outside a run, and in a run of a `Driver` without `with_threads`.
+  its caller is cancelled. It is `False` outside a run, and in a run of a `Driver` without `with_threads`. A node
+  that sees it should return early, or raise `fnloom.StoppedError`, which says only that the node was stopped and is
+  never raised in place of the failure that stopped the run. Any other error the node raises counts as a failure of
+  its own, and in [`run_many`](#many-input-sets) a stopped set that raises one at a lower index outranks the set that
+  failed first.
 - **Runs inside runs** stop with the run that started them. A node of a run started inside a node of a stopping run,
   on any driver and at any depth, sees `cancelled()` turn `True` too. A parallel or async inner run also starts no new
-  node. Once its running nodes return, it returns its outputs if they were all computed. Otherwise it raises a
-  `RuntimeError`: `the run that started this one has stopped or ended, so this one stopped`. The outer run never
-  raises that error in place of the failure that stopped it. A context that outlives a stopped run, such as one a
-  thread copied, keeps it stopped, so a run started from it later stops at once.
+  node. Once its running nodes return, it returns its outputs if they were all computed. Otherwise it raises
+  `fnloom.StoppedError`, a `RuntimeError`: `the run that started this one has stopped or ended, so this one
+  stopped`. The outer run never raises that error in place of the failure that stopped it. A context that outlives a
+  stopped run, such as one a thread copied, keeps it stopped, so a run started from it later stops at once.
 - **`Ctrl-C`** stops a parallel run the same way, with or without a deadline: the nodes still running are abandoned,
   and `KeyboardInterrupt` is raised at once.
 - **Cached runs.** On a driver with a cache, the deadline covers the whole run, the `recompute` nodes run first
@@ -969,9 +973,9 @@ lengths.run_many([{"word": "tea"}, {"word": 3}])
 - **Failures.** Once a set fails, no set opens, and every open set stops as a failed run does: its running nodes
   finish, `fnloom.cancelled()` turns `True` in them, and it starts no new node. Then the failure of the
   lowest-indexed failing set seen is raised, with the note `while running input set 3 of run_many`; with one failing
-  set, that is always its failure. A set that was stopped before its outputs were in raises the "this one stopped"
-  `RuntimeError` of a [run inside a run](#deadlines-and-cancellation), which is never raised in place of the failure
-  that stopped it. A set that never opened fires no hook event.
+  set, that is always its failure. A set that was stopped before its outputs were in raises the
+  `fnloom.StoppedError` of a [run inside a run](#deadlines-and-cancellation), which is never raised in place of the
+  failure that stopped it. A set that never opened fires no hook event.
 - **`timeout=`** covers every set together, and needs `with_threads`. Each set gets what is left of it as it opens,
   and a set not open when it passes never opens.
 - **`Ctrl-C`** stops every open set and is raised at once. A set the calling thread is running abandons its running

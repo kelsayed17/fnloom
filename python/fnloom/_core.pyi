@@ -179,7 +179,8 @@ class Threads:
 @final
 class Stop:
     # A run's stop flag: true once the run is stopping, or one that started it is.
-    # Made here, it is `run_many`'s, under the run the current context is in.
+    # Made here, it is `run_many`'s, under the run the current context is in, and
+    # only such a flag may be `set`: a run's own raises `RuntimeError`.
     def __bool__(self) -> bool: ...
     def set(self) -> None: ...
 

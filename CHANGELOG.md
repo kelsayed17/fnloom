@@ -98,7 +98,10 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `max_workers` open at once, in index order. Once one fails, no set opens and the open ones stop, and the failure of
   the lowest-indexed failing set is raised, noted `while running input set 3 of run_many`. `timeout=` covers every
   set together. Each set is its own run, with its own hook events; a set that never opened fires none. Without
-  `with_threads`, the sets run one after another on the calling thread.
+  `with_threads`, the sets run one after another on the calling thread. A driver has at most `max_workers - 1`
+  helper threads for `run_many`, however many callers run it at once.
+- `fnloom.StoppedError`, the `RuntimeError` a run stopped by the run that started it raises, is public. A node that
+  sees `fnloom.cancelled()` may raise it to stop: it is never raised in place of the failure that stopped its run.
 
 ### Fixed
 

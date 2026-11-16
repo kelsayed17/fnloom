@@ -144,9 +144,9 @@ class _Threaded:
         """The native plan."""
         return self._plan
 
-    def pool(self) -> _core.Threads | None:
-        """The driver's pool, or `None` without `with_threads`."""
-        return self._workers.threads()
+    def workers(self) -> _threads.Workers:
+        """The driver's limits and pool."""
+        return self._workers
 
     def run(
         self,
@@ -739,7 +739,8 @@ class PreparedPlan[R = dict[str, object]]:
         plan = self._plan
         seconds = None if timeout is None else _timeout(plan, timeout)
         runners = 1
-        threads = plan.pool() if isinstance(plan, (_Threaded, CacheRun)) else None
+        workers = plan.workers() if isinstance(plan, (_Threaded, CacheRun)) else None
+        threads = None if workers is None else workers.threads()
         # Inside a task of this driver, the sets share that task's worker slot.
         if threads is not None and not threads.nested():
             runners = min(threads.max_workers, len(sets))
@@ -748,7 +749,8 @@ class PreparedPlan[R = dict[str, object]]:
             given_inputs, given_overrides = sets[index]
             return self._run_checked(given_inputs, given_overrides, left)
 
-        return _threads.run_sets(one, len(sets), runners, seconds)
+        permits = None if workers is None else workers.helpers()
+        return _threads.run_sets(one, len(sets), runners, seconds, permits)
 
     def _run_checked(
         self,

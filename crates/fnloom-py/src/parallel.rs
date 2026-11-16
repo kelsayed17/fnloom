@@ -135,6 +135,9 @@ pub struct Stop {
     own: Arc<AtomicBool>,
     /// The stop flags of the runs that started this one, innermost first.
     ancestors: Vec<Arc<AtomicBool>>,
+    /// Made by `Stop()`, for `run_many`'s input sets: only such a flag may be `set` from
+    /// Python. A run's own flag is the run's to set.
+    batch: bool,
 }
 
 #[pymethods]
@@ -144,17 +147,28 @@ impl Stop {
     /// it is `set`.
     #[new]
     fn py_new(py: Python<'_>) -> PyResult<Self> {
-        Self::current(py)
+        Ok(Self {
+            batch: true,
+            ..Self::current(py)?
+        })
     }
 
     fn __bool__(&self) -> bool {
         self.own.load(Ordering::Acquire) || stopping(&self.ancestors)
     }
 
-    /// Sets the flag: every run that follows it stops.
+    /// Sets the flag: every run that follows it stops. `RuntimeError` on a run's own flag,
+    /// which only its run sets.
     #[pyo3(name = "set")]
-    fn py_set(&self) {
+    fn py_set(&self) -> PyResult<()> {
+        if !self.batch {
+            return Err(PyRuntimeError::new_err(
+                "a run's own stop flag is set by its run only; raise fnloom.StoppedError \
+                 or return to stop a node",
+            ));
+        }
         self.set();
+        Ok(())
     }
 }
 
@@ -172,6 +186,7 @@ impl Stop {
         Ok(Self {
             own: Arc::new(AtomicBool::new(false)),
             ancestors,
+            batch: false,
         })
     }
 
@@ -1542,6 +1557,7 @@ fn prepared<'py>(
     let flag = Stop {
         own: Arc::clone(&own),
         ancestors: ancestors.clone(),
+        batch: false,
     };
     inside.call1((
         cancelled.getattr(intern!(py, "set"))?,
