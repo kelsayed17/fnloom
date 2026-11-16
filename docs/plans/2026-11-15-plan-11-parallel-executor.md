@@ -4,9 +4,8 @@
 > superpowers:executing-plans to implement this plan PR by PR, task by task, with superpowers:test-driven-development
 > inside each task and an independent reviewer subagent per PR. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** implementation plan, awaiting the maintainer's approval. Nothing is built. Drafted 2026-11-15, and revised
-2026-11-16 after an independent review (#99). Every decision the design leaves open is answered here, and gathered in
-[Open questions](#open-questions) for approval in one pass.
+**Status:** approved 2026-11-16 with every recommended answer in [Open questions](#open-questions); nothing is built.
+Drafted 2026-11-15, and revised 2026-11-16 after two rounds of independent review (#99). PR C1 is next.
 
 **Goal:** milestones C to E of the [dynamic execution design](../design/2026-10-28-dynamic-execution-design.md).
 
