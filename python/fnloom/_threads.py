@@ -1,10 +1,13 @@
 """Running one run's nodes in parallel, and limits: a driver's pool, caps and checks."""
 
 import atexit
+import contextvars
 import math
 import os
+import threading
+import time
 import weakref
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
@@ -29,6 +32,7 @@ __all__ = [
     "close_all",
     "make_limits",
     "make_threads",
+    "run_sets",
 ]
 
 # The slots the running calls of this context hold, as `(limits, slot, live)`
@@ -244,6 +248,160 @@ class Workers:
         """The limits every run of the driver is granted slots by."""
         self._current()
         return self._limits
+
+
+# How long `run_many`'s caller waits for its other runners before it checks for
+# signals again (O22).
+_SLICE: Final = 0.05
+# An input set's result before it is in.
+_MISSING: Final = object()
+
+
+def run_sets[T](
+    one: Callable[[int, float | None], T],
+    count: int,
+    runners: int,
+    timeout: float | None,
+) -> list[T]:
+    """`run_many`'s input sets 0 to `count - 1`, each run by `one(index, timeout)`.
+
+    `timeout`, in seconds, covers every set together: each set gets what is left
+    of it when it opens, and a set not open yet when it passes never opens and
+    raises `TimeoutError`. With one runner, the sets run one after another on the
+    calling thread, as a loop of `run` would, and the first failure is raised.
+
+    With more, the caller and `runners - 1` threads each open the next set, by
+    index, as their last one closes, so at most `runners` sets are open at once
+    (O17). Each set runs in its own copy of the caller's context, whose
+    `CANCELLED` is the batch's stop flag: once a set fails, no set opens, and
+    every open set stops, its running nodes finishing first. Then the failure of
+    the lowest-indexed failing set is raised, a `StoppedError` only when no set
+    failed otherwise, since it means only that the set was stopped. A
+    `KeyboardInterrupt` in the caller stops the open sets and is raised at once.
+    """
+    deadline = None if timeout is None else time.monotonic() + timeout
+    if runners <= 1:
+        results: list[T] = []
+        for index in range(count):
+            try:
+                results.append(one(index, _left(deadline, timeout, index)))
+            except BaseException as error:
+                _noted(error, index)
+                raise
+        return results
+    batch = _Batch(one, count, deadline, timeout)
+    helpers: list[threading.Thread] = []
+    try:
+        for number in range(1, runners):
+            thread = threading.Thread(
+                target=batch.work, name=f"fnloom-run-many-{number}", daemon=True
+            )
+            try:
+                thread.start()
+            except RuntimeError:
+                # No thread to be had: the sets run on the runners there are.
+                break
+            helpers.append(thread)
+        batch.work(caller=True)
+        for thread in helpers:
+            while thread.is_alive():
+                thread.join(_SLICE)
+    except BaseException:
+        batch.stop.set()
+        raise
+    return batch.outcome()
+
+
+def _left(deadline: float | None, timeout: float | None, index: int) -> float | None:
+    """What's left of `run_many`'s timeout as set `index` opens; else `TimeoutError`."""
+    if deadline is None:
+        return None
+    left = deadline - time.monotonic()
+    if left <= 0:
+        msg = (
+            f"run_many did not finish within its timeout of {timeout} s; input set "
+            f"{index} and the sets after it did not start"
+        )
+        raise TimeoutError(msg)
+    return left
+
+
+def _noted(error: BaseException, index: int) -> None:
+    """Notes on `error` which input set of `run_many` raised it."""
+    error.add_note(f"while running input set {index} of run_many")
+
+
+class _Batch[T]:
+    """The input sets of one `run_many` call, opened in index order by its runners."""
+
+    __slots__ = (
+        "_context",
+        "_count",
+        "_deadline",
+        "_lock",
+        "_next",
+        "_one",
+        "_results",
+        "_timeout",
+        "failures",
+        "stop",
+    )
+
+    def __init__(
+        self,
+        one: Callable[[int, float | None], T],
+        count: int,
+        deadline: float | None,
+        timeout: float | None,
+    ) -> None:
+        """Sets to run through `one`, none opened yet; see `run_sets`."""
+        self._one = one
+        self._count = count
+        self._deadline = deadline
+        self._timeout = timeout
+        self._lock = threading.Lock()
+        self._next = 0
+        self._results: list[object] = [_MISSING] * count
+        self.failures: list[tuple[int, BaseException]] = []
+        # Under the run the caller is in, if any: so the sets stop with it too.
+        self.stop = _core.Stop()
+        self._context = contextvars.copy_context()
+        self._context.run(CANCELLED.set, self.stop)
+
+    def work(self, *, caller: bool = False) -> None:
+        """Opens the next set and runs it, until none is left or the batch stops."""
+        while True:
+            with self._lock:
+                if self.stop or self._next >= self._count:
+                    return
+                index = self._next
+                self._next += 1
+            try:
+                left = _left(self._deadline, self._timeout, index)
+                self._results[index] = self._context.copy().run(self._one, index, left)
+            except BaseException as error:
+                with self._lock:
+                    self.failures.append((index, error))
+                self.stop.set()
+                if caller and isinstance(error, KeyboardInterrupt):
+                    _noted(error, index)
+                    raise
+
+    def outcome(self) -> list[T]:
+        """Every set's result, once every runner is done; see `run_sets` on failures."""
+        if self.failures:
+            roots = [
+                failure
+                for failure in self.failures
+                if not isinstance(failure[1], _core.StoppedError)
+            ]
+            index, error = min(roots or self.failures, key=lambda failure: failure[0])
+            _noted(error, index)
+            raise error
+        if any(result is _MISSING for result in self._results):
+            msg = "the run that started this run_many has stopped, so it stopped"
+            raise _core.StoppedError(msg)
+        return self._results  # ty: ignore[invalid-return-type]  # every set's result is in
 
 
 def close_all() -> None:

@@ -139,8 +139,22 @@ pub struct Stop {
 
 #[pymethods]
 impl Stop {
+    /// A flag of its own for `run_many`'s input sets, unset, under the run whose task the
+    /// current context is in, if any: a run started where `CANCELLED` holds it stops once
+    /// it is `set`.
+    #[new]
+    fn py_new(py: Python<'_>) -> PyResult<Self> {
+        Self::current(py)
+    }
+
     fn __bool__(&self) -> bool {
         self.own.load(Ordering::Acquire) || stopping(&self.ancestors)
+    }
+
+    /// Sets the flag: every run that follows it stops.
+    #[pyo3(name = "set")]
+    fn py_set(&self) {
+        self.set();
     }
 }
 
@@ -435,6 +449,18 @@ impl Drop for Holding {
 fn holds(limits: &Arc<Caps>) -> bool {
     let id = Arc::as_ptr(limits) as usize;
     WORKING.with(|held| held.borrow().contains(&id))
+}
+
+/// Whether a run started here runs inside a task holding a worker slot of `limits`: on
+/// that task's thread, or where the context of its run's tasks reaches.
+pub(crate) fn inside(py: Python<'_>, limits: &Arc<Caps>) -> PyResult<bool> {
+    if holds(limits) {
+        return Ok(true);
+    }
+    let held = held_variable(py)?
+        .bind(py)
+        .call_method1(intern!(py, "get"), (PyTuple::empty(py),))?;
+    Ok(limits.works(&held))
 }
 
 /// The calls of one task, in its own copy of the run's context, with

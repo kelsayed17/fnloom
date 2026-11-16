@@ -931,6 +931,58 @@ fnloom.build(lookups).execute(["answer"], inputs={"question": "why"}, timeout=0.
 - **Hooks.** `after_run` gets `ok=False` and the `TimeoutError`, and fires once any hook call already going on has
   returned, so a run's hook calls never overlap.
 
+## Many input sets
+
+`PreparedPlan.run_many(inputs_seq, *, overrides=None, timeout=None)` runs a [prepared plan](#prepared-plans) once per
+input set, and returns each set's result, in order (Q171):
+
+```python
+# file: words.py
+def shouted(word: str) -> str:
+    return word.upper()
+
+
+def length(shouted: str) -> int:
+    return len(shouted)
+```
+
+```python
+import words
+
+batch = fnloom.Builder().with_modules(words).with_threads(4).build()
+lengths = batch.prepare(["length"], inputs={"word": ""})
+lengths.run_many([{"word": "tea"}, {"word": "coffee"}, {"word": "cocoa"}])
+# -> [{'length': 3}, {'length': 6}, {'length': 5}]
+lengths.run_many([{"word": "tea"}, {"word": 3}])
+# raises ValueError: word: expected str, got int
+```
+
+- **Each set is its own run**, as `run` would run it: its result is what `run` returns, the result builder's included,
+  and it fires its own hook events, with its own `run_id`. `overrides` is shared by every set.
+- **Checks first.** Every set is checked as `run` checks it before any runs. A set that fails the checks raises, with
+  the note `in input set 1 of run_many` (counting from 0), and no set runs.
+- **Where the sets run.** On a driver built `with_threads`, the sets run on its pool, under its limits: at most
+  `max_workers` sets are open at once, opening in index order as earlier ones end, and `max_workers` caps the nodes of
+  all of them together. Without `with_threads`, the sets run one after another on the calling thread, so the same code
+  works on either driver. Called inside a node of its own driver, `run_many` runs its sets one after another on the
+  worker that node holds.
+- **Failures.** Once a set fails, no set opens, and every open set stops as a failed run does: its running nodes
+  finish, `fnloom.cancelled()` turns `True` in them, and it starts no new node. Then the failure of the
+  lowest-indexed failing set is raised, with the note `while running input set 3 of run_many`. A set that was
+  stopped before its outputs were in raises the "this one stopped" `RuntimeError` of a [run inside a
+  run](#deadlines-and-cancellation), which is never raised in place of the failure that stopped it. A set that never
+  opened fires no hook event.
+- **`timeout=`** covers every set together, and needs `with_threads`. Each set gets what is left of it as it opens,
+  and a set not open when it passes never opens.
+- **`Ctrl-C`** stops every open set and is raised at once. A set the calling thread is running abandons its running
+  nodes, as a run does; the other open sets start no new node, and their running nodes finish in the background,
+  keeping their workers until they return.
+- **Hooks.** Two sets' hook calls may overlap, as two threads' runs do, so a hook that keeps state across runs must be
+  safe to call from several threads at once.
+- **Caching.** Single-flight is per run: two open sets that need the same cached value both compute it. A set that
+  opens after one stored it hits it.
+- **On the async driver** there is no `run_many`: `asyncio.gather` over `AsyncPreparedPlan.run` does the same.
+
 ## Rebuilding after an edit
 
 A driver keeps the functions it was built with. After `importlib.reload` it still runs the old code, as Hamilton's
