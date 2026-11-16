@@ -12,8 +12,8 @@ document is the author's unless it says otherwise; §11 lists them so any can be
 A cache lets a run skip a node whose result is already known: same function, same arguments, so the same value. It
 pays off in two places:
 
-- **Across runs in one process**, as when a prepared plan runs once per incoming bar. Nodes that depend only on what
-  did not change since the last bar (parameters, reference data, slow-moving inputs) are not run again.
+- **Across runs in one process**, as when a prepared plan runs once per incoming record. Nodes that depend only on what
+  did not change since the last record (parameters, reference data, slow-moving inputs) are not run again.
 - **Across processes**, as in a research pipeline rerun after an edit. Only the nodes the edit touches, and the nodes
   downstream of them, run again.
 
@@ -318,8 +318,8 @@ FIX.
 6. **No copies from the memory store.** This is for speed. Mutation is a documented contract violation.
 7. **No index database on disk.** One file per key, atomic replace, and access-time eviction.
 8. **Pickle by default**, behind a pluggable serializer, with version headers.
-9. **Hits as overrides.** Pruning reuses the planner and the plan cache. In a bar loop where the hit set changes
-   every bar, that compiles a plan per new shape. If this shows in the benchmarks, the binding gains a direct
+9. **Hits as overrides.** Pruning reuses the planner and the plan cache. In a record loop where the hit set changes
+   every record, that compiles a plan per new shape. If this shows in the benchmarks, the binding gains a direct
    "run with these nodes available" path.
 10. **BLAKE3 in Rust**, compiled into the extension.
 11. **Keep Hamilton's names** (`with_cache`, `@cache(behavior=...)`, `recompute`, `disable`) for intent, and move

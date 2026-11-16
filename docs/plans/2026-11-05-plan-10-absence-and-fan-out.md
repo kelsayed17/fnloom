@@ -638,8 +638,8 @@ compile. B1 waits for A1 because both rewrite `run.rs`'s slot table.
 - An edge from an expand into its own block passes no absence on. Its consumers read items, and an item is never
   absent. An absent expand makes the block run no branches, and the collects take over (§7.4).
 - Display texts, quoted the way `quoted` quotes:
-    - `'total' reads 'prices' both through Collect and directly, so it would be inside the block of 'tickers' it
-      collects: 'tickers' -> 'prices' -> 'total'`;
+    - `'total' reads 'details' both through Collect and directly, so it would be inside the block of 'picked' it
+      collects: 'picked' -> 'details' -> 'total'`;
     - `'pair' reads blocks of 'left' and 'right', which are unrelated; collect both in one node to pair them`.
 - [ ] **Step 1: Write the failing tests.**
     - `a_block_holds_every_node_reachable_without_a_collect`;

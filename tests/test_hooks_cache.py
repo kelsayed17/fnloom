@@ -261,17 +261,17 @@ RECOMPUTED = """
 from fnloom import cache
 
 
-def symbol(code: str) -> str:
+def item(code: str) -> str:
     return code.upper()
 
 
 @cache(behavior="recompute")
-def price(symbol: str) -> float:
+def price(item: str) -> float:
     return 100.0
 
 
-def value(price: float, lots: int) -> float:
-    return price * lots
+def value(price: float, count: int) -> float:
+    return price * count
 """
 
 
@@ -281,26 +281,26 @@ def test_a_recompute_run_reports_through_the_same_run(
     """The `recompute` nodes a key reads run first, and report in the same run."""
     hook = Recorder()
     cached = Cached(RECOMPUTED, kind, store, tmp_path, hook)
-    inputs: dict[str, object] = {"code": "abc", "lots": 2}
+    inputs: dict[str, object] = {"code": "abc", "count": 2}
     assert cached.execute(["value"], inputs=inputs) == {"value": 200.0}
     assert _outcomes(hook) == [
         (stage, name, outcome)
         for name, outcome in (
-            ("symbol", MISS),
+            ("item", MISS),
             ("price", CacheOutcome("miss", "policy recompute (decorator)")),
             ("value", MISS),
         )
         for stage in ("before_node", "after_node")
     ]
-    assert hook.of(RunStart)[0].nodes == ("symbol", "price", "value")
+    assert hook.of(RunStart)[0].nodes == ("item", "price", "value")
     hook.log.clear()
     hook.events.clear()
     assert cached.execute(["value"], inputs=inputs) == {"value": 200.0}
-    # `symbol` hits in the run of `price`, which runs, and then `value` hits.
+    # `item` hits in the run of `price`, which runs, and then `value` hits.
     assert _stages(hook) == [
         ("before_run", None),
-        ("before_node", "symbol"),
-        ("after_node", "symbol"),
+        ("before_node", "item"),
+        ("after_node", "item"),
         ("before_node", "price"),
         ("after_node", "price"),
         ("before_node", "value"),
@@ -309,7 +309,7 @@ def test_a_recompute_run_reports_through_the_same_run(
     ]
     assert [e.cache.status for e in hook.of(NodeEnd)] == ["hit", "miss", "hit"]
     # Which nodes after `price` hit is known only once it ran.
-    assert hook.of(RunStart)[0].nodes == ("symbol", "price", "value")
+    assert hook.of(RunStart)[0].nodes == ("item", "price", "value")
 
 
 def test_a_value_check_that_fails_lists_no_nodes(
@@ -379,17 +379,17 @@ BOUNDED = """
 from fnloom import cache
 
 
-def symbol(code: str) -> str:
+def item(code: str) -> str:
     return code.upper()
 
 
 @cache(behavior="recompute")
-def price(symbol: str) -> float:
+def price(item: str) -> float:
     return 100.0
 
 
-def units(lots: int) -> int:
-    return lots * 10
+def units(count: int) -> int:
+    return count * 10
 
 
 def value(price: float, units: int) -> float:
@@ -403,18 +403,18 @@ def test_a_recompute_run_lists_nodes_it_may_not_report(
     """R9: before `price` runs, `nodes` can only bound what the outer level reports."""
     hook = Recorder()
     cached = Cached(BOUNDED, kind, store, tmp_path, hook)
-    inputs: dict[str, object] = {"code": "abc", "lots": 2}
+    inputs: dict[str, object] = {"code": "abc", "count": 2}
     assert cached.execute(["value"], inputs=inputs) == {"value": 2000.0}
     hook.log.clear()
     hook.events.clear()
     assert cached.execute(["value"], inputs=inputs) == {"value": 2000.0}
     reported = tuple(e.node.name for e in hook.of(NodeStart))
     # `value` hits, so `units`, which only it needs, neither runs nor reports...
-    assert reported == ("symbol", "price", "value")
+    assert reported == ("item", "price", "value")
     nodes = hook.of(RunStart)[0].nodes
     # ...yet `nodes`, fixed before `price` ran, lists it: an upper bound.
-    assert nodes[:2] == ("symbol", "price")
-    assert set(nodes) == {"symbol", "price", "units", "value"}
+    assert nodes[:2] == ("item", "price")
+    assert set(nodes) == {"item", "price", "units", "value"}
     assert "units" not in reported
     assert hook.of(RunEnd)[0].nodes == nodes
 

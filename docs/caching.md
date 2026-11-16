@@ -12,20 +12,20 @@ first on this page: a node that reads the outside world must say so.
 The examples on this page use one module:
 
 ```python
-# file: quotes.py
-def spread(bid: float, ask: float) -> float:
-    """The distance between the best prices."""
-    return ask - bid
+# file: bounds.py
+def width(low: float, high: float) -> float:
+    """The distance between the bounds."""
+    return high - low
 
 
-def mid(bid: float, ask: float) -> float:
-    """The price halfway between them."""
-    return (bid + ask) / 2
+def centre(low: float, high: float) -> float:
+    """The value halfway between them."""
+    return (low + high) / 2
 
 
-def relative_spread(spread: float, mid: float) -> float:
-    """The spread as a share of the mid price."""
-    return spread / mid
+def relative_width(width: float, centre: float) -> float:
+    """The width as a share of the centre."""
+    return width / centre
 ```
 
 ## Turning it on
@@ -35,29 +35,29 @@ life of the process; `fnloom.DiskCache(path)` keeps them on disk, across process
 
 ```python
 import fnloom
-import quotes
+import bounds
 
-driver = fnloom.Builder().with_modules(quotes).with_cache(fnloom.MemoryCache()).build()
-driver.execute(["relative_spread"], inputs={"bid": 99.0, "ask": 101.0})
-# -> {'relative_spread': 0.02}
+driver = fnloom.Builder().with_modules(bounds).with_cache(fnloom.MemoryCache()).build()
+driver.execute(["relative_width"], inputs={"low": 99.0, "high": 101.0})
+# -> {'relative_width': 0.02}
 ```
 
 Nothing else changes: `execute`, `prepare` and `PreparedPlan.run` work as without a cache, and return what they would
 return without it. Each run works out every node's **key** from the node's code and the values it reads, finds the
 stored results nearest the outputs, and runs and stores the rest. A second run with the same inputs loads
-`relative_spread` and runs nothing; `explain_cache` shows it without running anything:
+`relative_width` and runs nothing; `explain_cache` shows it without running anything:
 
 ```python
-driver.explain_cache(["relative_spread"], inputs={"bid": 99.0, "ask": 101.0})
-# -> {"mid": ("hit", None), "relative_spread": ("hit", None), "spread": ("hit", None)}
+driver.explain_cache(["relative_width"], inputs={"low": 99.0, "high": 101.0})
+# -> {"centre": ("hit", None), "relative_width": ("hit", None), "width": ("hit", None)}
 ```
 
 With other inputs, every key changes, so every node misses:
 
 ```python
-outcomes = driver.explain_cache(["relative_spread"], inputs={"bid": 99.0, "ask": 102.0})
+outcomes = driver.explain_cache(["relative_width"], inputs={"low": 99.0, "high": 102.0})
 {name: outcome.status for name, outcome in outcomes.items()}
-# -> {"mid": "miss", "relative_spread": "miss", "spread": "miss"}
+# -> {"centre": "miss", "relative_width": "miss", "width": "miss"}
 ```
 
 A key covers a node's code as well as its inputs, so an edit to the function, to a helper it calls or to a constant
@@ -73,13 +73,13 @@ code**, with `driver.rebuild()` ([Code versions](#code-versions)).
 import asyncio
 
 store = fnloom.MemoryCache()
-builder = fnloom.Builder().with_modules(quotes).with_cache(store)
-quote = {"bid": 98.0, "ask": 102.0}
-asyncio.run(builder.build_async().execute(["relative_spread"], inputs=quote))
-# -> {'relative_spread': 0.04}
-outcomes = builder.build().explain_cache(["relative_spread"], inputs=quote)
+builder = fnloom.Builder().with_modules(bounds).with_cache(store)
+sample = {"low": 98.0, "high": 102.0}
+asyncio.run(builder.build_async().execute(["relative_width"], inputs=sample))
+# -> {'relative_width': 0.04}
+outcomes = builder.build().explain_cache(["relative_width"], inputs=sample)
 {name: outcome.status for name, outcome in outcomes.items()}
-# -> {"mid": "hit", "relative_spread": "hit", "spread": "hit"}
+# -> {"centre": "hit", "relative_width": "hit", "width": "hit"}
 ```
 
 Each node is stored as it succeeds. A node that fails, or that a failing node cancels, stores nothing, so the next run
@@ -101,7 +101,7 @@ request to a service: their result can change while their parameters stay the sa
 hit when its result did not change. An unmarked loader is the one way to get a stale result from the cache.
 
 ```python
-# file: prices_file.py
+# file: reading_log.py
 from pathlib import Path
 
 from fnloom import cache
@@ -113,27 +113,27 @@ def raw(path: str) -> str:
     return Path(path).read_text(encoding="utf-8")
 
 
-def prices(raw: str) -> list[float]:
-    """One price per line."""
+def readings(raw: str) -> list[float]:
+    """One reading per line."""
     return [float(line) for line in raw.split()]
 
 
-def high(prices: list[float]) -> float:
-    """The highest price."""
-    return max(prices)
+def high(readings: list[float]) -> float:
+    """The highest reading."""
+    return max(readings)
 ```
 
 ```python
 import tempfile
 from pathlib import Path
 
-import prices_file
+import reading_log
 
 folder = Path(tempfile.mkdtemp())
-path = folder / "prices.txt"
+path = folder / "readings.txt"
 path.write_text("1.5\n2.5\n", encoding="utf-8")
 loader = (
-    fnloom.Builder().with_modules(prices_file).with_cache(fnloom.MemoryCache()).build()
+    fnloom.Builder().with_modules(reading_log).with_cache(fnloom.MemoryCache()).build()
 )
 loader.execute(["high"], inputs={"path": str(path)})
 # -> {'high': 2.5}
@@ -142,7 +142,7 @@ loader.execute(["high"], inputs={"path": str(path)})
 # -> {'high': 3.5}
 ```
 
-`raw` read the new text, and `prices` and `high` ran again because `raw`'s result changed. Had the file been
+`raw` read the new text, and `readings` and `high` ran again because `raw`'s result changed. Had the file been
 unchanged, they would have hit.
 
 **A cached node never mutates its arguments.** A `MemoryCache` hit returns the stored object itself, not a copy, so a
@@ -175,15 +175,15 @@ pickled: a client, a connection, a lock.
 versioned. Every other node reading `client` is unaffected.
 
 ```python
-# file: market.py
+# file: station.py
 from fnloom import cache
 
 
 class Client:
-    """A connection to a price service, which must never be pickled."""
+    """A connection to a sensor service, which must never be pickled."""
 
-    def last_price(self, symbol: str) -> float:
-        """What the service quotes; fixed here."""
+    def last_reading(self, sensor: str) -> float:
+        """What the service reports; fixed here."""
         return 101.0
 
 
@@ -194,29 +194,29 @@ def client() -> Client:
 
 
 @cache(behavior="recompute", ignore=("client",))
-def last(client: Client, symbol: str) -> float:
-    """The latest price: the outside world, so `recompute`."""
-    return client.last_price(symbol)
+def last(client: Client, sensor: str) -> float:
+    """The latest reading: the outside world, so `recompute`."""
+    return client.last_reading(sensor)
 
 
 @cache(ignore=("client",))
-def lot_value(client: Client, last: float, lots: int) -> float:
-    """What the lots are worth, whichever client is passed."""
-    return last * lots * 100
+def scaled(client: Client, last: float, gain: int) -> float:
+    """The reading in hundredths times the gain, whichever client is passed."""
+    return last * gain * 100
 ```
 
 ```python
-import market
+import station
 
-feed = fnloom.Builder().with_modules(market).with_cache(fnloom.MemoryCache()).build()
-feed.execute(["lot_value"], inputs={"symbol": "ABC", "lots": 2})
-# -> {'lot_value': 20200.0}
-feed.explain_cache(["lot_value"], inputs={"symbol": "ABC", "lots": 2})
-# -> {"client": ("uncacheable", "policy disable (decorator)"), "last": ("miss", "policy recompute (decorator)"), "lot_value": ("unknown", "downstream of recompute node 'last'")}
+live = fnloom.Builder().with_modules(station).with_cache(fnloom.MemoryCache()).build()
+live.execute(["scaled"], inputs={"sensor": "ABC", "gain": 2})
+# -> {'scaled': 20200.0}
+live.explain_cache(["scaled"], inputs={"sensor": "ABC", "gain": 2})
+# -> {"client": ("uncacheable", "policy disable (decorator)"), "last": ("miss", "policy recompute (decorator)"), "scaled": ("unknown", "downstream of recompute node 'last'")}
 ```
 
-`lot_value` is `unknown` to `explain_cache` because its key depends on `last`'s result, which only a run knows: in a
-run, `last` runs first, and `lot_value` hits when `last` returned the same price.
+`scaled` is `unknown` to `explain_cache` because its key depends on `last`'s result, which only a run knows: in a
+run, `last` runs first, and `scaled` hits when `last` returned the same reading.
 
 **`version="..."`** replaces the automatic code version with your own string, for a function the automatic one
 cannot cover, such as one that reads a mutable global or a file next to its module. Change the string whenever what
@@ -227,18 +227,18 @@ row's `value()` constants and bindings included, are still part of its key.
 # file: weights.py
 from fnloom import cache
 
-WEIGHTS = {"bid": 0.4, "ask": 0.6}
+WEIGHTS = {"low": 0.4, "high": 0.6}
 
 
-def plain_weighted(bid: float, ask: float) -> float:
+def plain_weighted(low: float, high: float) -> float:
     """Reads a dict, which may change unseen: uncacheable."""
-    return bid * WEIGHTS["bid"] + ask * WEIGHTS["ask"]
+    return low * WEIGHTS["low"] + high * WEIGHTS["high"]
 
 
 @cache(version="weights-1")
-def weighted(bid: float, ask: float) -> float:
+def weighted(low: float, high: float) -> float:
     """The same, vouched for by hand."""
-    return bid * WEIGHTS["bid"] + ask * WEIGHTS["ask"]
+    return low * WEIGHTS["low"] + high * WEIGHTS["high"]
 ```
 
 ```python
@@ -248,7 +248,7 @@ vouched = (
     fnloom.Builder().with_modules(weights).with_cache(fnloom.MemoryCache()).build()
 )
 outcomes = vouched.explain_cache(
-    ["plain_weighted", "weighted"], inputs={"bid": 1.0, "ask": 2.0}
+    ["plain_weighted", "weighted"], inputs={"low": 1.0, "high": 2.0}
 )
 outcomes["plain_weighted"].reason
 # -> "global 'WEIGHTS' of 'plain_weighted' is a dict, which may change; give @cache(version=...)"
@@ -405,32 +405,32 @@ Anything else cannot be fingerprinted, at any depth, and is never replaced by a 
 node reading it runs, and `explain_cache` names its type and where it sits in the value.
 
 ```python
-# file: sizes_book.py
-def total_size(levels: list[object]) -> int:
-    """The size at every level of the book."""
-    return sum(level.size for level in levels)
+# file: shelf_size.py
+def total_size(shelves: list[object]) -> int:
+    """The size on every shelf together."""
+    return sum(shelf.size for shelf in shelves)
 ```
 
 ```python
-import sizes_book
+import shelf_size
 
 
-class Level:
-    """A price level, which fnloom cannot fingerprint until told how."""
+class Shelf:
+    """A shelf, which fnloom cannot fingerprint until told how."""
 
-    __slots__ = ("price", "size")
+    __slots__ = ("width", "size")
 
-    def __init__(self, price: float, size: int) -> None:
-        self.price = price
+    def __init__(self, width: float, size: int) -> None:
+        self.width = width
         self.size = size
 
 
-book = (
-    fnloom.Builder().with_modules(sizes_book).with_cache(fnloom.MemoryCache()).build()
+storeroom = (
+    fnloom.Builder().with_modules(shelf_size).with_cache(fnloom.MemoryCache()).build()
 )
-levels = [Level(100.0, 5), Level(100.5, 3)]
-book.explain_cache(["total_size"], inputs={"levels": levels})
-# -> {"total_size": ("uncacheable", "levels[0]: Level")}
+shelves = [Shelf(100.0, 5), Shelf(100.5, 3)]
+storeroom.explain_cache(["total_size"], inputs={"shelves": shelves})
+# -> {"total_size": ("uncacheable", "shelves[0]: Shelf")}
 ```
 
 **Registering more.** A class you own can define `__fnloom_fingerprint__`, returning something that can itself be
@@ -438,8 +438,8 @@ fingerprinted. For a class you do not own, `fnloom.register_fingerprint(cls, fn)
 subclasses too, the most specific registration first.
 
 ```python
-fnloom.register_fingerprint(Level, lambda level: (level.price, level.size))
-book.explain_cache(["total_size"], inputs={"levels": levels})
+fnloom.register_fingerprint(Shelf, lambda shelf: (shelf.width, shelf.size))
+storeroom.explain_cache(["total_size"], inputs={"shelves": shelves})
 # -> {"total_size": ("miss", None)}
 ```
 
@@ -542,7 +542,7 @@ A node that declines ([Declining](writing-nodes.md#declining)) is cached like an
 result, stored under its key, and a hit replays it, so each node that requires it is skipped again without running.
 
 ```python
-# file: stock.py
+# file: wares.py
 from fnloom import ABSENT, Absent
 
 
@@ -558,9 +558,9 @@ def count(listing: list[str]) -> int:
 
 ```python
 import fnloom
-import stock
+import wares
 
-shop = fnloom.Builder().with_modules(stock).with_cache(fnloom.MemoryCache()).build()
+shop = fnloom.Builder().with_modules(wares).with_cache(fnloom.MemoryCache()).build()
 shop.execute(["count"], inputs={"item": "desk"})
 # -> {'count': fnloom.ABSENT}
 shop.explain_cache(["count"], inputs={"item": "desk"})
@@ -719,9 +719,9 @@ from fnloom import cache
 
 
 @cache(format="json")
-def summary(bid: float, ask: float) -> dict[str, float]:
-    """The quote, stored as JSON that any tool can read."""
-    return {"bid": bid, "ask": ask}
+def summary(low: float, high: float) -> dict[str, float]:
+    """The bounds, stored as JSON that any tool can read."""
+    return {"low": low, "high": high}
 ```
 
 ```python
@@ -731,8 +731,8 @@ import summary
 
 store = fnloom.DiskCache(tempfile.mkdtemp())
 built = fnloom.Builder().with_modules(summary).with_cache(store).build()
-built.execute(["summary"], inputs={"bid": 99.0, "ask": 101.0})
-# -> {'summary': {'bid': 99.0, 'ask': 101.0}}
+built.execute(["summary"], inputs={"low": 99.0, "high": 101.0})
+# -> {'summary': {'low': 99.0, 'high': 101.0}}
 sorted(store.formats)
 # -> ['json', 'pickle']
 ```
@@ -749,12 +749,12 @@ sorted(store.formats)
 import shutil
 
 directory = tempfile.mkdtemp()
-quote = {"bid": 99.0, "ask": 101.0}
-writer = fnloom.Builder().with_modules(quotes).with_cache(fnloom.DiskCache(directory))
-writer.build().execute(["relative_spread"], inputs=quote)
-# -> {'relative_spread': 0.02}
-reader = fnloom.Builder().with_modules(quotes).with_cache(fnloom.DiskCache(directory))
-reader.build().explain_cache(["relative_spread"], inputs=quote)["relative_spread"]
+sample = {"low": 99.0, "high": 101.0}
+writer = fnloom.Builder().with_modules(bounds).with_cache(fnloom.DiskCache(directory))
+writer.build().execute(["relative_width"], inputs=sample)
+# -> {'relative_width': 0.02}
+reader = fnloom.Builder().with_modules(bounds).with_cache(fnloom.DiskCache(directory))
+reader.build().explain_cache(["relative_width"], inputs=sample)["relative_width"]
 # -> ("hit", None)
 shutil.rmtree(directory)
 shutil.rmtree(folder)

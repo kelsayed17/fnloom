@@ -12,7 +12,7 @@ probed on Python 3.14 (§11). Every decision is a call this design makes, change
 Three things a fnloom user can't do today:
 
 1. **Run part of a graph once per item of a list that exists only at run time**, and gather the results: one branch
-   per file, per ticker, per parameter set. Hamilton does this with `Parallelizable[T]` and `Collect[T]`, behind an
+   per file, per city, per parameter set. Hamilton does this with `Parallelizable[T]` and `Collect[T]`, behind an
    "experimental" flag. In fnloom it is a Python loop around `execute`, which loses caching per item, hooks per item,
    and parallelism.
 2. **Run independent nodes at the same time.** fnloom runs one node at a time on `Driver`, and concurrently only for
@@ -83,16 +83,16 @@ The design fails, even if every test passes, if:
 from fnloom import Collect, Parallelizable
 
 
-def tickers(universe: str) -> Parallelizable[str]:
-    yield from load_universe(universe)  # or: return [...]
+def picked(listing: str) -> Parallelizable[str]:
+    yield from load_listing(listing)  # or: return [...]
 
 
-def prices(tickers: str, day: date) -> float:  # runs once per ticker; `day` is shared
-    return fetch(tickers, day)
+def details(picked: str, region: str) -> float:  # once per item; `region` is shared
+    return fetch(picked, region)
 
 
-def total(prices: Collect[float]) -> float:  # prices is a list[float], in ticker order
-    return sum(prices)
+def summary(details: Collect[float]) -> float:  # details: a list[float], in item order
+    return sum(details)
 ```
 
 - `Parallelizable[T]` and `Collect[T]` keep Hamilton's names and shape (design §5: same name, same intent), so a
@@ -172,7 +172,7 @@ Keys compare lexicographically.
   block, so it gathers per outer branch. Branch paths grow by one index per level. The scheduler keeps an explicit
   stack of block instances, so nesting never recurses in Rust or Python (design guarantee: no recursion over depth).
   Nesting depth is bounded only by the graph.
-- **Namespaces.** Blocks are named by their expand node, which carries its namespace (`ns.tickers`), so two copies of
+- **Namespaces.** Blocks are named by their expand node, which carries its namespace (`ns.picked`), so two copies of
   a module through `with_modules(..., namespace=)` have two independent blocks.
 - **`bind=` (Q112).** A copy's input bound to an outer node becomes a shared value of the copy's blocks. A binding to
   a block node of another copy is refused like any cross-block edge (§4.2); binding to that copy's `Collect` node is
@@ -188,7 +188,7 @@ By default a failing branch fails the run, as a failing node does today:
 - no new step starts, in any branch; steps already running finish (they can't be interrupted, §6.5), and their
   results are dropped;
 - the run raises the failing node's own exception once, with a note naming the node and its branch path
-  (`while computing 'prices' for branch (3,) of 'tickers'`), never an `ExceptionGroup`, so `except KeyError` works
+  (`while computing 'details' for branch (3,) of 'picked'`), never an `ExceptionGroup`, so `except KeyError` works
   as it does today (Q66's rule);
 - among the failures seen before the run stopped, the one with the lowest order key (§4.3) is raised. With one
   worker, or one failing node, that is deterministic and is today's behaviour; with several workers and several
@@ -243,7 +243,7 @@ The caching design's rules hold unchanged for nodes outside blocks. For a block:
   those three amend are listed in §10.
 - **Node wrappers** (Q111) wrap each branch's call, and `NodeView` tells them the node, not the branch; the branch
   path is on a context variable, `fnloom.current_branch()`, readable from a wrapper, a check or the node itself.
-- **Drawing.** `draw()` and its kin draw a block as a cluster labelled `for each item of tickers`, the expand node's
+- **Drawing.** `draw()` and its kin draw a block as a cluster labelled `for each item of picked`, the expand node's
   edge into it marked `expand` and each `Collect` edge out marked `collect`, in DOT and Mermaid, independent of the
   hash seed (Q94). `draw_execution` draws the plan, not a run, so a block is drawn once.
 - **Export.** Nodes gain `kind: "expand" | "collect"`, `block` and `may_be_absent`. A reader that switches on `kind`
@@ -387,9 +387,9 @@ The [Threads](../running.md#threads) guarantees hold and extend to parallel runs
 from fnloom import ABSENT, Absent
 
 
-def quote(ticker: str) -> float | Absent:
-    q = feed.get(ticker)
-    return ABSENT if q is None else q.price
+def details(picked: str) -> float | Absent:
+    found = catalog.get(picked)
+    return ABSENT if found is None else found.size
 ```
 
 `fnloom.Absent` is a final class with one instance, `fnloom.ABSENT`. It is distinct from `None`, which stays a value
@@ -446,7 +446,7 @@ output that is absent is `ABSENT` in the result dict.
 
 ```python
 @fnloom.absent_on(TimeoutError, ConnectionError)
-async def quote(ticker: str) -> float | Absent: ...
+async def details(picked: str) -> float | Absent: ...
 ```
 
 When the node raises one of those (or a subclass), its outcome is `ABSENT` instead of a failure. `after_node` still
@@ -468,9 +468,9 @@ What Plan 10 delivers, and what it only leaves room for:
 |---|---|---|
 | Mixed Python/Rust graphs (design §11) | The scheduler is in the core and generic over `P`; workers attach only for Python payloads | A Rust payload runs on a worker without the GIL, in parallel even on the GIL build |
 | Zero-copy arrays | Branch values are passed by reference; nothing is copied per branch or per worker | A native array value type in the binding |
-| Streaming and per-node state | Lazy expand with an in-flight bound; a block's sub-plan is a reusable per-item step | A `Stream[T]` expand whose collect is a fold, and stateful nodes carrying state from branch *i* to *i+1*: a plan stepped bar by bar |
+| Streaming and per-node state | Lazy expand with an in-flight bound; a block's sub-plan is a reusable per-item step | A `Stream[T]` expand whose collect is a fold, and stateful nodes carrying state from branch *i* to *i+1*: a plan stepped record by record |
 | Incremental execution | Content-addressed branch keys: an appended item computes one branch, and the rest hit | Incremental collect (fold over new branches only) |
-| Panel execution | In-graph: expand over entities; and `PreparedPlan.run_many(inputs_seq)`, one prepared plan over many input sets on the pool, results in order (maintainer, 2026-10-29) | Panels that share work across entities |
+| Batch execution | In-graph: expand over entities; and `PreparedPlan.run_many(inputs_seq)`, one prepared plan over many input sets on the pool, results in order (maintainer, 2026-10-29) | Batches that share work across entities |
 | Sweep execution | An expand node over parameter sets | A `sweep(...)` helper over a grid of `value()`s |
 | Graphs that carry I/O and failure | `absent_on`, `Collect` over partial results, cancellation, deadlines | Retries and backoff, as a node wrapper recipe |
 | Array contracts (Q9/Q17/Q18) | Untouched | Unchanged |

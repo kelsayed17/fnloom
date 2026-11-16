@@ -365,49 +365,49 @@ mod tests {
         node.block.map(|id| graph.node(id).name.clone())
     }
 
-    /// `tickers` expands `universe`; `prices` reads each ticker and the shared `day`;
-    /// `scaled` reads `prices`; `total` collects `scaled`.
-    fn tickers() -> Vec<NodeSpec<()>> {
+    /// `picked` expands `listing`; `details` reads each item and the shared `region`;
+    /// `scaled` reads `details`; `total` collects `scaled`.
+    fn catalog() -> Vec<NodeSpec<()>> {
         vec![
-            expanding("tickers", &[plain("universe")], ()),
-            reading("day", &[], ()),
-            reading("prices", &[plain("tickers"), plain("day")], ()),
-            reading("scaled", &[plain("prices")], ()),
+            expanding("picked", &[plain("listing")], ()),
+            reading("region", &[], ()),
+            reading("details", &[plain("picked"), plain("region")], ()),
+            reading("scaled", &[plain("details")], ()),
             reading("total", &[collect("scaled")], ()),
         ]
     }
 
     #[test]
     fn a_block_holds_every_node_reachable_without_a_collect() {
-        let g = build(tickers());
-        assert_eq!(block(&g, "prices").as_deref(), Some("tickers"));
-        assert_eq!(block(&g, "scaled").as_deref(), Some("tickers"));
-        assert_eq!(path(&g, "scaled"), ["tickers"]);
-        for outside in ["tickers", "universe", "day", "total"] {
+        let g = build(catalog());
+        assert_eq!(block(&g, "details").as_deref(), Some("picked"));
+        assert_eq!(block(&g, "scaled").as_deref(), Some("picked"));
+        assert_eq!(path(&g, "scaled"), ["picked"]);
+        for outside in ["picked", "listing", "region", "total"] {
             assert_eq!(block(&g, outside), None, "{outside}");
             assert_eq!(path(&g, outside), [] as [String; 0], "{outside}");
         }
-        assert!(g.node(g.id_of("tickers").unwrap()).is_expand());
+        assert!(g.node(g.id_of("picked").unwrap()).is_expand());
     }
 
     #[test]
     fn shared_outer_nodes_stay_outside() {
-        let mut specs = tickers();
-        specs.push(reading("rate", &[plain("day")], ()));
+        let mut specs = catalog();
+        specs.push(reading("rate", &[plain("region")], ()));
         specs.push(reading("converted", &[plain("scaled"), plain("rate")], ()));
         specs.push(reading("sum", &[collect("converted")], ()));
         let g = build(specs);
         assert_eq!(block(&g, "rate"), None);
-        assert_eq!(block(&g, "day"), None);
-        assert_eq!(block(&g, "converted").as_deref(), Some("tickers"));
+        assert_eq!(block(&g, "region"), None);
+        assert_eq!(block(&g, "converted").as_deref(), Some("picked"));
     }
 
     #[test]
     fn two_collects_of_one_block_build() {
         // Q123.
-        let mut specs = tickers();
+        let mut specs = catalog();
         specs.push(reading("count", &[collect("scaled")], ()));
-        specs.push(reading("first", &[collect("prices")], ()));
+        specs.push(reading("first", &[collect("details")], ()));
         let g = build(specs);
         for collector in ["total", "count", "first"] {
             assert_eq!(block(&g, collector), None, "{collector}");
@@ -416,40 +416,40 @@ mod tests {
 
     #[test]
     fn reading_a_block_node_and_its_collect_is_refused_with_the_path() {
-        // Q124: reading `prices` puts `total` in the block it collects.
+        // Q124: reading `details` puts `total` in the block it collects.
         let err = refusal(vec![
-            expanding("tickers", &[], ()),
-            reading("prices", &[plain("tickers")], ()),
-            reading("total", &[collect("prices"), plain("prices")], ()),
+            expanding("picked", &[], ()),
+            reading("details", &[plain("picked")], ()),
+            reading("total", &[collect("details"), plain("details")], ()),
         ]);
         assert_eq!(
             err,
             BuildError::CollectsOwnBlock {
                 consumer: "total".to_owned(),
-                source: "prices".to_owned(),
-                expand: "tickers".to_owned(),
-                path: strings(&["tickers", "prices", "total"]),
+                source: "details".to_owned(),
+                expand: "picked".to_owned(),
+                path: strings(&["picked", "details", "total"]),
             }
         );
         assert_eq!(
             err.to_string(),
-            "'total' reads 'prices' both through Collect and directly, so it would be inside \
-             the block of 'tickers' it collects: 'tickers' -> 'prices' -> 'total'"
+            "'total' reads 'details' both through Collect and directly, so it would be inside \
+             the block of 'picked' it collects: 'picked' -> 'details' -> 'total'"
         );
         // Reading another node of the block is the same refusal, through that node.
-        let mut specs = tickers();
-        specs.push(reading("both", &[collect("scaled"), plain("prices")], ()));
+        let mut specs = catalog();
+        specs.push(reading("both", &[collect("scaled"), plain("details")], ()));
         let err = refusal(specs);
         assert_eq!(
             err.to_string(),
-            "'both' collects 'scaled' but also reads the block of 'tickers' directly, so it \
-             would be inside the block it collects: 'tickers' -> 'prices' -> 'both'"
+            "'both' collects 'scaled' but also reads the block of 'picked' directly, so it \
+             would be inside the block it collects: 'picked' -> 'details' -> 'both'"
         );
     }
 
     #[test]
     fn collecting_one_node_two_ways_is_a_conflicting_input() {
-        let mut specs = tickers();
+        let mut specs = catalog();
         specs.push(reading(
             "both",
             &[
@@ -469,40 +469,40 @@ mod tests {
 
     #[test]
     fn collect_outside_a_block_is_refused() {
-        let mut specs = tickers();
-        specs.push(reading("days", &[collect("day")], ()));
+        let mut specs = catalog();
+        specs.push(reading("regions", &[collect("region")], ()));
         let err = refusal(specs);
         assert_eq!(
             err,
             BuildError::CollectOutsideBlock {
-                consumer: "days".to_owned(),
-                source: "day".to_owned(),
+                consumer: "regions".to_owned(),
+                source: "region".to_owned(),
             }
         );
         assert_eq!(
             err.to_string(),
-            "'days' collects 'day', which is in no block; collect a node that reads an expand"
+            "'regions' collects 'region', which is in no block; collect a node that reads an expand"
         );
         // So is a collect in a graph with no expand at all.
-        let err = refusal(vec![reading("days", &[collect("day")], ())]);
+        let err = refusal(vec![reading("regions", &[collect("region")], ())]);
         assert!(matches!(err, BuildError::CollectOutsideBlock { .. }));
     }
 
     #[test]
     fn collect_of_an_expand_is_refused() {
-        let mut specs = tickers();
-        specs.push(reading("all", &[collect("tickers")], ()));
+        let mut specs = catalog();
+        specs.push(reading("all", &[collect("picked")], ()));
         let err = refusal(specs);
         assert_eq!(
             err,
             BuildError::CollectOfExpand {
                 consumer: "all".to_owned(),
-                expand: "tickers".to_owned(),
+                expand: "picked".to_owned(),
             }
         );
         assert_eq!(
             err.to_string(),
-            "'all' collects the expand 'tickers', which is not in its own block; collect a \
+            "'all' collects the expand 'picked', which is not in its own block; collect a \
              node of its block instead"
         );
     }
@@ -554,7 +554,7 @@ mod tests {
 
     #[test]
     fn plain_reads_of_one_node_that_disagree_conflict_beside_a_collect() {
-        let mut specs = tickers();
+        let mut specs = catalog();
         specs.push(reading(
             "odd",
             &[

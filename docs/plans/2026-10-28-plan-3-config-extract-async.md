@@ -416,7 +416,7 @@ benchmarks.md, CHANGELOG.md, the roadmap's ledger
 - [x] **Step 1: Write the failing tests** in `tests/test_async.py` (with `asyncio.run` in plain tests, no plugin):
     - `test_build_is_sync_and_execute_returns_a_dict_in_request_order`.
     - `test_async_and_sync_nodes_mix`.
-    - `test_sync_nodes_do_not_block_the_loop`: a sync node sleeping 0.2 s and an async ticker that must tick
+    - `test_sync_nodes_do_not_block_the_loop`: a sync node sleeping 0.2 s and an async clock that must tick
       within 0.05 s.
     - `test_inline_sync_nodes_run_on_the_loop_thread`.
     - `test_a_failure_cancels_siblings_and_raises_the_node_exception`: the sibling's `CancelledError` is observed,

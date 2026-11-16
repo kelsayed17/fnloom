@@ -32,7 +32,7 @@ def summary(details: Collect[int]) -> list[int]:
 def test_aliases_type_check_as_iterable_and_list() -> None:
     """The snippet `ty check` reads runs: a generator expand, `len()` and `[0]`."""
     built = fnloom.Builder().with_modules(snippet).build()
-    assert built.execute(["total"], inputs={"universe": "a,bb,ccc"}) == {"total": 4.0}
+    assert built.execute(["total"], inputs={"listing": "a,bb,ccc"}) == {"total": 4.0}
 
 
 def test_annotated_metadata_never_hides_an_expand_or_a_collect() -> None:

@@ -470,7 +470,7 @@ if TYPE_CHECKING:
 
 
 def rate() -> "Decimal":
-    """The exchange rate."""
+    """A unit conversion factor."""
     raise NotImplementedError
 
 
@@ -1626,15 +1626,15 @@ pandas or polars itself. Name a column, or give `(name, doc)` to set that node's
 from fnloom import extract_columns
 
 
-@extract_columns("price", ("volume", "Shares traded."), fill_with=0)
-def bars(symbol: str) -> dict[str, list[float]]:
-    """Columns of bars, keyed by name."""
-    return {"price": [10.0, 10.5], "spread": [0.1, 0.2]}
+@extract_columns("reading", ("samples", "Samples taken."), fill_with=0)
+def channels(sensor: str) -> dict[str, list[float]]:
+    """Columns of channels, keyed by name."""
+    return {"reading": [10.0, 10.5], "noise": [0.1, 0.2]}
 
 
-def notional(price: list[float], volume: object) -> float:
+def weighted(reading: list[float], samples: object) -> float:
     """Column nodes feed other nodes like any node."""
-    return sum(price) * (volume or 1)
+    return sum(reading) * (samples or 1)
 ```
 
 ```python
@@ -1642,13 +1642,13 @@ import table
 
 driver = fnloom.build(table)
 driver.node_names()
-# -> ['bars', 'notional', 'price', 'symbol', 'volume']
-driver.execute(["price", "volume", "notional"], inputs={"symbol": "X"})
-# -> {'price': [10.0, 10.5], 'volume': 0, 'notional': 20.5}
-driver.nodes["volume"].doc
-# -> 'Shares traded.'
-driver.nodes["price"].doc
-# -> 'Columns of bars, keyed by name.'
+# -> ['channels', 'reading', 'samples', 'sensor', 'weighted']
+driver.execute(["reading", "samples", "weighted"], inputs={"sensor": "X"})
+# -> {'reading': [10.0, 10.5], 'samples': 0, 'weighted': 20.5}
+driver.nodes["samples"].doc
+# -> 'Samples taken.'
+driver.nodes["reading"].doc
+# -> 'Columns of channels, keyed by name.'
 ```
 
 - **A column's type comes from the return annotation.** A `pandas.DataFrame` return gives `pandas.Series` columns, a
@@ -1669,17 +1669,17 @@ driver.nodes["price"].doc
 from fnloom import extract_columns
 
 
-@extract_columns("close")
-def quotes() -> dict[str, list[float]]:
-    """Has no `close` column."""
-    return {"open": [1.0], "high": [2.0]}
+@extract_columns("depth")
+def box() -> dict[str, list[float]]:
+    """Has no `depth` column."""
+    return {"width": [1.0], "height": [2.0]}
 ```
 
 ```python
 import gaps
 
-fnloom.build(gaps).execute(["close"])
-# raises ValueError: 'quotes' returned no column 'close'; it returned 'high', 'open'
+fnloom.build(gaps).execute(["depth"])
+# raises ValueError: 'box' returned no column 'depth'; it returned 'height', 'width'
 ```
 
 ## What is refused

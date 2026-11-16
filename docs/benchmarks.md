@@ -203,7 +203,7 @@ namespace's names are found once, before any node is made, so each parameter is 
 
 ### Per run
 
-A prepared plan run once per incoming record (a market bar, say) pays its per-run overhead every time. Microseconds
+A prepared plan run once per incoming record (a sensor reading, say) pays its per-run overhead every time. Microseconds
 per `PreparedPlan.run` on the same machine, median of nine batches, before and after the per-run work, checks on:
 
 | shape | n | before | after | of which the native run |
