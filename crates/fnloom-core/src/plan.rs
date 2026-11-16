@@ -92,8 +92,8 @@ pub struct Plan {
     /// packed; per node, its step's span in it. Both empty without an expand.
     arg_edges: Vec<u32>,
     arg_spans: Vec<(u32, u32)>,
-    /// Per node, its step's position in the steps of its scope; `u32::MAX` for a node that
-    /// isn't planned.
+    /// Per node, its step's position in the steps of its scope, `u32::MAX` for a node that
+    /// isn't planned; empty without an expand, so `prepare` of a plain plan pays nothing.
     positions: Vec<u32>,
     /// Per node, the sub-plan whose steps hold its step; empty without an expand.
     within: Vec<Option<BlockId>>,
@@ -162,11 +162,19 @@ impl Plan {
     }
 
     /// The position of `node`'s step in the steps of its scope: the outer plan, or the
-    /// sub-plan of its innermost block. `usize::MAX` for a node that isn't planned.
-    pub(crate) fn position(&self, node: NodeId) -> usize {
-        self.positions
-            .get(node.index())
-            .map_or(usize::MAX, |&at| at as usize)
+    /// sub-plan of its innermost block. `usize::MAX` for a node that isn't planned. A plan
+    /// without an expand keeps no table, and scans its steps.
+    fn position(&self, node: NodeId) -> usize {
+        if self.expands {
+            return self
+                .positions
+                .get(node.index())
+                .map_or(usize::MAX, |&at| at as usize);
+        }
+        self.steps
+            .iter()
+            .position(|step| step.node == node)
+            .unwrap_or(usize::MAX)
     }
 
     /// The sub-plan whose steps hold `node`'s step; `None` for an outer step.
@@ -177,7 +185,8 @@ impl Plan {
     /// The order key of the step of `node` in `branch`, as the `Scheduler` gives it: the
     /// (step position, branch index) pairs of the expands whose blocks hold it, outermost
     /// first, then its own position. `branch` has one index per level of nesting, outermost
-    /// first; a missing index counts as 0. Pure, and as long as the nesting is deep.
+    /// first; a missing index counts as 0. Pure; in a plan with an expand it costs as much as
+    /// the nesting is deep, and in one without, a scan of the steps.
     #[must_use]
     pub fn order_key(&self, node: NodeId, branch: &[usize]) -> OrderKey {
         let mut chain = vec![node];
@@ -199,7 +208,10 @@ impl Plan {
 }
 
 /// Per node, its step's position in the steps of its scope; `u32::MAX` for the rest.
-fn positions<'s>(count: usize, scopes: impl IntoIterator<Item = &'s [Step]>) -> Vec<u32> {
+pub(crate) fn positions<'s>(
+    count: usize,
+    scopes: impl IntoIterator<Item = &'s [Step]>,
+) -> Vec<u32> {
     let mut positions = vec![u32::MAX; count];
     for steps in scopes {
         for (at, step) in steps.iter().enumerate() {
@@ -251,7 +263,7 @@ impl<P> Graph<P> {
         let needs_rules = self.has_absence() && order.iter().any(|&id| self.node(id).may_be_absent);
         let steps = self.build_steps(&order, &actions, &resolved.outputs);
         Ok(Plan {
-            positions: positions(self.nodes().len(), [steps.as_slice()]),
+            positions: Vec::new(),
             within: Vec::new(),
             steps,
             outputs: resolved.outputs,

@@ -19,7 +19,7 @@ use crate::branch::{Need, declined_wrongly, needs, node_error};
 use crate::graph::Graph;
 use crate::limits::Grant;
 use crate::node::{Collect, Dependency, Edge, NodeId, as_u32};
-use crate::plan::{Action, BlockId, Plan, Step};
+use crate::plan::{Action, BlockId, Plan, Step, positions};
 use crate::run::{Item, Outputs, RunError, Slot, broken, planned_to_compute};
 
 /// Names a task `Scheduler::next` handed out, for `Scheduler::complete`.
@@ -302,6 +302,8 @@ struct Layout {
     templates: Vec<Template>,
     /// Per collected node, its entry in the gathered table of its expand's scope.
     gather_at: Vec<u32>,
+    /// Per node, its step's position in the steps of its scope.
+    positions: Vec<u32>,
 }
 
 /// The scope holding `node`'s step: 0 for the outer plan, a block's id plus one.
@@ -338,6 +340,7 @@ fn use_of<P>(
     arg: NodeId,
     collects: bool,
     gather_at: &[u32],
+    positions: &[u32],
 ) -> Option<Use> {
     let node = graph.node(arg);
     if collects {
@@ -348,7 +351,7 @@ fn use_of<P>(
         let block = plan.block_of(arg)?;
         return (block.index() + 1 == scope).then_some(Use::Item);
     }
-    (scope_of(plan, arg) == scope).then(|| Use::Slot(as_u32(plan.position(arg))))
+    (scope_of(plan, arg) == scope).then(|| Use::Slot(positions[arg.index()]))
 }
 
 impl Layout {
@@ -360,14 +363,27 @@ impl Layout {
                 collected[node.index()] = true;
             }
         }
+        let positions = positions(
+            count,
+            std::iter::once(plan.steps())
+                .chain(plan.blocks().iter().map(|sub| sub.steps.as_slice())),
+        );
         let mut gather_at = vec![u32::MAX; count];
         let templates = (0..=plan.blocks().len())
-            .map(|scope| template(plan, graph, scope, &collected, &mut gather_at))
+            .map(|scope| template(plan, graph, scope, &collected, &mut gather_at, &positions))
             .collect();
         Self {
             templates,
             gather_at,
+            positions,
         }
+    }
+
+    /// The position of `node`'s step in the steps of its scope.
+    fn position(&self, node: NodeId) -> usize {
+        self.positions
+            .get(node.index())
+            .map_or(usize::MAX, |&at| at as usize)
     }
 }
 
@@ -378,6 +394,7 @@ fn template<P>(
     scope: usize,
     collected: &[bool],
     gather_at: &mut [u32],
+    positions: &[u32],
 ) -> Template {
     let steps = steps_of(plan, scope);
     let depth = match scope.checked_sub(1) {
@@ -412,7 +429,7 @@ fn template<P>(
         let mut wait = |place: NodeId| {
             if let Some(unit) = graph.unit_in(place, depth) {
                 if unit != step.node && scope_of(plan, unit) == scope {
-                    edges.push((as_u32(plan.position(unit)), as_u32(position)));
+                    edges.push((positions[unit.index()], as_u32(position)));
                 }
             }
         };
@@ -440,7 +457,7 @@ fn template<P>(
                     .get(at)
                     .and_then(|&edge| node.inputs.get(edge as usize))
                     .is_some_and(|edge| edge.collect.is_some());
-                let found = use_of(plan, graph, scope, arg, collects, gather_at);
+                let found = use_of(plan, graph, scope, arg, collects, gather_at, positions);
                 count(&mut t, found);
                 t.uses.extend(found);
             }
@@ -451,7 +468,7 @@ fn template<P>(
             for &read in &plan.blocks()[block.index()].reads {
                 let place = graph.read_place(read, step.node);
                 let found = if place == read {
-                    use_of(plan, graph, scope, read, false, gather_at)
+                    use_of(plan, graph, scope, read, false, gather_at, positions)
                 } else {
                     // The gathered values of a sibling block, which live where its expand is.
                     (scope_of(plan, place) == scope).then(|| Use::Gathered(gather_at[read.index()]))
@@ -1085,7 +1102,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                 let slot = self
                     .instances
                     .get_mut(OUTER)
-                    .and_then(|outer| outer.steps.get_mut(plan.position(id)))
+                    .and_then(|outer| outer.steps.get_mut(self.layout.position(id)))
                     .and_then(|state| state.slot.take());
                 match slot {
                     Some(slot) => Ok((id, slot.value)),
@@ -1403,7 +1420,11 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             return self.instances.get(holder)?.item.as_ref().map(Read::Item);
         }
         let holder = self.holder(instance, scope_of(plan, arg))?;
-        let state = self.instances.get(holder)?.steps.get(plan.position(arg))?;
+        let state = self
+            .instances
+            .get(holder)?
+            .steps
+            .get(self.layout.position(arg))?;
         state.slot.as_ref().map(Read::Value)
     }
 
@@ -1819,7 +1840,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         for (k, &node) in plan.blocks()[block].collected.iter().enumerate() {
             let slot = found
                 .steps
-                .get_mut(plan.position(node))
+                .get_mut(self.layout.position(node))
                 .and_then(|state| state.slot.take());
             match slot {
                 Some(slot) => self.frame_mut(frame).collected[k][index] = Some(slot),
@@ -2013,7 +2034,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             }
             (Kind::Probe, Outcome::LookupFailed(node, error)) => {
                 let found = self.instance(entry.at);
-                let key = extend(&found.prefix, &[as_u32(plan.position(node))]);
+                let key = extend(&found.prefix, &[as_u32(self.layout.position(node))]);
                 let failure = node_error(graph, graph.node(node), error, &found.branch, Vec::new());
                 self.fail(OrderKey(key), failure);
             }
