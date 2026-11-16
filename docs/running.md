@@ -915,8 +915,11 @@ fnloom.build(lookups).execute(["answer"], inputs={"question": "why"}, timeout=0.
 - **A failure first.** A run that had failed and was waiting for its running nodes raises that failure at the
   deadline, not `TimeoutError`.
 - **`fnloom.cancelled()`** is `True` inside a node once its run is stopping: its deadline passed, another node failed,
-  or it was interrupted. It is `False` outside a run, and in a run of a driver without `with_threads`, unless a node of
-  a stopping run started it.
+  or it was interrupted. It is `False` outside a run, and in a run of a driver without `with_threads`.
+- **Runs inside runs** stop with the run that started them. A node of a run started inside a node of a stopping run,
+  on any driver and at any depth, sees `cancelled()` turn `True` too. A parallel inner run also starts no new node,
+  and once its running nodes return it raises `RuntimeError: the run that started this one is stopping, so this one
+  stopped`.
 - **`Ctrl-C`** stops a parallel run the same way, with or without a deadline: the nodes still running are abandoned,
   and `KeyboardInterrupt` is raised at once.
 - **Cached runs.** On a driver with a cache, the deadline covers the whole run, the `recompute` nodes run first

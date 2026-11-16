@@ -50,6 +50,7 @@ fn core(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module.add_function(wrap_pyfunction!(parallel::arm_report_panic, module)?)?;
         module.add_function(wrap_pyfunction!(parallel::arm_perform_panic, module)?)?;
         module.add_function(wrap_pyfunction!(limits::held_slots, module)?)?;
+        module.add_function(wrap_pyfunction!(parallel::arm_state_panic, module)?)?;
     }
     module.add_function(wrap_pyfunction!(fingerprint::fingerprint, module)?)?;
     module.add_function(wrap_pyfunction!(fingerprint::hash_parts, module)?)?;

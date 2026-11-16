@@ -74,11 +74,15 @@ pub struct Run {
     abandoned: AtomicBool,
     /// Set when a task failed with `KeyboardInterrupt`: the caller abandons the others.
     interrupted: AtomicBool,
-    /// Set once a step found nothing left to hand out.
+    /// Set once a step found nothing left to hand out: what the caller of a run with a
+    /// deadline, which takes no task, waits for.
     done: AtomicBool,
     /// Whether the run has a lent seat (`Scheduler::lend`), which pool threads take tasks
     /// on once no worker slot is free.
     lends: AtomicBool,
+    /// The stop flags of the runs that started this one, innermost first: once one is
+    /// set, this run stops too.
+    ancestors: Vec<Arc<AtomicBool>>,
 }
 
 /// What the scheduler's lock guards.
@@ -122,15 +126,35 @@ enum Performed {
 }
 
 /// A run's stop flag, as `fnloom._threads.CANCELLED` holds it: true once the run is
-/// stopping, by a deadline, a failure or an interrupt.
+/// stopping, by a deadline, a failure or an interrupt, or once a run that started it,
+/// at any depth, is.
 #[pyclass(frozen, module = "fnloom._core")]
-pub struct Stop(Arc<AtomicBool>);
+pub struct Stop {
+    own: Arc<AtomicBool>,
+    /// The stop flags of the runs that started this one, innermost first.
+    ancestors: Vec<Arc<AtomicBool>>,
+}
 
 #[pymethods]
 impl Stop {
     fn __bool__(&self) -> bool {
-        self.0.load(Ordering::Acquire)
+        self.own.load(Ordering::Acquire) || stopping(&self.ancestors)
     }
+}
+
+impl Stop {
+    /// This flag and its ancestors': the ancestors of a run this one's tasks start.
+    fn chain(&self) -> Vec<Arc<AtomicBool>> {
+        let mut chain = Vec::with_capacity(self.ancestors.len() + 1);
+        chain.push(Arc::clone(&self.own));
+        chain.extend(self.ancestors.iter().cloned());
+        chain
+    }
+}
+
+/// Whether any of `flags` is set.
+fn stopping(flags: &[Arc<AtomicBool>]) -> bool {
+    flags.iter().any(|flag| flag.load(Ordering::Acquire))
 }
 
 /// `fnloom._threads.CANCELLED`, the context variable of the run a task belongs to.
@@ -142,6 +166,35 @@ fn cancelled_variable(py: Python<'_>) -> PyResult<&'static Py<PyAny>> {
             .getattr(intern!(py, "CANCELLED"))?
             .unbind())
     })
+}
+
+/// Stops `scheduler` once a run that started this one is stopping: it hands out no new
+/// task, and the run fails once its running ones return. Checked under the scheduler's
+/// lock before every hand-out, so no task starts after it.
+fn follow(run: &Run, scheduler: &mut Sched, failures: &mut Vec<(OrderKey, Failure)>) {
+    if run.ancestors.is_empty() || scheduler.is_stopping() || !stopping(&run.ancestors) {
+        return;
+    }
+    let error =
+        PyRuntimeError::new_err("the run that started this one is stopping, so this one stopped");
+    let failure = RunError::Observers {
+        event: "the run",
+        errors: vec![error],
+    };
+    failures.push((OrderKey::default(), Failure::Run(failure)));
+    scheduler.stop();
+    run.stop.store(true, Ordering::Release);
+}
+
+/// The slots of a limited task of `node` just handed out, held, and kept in `limited` for
+/// the run to give back should it abandon the task.
+fn held_by(node: NodeId, limited: &mut Vec<Arc<Held>>) -> Arc<Held> {
+    let slots = Arc::new(Held {
+        node,
+        held: AtomicBool::new(true),
+    });
+    limited.push(Arc::clone(&slots));
+    slots
 }
 
 /// Counts a completed task out of the running ones.
@@ -475,12 +528,12 @@ fn shared(value: Bound<'_, PyAny>) -> Shared {
 
 impl Run {
     /// A run of `plan` in this process, its tasks copying `snapshot`, its scheduler not
-    /// yet made.
+    /// yet made; `stop` is its own stop flag and its ancestors'.
     fn new(
         plan: &Bound<'_, Plan>,
         snapshot: Py<PyAny>,
         observers: SharedObservers,
-        stop: Arc<AtomicBool>,
+        (stop, ancestors): Flags,
         lends: bool,
     ) -> Self {
         Self {
@@ -504,6 +557,7 @@ impl Run {
             interrupted: AtomicBool::new(false),
             done: AtomicBool::new(false),
             lends: AtomicBool::new(lends),
+            ancestors,
         }
     }
 
@@ -732,13 +786,15 @@ pub fn step(
     let graph = plan.graph().get().core();
     let limits: &CoreLimits = &pool.limits.core;
     let next = run.with_state(py, |state| {
+        #[cfg(feature = "test-hooks")]
+        state_armed();
         let State {
             scheduler,
+            failures,
             running,
             taking,
             limited,
             abandons,
-            ..
         } = state;
         // Once the run abandoned its tasks, only its caller takes any: the finishes it runs.
         let Some(scheduler) = scheduler
@@ -747,23 +803,15 @@ pub fn step(
         else {
             return (Next::Done, None, None, 0);
         };
+        follow(run, scheduler, failures);
         let next = scheduler.next(core, graph, limits, seat);
         let mut held = None;
         if let Next::Task(task) = &next {
             run.active.fetch_add(1, Ordering::AcqRel);
             *running += 1;
-            if seat == Seat::Take {
-                *taking += 1;
-            }
+            *taking += usize::from(seat == Seat::Take);
             let calls = matches!(task.work, Work::Compute { .. } | Work::Pull { .. });
-            if calls && pool.limits.limited(task.node) {
-                let slots = Arc::new(Held {
-                    node: task.node,
-                    held: AtomicBool::new(true),
-                });
-                limited.push(Arc::clone(&slots));
-                held = Some(slots);
-            }
+            held = (calls && pool.limits.limited(task.node)).then(|| held_by(task.node, limited));
         }
         let blocked = matches!(next, Next::Wait)
             .then(|| scheduler.blocked())
@@ -775,7 +823,6 @@ pub fn step(
         Some((Next::Wait, Some(node), ..)) => Step::Blocked(node),
         Some((Next::Wait, None, ..)) => Step::Wait,
         Some((Next::Done, ..)) => {
-            // A deadline run's caller, which takes no task, waits for this.
             if !run.done.swap(true, Ordering::AcqRel) {
                 pool.notify(py);
             }
@@ -1079,6 +1126,26 @@ fn bound_args<'g, 'py>(
     Ok(built)
 }
 
+/// A late step's cache hit, or its lookup's failure; `None` when it missed.
+fn looked_up<'py>(
+    scope: &Scope<'_, 'py>,
+    calls: &Copied<'py>,
+    node: &Node<Py<PyAny>>,
+    branch: &[usize],
+) -> Option<Landed> {
+    match scope.lookup(calls, node, branch) {
+        Err(error) => Some(Landed::failed(error)),
+        Ok(Some(value)) => {
+            let absent = node.may_be_absent && value.is(scope.absent);
+            Some(Landed::done(Outcome::Hit {
+                value: shared(value),
+                absent,
+            }))
+        }
+        Ok(None) => None,
+    }
+}
+
 /// Runs a compute: a late step's lookup, its hooks, its node's call in the task's context,
 /// `on_value` and `late.store`, and an expand's iterator. A limited node's slots, taken
 /// at hand-out, are given back while its `pre_node` hooks wait for the run's busy flag and
@@ -1102,18 +1169,11 @@ fn compute<'py>(
 ) -> Landed {
     let plan = run.plan.get();
     let graph = scope.graph;
-    if late {
-        match scope.lookup(calls, node, branch) {
-            Err(error) => return Landed::failed(error),
-            Ok(Some(value)) => {
-                let absent = node.may_be_absent && value.is(scope.absent);
-                return Landed::done(Outcome::Hit {
-                    value: shared(value),
-                    absent,
-                });
-            }
-            Ok(None) => {}
-        }
+    if let Some(hit) = late
+        .then(|| looked_up(scope, calls, node, branch))
+        .flatten()
+    {
+        return hit;
     }
     let built = match bound_args(py, graph, args) {
         Ok(built) => built,
@@ -1170,6 +1230,10 @@ fn compute<'py>(
     let mut errors = run.hooked(py, calls, &lent, |hook| {
         hook.post_node_in(&node.name, branch, result.as_ref())
     });
+    // Abandoned while its hooks ran: nothing is stored.
+    if run.abandoned.load(Ordering::SeqCst) {
+        return Landed::failed(abandoned());
+    }
     errors.extend(run.observers.stored(
         py,
         &calls.run,
@@ -1351,6 +1415,41 @@ impl Drop for Caller<'_> {
     }
 }
 
+/// A run's own stop flag, and its ancestors', innermost first.
+type Flags = (Arc<AtomicBool>, Vec<Arc<AtomicBool>>);
+
+/// Sets up `snapshot`, the context every task of a run copies. Every task holds a worker
+/// slot or runs inside one that does, so its `HELD` records one, live until the run ends,
+/// whose live flag is returned. Its `CANCELLED` is the run's stop flag, chained to the
+/// one it held, so a run started inside a task of another stops when that one does.
+fn prepared<'py>(
+    pool: &Pool,
+    snapshot: &Bound<'py, PyAny>,
+    held: &Bound<'py, PyAny>,
+) -> PyResult<(Bound<'py, PyList>, Flags)> {
+    let py = snapshot.py();
+    let variable = held_variable(py)?.bind(py);
+    let (working, live) = pool.limits.holding_worker(held)?;
+    let inside = snapshot.getattr(intern!(py, "run"))?;
+    inside.call1((variable.getattr(intern!(py, "set"))?, working))?;
+    let cancelled = cancelled_variable(py)?.bind(py);
+    let parent = snapshot.call_method1(intern!(py, "get"), (cancelled, py.None()))?;
+    let ancestors = parent
+        .cast::<Stop>()
+        .map(|parent| parent.get().chain())
+        .unwrap_or_default();
+    let own = Arc::new(AtomicBool::new(false));
+    let flag = Stop {
+        own: Arc::clone(&own),
+        ancestors: ancestors.clone(),
+    };
+    inside.call1((
+        cancelled.getattr(intern!(py, "set"))?,
+        Bound::new(py, flag)?,
+    ))?;
+    Ok((live, (own, ancestors)))
+}
+
 /// The time `timeout` seconds from now; `ValueError` for a negative, NaN or too large one.
 fn deadline_of(timeout: f64) -> PyResult<(Instant, f64)> {
     Duration::try_from_secs_f64(timeout)
@@ -1416,15 +1515,7 @@ pub fn run<'py>(
     if nested && !lends {
         caller.seat = Seat::Held;
     }
-    // Every task of this run holds a worker slot or runs inside one that does, so the
-    // context they all copy records it, live until the run ends, with the run's stop flag.
-    let (working, live) = pool.limits.holding_worker(&held)?;
-    let inside = snapshot.getattr(intern!(py, "run"))?;
-    inside.call1((variable.getattr(intern!(py, "set"))?, working))?;
-    let stop = Arc::new(AtomicBool::new(false));
-    let flag = Bound::new(py, Stop(Arc::clone(&stop)))?;
-    let cancelled = cancelled_variable(py)?.bind(py);
-    inside.call1((cancelled.getattr(intern!(py, "set"))?, flag))?;
+    let (live, stop) = prepared(pool, &snapshot, &held)?;
     let _live = Ended(live);
     let observers = SharedObservers::new(observers, on_value, late);
     let run = Arc::new(Run::new(slf, snapshot.unbind(), observers, stop, lends));
@@ -1475,10 +1566,14 @@ pub fn run<'py>(
     match drove {
         Ok(last) => ended(slf, &run, last == Step::Broken),
         Err(interrupt) => {
-            let closing = run
-                .observers
-                .fire(py, &kwargs, None, |hook| hook.post_graph(false));
-            drop(closing);
+            // A task still running may be firing a hook: `post_graph` waits for it, as
+            // `ended` does. A second interrupt while it waits skips `post_graph`.
+            if let Ok(busy) = run.hold(py) {
+                let closing = run
+                    .observers
+                    .fire(py, &kwargs, None, |hook| hook.post_graph(false));
+                drop((closing, busy));
+            }
             Err(interrupt)
         }
     }
@@ -1782,6 +1877,27 @@ pub fn arm_report_panic() {
 #[pyfunction]
 pub fn arm_hook_panic() {
     HOOK_ARMED.store(true, Ordering::Release);
+}
+
+/// Armed by `_core.arm_state_panic()`: the next step of any run panics holding its
+/// scheduler's lock, which poisons it and breaks the run.
+#[cfg(feature = "test-hooks")]
+static STATE_ARMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Makes the next step of any run panic while it holds the run's scheduler lock.
+#[cfg(feature = "test-hooks")]
+#[pyfunction]
+pub fn arm_state_panic() {
+    STATE_ARMED.store(true, Ordering::Release);
+}
+
+/// The armed panic of `arm_state_panic`, called holding a run's scheduler lock.
+#[cfg(feature = "test-hooks")]
+fn state_armed() {
+    assert!(
+        !STATE_ARMED.swap(false, Ordering::AcqRel),
+        "deliberate panic holding a run's scheduler lock"
+    );
 }
 
 /// Makes the next iteration of any worker loop panic outside a node call.

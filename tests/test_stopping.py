@@ -427,6 +427,122 @@ def test_interrupt_main_stops_a_parallel_run_with_a_node_hung_on_a_worker() -> N
         module.RELEASE.set()
 
 
+def test_interrupt_ends_a_broken_run_waiting_for_a_hung_node() -> None:
+    """A run whose scheduler lock a panic poisoned still ends on `Ctrl-C`, hooked."""
+    module = make_module("stop_broken_interrupt", FAN_HUNG)
+    hook = Recorded()
+    driver = (
+        fnloom.Builder().with_modules(module).with_hooks(hook).with_threads(2).build()
+    )
+
+    def poke() -> None:
+        assert module.STARTED.wait(5)
+        _core.arm_state_panic()
+        # Long enough for the caller to step into the poisoned lock, then wait.
+        time.sleep(0.5)
+        _thread.interrupt_main()
+
+    thread = started(poke)
+    try:
+        start = time.monotonic()
+        with pytest.raises(KeyboardInterrupt):
+            driver.execute(["summary"], inputs={"n": 8})
+        assert time.monotonic() - start < SLOW
+        joined(thread)
+        assert hook.events[-1] == ("run", False, "KeyboardInterrupt")
+    finally:
+        module.RELEASE.set()
+
+
+# A run inside a node of a run with a deadline: `poll` waits for `cancelled()`, and
+# `after` runs only if the inner run goes on.
+CHAINED = """
+import time
+
+import fnloom
+
+INNER = []
+SEEN = []
+AFTER = []
+
+
+def poll(x: int) -> int:
+    start = time.monotonic()
+    while time.monotonic() - start < 5:
+        if fnloom.cancelled():
+            SEEN.append(time.monotonic() - start)
+            return -1
+        time.sleep(0.01)
+    return x
+
+
+def after(poll: int) -> int:
+    AFTER.append(poll)
+    return poll
+
+
+def outer(x: int) -> int:
+    return INNER[0].execute(["after"], inputs={"x": x})["after"]
+"""
+
+
+@pytest.mark.parametrize("inner", ["same driver", "other driver", "sequential"])
+def test_a_run_inside_a_stopping_run_sees_it_cancelled(inner: str) -> None:
+    """Its nodes see `cancelled()` at the outer deadline; a parallel one stops too."""
+    module = make_module(f"stop_chained_{inner.replace(' ', '_')}", CHAINED)
+    driver = fnloom.Builder().with_modules(module).with_threads(2).build()
+    builder = fnloom.Builder().with_modules(module)
+    module.INNER.append(
+        {
+            "same driver": driver,
+            "other driver": builder.with_threads(2).build(),
+            "sequential": builder.build(),
+        }[inner]
+    )
+    with pytest.raises(TimeoutError):
+        driver.execute(["outer"], inputs={"x": 1}, timeout=0.3)
+    seen = settled(lambda: len(module.SEEN), 1)
+    assert seen == 1
+    assert module.SEEN[0] < PROMPT
+    time.sleep(0.2)
+    # A sequential inner run goes on to `after`; a parallel one stopped.
+    went_on = module.AFTER
+    assert went_on == ([-1] if inner == "sequential" else [])
+
+
+def test_a_store_after_a_hook_the_deadline_outlasted_is_dropped() -> None:
+    """A node whose `after_node` hook runs past the deadline stores nothing."""
+
+    class Slow(fnloom.Hook):
+        @override
+        def after_node(self, event: fnloom.NodeEnd) -> None:
+            time.sleep(0.5)
+
+    class Puts(fnloom.MemoryCache):
+        def __init__(self) -> None:
+            super().__init__()
+            self.puts: list[bytes] = []
+
+        @override
+        def put(self, key: bytes, value: object) -> None:
+            self.puts.append(key)
+            super().put(key, value)
+
+    store = Puts()
+    driver = (
+        fnloom.Builder()
+        .with_modules(make_module("stop_late_store", NODES))
+        .with_hooks(Slow())
+        .with_cache(store)
+        .with_threads(2)
+        .build()
+    )
+    with pytest.raises(TimeoutError):
+        driver.execute(["quick"], inputs={"x": 1}, timeout=0.2)
+    time.sleep(0.2)
+    assert store.puts == []
+
+
 # A generator whose second pull runs while the first branch fails.
 PULLING = """
 import threading

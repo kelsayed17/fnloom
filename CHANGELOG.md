@@ -64,7 +64,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
   with no hook and no store. The caller closes the generators no worker is reading before it raises. A deadline run
   inside a node lends that node's worker to its own nodes. Without `with_threads`, `timeout=` is a `TypeError`.
 - `fnloom.cancelled()` tells a node whether its parallel run is stopping, by its deadline, another node's failure or
-  an interrupt, so it can return early; `False` outside one.
+  an interrupt, so it can return early; `False` outside one. A run started inside a node of a stopping run, on any
+  driver, sees it too, and a parallel one stops starting nodes.
 - `Ctrl-C` ends a parallel run at once, abandoning its running nodes as a deadline does, so a node hung on a worker
   thread no longer keeps the run waiting. A `KeyboardInterrupt` a node raises does the same.
 
