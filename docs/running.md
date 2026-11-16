@@ -772,6 +772,10 @@ threaded.execute(["summary"], inputs={"category": "furniture", "endpoint": endpo
   Deadlines that abandon a hung node come with a later release.
 - **The pool's life.** A driver's worker threads leave once the driver is collected. A discarded driver caught in a
   reference cycle keeps its idle threads until the cyclic garbage collector frees it.
+- **Lazy generators.** An expand's generator is read only while fewer than `2 * max_workers` of its branches are
+  unfinished, so a large one is never read far ahead.
+- **Runs inside runs.** A node may run its own driver: the inner run's tasks start on the worker the node holds, so it
+  never waits for a free one.
 - An `AsyncDriver` built from such a builder ignores the setting for now.
 
 fnloom can't make your own code safe:
@@ -788,6 +792,72 @@ fnloom can't make your own code safe:
 - **Your value checks.** An output check, and so a custom value check (`with_value_check`) it calls, runs with its
   node: for a plain function on an `AsyncDriver` with `sync_nodes="thread"`, in the worker thread, so a value check
   that keeps state must be safe to call from several threads at once.
+
+## Limits
+
+`@fnloom.limit(n)` caps how many calls of a node run at once, across every run of a driver. `@fnloom.limit(group=...)`
+puts a node in a group whose members share one cap, and `Builder.with_limits({group: size})` sizes each group. Give
+`limit` either or both; a call then needs a slot of each:
+
+```python
+# file: catalog_limits.py
+from fnloom import Collect, Parallelizable, limit
+
+
+def picked(items: list[str]) -> Parallelizable[str]:
+    """Every item asked for."""
+    yield from items
+
+
+@limit(4, group="api")
+def details(picked: str) -> str:
+    """One item's details: at most four calls at once, and a slot of `api`."""
+    return f"https://api.test/{picked}"
+
+
+@limit(group="api")
+def reviews(picked: str) -> int:
+    """How many reviews the item has, from the same endpoint."""
+    return len(picked)
+
+
+def summary(details: Collect[str], reviews: Collect[int]) -> list[tuple[str, int]]:
+    """Each item's details and review count, in the order asked."""
+    return list(zip(details, reviews, strict=True))
+```
+
+```python
+import fnloom
+import catalog_limits
+
+limited = (
+    fnloom.Builder()
+    .with_modules(catalog_limits)
+    .with_threads(8)
+    .with_limits({"api": 6})
+    .build()
+)
+limited.execute(["summary"], inputs={"items": ["chair", "desk"]})
+# -> {'summary': [('https://api.test/chair', 5), ('https://api.test/desk', 4)]}
+```
+
+Here at most four `details` calls, and six calls of `details` and `reviews` together, run at once.
+
+- **Every driver honours limits**, with or without `with_threads`. A driver shared by several threads runs a
+  `@limit(1)` node one call at a time: a call waits until a slot is free, and `Ctrl-C` ends the wait.
+- **A slot is held for the call alone.** It is taken as the node's call starts and given back as it returns, before its
+  hooks run or its value is stored, waking whoever waits for it. A generator node takes its slots for each item it
+  yields.
+- **Each driver has its own counters.** A copy, a rebuilt or an unpickled driver starts with every slot free, and so
+  does a forked child. Two drivers never share a slot, even over the same modules.
+- **Checked at build**, on every driver: a group a node is in that has no size, or a size of a group no node is in, is
+  a `ValueError` naming it.
+- **Runs inside runs.** A node that runs a driver may need a slot its own call holds, which would wait for good. A
+  run started inside a node knows the slots of the runs that called it, so it fails at once instead, with a
+  `RuntimeError` naming the node and the slot: a `@limit(1)` node that runs its own driver on a request needing
+  itself, or a node in a full group whose inner run needs that group. Two unrelated runs that each hold part of a
+  group and wait for each other are not detected.
+- An `AsyncDriver` checks the limits at build, and honours them from a later release.
 
 ## Rebuilding after an edit
 

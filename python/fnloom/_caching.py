@@ -997,7 +997,8 @@ class CacheRun:
 
         `fresh` holds the producers an enclosing run's `recompute` fields need
         fresh, so a nested run computing one never looks it up either.
-        `workers`, when given, is the driver's pool, which every core run uses.
+        `workers`, when given, is the driver's pool and limits, which every core
+        run uses.
         """
         self._workers = workers
         self._store = cache.store
@@ -1152,7 +1153,7 @@ class CacheRun:
     @property
     def threaded(self) -> bool:
         """Whether its core runs are on a driver's pool."""
-        return self._workers is not None
+        return self._workers is not None and self._workers.max_workers is not None
 
     @property
     def blocks(self) -> _Blocks | None:
@@ -1221,6 +1222,7 @@ class CacheRun:
                 on_value=on_value,
                 late=begun.late,
                 threads=workers.threads(),
+                limits=workers.limits(),
             )
         if begun.values is not None:
             begun.values.update(begun.hits)

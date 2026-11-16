@@ -121,6 +121,20 @@ class CachePolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class LimitPolicy:
+    """What `@limit` recorded: how many calls of the node may run at once.
+
+    Attributes:
+        n: The node's own cap, or None for none.
+        group: The group the node shares a cap with, sized by
+            `Builder.with_limits`, or None for none.
+    """
+
+    n: int | None
+    group: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class DefaultsPolicy:
     """What `@defaults` recorded: the parameters whose default the build may not refuse.
 
@@ -158,6 +172,7 @@ class Decorations:
     mutates: tuple[Callable[..., object], ...] = ()
     injected: Mapping[str, Binding] | None = None
     resolvers: tuple[Callable[..., object], ...] = ()
+    limit: LimitPolicy | None = None
 
 
 def source(name: str) -> Source:
@@ -773,6 +788,51 @@ def cache[F: Callable[..., object]](
             msg = f"the function does not have the parameters named by ignore: {listed}"
             raise ValueError(msg)
         setattr(fn, _ATTRIBUTE, replace(current, cache=policy))
+        return fn
+
+    return apply
+
+
+def limit[F: Callable[..., object]](
+    n: int | None = None, *, group: str | None = None
+) -> Callable[[F], F]:
+    """Caps how many calls of the node run at once, across every run of a driver.
+
+    `n` caps the node's own calls; `group` puts it in a group whose members share
+    one cap, sized by `Builder.with_limits({group: size})`. Give either or both:
+    a call then needs a slot of each. Every driver honours it, with or without
+    `with_threads`: a call waits until a slot is free. The slots are taken for the
+    call alone and given back as it returns, before its hooks run; a generator's
+    are taken for each item it yields. Only records the policy, so it stacks with
+    the other decorators in either order.
+
+    `TypeError` for an `n` that is no `int` (a `bool` included) or a `group`
+    that is no `str`; `ValueError` for neither given, an `n` under 1, an empty
+    `group`, or a second `@limit` on one function.
+    """
+    if n is not None and (isinstance(n, bool) or not isinstance(n, int)):
+        msg = f"limit n must be an int or None, not {n!r}"
+        raise TypeError(msg)
+    if group is not None and not isinstance(group, str):
+        msg = f"limit group must be a str or None, not {group!r}"
+        raise TypeError(msg)
+    if n is None and group is None:
+        msg = "limit needs n, group or both"
+        raise ValueError(msg)
+    if n is not None and n < 1:
+        msg = f"limit n must be at least 1, not {n}"
+        raise ValueError(msg)
+    if group == "":
+        msg = "limit group must be a non-empty str"
+        raise ValueError(msg)
+    policy = LimitPolicy(n, group)
+
+    def apply(fn: F) -> F:
+        current = decorations(fn)
+        if current.limit is not None:
+            msg = "function already has a limit; apply limit once"
+            raise ValueError(msg)
+        setattr(fn, _ATTRIBUTE, replace(current, limit=policy))
         return fn
 
     return apply

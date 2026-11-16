@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, PoisonError, TryLockError};
 use std::time::Duration;
 
-use fnloom_core::limits::Limits as CoreLimits;
+use fnloom_core::limits::{Grant, Limits as CoreLimits};
 use fnloom_core::node::{Node, NodeId};
 use fnloom_core::plan::{Action, Plan as CorePlan};
 use fnloom_core::run::{Arg, Item, Observer, RunError, Slot};
@@ -33,6 +33,7 @@ use pyo3::types::{PyDict, PyList, PyTuple};
 use crate::absent::{self, Absent};
 use crate::errors::{caught, run_error};
 use crate::graph::Graph;
+use crate::limits::{Caps, held_variable};
 use crate::observer::ObserverBase;
 use crate::plan::{Kwargs, Plan, Value, branch_variable, keyword};
 use crate::pool::{Pool, Threads};
@@ -87,6 +88,9 @@ pub enum Step {
     Worked,
     /// Nothing to take now.
     Wait,
+    /// Nothing to take now, nothing of the run is in flight, and the ready task with the
+    /// lowest key waits for a slot of this node (`Scheduler::blocked`).
+    Blocked(NodeId),
     /// Nothing is left to hand out.
     Done,
     /// The scheduler's lock is poisoned: the run is broken.
@@ -123,6 +127,64 @@ impl Drop for Active<'_, '_> {
     }
 }
 
+/// The node and group slots a limited compute or pull holds: given back, with a wake, as
+/// soon as its call returns, before its hooks and store writes, or when dropped, a panic
+/// included. So `complete` gives back only the worker slot (`WorkerOnly`).
+struct Slots<'a, 'py> {
+    pool: &'a Pool,
+    /// The node, while its slots are held.
+    node: Option<NodeId>,
+    py: Python<'py>,
+}
+
+impl<'a, 'py> Slots<'a, 'py> {
+    /// The slots a task of `node` doing `work` holds, if its node is limited.
+    fn of(py: Python<'py>, pool: &'a Pool, node: NodeId, work: &Work<Shared>) -> Self {
+        let takes = matches!(work, Work::Compute { .. } | Work::Pull { .. });
+        Self {
+            pool,
+            node: (takes && pool.limits.limited(node)).then_some(node),
+            py,
+        }
+    }
+
+    /// The caps the slots are held of, while they are.
+    fn caps(&self) -> Option<&'a Caps> {
+        self.node.map(|_| &*self.pool.limits)
+    }
+
+    fn release(&mut self) {
+        // In a forked child nothing inherited is locked again.
+        if let Some(node) = self
+            .node
+            .take()
+            .filter(|_| std::process::id() == self.pool.pid)
+        {
+            self.pool.release(self.py, node);
+        }
+    }
+}
+
+impl Drop for Slots<'_, '_> {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+/// The grant a completion gives slots back to: the worker slot only, since a task's node
+/// and group slots went back as its call returned (`Slots`).
+struct WorkerOnly<'a>(&'a CoreLimits);
+
+impl Grant for WorkerOnly<'_> {
+    fn try_start(&self, node: Option<NodeId>, seat: Seat) -> bool {
+        self.0.try_start(node, seat)
+    }
+
+    fn release(&self, _node: Option<NodeId>, seat: Seat) {
+        self.0.release(None, seat);
+    }
+}
+
 thread_local! {
     /// The caps this thread holds a worker slot of, innermost last: a run started inside a
     /// task takes its caller's tasks on the slot already held.
@@ -133,7 +195,7 @@ thread_local! {
 struct Holding;
 
 impl Holding {
-    fn enter(limits: &Arc<CoreLimits>) -> Self {
+    fn enter(limits: &Arc<Caps>) -> Self {
         HELD.with(|held| held.borrow_mut().push(Arc::as_ptr(limits) as usize));
         Self
     }
@@ -146,7 +208,7 @@ impl Drop for Holding {
 }
 
 /// Whether this thread holds a worker slot of `limits`.
-fn holds(limits: &Arc<CoreLimits>) -> bool {
+fn holds(limits: &Arc<Caps>) -> bool {
     let id = Arc::as_ptr(limits) as usize;
     HELD.with(|held| held.borrow().contains(&id))
 }
@@ -196,6 +258,29 @@ impl<'py> Copied<'py> {
             }
             _ => Self::new(py, snapshot, branch),
         }
+    }
+
+    /// `call`, in this context with `fnloom._threads.HELD` recording `node`'s slot of
+    /// `caps` while it runs, when the task holds one: so a run the call starts sees it.
+    fn holding<T>(
+        &self,
+        caps: Option<&Caps>,
+        node: NodeId,
+        call: impl FnOnce() -> PyResult<T>,
+    ) -> PyResult<T> {
+        let Some(caps) = caps else {
+            return call();
+        };
+        let py = self.context.py();
+        let variable = held_variable(py)?.bind(py);
+        let held = self.run.call1((variable.getattr(intern!(py, "get"))?,))?;
+        let set = variable.getattr(intern!(py, "set"))?;
+        let token = self.run.call1((set, caps.holding(&held, node)?))?;
+        let result = call();
+        let reset = variable.getattr(intern!(py, "reset"))?;
+        let reset = self.run.call1((reset, token));
+        let value = result?;
+        reset.map(|_| value)
     }
 
     /// `iterator`, paired with a copy of this context, as the scheduler keeps it: a copy,
@@ -458,22 +543,26 @@ pub fn step(
     let plan = run.plan.get();
     let core = plan.core();
     let graph = plan.graph().get().core();
-    let limits: &CoreLimits = &pool.limits;
+    let limits: &CoreLimits = &pool.limits.core;
     let next = run.with_state(py, |state| {
         let Some(scheduler) = state.scheduler.as_mut() else {
-            return Next::Done;
+            return (Next::Done, None);
         };
         let next = scheduler.next(core, graph, limits, seat);
         if matches!(next, Next::Task(_)) {
             run.active.fetch_add(1, Ordering::AcqRel);
         }
-        next
+        let blocked = matches!(next, Next::Wait)
+            .then(|| scheduler.blocked())
+            .flatten();
+        (next, blocked)
     });
     match next {
         None => Step::Broken,
-        Some(Next::Wait) => Step::Wait,
-        Some(Next::Done) => Step::Done,
-        Some(Next::Task(task)) => {
+        Some((Next::Wait, Some(node))) => Step::Blocked(node),
+        Some((Next::Wait, None)) => Step::Wait,
+        Some((Next::Done, _)) => Step::Done,
+        Some((Next::Task(task), _)) => {
             let active = Active { run, pool, py };
             if perform(py, run, pool, seat, task, report) {
                 // The child of a fork: no lock it inherited is touched again.
@@ -508,12 +597,14 @@ fn perform(
         work,
     } = task;
     let iterating = matches!(work, Work::Pull { .. } | Work::Finish { .. });
+    let mut slots = Slots::of(py, pool, node, &work);
     let calls = Copied::of_task(py, &run.snapshot, &branch, &work);
     let landed = match &calls {
-        Ok(calls) => caught(|| Ok(land(py, run, graph, node, &branch, work, calls)))
+        Ok(calls) => caught(|| Ok(land(py, run, graph, node, &branch, work, calls, &mut slots)))
             .unwrap_or_else(Landed::failed),
         Err(error) => Landed::failed(error.clone_ref(py)),
     };
+    drop(slots);
     drop(held);
     if std::process::id() != run.pid {
         return true;
@@ -531,7 +622,7 @@ fn perform(
         };
         (at, failure)
     });
-    let limits: &CoreLimits = &pool.limits;
+    let limits = WorkerOnly(&pool.limits.core);
     let report_in = &mut *report;
     run.with_state(py, move |state| {
         state.failures.extend(failure);
@@ -539,7 +630,7 @@ fn perform(
             if stop {
                 scheduler.stop();
             }
-            scheduler.complete(core, graph.core(), limits, id, outcome, report_in);
+            scheduler.complete(core, graph.core(), &limits, id, outcome, report_in);
         }
     });
     if iterating && report.has_events() && run.observers.any() {
@@ -556,6 +647,10 @@ fn perform(
 }
 
 /// Runs a task's work: its node's call, or a pull, a finish, an iterate or a probe.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the task's parts, as the scheduler gives them, and its slots"
+)]
 fn land(
     py: Python<'_>,
     run: &Run,
@@ -564,6 +659,7 @@ fn land(
     branch: &[usize],
     work: Work<Shared>,
     calls: &Copied<'_>,
+    slots: &mut Slots<'_, '_>,
 ) -> Landed {
     let plan = run.plan.get();
     let node = graph.core().node(id);
@@ -582,7 +678,9 @@ fn land(
             args,
             expands,
             late,
-        } => compute(py, run, &scope, calls, node, branch, args, expands, late),
+        } => compute(
+            py, run, &scope, calls, node, branch, args, expands, late, slots,
+        ),
         Work::Iterate { iterable } => match scope
             .iterate(calls, node, iterable.bind(py), branch)
             .and_then(|iterator| calls.paired(iterator))
@@ -590,9 +688,11 @@ fn land(
             Ok(iterator) => Landed::done(Outcome::Iterator(iterator)),
             Err(error) => Landed::failed(error),
         },
-        Work::Pull { iterator } => match unpaired(iterator.bind(py))
-            .and_then(|iterator| scope.next_item(calls, node, &iterator))
-        {
+        Work::Pull { iterator } => match unpaired(iterator.bind(py)).and_then(|iterator| {
+            let item = calls.holding(slots.caps(), id, || scope.next_item(calls, node, &iterator));
+            slots.release();
+            item
+        }) {
             Ok(item) => Landed::done(Outcome::Item(match item {
                 Item::Next(value) => Item::Next(shared(value)),
                 Item::Declined(value) => Item::Declined(shared(value)),
@@ -644,7 +744,7 @@ fn land(
 /// `on_value` and `late.store`, and an expand's iterator.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the task's parts, as the scheduler gives them"
+    reason = "the task's parts, as the scheduler gives them, and its slots"
 )]
 fn compute<'py>(
     py: Python<'py>,
@@ -656,6 +756,7 @@ fn compute<'py>(
     args: Vec<(NodeId, ArgValue<Shared>)>,
     expands: bool,
     late: bool,
+    slots: &mut Slots<'_, '_>,
 ) -> Landed {
     let plan = run.plan.get();
     let graph = scope.graph;
@@ -708,12 +809,17 @@ fn compute<'py>(
     if !errors.is_empty() {
         return Landed::hooks(py, "pre_node", errors);
     }
-    let result = caught(|| calls.call(payload.bind(py), Vec::new(), Some(&kwargs)))
+    let result = calls
+        .holding(slots.caps(), node.id, || {
+            caught(|| calls.call(payload.bind(py), Vec::new(), Some(&kwargs)))
+        })
         .and_then(|value| scope.checked(node, value));
     if std::process::id() != run.pid {
         // The node forked, and this is the child: `perform` returns at once.
         return Landed::hooks(py, "fork", Vec::new());
     }
+    // A limit counts concurrent calls, and a hook may start a run needing this slot.
+    slots.release();
     let mut errors = run.hooked(py, calls, &lent, |hook| {
         hook.post_node_in(&node.name, branch, result.as_ref())
     });
@@ -1027,7 +1133,14 @@ fn drive(
                 return step;
             }
             Step::Done if run.active.load(Ordering::Acquire) == 0 => return step,
-            Step::Done | Step::Wait => {
+            Step::Done | Step::Wait | Step::Blocked(_) => {
+                if let Step::Blocked(node) = step {
+                    if let Some(error) = reentered(py, run, pool, node) {
+                        // Waiting would be for good: the run fails, once nothing runs.
+                        run.fail_now(py, error);
+                        continue;
+                    }
+                }
                 pool.wait_slice(py, generation, SLICE);
                 if let Err(error) = py.check_signals() {
                     run.fail_now(py, error);
@@ -1035,6 +1148,21 @@ fn drive(
             }
         }
     }
+}
+
+/// The `RuntimeError` for a run blocked on a slot of `node` that the runs that called it
+/// hold every unit of, by the `HELD` its context started with; `None` when it may wait.
+fn reentered(py: Python<'_>, run: &Run, pool: &Pool, node: NodeId) -> Option<PyErr> {
+    if !pool.limits.limited(node) {
+        return None;
+    }
+    let variable = held_variable(py).ok()?.bind(py);
+    let held = run
+        .snapshot
+        .bind(py)
+        .call_method1(intern!(py, "get"), (variable,))
+        .ok()?;
+    pool.limits.reentered(node, Some(&held))
 }
 
 /// Armed by `_core.arm_worker_panic()`: the next worker-loop iteration panics.

@@ -90,6 +90,7 @@ class Plan:
         late: object | None = None,
         *,
         threads: Threads | None = None,
+        limits: Limits | None = None,
     ) -> dict[str, object]: ...
     def steps(self) -> list[tuple[str, str]]: ...
     def late(self) -> list[str]: ...
@@ -97,7 +98,15 @@ class Plan:
 
 @final
 class Limits:
-    def __new__(cls, max_workers: int | None = None) -> Self: ...
+    def __new__(
+        cls,
+        graph: Graph,
+        max_workers: int | None = None,
+        node_caps: Mapping[str, int] | None = None,
+        node_groups: Mapping[str, str] | None = None,
+        group_caps: Mapping[str, int] | None = None,
+    ) -> Self: ...
+    def add_waker(self, waker: Callable[[], object], /) -> None: ...
 
 @final
 class Threads:

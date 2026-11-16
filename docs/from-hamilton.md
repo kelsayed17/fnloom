@@ -470,8 +470,9 @@ CLI, `@check_output` validators, step injection, `@inject`, `@resolve`, node wra
 sequential fan-out and fan-in (`Parallelizable` and `Collect`) are done. These Hamilton features come next, roughly in
 this order:
 
-1. **The rest of the parallel executor**: `Builder.with_threads` runs a run's nodes and branches on a pool, but there
-   are no per-node limits, deadlines or `run_many` yet, and the async driver doesn't run blocks.
+1. **The rest of the parallel executor**: `Builder.with_threads` runs a run's nodes and branches on a pool, and
+   `@limit` caps a node's calls, but there are no deadlines or `run_many` yet, and the async driver doesn't run blocks
+   or honour limits.
 2. **`GracefulErrorAdapter`**. Node wrappers can change how a node is called, but a run still stops at the first
    failure.
 

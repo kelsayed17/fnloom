@@ -1,7 +1,7 @@
 """Decorator order: every pair of Plan 8 decorators gives one graph either way round.
 
 Each Plan 8 decorator is stacked with each other one, and with `@tag`,
-`@parameterize`, `@config.when`, `@config.matches`, `@cache` and a step
+`@parameterize`, `@config.when`, `@config.matches`, `@cache`, `@limit` and a step
 namespace, in both orders, with and without a `@mutate` step on the function;
 each is also stacked with `@extract_fields`. Both orders must build the same
 nodes, wired the same way, tagged the same, computing the same values with the
@@ -35,14 +35,15 @@ OTHERS = {
     "config.when": "config.when(mode='a')",
     "config.matches": "config.matches(lambda mode: mode == 'a')",
     "cache": "cache(behavior='recompute')",
+    "limit": "limit(2)",
     "step_namespace": "pipe_output(step(_inc).named('out'), namespace='fmt')",
 }
 
 HEADER = """
 from fnloom import (
     Collect, Parallelizable, cache, check_output, check_output_custom, config,
-    extract_fields, inject, mutate, parameterize, pipe_input, pipe_output, resolve,
-    source, step, tag, value,
+    extract_fields, inject, limit, mutate, parameterize, pipe_input, pipe_output,
+    resolve, source, step, tag, value,
 )
 
 def _small(v: int) -> bool:
@@ -177,6 +178,7 @@ ON_FIELDS = {
     "inject": "inject(k=value(3))",
     "resolve": "resolve(lambda: tag(resolved='1'))",
     "cache": "cache(fields={'p': 'recompute'})",
+    "limit": "limit(2)",
 }
 
 

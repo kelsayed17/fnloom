@@ -20,7 +20,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
-use fnloom_core::limits::Limits as CoreLimits;
 use fnloom_core::schedule::{Report, Seat};
 use pyo3::exceptions::PyValueError;
 use pyo3::intern;
@@ -28,7 +27,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyCFunction, PyDict};
 
 use crate::errors::panic_error;
-use crate::limits::Limits;
+use crate::limits::{Caps, Limits};
 use crate::parallel::{self, Run, Step};
 
 /// Pool threads alive in this process, started and not yet ended.
@@ -45,7 +44,7 @@ const IDLE: Duration = Duration::from_secs(1);
 /// A driver's pool: its caps, its threads and the runs that want work.
 pub struct Pool {
     /// The driver's caps, which every run's scheduler is granted slots by.
-    pub limits: Arc<CoreLimits>,
+    pub limits: Arc<Caps>,
     /// The threads it starts: `max_workers - 1`.
     size: usize,
     /// `max_workers`.
@@ -95,6 +94,13 @@ impl Pool {
     pub fn notify(&self, py: Python<'_>) {
         self.with_state(py, |state| state.generation += 1);
         self.wake.notify_all();
+    }
+
+    /// Gives back `node`'s own slot and its group's, waking the limits' waiters and every
+    /// thread of the pool, since a run of the driver may wait for that slot.
+    pub fn release(&self, py: Python<'_>, node: fnloom_core::node::NodeId) {
+        self.limits.release(py, node);
+        self.notify(py);
     }
 
     /// Waits, detached, until the generation is no longer `generation`.
@@ -303,7 +309,7 @@ impl Threads {
         }
         Ok(Self {
             pool: Arc::new(Pool {
-                limits: Arc::clone(limits.get().core()),
+                limits: Arc::clone(limits.get().caps()),
                 size: max_workers - 1,
                 max_workers,
                 state: Mutex::new(State {

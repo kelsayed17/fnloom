@@ -46,6 +46,14 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - Single-flight per key within a run. On a driver built `with_threads` with a cache, a block node whose key equals one
   already running in the same run waits for that value, holding no worker, and reports a hit (Q85); a `recompute` or
   uncacheable node never does, nor do two runs share one.
+- `@fnloom.limit(n=None, *, group=None)` caps how many calls of a node run at once, across every run of a driver, and
+  `Builder.with_limits({group: size})` sizes the groups nodes share a cap in (Q134). Every driver honours them, with
+  or without `with_threads`; the async driver checks them at build and honours them from a later release. A call
+  holds its slots only while it runs, given back before its hooks, and a sequential run waits for one detached,
+  `Ctrl-C` ending the wait. A group with no size, or a size of a group no node is in, fails the build. A run started
+  inside a node that needs a slot its callers hold every unit of is refused at once with a `RuntimeError` naming the
+  node and the slot, instead of waiting for good. Each driver object has its own counters, through pickling, `copy`,
+  `rebuild()` and a fork.
 
 ### Changed
 
