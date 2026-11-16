@@ -67,11 +67,14 @@ change the public API; such changes are listed under **Changed** and **Removed**
   its slots until its call returns.
 - `with_threads` on `build_async()`: each sync node runs on the driver's own pool, holding a worker slot, so at most
   `max_workers` run at once, while `async def` nodes hold none (Q65). `sync_nodes="inline"` with it is a
-  `ValueError`. A sync node there that runs its own async driver never waits for the slot it holds.
+  `ValueError`. A sync node there that runs its own async driver never waits for the slot it holds. The pool keeps
+  `max_workers` threads from an async run's first sync node, and a thread whose call the run abandons is replaced at
+  once, leaving the pool once the call returns.
 - Blocks on the async driver (Q132). `build_async()` runs fan-outs as `build()` does, with a block's branches
   overlapping on the loop and each `Collect` in item order, and an `async def` generator annotated
   `-> Parallelizable[T]` is an expand there, its items awaited on the loop and checked as a sync expand's are (Q32).
-  A sync generator's items are read, and it is closed, where its node runs. A generator keeps one context across its
+  A sync generator's items are read where its node runs, and it is closed in the loop's default executor, so its
+  `finally` never waits for a pool thread a hung call holds. A generator keeps one context across its
   items. A failing branch cancels every running node and pending read once, and the generator is closed once.
   `build()` refuses an async generator expand, saying to use `build_async()`.
 - Deadlines (Q170). On a driver built `with_threads`, `execute`, `raw_execute`, `PreparedPlan.run` and `run_raw` take
@@ -82,7 +85,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
   inside a node lends that node's worker to its own nodes. Without `with_threads`, `timeout=` is a `TypeError`.
 - `fnloom.cancelled()` tells a node whether its parallel run is stopping, by its deadline, another node's failure or
   an interrupt, so it can return early; `False` outside one. A run started inside a node of a stopping run, on any
-  driver, sees it too, and a parallel one stops starting nodes. It then returns its outputs if they were all computed,
+  driver, sees it too, and a parallel or async one stops starting nodes. On the async driver, `cancelled()` turns true
+  once the run fails or its caller is cancelled. It then returns its outputs if they were all computed,
   or else raises a `RuntimeError`, which the outer run never raises in place of the failure that stopped it.
 - `Ctrl-C` ends a parallel run at once, abandoning its running nodes as a deadline does, so a node hung on a worker
   thread no longer keeps the run waiting. A `KeyboardInterrupt` a node raises does the same.

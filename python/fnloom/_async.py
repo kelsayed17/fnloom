@@ -33,13 +33,13 @@ import threading
 import weakref
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple, cast
 
-from fnloom import _extract
+from fnloom import _core, _extract
 from fnloom._blocks import AsyncItems
+from fnloom._threads import CANCELLED
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Coroutine, Iterator, Mapping, Sequence
 
-    from fnloom import _core
     from fnloom._caching import CacheRun, LateKeys
     from fnloom._hooks import Dispatch
     from fnloom._scan import NodeDef
@@ -170,7 +170,12 @@ class Runner:
         )
         # A run inside a pooled task pools nothing: its own loop's executor runs them.
         pool = threads if stepper.pooling else None
-        return await _Run(stepper, self.calls, pool, limits).wait()
+        # Its stop flag, for `fnloom.cancelled()` and the runs its nodes start.
+        token = CANCELLED.set(stepper.cancelled)
+        try:
+            return await _Run(stepper, self.calls, pool, limits).wait()
+        finally:
+            CANCELLED.reset(token)
 
 
 class Schedule:
@@ -357,25 +362,33 @@ class _Guard:
     """A sync node's call in a thread, which its stopping run may abandon.
 
     The run then hands the guard the call's slots (`Stepper.detach`), which it gives
-    back once the call returns, so a limit holds while an abandoned call runs.
+    back once the call returns, so a limit holds while an abandoned call runs. A call
+    abandoned on the driver's pool has its thread replaced at once (`Threads.abandon`),
+    and the thread leaves the pool once the call returns (`Threads.leave`).
     """
 
-    __slots__ = ("held", "lock", "returned")
+    __slots__ = ("abandoned", "held", "lock", "returned", "started")
 
     def __init__(self) -> None:
-        """A call not yet returned, holding its own slots."""
+        """A call not yet started, holding its own slots."""
         self.lock = threading.Lock()
+        self.started = False
         self.returned = False
+        self.abandoned = False
         self.held: _core.Held | None = None
 
     def call(self, function: Callable[[], object]) -> object:
         """`function()`, then the abandoned call's slots given back, if it was."""
+        self.started = True
         try:
             return function()
         finally:
             with self.lock:
                 self.returned = True
                 held = self.held
+                abandoned = self.abandoned
+            if abandoned:
+                _core.Threads.leave()
             if held is not None:
                 held.release()
 
@@ -539,8 +552,9 @@ class _Run:
                             return
                 else:
                     call = functools.partial(function, **payload)
-                    if self._limits is not None:
-                        # Its slots outlive the run that abandons it, until it returns.
+                    if self._limits is not None or self._threads is not None:
+                        # Its slots, and its pool thread, outlive the run that abandons
+                        # it, until it returns.
                         guard = _Guard()
                         call = functools.partial(guard.call, call)
                     future = self._threaded(call, context)
@@ -552,14 +566,17 @@ class _Run:
                 )
                 future = self._task(awaited, context)
             elif kind != "inline":
-                # A sync iterator's reads and its end run where its node would, so a
-                # `finally` that blocks never stalls the loop.
-                call = (
-                    functools.partial(_next, payload)
-                    if work == "pull"
-                    else functools.partial(payload.finish, work == "finish")
-                )
-                future = self._threaded(call, context)
+                # A sync iterator's reads run where its node would, and its end, which
+                # holds no slot, in the loop's executor: so a `finally` that blocks
+                # never stalls the loop, nor waits for a pool thread a hung call holds.
+                if work == "pull":
+                    future = self._threaded(functools.partial(_next, payload), context)
+                else:
+                    future = self._loop.run_in_executor(
+                        None,
+                        (context or contextvars.copy_context()).run,
+                        functools.partial(payload.finish, work == "finish"),
+                    )
             else:
                 # An inline expand's reads and its end run on the loop.
                 self._on_loop(task, work, payload, cast("contextvars.Context", context))
@@ -687,6 +704,7 @@ class _Run:
             return False
         self._stopped = True
         detached = False
+        replaced = 0
         for future, (task, _, work) in list(self._running.items()):
             guard = self._guards.pop(future, None)
             if guard is not None:
@@ -695,10 +713,17 @@ class _Run:
                         guard.held = self._stepper.detach(task)
                         del self._running[future]
                         detached = True
+                        # On the pool, and in a thread already: that thread is lost
+                        # until the call returns.
+                        if self._threads is not None and guard.started:
+                            guard.abandoned = True
+                            replaced += 1
             if work == "compute" or (
                 work == "pull" and isinstance(future, asyncio.Task)
             ):
                 future.cancel()
+        for _ in range(replaced):
+            cast("_core.Threads", self._threads).abandon()
         return detached
 
     def _stop(self) -> None:

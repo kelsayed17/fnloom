@@ -6,6 +6,7 @@ node that hangs waits on an event the test sets at its end.
 """
 
 import _thread
+import asyncio
 import contextvars
 import gc
 import os
@@ -1052,3 +1053,125 @@ def test_cancelled_is_public() -> None:
     """`cancelled` is a public name, and reads a context variable of the run."""
     assert "cancelled" in fnloom.__all__
     assert contextvars.copy_context().run(fnloom.cancelled) is False
+
+
+# An async run's nodes: a sync one polling `cancelled()`, an `async def` one reading it
+# as it is cancelled, and one that fails. `outer` runs a run of `INNER[0]` inside it,
+# which stops before `later`, and `ran` runs `INNER[0]`'s async run inside a sync node.
+ASYNC_STOP = """
+import asyncio
+import time
+
+import fnloom
+
+SEEN = []
+INNER = []
+RAISED = []
+
+
+def polled(x: int) -> int:
+    start = time.monotonic()
+    while time.monotonic() - start < 5:
+        if fnloom.cancelled():
+            SEEN.append("cancelled")
+            return -1
+        time.sleep(0.01)
+    SEEN.append("timed out")
+    return x
+
+
+async def waiting(x: int) -> int:
+    try:
+        await asyncio.sleep(5)
+    except asyncio.CancelledError:
+        SEEN.append(("async", fnloom.cancelled()))
+        raise
+    return x
+
+
+async def failing(x: int) -> int:
+    await asyncio.sleep(0.2)
+    raise ValueError("failing")
+
+
+def slow(x: int) -> int:
+    time.sleep(0.4)
+    return x
+
+
+def after(slow: int) -> int:
+    SEEN.append("after")
+    return slow
+
+
+def later(polled: int) -> int:
+    SEEN.append("later")
+    return polled
+
+
+def outer(x: int) -> int:
+    try:
+        return INNER[0].execute(["later"], inputs={"x": x})["later"]
+    except Exception as error:
+        RAISED.append(type(error))
+        raise
+
+
+def ran(x: int) -> int:
+    try:
+        return asyncio.run(INNER[0].execute(["after"], inputs={"x": x}))["after"]
+    except Exception as error:
+        RAISED.append(type(error))
+        raise
+
+
+def sibling(x: int) -> int:
+    time.sleep(0.1)
+    raise ValueError("sibling")
+"""
+
+
+@pytest.mark.parametrize("threads", [2, None], ids=["with_threads", "executor"])
+def test_cancelled_turns_true_in_an_async_run_on_a_siblings_failure(
+    threads: int | None,
+) -> None:
+    """A sync node in a thread and an `async def` node both see their run stopping."""
+    module = make_module(f"stop_async_cancelled_{threads}", ASYNC_STOP)
+    builder = fnloom.Builder().with_modules(module)
+    if threads is not None:
+        builder = builder.with_threads(threads)
+    driver = builder.build_async()
+    start = time.monotonic()
+    with pytest.raises(ValueError, match="failing"):
+        asyncio.run(driver.execute(["polled", "waiting", "failing"], inputs={"x": 1}))
+    assert time.monotonic() - start < SLOW
+    seen = settled(lambda: len(module.SEEN), 2)
+    assert seen == 2  # noqa: PLR2004
+    assert sorted(map(str, module.SEEN)) == ["('async', True)", "cancelled"]
+
+
+def test_a_parallel_run_inside_a_stopping_async_run_stops() -> None:
+    """Its node sees `cancelled()`; missing an output, the run raises `StoppedError`."""
+    module = make_module("stop_async_outer", ASYNC_STOP)
+    inner = fnloom.Builder().with_functions(module.polled, module.later)
+    module.INNER.append(inner.with_threads(2).build())
+    driver = fnloom.Builder().with_modules(module).with_threads(2).build_async()
+    with pytest.raises(ValueError, match="failing"):
+        asyncio.run(driver.execute(["outer", "failing"], inputs={"x": 1}))
+    assert settled(lambda: module.RAISED, [_core.StoppedError]) == [_core.StoppedError]
+    assert module.SEEN == ["cancelled"]
+
+
+def test_an_async_run_inside_a_stopping_parallel_run_stops() -> None:
+    """It starts no node once the run that started it stops, and raises `StoppedError`.
+
+    The outer run raises its own failure, not the inner run's `StoppedError`.
+    """
+    module = make_module("stop_async_inner", ASYNC_STOP)
+    module.INNER.append(fnloom.Builder().with_modules(module).build_async())
+    builder = fnloom.Builder().with_functions(module.ran, module.sibling)
+    driver = builder.with_threads(2).build()
+    with pytest.raises(ValueError, match="sibling"):
+        driver.execute(["ran", "sibling"], inputs={"x": 1})
+    assert settled(lambda: module.RAISED, [_core.StoppedError]) == [_core.StoppedError]
+    assert module.SEEN == []

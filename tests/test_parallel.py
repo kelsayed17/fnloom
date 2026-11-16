@@ -1415,6 +1415,115 @@ def test_async_runs_never_grow_the_pool_past_max_workers() -> None:
     assert _core.live_workers() - before <= 2  # noqa: PLR2004  # max_workers
 
 
+CLOSE_STARVED = """
+import asyncio
+import threading
+
+from fnloom import Collect, Parallelizable
+
+GATE = threading.Event()
+CLOSED = []
+
+
+def items(n: int) -> Parallelizable[int]:
+    try:
+        yield from range(n)
+    finally:
+        CLOSED.append(n)
+
+
+def slow(items: int) -> int:
+    GATE.wait(10)
+    return items
+
+
+def total(slow: Collect[int]) -> int:
+    return sum(slow)
+
+
+async def boom(n: int) -> int:
+    await asyncio.sleep(0.2)
+    raise ValueError("boom")
+"""
+
+
+@pytest.mark.parametrize("threads", [1, 4])
+def test_an_iterator_closes_while_its_items_hang_on_every_pool_thread(
+    threads: int,
+) -> None:
+    """A sibling fails while each pool thread is in a hung item call: the run ends now.
+
+    The generator's close holds no slot, so it never waits for a pool thread.
+    """
+    module = make_module(f"async_close_starved_{threads}", CLOSE_STARVED)
+    driver = fnloom.Builder().with_modules(module).with_threads(threads).build_async()
+    started = time.monotonic()
+    try:
+        with pytest.raises(ValueError, match="boom"):
+            _async_run(
+                asyncio.wait_for(
+                    driver.execute(["total", "boom"], inputs={"n": 100}), 5
+                )
+            )
+        assert time.monotonic() - started < 3  # noqa: PLR2004  # not the hung calls' 10
+        assert module.CLOSED == [100]
+    finally:
+        module.GATE.set()
+
+
+ABANDONED = """
+import asyncio
+import threading
+
+GATE = threading.Event()
+
+
+def h0(x: int) -> int:
+    GATE.wait(10)
+    return x
+
+
+def h1(x: int) -> int:
+    GATE.wait(10)
+    return x
+
+
+async def fail(x: int) -> int:
+    await asyncio.sleep(0.05)
+    raise ValueError("sibling fails")
+
+
+{nodes}
+"""
+
+
+def test_abandoned_pool_calls_are_replaced_and_their_threads_leave() -> None:
+    """Runs that abandon hung calls keep the pool bounded, by the slots they hold.
+
+    Each abandoned call keeps its worker slot and its thread, which the pool replaces
+    at once and lets go once the call returns: never a thread per call.
+    """
+    before = settled_workers()
+    nodes = "\n".join(f"def n{i}(x: int) -> int:\n    return x\n" for i in range(50))
+    module = make_module("async_abandoned", ABANDONED.format(nodes=nodes))
+    driver = fnloom.Builder().with_modules(module).with_threads(2).build_async()
+    try:
+        for _ in range(5):
+            with pytest.raises(ValueError, match="sibling fails"):
+                _async_run(driver.execute(["fail", "h0", "h1"], inputs={"x": 1}))
+            # The pool's two, and at most two in abandoned calls, by their slots.
+            assert _core.live_workers() - before <= 4  # noqa: PLR2004
+    finally:
+        module.GATE.set()
+    assert settled_workers() - before == 2  # noqa: PLR2004  # max_workers
+    outputs = [f"n{i}" for i in range(50)]
+    for _ in range(10):
+        assert _async_run(driver.execute(outputs, inputs={"x": 1})) == dict.fromkeys(
+            outputs, 1
+        )
+    assert settled_workers() - before == 2  # noqa: PLR2004  # max_workers
+
+
 NESTED_WIDE = """
 import asyncio
 import time
@@ -1451,6 +1560,7 @@ import threading
 import time
 
 from fnloom import limit
+from fnloom._threads import CANCELLED
 
 DRIVER = []
 INNER = []
@@ -1460,6 +1570,8 @@ DONE = threading.Event()
 @limit(group="db")
 def held(n: int) -> int:
     time.sleep(0.3)
+    # Not stopped with the run that abandoned it, so the inner run reaches the slots.
+    CANCELLED.set(None)
     try:
         run = DRIVER[0].execute(["inner"], inputs={{"n": n}})
         return asyncio.run(asyncio.wait_for(run, 5))["inner"]

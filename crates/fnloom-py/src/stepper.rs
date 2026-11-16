@@ -39,7 +39,9 @@ use crate::errors::run_error;
 use crate::graph::Graph;
 use crate::limits::{Caps, Limits, held_variable};
 use crate::observer::ObserverBase;
-use crate::parallel::{Failure, Out, Sched, Shared, outcome_of, seed, shared, unpaired};
+use crate::parallel::{
+    Failure, Out, Sched, Shared, Stop, fire_report, outcome_of, seed, shared, stopped, unpaired,
+};
 use crate::plan::{Kwargs, Plan, branch_variable, keyword, keyword_for};
 use crate::pool::{Pool, Threads};
 use crate::shared::SharedObservers;
@@ -79,6 +81,10 @@ pub struct Stepper {
     /// `fnloom._threads.HELD` as the run started: its ancestors' slots.
     held: Py<PyAny>,
     observers: SharedObservers,
+    /// The run's stop flag, as its tasks' `fnloom._threads.CANCELLED` holds it.
+    stop: Py<Stop>,
+    /// Whether the run stopped because a run that started it did.
+    followed: bool,
     /// The process the run started in.
     pid: u32,
 }
@@ -263,8 +269,13 @@ impl Stepper {
         )))
     }
 
+    /// Whether the run is stopping, which its stop flag then says too.
     fn stopping(&self) -> bool {
-        self.scheduler.as_ref().is_none_or(Sched::is_stopping)
+        let stopping = self.scheduler.as_ref().is_none_or(Sched::is_stopping);
+        if stopping {
+            self.stop.get().set();
+        }
+        stopping
     }
 
     /// The status bits of a run that hands out no task now.
@@ -443,46 +454,8 @@ impl Stepper {
         let run = made.as_ref().and_then(|context| context_run(context).ok());
         let run = run.as_ref();
         let plan = self.plan.get();
-        let graph = plan.graph().get();
-        let core = graph.core();
-        let kwargs = Kwargs::new(py, plan, graph);
-        // shortcut: `parallel::Run::report` without its busy flag, kept apart so the stopping
-        // PR's edits to `parallel.rs` merge cleanly; fold the two together after it lands.
-        let mut failed = None;
-        for (node, branch, value) in &report.hits {
-            let name = &core.node(*node).name;
-            let errors = self.observers.fire(py, &kwargs, run, |hook| {
-                hook.hit_in(name, branch, value.bind(py))
-            });
-            if !errors.is_empty() {
-                failed = Some((plan.core().order_key(*node, branch), "hit", errors));
-                break;
-            }
-        }
-        if failed.is_none() {
-            for (node, branch, items) in &report.expanded {
-                let name = &core.node(*node).name;
-                let errors = self.observers.fire(py, &kwargs, run, |hook| {
-                    hook.post_expand(name, branch, *items)
-                });
-                if !errors.is_empty() {
-                    failed = Some((plan.core().order_key(*node, branch), "post_expand", errors));
-                    break;
-                }
-            }
-        }
-        if failed.is_none() {
-            for (node, branch, key) in &report.skipped {
-                let name = &core.node(*node).name;
-                let errors = self
-                    .observers
-                    .fire(py, &kwargs, run, |hook| hook.skipped(name, branch));
-                if !errors.is_empty() {
-                    failed = Some((key.clone(), "skipped", errors));
-                    break;
-                }
-            }
-        }
+        let kwargs = Kwargs::new(py, plan, plan.graph().get());
+        let failed = fire_report(py, &self.observers, &kwargs, run, plan, report);
         if let Some((key, event, errors)) = failed {
             self.fail_at(key, RunError::Observers { event, errors });
         }
@@ -942,6 +915,13 @@ impl Stepper {
         let plan = handle.get();
         let core = plan.core();
         let graph = plan.graph().get().core();
+        // A run that started this one stopped: no new task starts, and no failure is kept.
+        if !self.followed && self.stop.get().followed() {
+            if let Some(scheduler) = self.scheduler.as_mut().filter(|s| !s.is_stopping()) {
+                scheduler.stop();
+                self.followed = true;
+            }
+        }
         loop {
             if !self.parked.is_empty() {
                 if let Some(found) = self.unpark(py) {
@@ -1088,6 +1068,14 @@ impl Stepper {
         if let Some(scheduler) = self.scheduler.as_mut() {
             scheduler.stop();
         }
+        self.stop.get().set();
+    }
+
+    /// The run's stop flag, for its tasks' `fnloom._threads.CANCELLED`: true once it is
+    /// stopping, or a run that started it is.
+    #[getter]
+    fn cancelled(&self, py: Python<'_>) -> Py<Stop> {
+        self.stop.clone_ref(py)
     }
 
     /// The requested outputs, keyed by name, once the run is done; or its failure, the one
@@ -1102,8 +1090,15 @@ impl Stepper {
         let failures = std::mem::take(&mut self.failures);
         let plan = self.plan.get();
         let graph = plan.graph().get();
-        let outputs = outcome_of(scheduler.finish(plan.core(), graph.core()), failures)
-            .map_err(|error| run_error(py, error))?;
+        let outputs = match outcome_of(scheduler.finish(plan.core(), graph.core()), failures) {
+            // Stopped for a run that started it before every output was in.
+            Err(RunError::BrokenPlan { .. }) if self.followed => Err(RunError::Observers {
+                event: "the run",
+                errors: vec![stopped()],
+            }),
+            outcome => outcome,
+        }
+        .map_err(|error| run_error(py, error))?;
         let result = PyDict::new(py);
         for (id, value) in outputs {
             let name = &graph.core().node(id).name;
@@ -1187,6 +1182,8 @@ pub fn start(
         pooled: flags,
         held: held.unbind(),
         observers: SharedObservers::new(observers, on_value, late),
+        stop: Py::new(py, Stop::current(py)?)?,
+        followed: false,
         pid,
     };
     stepper.fire(py, &report, None, &[]);

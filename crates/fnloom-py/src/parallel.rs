@@ -145,6 +145,32 @@ impl Stop {
 }
 
 impl Stop {
+    /// A new run's flag, unset, under the run whose task, at any depth, the current context
+    /// is in, if any.
+    pub(crate) fn current(py: Python<'_>) -> PyResult<Self> {
+        let parent = cancelled_variable(py)?
+            .bind(py)
+            .call_method0(intern!(py, "get"))?;
+        let ancestors = parent
+            .cast::<Self>()
+            .map(|parent| parent.get().chain())
+            .unwrap_or_default();
+        Ok(Self {
+            own: Arc::new(AtomicBool::new(false)),
+            ancestors,
+        })
+    }
+
+    /// The run is stopping.
+    pub(crate) fn set(&self) {
+        self.own.store(true, Ordering::Release);
+    }
+
+    /// Whether a run that started this one has stopped.
+    pub(crate) fn followed(&self) -> bool {
+        stopping(&self.ancestors)
+    }
+
     /// This flag and its ancestors': the ancestors of a run this one's tasks start.
     fn chain(&self) -> Vec<Arc<AtomicBool>> {
         let mut chain = Vec::with_capacity(self.ancestors.len() + 1);
@@ -180,7 +206,7 @@ pyo3::create_exception!(
 );
 
 /// The `StoppedError` a run raises when it stopped for the run that started it.
-fn stopped() -> PyErr {
+pub(crate) fn stopped() -> PyErr {
     StoppedError::new_err("the run that started this one has stopped or ended, so this one stopped")
 }
 
@@ -752,9 +778,7 @@ impl Run {
             return;
         }
         let plan = self.plan.get();
-        let graph = plan.graph().get();
-        let core = graph.core();
-        let kwargs = Kwargs::new(py, plan, graph);
+        let kwargs = Kwargs::new(py, plan, plan.graph().get());
         let context = calls.map(|calls| &calls.run);
         let busy = self.acquire(py);
         #[cfg(feature = "test-hooks")]
@@ -765,41 +789,7 @@ impl Run {
         if self.abandoned.load(Ordering::SeqCst) {
             return;
         }
-        let mut failed = None;
-        for (node, branch, value) in &report.hits {
-            let name = &core.node(*node).name;
-            let errors = self.observers.fire(py, &kwargs, context, |hook| {
-                hook.hit_in(name, branch, value.bind(py))
-            });
-            if !errors.is_empty() {
-                failed = Some((plan.core().order_key(*node, branch), "hit", errors));
-                break;
-            }
-        }
-        if failed.is_none() {
-            for (node, branch, items) in &report.expanded {
-                let name = &core.node(*node).name;
-                let errors = self.observers.fire(py, &kwargs, context, |hook| {
-                    hook.post_expand(name, branch, *items)
-                });
-                if !errors.is_empty() {
-                    failed = Some((plan.core().order_key(*node, branch), "post_expand", errors));
-                    break;
-                }
-            }
-        }
-        if failed.is_none() {
-            for (node, branch, key) in &report.skipped {
-                let name = &core.node(*node).name;
-                let errors = self
-                    .observers
-                    .fire(py, &kwargs, context, |hook| hook.skipped(name, branch));
-                if !errors.is_empty() {
-                    failed = Some((key.clone(), "skipped", errors));
-                    break;
-                }
-            }
-        }
+        let failed = fire_report(py, &self.observers, &kwargs, context, plan, report);
         drop(busy);
         // A hook that forked: the child locks nothing it inherited.
         if std::process::id() != self.pid {
@@ -809,6 +799,46 @@ impl Run {
             self.fail_at(py, key, RunError::Observers { event, errors });
         }
     }
+}
+
+/// Fires what `report` settled to `observers`: its hits, then its expands, then its skips,
+/// in `context`, or else the current one. The first event an observer raised in, with its
+/// order key and its errors, after which no event fires.
+pub(crate) fn fire_report<'py>(
+    py: Python<'py>,
+    observers: &SharedObservers,
+    kwargs: &Kwargs<'py, '_>,
+    context: Option<&Bound<'py, PyAny>>,
+    plan: &Plan,
+    report: &Report<Shared>,
+) -> Option<(OrderKey, &'static str, Vec<PyErr>)> {
+    let core = plan.graph().get().core();
+    for (node, branch, value) in &report.hits {
+        let name = &core.node(*node).name;
+        let errors = observers.fire(py, kwargs, context, |hook| {
+            hook.hit_in(name, branch, value.bind(py))
+        });
+        if !errors.is_empty() {
+            return Some((plan.core().order_key(*node, branch), "hit", errors));
+        }
+    }
+    for (node, branch, items) in &report.expanded {
+        let name = &core.node(*node).name;
+        let errors = observers.fire(py, kwargs, context, |hook| {
+            hook.post_expand(name, branch, *items)
+        });
+        if !errors.is_empty() {
+            return Some((plan.core().order_key(*node, branch), "post_expand", errors));
+        }
+    }
+    for (node, branch, key) in &report.skipped {
+        let name = &core.node(*node).name;
+        let errors = observers.fire(py, kwargs, context, |hook| hook.skipped(name, branch));
+        if !errors.is_empty() {
+            return Some((key.clone(), "skipped", errors));
+        }
+    }
+    None
 }
 
 /// Takes one task of `run` for `seat`, if one is ready, runs it, completes it and sends

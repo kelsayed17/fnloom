@@ -916,10 +916,11 @@ fnloom.build(lookups).execute(["answer"], inputs={"question": "why"}, timeout=0.
 - **A failure first.** A run that had failed and was waiting for its running nodes raises that failure at the
   deadline, not `TimeoutError`.
 - **`fnloom.cancelled()`** is `True` inside a node once its run is stopping: its deadline passed, another node failed,
-  or it was interrupted. It is `False` outside a run, and in a run of a driver without `with_threads`.
+  or it was interrupted. On an `AsyncDriver`, with or without `with_threads`, it turns `True` once the run fails or
+  its caller is cancelled. It is `False` outside a run, and in a run of a `Driver` without `with_threads`.
 - **Runs inside runs** stop with the run that started them. A node of a run started inside a node of a stopping run,
-  on any driver and at any depth, sees `cancelled()` turn `True` too. A parallel inner run also starts no new node.
-  Once its running nodes return, it returns its outputs if they were all computed. Otherwise it raises a
+  on any driver and at any depth, sees `cancelled()` turn `True` too. A parallel or async inner run also starts no new
+  node. Once its running nodes return, it returns its outputs if they were all computed. Otherwise it raises a
   `RuntimeError`: `the run that started this one has stopped or ended, so this one stopped`. The outer run never
   raises that error in place of the failure that stopped it. A context that outlives a stopped run, such as one a
   thread copied, keeps it stopped, so a run started from it later stops at once.
@@ -1128,8 +1129,9 @@ asyncio.run(streamed.execute(["summary"], inputs={"items": ["chair", "desk"]}))
 # -> {'summary': ['CHAIR', 'DESK']}
 ```
 
-A sync generator's items are read, and it is closed, where its node would run: in a thread, on the pool, or on the
-loop. A generator keeps one context from its first item to its last. When a branch fails, every running node and
+A sync generator's items are read where its node would run: in a thread, on the pool, or on the loop. It is closed
+on the loop when its node is inline, and else in the loop's default executor, which a hung call never holds. A
+generator keeps one context from its first item to its last. When a branch fails, every running node and
 every pending read of an async generator is cancelled once, and the generator is closed once, after any read of it in
 a thread returns.
 
@@ -1142,8 +1144,10 @@ branches enough workers for the overlap you want.
 the failed node's own exception, with the same note naming the node as the sync driver adds. There's no
 `ExceptionGroup`, so `except ZeroDivisionError` works as it does with `Driver`. A sync node in a thread can't be
 interrupted: the run doesn't wait for it, and drops its result when it comes, but its `@limit` and worker slots stay
-taken until it returns. `asyncio.run` still waits for running threads when the loop shuts down, since it shuts the
-default executor down. If the caller is cancelled, as by
+taken until it returns. On the driver's pool, its thread is replaced at once, and leaves the pool once the call
+returns. An expand's end, which holds no slot, runs in the loop's default executor, so a generator's `finally` never
+waits for a hung call's thread. `asyncio.run` still waits for running threads when the loop shuts down, since it
+shuts the default executor down. If the caller is cancelled, as by
 `asyncio.timeout`, the run cancels its nodes the same way, and the cancellation reaches the caller once each
 `async def` node has stopped. Each node is cancelled once: a second cancellation of the caller, or one after a node
 failed, doesn't interrupt a node's cleanup, and the caller still waits for it.

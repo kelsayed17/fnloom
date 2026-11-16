@@ -405,7 +405,6 @@ impl Pool {
         }
         leaves
     }
-
 }
 
 /// Whether a thread whose `start` an interrupt cut short begins its work: waits for it,

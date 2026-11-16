@@ -23,8 +23,8 @@ __all__ = [
     "arm_hook_panic",
     "arm_perform_panic",
     "arm_report_panic",
-    "arm_stepper_panic",
     "arm_state_panic",
+    "arm_stepper_panic",
     "arm_worker_panic",
     "core_version",
     "fingerprint",
@@ -146,6 +146,8 @@ class Stepper:
     def detach(self, task: int, /) -> Held | None: ...
     @property
     def pooling(self) -> bool: ...
+    @property
+    def cancelled(self) -> Stop: ...
     def outputs(self) -> dict[str, object]: ...
 
 @final
@@ -169,6 +171,9 @@ class Threads:
     def submit(
         self, function: Callable[[], object], context: contextvars.Context, /
     ) -> concurrent.futures.Future[Any]: ...
+    def abandon(self) -> None: ...
+    @staticmethod
+    def leave() -> None: ...
 
 @final
 class Stop:
