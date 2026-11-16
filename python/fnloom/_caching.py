@@ -1901,15 +1901,19 @@ class LateKeys:
         if isinstance(key, bytes) and isinstance(value, list):
             self._run.put(key, name, value, self._warned)
 
-    def flight(self, name: str, branch: _Branch) -> bytes | None:
-        """Late node `name`'s single-flight key in `branch`: its key, when it is stored.
+    def probe(self, name: str, branch: _Branch) -> tuple[object] | bytes | None:
+        """`lookup` of late node `name` in `branch`; on a miss, its single-flight key.
 
-        `None` for a node that is not stored, such as a `recompute` one, or whose
-        key is uncacheable or not known yet: such a step is never shared.
+        A hit as a 1-tuple; else the key a stored node is stored under, which the
+        run's steps of an equal key wait on; else `None`: a node that is not
+        stored, such as a `recompute` one, or whose key is uncacheable or not
+        known yet, is never shared. One call per step a parallel run probes.
         """
-        if not self._stores(name):
-            return None
-        key = self.key(name, branch)
+        found = self.lookup(name, branch)
+        if found is not None or not self._stores(name):
+            return found
+        # `lookup` keyed it: a known key is in the memo, an unknown one is not.
+        key = self._memo.get((name, branch))
         return key if isinstance(key, bytes) else None
 
     def outcome(self, name: str, branch: _Branch, *, hit: bool) -> CacheOutcome:

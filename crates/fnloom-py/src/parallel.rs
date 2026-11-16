@@ -732,16 +732,13 @@ fn land(
             let mut wanted = Vec::new();
             let outcome = schedule::probe(plan.core(), core, block, &mut wanted, |step| {
                 let node = core.node(step);
-                let hit = scope.lookup(calls, node, branch)?.map(|value| {
+                // A step that runs shares its value with the steps of this run whose key
+                // equals its own (single-flight); a hit runs nothing, so has no key.
+                let (hit, key) = scope.probe(calls, node, branch)?;
+                let hit = hit.map(|value| {
                     let absent = node.may_be_absent && value.is(scope.absent);
                     (shared(value), absent)
                 });
-                // A step that runs shares its value with the steps of this run whose key
-                // equals its own (single-flight); a hit runs nothing.
-                let key = match hit {
-                    Some(_) => None,
-                    None => scope.flight(calls, node, branch)?,
-                };
                 Ok((hit, key))
             });
             match outcome {

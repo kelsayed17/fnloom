@@ -14,6 +14,9 @@ use crate::errors::caught;
 use crate::graph::Graph;
 use crate::plan::keyword;
 
+/// A step's 32-byte cache key, its single-flight key in a parallel run.
+pub type Key = [u8; 32];
+
 /// How a task calls into Python: directly, in the caller's context, or in a copy of a
 /// parallel run's context.
 pub trait Calls<'py> {
@@ -183,27 +186,31 @@ impl<'py> Scope<'_, 'py> {
         Ok(Some(found.get_item(0)?))
     }
 
-    /// `node`'s single-flight key in `branch`, from `late.flight`: its 32-byte cache key
-    /// when it is stored, or `None` for an uncacheable or `recompute` step, or uncached.
-    pub fn flight(
+    /// A probed step's cache hit, or else its single-flight key, from `late.probe`, which
+    /// returns a hit as a 1-tuple, the 32-byte key of a stored step that missed, or
+    /// `None` for an uncacheable or `recompute` step; uncached, neither.
+    pub fn probe(
         &self,
         calls: &impl Calls<'py>,
         node: &Node<Py<PyAny>>,
         branch: &[usize],
-    ) -> PyResult<Option<[u8; 32]>> {
+    ) -> PyResult<(Option<Bound<'py, PyAny>>, Option<Key>)> {
         let Some(late) = self.late else {
-            return Ok(None);
+            return Ok((None, None));
         };
         let py = self.absent.py();
         let args = vec![
             self.name(node).into_any(),
             PyTuple::new(py, branch)?.into_any(),
         ];
-        let key = caught(|| calls.call_method(late, intern!(py, "flight"), args))?;
-        if key.is_none() {
-            return Ok(None);
+        let found = caught(|| calls.call_method(late, intern!(py, "probe"), args))?;
+        if found.is_none() {
+            return Ok((None, None));
         }
-        key.extract::<[u8; 32]>().map(Some)
+        if found.is_instance_of::<PyTuple>() {
+            return Ok((Some(found.get_item(0)?), None));
+        }
+        Ok((None, Some(found.extract::<[u8; 32]>()?)))
     }
 
     /// `result` of `node`'s call, once it passes the return check: `fnloom.ABSENT` only
