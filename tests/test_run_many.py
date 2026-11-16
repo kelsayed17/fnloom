@@ -55,12 +55,16 @@ def met(x: int) -> int:
 
 def stepped(x: int) -> int:
     if x == TOOLS.get("late"):
+        if "entered" in TOOLS:
+            TOOLS["entered"].set()
         TOOLS["before"].wait(5)
         time.sleep(0.05)
         raise ValueError(x)
     if x in TOOLS.get("fails", ()):
         if "started" in TOOLS:
             TOOLS["started"].wait(5)
+        if "entered" in TOOLS:
+            TOOLS["entered"].wait(5)
         if "before" in TOOLS:
             TOOLS["before"].set()
         raise ValueError(x)
@@ -370,9 +374,15 @@ def test_sets_without_threads_stop_at_the_first_failure() -> None:
 
 
 def test_the_lowest_indexed_failure_leads_though_a_later_one_came_first() -> None:
-    """Set 3 fails first, then set 1, which was open: set 1's error is raised."""
+    """Set 3 fails first, then set 1, which was open: set 1's error is raised.
+
+    Set 3 fails only once set 1's node is running, so set 1 is never stopped
+    before its node starts, however loaded the machine.
+    """
     nodes = module("rm_lowest")
-    nodes.TOOLS.update(fails={3}, late=1, before=threading.Event())
+    nodes.TOOLS.update(
+        fails={3}, late=1, before=threading.Event(), entered=threading.Event()
+    )
     plan = driver(nodes, 4).prepare(["stepped"], inputs={"x": 0})
     with pytest.raises(ValueError, match="1") as raised:
         plan.run_many(sets(0, 1, 2, 3))
