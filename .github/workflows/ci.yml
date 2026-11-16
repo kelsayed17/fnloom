@@ -109,14 +109,30 @@ jobs:
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
       - name: Run the benchmarks
         run: cargo bench --locked -p fnloom-core --bench core -- --output-format=json > bench.jsonl
+      # The counts this image measured, for `bench_gate.py --write-baseline` when a change moves them on purpose.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: instruction-counts
+          path: bench.jsonl
+          retention-days: 30
+      # The scheduler with one worker may cost at most twice Plan::run's instructions (Plan 11, O19).
       - name: Gate on the committed baseline
         run: >
           uv run --no-project --python 3.14 scripts/bench_gate.py
           --baseline crates/fnloom-core/benches/baseline.json --results bench.jsonl
+          --ratio core::engine::schedule.layered_1000:core::engine::run.layered_1000:2.0
+          --ratio core::engine::schedule.layered_10000:core::engine::run.layered_10000:2.0
 
   benchmarks-smoke:
-    name: Benchmarks run
+    name: Benchmarks run (Python ${{ matrix.python }})
     runs-on: ubuntu-latest
+    # 3.14t too, the build the parallel benchmarks are for.
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.14", "3.14t"]
+    env:
+      PYTHON: ${{ matrix.python }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -126,8 +142,9 @@ jobs:
           toolchain: stable
       - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
         with:
-          python-version: "3.14"
-      - run: uv sync --locked
+          python-version: ${{ matrix.python }}
+      - run: uv python install "$PYTHON"
+      - run: uv sync --locked --python "$PYTHON"
       # The release profile, so the benchmarks measure the optimised extension, not the debug build `uv sync` makes.
       - run: uv run --no-sync maturin develop --release --locked
       - run: uv run --no-sync python -m pytest benchmarks
