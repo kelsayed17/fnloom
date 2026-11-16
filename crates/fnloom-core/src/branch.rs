@@ -18,8 +18,8 @@ enum Collected<V> {
 }
 
 /// What a branch does with one step of its sub-plan, decided before it runs.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Need {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Need {
     /// Nothing needs it in this branch.
     Skip,
     /// `Evaluate::lookup` gave its value.
@@ -439,11 +439,8 @@ impl<'r, P, T: Clone> Runner<'r, P, T> {
         }
     }
 
-    /// Decides the innermost frame's needs for its new branch, then fires its hits.
-    ///
-    /// The walk goes back from the nodes the block's collects read, in reverse step order,
-    /// asking `lookup` of each needed step: a hit's own arguments are not needed through it.
-    /// A nested expand that is needed, hit or not, needs what its block reads.
+    /// Decides the innermost frame's needs for its new branch (`needs`), asking `lookup` of
+    /// each needed computed step, then fires its hits.
     fn walk<V: Evaluate<P, Value = T>>(
         &mut self,
         eval: &mut V,
@@ -453,63 +450,38 @@ impl<'r, P, T: Clone> Runner<'r, P, T> {
         let Some(frame) = self.frames.last_mut() else {
             return Ok(());
         };
-        let sub = &plan.blocks()[frame.block.index()];
-        frame.need.clear();
-        frame.need.resize(sub.steps.len(), Need::Skip);
-        for &node in &sub.collected {
-            self.wanted[node.index()] = true;
-        }
+        let (slots, branch) = (&mut self.slots, &self.branch);
         let mut failure = None;
-        for (position, step) in sub.steps.iter().enumerate().rev() {
-            if !self.wanted[step.node.index()] {
-                continue;
-            }
-            let node = graph.node(step.node);
-            let hit = if step.action == Action::Compute {
-                match eval.lookup(node, &self.branch) {
-                    Ok(hit) => hit,
+        needs(
+            plan,
+            graph,
+            frame.block,
+            &mut self.wanted,
+            &mut frame.need,
+            |_, step| {
+                // After a failing lookup, nothing more is asked.
+                if failure.is_some() {
+                    return false;
+                }
+                let node = graph.node(step.node);
+                match eval.lookup(node, branch) {
+                    Ok(Some(value)) => {
+                        let absent = node.may_be_absent && eval.is_absent(&value);
+                        slots[step.node.index()] = Some(Slot { value, absent });
+                        true
+                    }
+                    Ok(None) => false,
                     Err(source) => {
-                        failure = Some(node_error(graph, node, source, &self.branch, Vec::new()));
-                        break;
+                        failure = Some(node_error(graph, node, source, branch, Vec::new()));
+                        false
                     }
                 }
-            } else {
-                None
-            };
-            if let Some(value) = hit {
-                let absent = node.may_be_absent && eval.is_absent(&value);
-                self.slots[step.node.index()] = Some(Slot { value, absent });
-                frame.need[position] = Need::Hit;
-            } else {
-                frame.need[position] = Need::Run;
-                for &arg in &step.args {
-                    want(&mut self.wanted, graph, arg, true);
-                }
-            }
-            if let Some(block) = plan.block_of(step.node) {
-                for &read in &plan.blocks()[block.index()].reads {
-                    want(&mut self.wanted, graph, read, true);
-                }
-            }
-        }
-        // Clear the scratch for the next walk.
-        for &node in &sub.collected {
-            self.wanted[node.index()] = false;
-        }
-        for step in &sub.steps {
-            self.wanted[step.node.index()] = false;
-            for &arg in &step.args {
-                want(&mut self.wanted, graph, arg, false);
-            }
-            if let Some(block) = plan.block_of(step.node) {
-                for &read in &plan.blocks()[block.index()].reads {
-                    want(&mut self.wanted, graph, read, false);
-                }
-            }
-        }
+            },
+        );
         if let Some(failure) = failure {
             return Err(failure);
         }
+        let sub = &plan.blocks()[frame.block.index()];
         let branch = &self.branch;
         for (step, &need) in sub.steps.iter().zip(&frame.need) {
             if need != Need::Hit {
@@ -667,6 +639,63 @@ impl<'r, P, T: Clone> Runner<'r, P, T> {
     }
 }
 
+/// What one branch of `block` does with each of its steps, into `need`, by position.
+///
+/// The walk goes back from the nodes the block's collects read, in reverse step order,
+/// calling `hit` for each needed computed step: `true` makes it a hit, whose own arguments
+/// are not needed through it. A nested expand that is needed, hit or not, needs what its
+/// block reads. `wanted` is scratch, one flag per node, clear before and after.
+pub(crate) fn needs<P>(
+    plan: &Plan,
+    graph: &Graph<P>,
+    block: BlockId,
+    wanted: &mut [bool],
+    need: &mut Vec<Need>,
+    mut hit: impl FnMut(usize, &Step) -> bool,
+) {
+    need.clear();
+    let Some(sub) = plan.blocks().get(block.index()) else {
+        return;
+    };
+    need.resize(sub.steps.len(), Need::Skip);
+    for &node in &sub.collected {
+        wanted[node.index()] = true;
+    }
+    for (position, step) in sub.steps.iter().enumerate().rev() {
+        if !wanted[step.node.index()] {
+            continue;
+        }
+        if step.action == Action::Compute && hit(position, step) {
+            need[position] = Need::Hit;
+        } else {
+            need[position] = Need::Run;
+            for &arg in &step.args {
+                want(wanted, graph, arg, true);
+            }
+        }
+        if let Some(block) = plan.block_of(step.node) {
+            for &read in &plan.blocks()[block.index()].reads {
+                want(wanted, graph, read, true);
+            }
+        }
+    }
+    // Clear the scratch for the next walk.
+    for &node in &sub.collected {
+        wanted[node.index()] = false;
+    }
+    for step in &sub.steps {
+        wanted[step.node.index()] = false;
+        for &arg in &step.args {
+            want(wanted, graph, arg, false);
+        }
+        if let Some(block) = plan.block_of(step.node) {
+            for &read in &plan.blocks()[block.index()].reads {
+                want(wanted, graph, read, false);
+            }
+        }
+    }
+}
+
 /// Marks `arg` wanted (or clears it), with the expand of its block: a collected node of a
 /// nested or sibling block is wanted through that block's expand step.
 fn want<P>(wanted: &mut [bool], graph: &Graph<P>, arg: NodeId, to: bool) {
@@ -677,7 +706,7 @@ fn want<P>(wanted: &mut [bool], graph: &Graph<P>, arg: NodeId, to: bool) {
 }
 
 /// A `RunError::Node` for `node`, failed in `branch`.
-fn node_error<P, E>(
+pub(crate) fn node_error<P, E>(
     graph: &Graph<P>,
     node: &Node<P>,
     source: E,
@@ -704,7 +733,7 @@ fn without_blocks<P, E>(node: &Node<P>) -> RunError<E> {
 /// The `RunError::BrokenPlan` for an expand whose iterator declined though the node
 /// cannot be absent (`Node::declines` is false).
 #[cold]
-fn declined_wrongly<P, E>(node: &Node<P>) -> RunError<E> {
+pub(crate) fn declined_wrongly<P, E>(node: &Node<P>) -> RunError<E> {
     broken(format!(
         "expand '{}' declined but cannot be absent",
         node.name
@@ -727,290 +756,19 @@ mod tests {
     use std::rc::Rc;
 
     use crate::graph::Graph;
-    use crate::node::{Collect, Dependency, Node, NodeId, NodeSpec};
+    use crate::node::{Dependency, Node};
     use crate::plan::Plan;
-    use crate::run::{Arg, Blocks, Evaluate, Item, Observer, RunError};
-    use crate::testing::{Read, collect, expanding, plain, reading, request};
-
-    /// How a test iterable ends once its items are pulled.
-    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    enum End {
-        Done,
-        Decline,
-        Fail,
-    }
-
-    /// The values of these tests. `Mark` counts live values through its `Rc`.
-    #[derive(Clone, Debug, PartialEq)]
-    enum Val {
-        Num(i64),
-        List(Vec<Val>),
-        Gen(Vec<Val>, End),
-        Iter(usize),
-        Absent,
-        Mark(i64, Rc<()>),
-    }
+    use crate::run::{Arg, Evaluate, RunError};
+    use crate::testing::blocks::{
+        End, Fan, Log, Pay, Val, absent_expand, asked, chain, declines, declining_details, echo,
+        expand, fan, first, hit, items, nested, node, num, nums, sibling_collect, tens,
+    };
+    use crate::testing::{collect, plain, request};
 
     use Val::{Absent, List, Num};
 
-    fn nums(values: &[i64]) -> Val {
-        List(values.iter().map(|&n| Num(n)).collect())
-    }
-
-    fn items(values: &[i64]) -> Val {
-        Val::Gen(values.iter().map(|&n| Num(n)).collect(), End::Done)
-    }
-
-    fn num(value: &Val) -> i64 {
-        match value {
-            Num(n) | Val::Mark(n, _) => *n,
-            List(values) => values.iter().map(num).sum(),
-            _ => 0,
-        }
-    }
-
-    type Pay = Rc<dyn Fn(&[Val]) -> Result<Val, String>>;
-
-    fn node(
-        name: &str,
-        reads: &[Read<'_>],
-        body: impl Fn(&[Val]) -> Result<Val, String> + 'static,
-    ) -> NodeSpec<Pay> {
-        reading(name, reads, Rc::new(body) as Pay)
-    }
-
-    fn expand(
-        name: &str,
-        reads: &[Read<'_>],
-        body: impl Fn(&[Val]) -> Result<Val, String> + 'static,
-    ) -> NodeSpec<Pay> {
-        expanding(name, reads, Rc::new(body) as Pay)
-    }
-
-    fn declines(spec: NodeSpec<Pay>) -> NodeSpec<Pay> {
-        NodeSpec {
-            declines: true,
-            ..spec
-        }
-    }
-
     /// No branch at all: what `Fan::called` gives for a node that never ran.
     const NONE: [Vec<usize>; 0] = [];
-
-    /// The sum of the arguments, times ten.
-    #[expect(clippy::unnecessary_wraps, reason = "a payload returns a `Result`")]
-    fn tens(args: &[Val]) -> Result<Val, String> {
-        Ok(Num(10 * args.iter().map(num).sum::<i64>()))
-    }
-
-    /// The arguments as a list, one per argument.
-    #[expect(clippy::unnecessary_wraps, reason = "a payload returns a `Result`")]
-    fn echo(args: &[Val]) -> Result<Val, String> {
-        Ok(List(args.to_vec()))
-    }
-
-    /// The single argument, unchanged.
-    #[expect(clippy::unnecessary_wraps, reason = "a payload returns a `Result`")]
-    fn first(args: &[Val]) -> Result<Val, String> {
-        Ok(args.first().cloned().unwrap_or(List(Vec::new())))
-    }
-
-    /// One open iterator: its items, how it ends, and how many it gave.
-    struct Open {
-        items: Vec<Val>,
-        end: End,
-        given: usize,
-    }
-
-    /// Runs payloads and blocks, recording everything it is asked.
-    #[derive(Default)]
-    struct Fan {
-        calls: Vec<(String, Vec<usize>)>,
-        open: Vec<Open>,
-        finished: Vec<(String, bool)>,
-        asked: Vec<(String, Vec<usize>)>,
-        hits: BTreeMap<(String, Vec<usize>), Val>,
-        fail: Option<(&'static str, Vec<usize>)>,
-        lookup_fails: Option<(&'static str, Vec<usize>)>,
-        iterated: Vec<(String, Vec<usize>)>,
-    }
-
-    impl Fan {
-        fn called(&self, name: &str) -> Vec<Vec<usize>> {
-            self.calls
-                .iter()
-                .filter(|(n, _)| n == name)
-                .map(|(_, b)| b.clone())
-                .collect()
-        }
-    }
-
-    impl Evaluate<Pay> for Fan {
-        type Value = Val;
-        type Error = String;
-
-        fn evaluate(
-            &mut self,
-            node: &Node<Pay>,
-            payload: &Pay,
-            args: &[Arg<'_, Val>],
-        ) -> Result<Val, String> {
-            self.evaluate_in(node, payload, args, &[])
-        }
-
-        fn evaluate_in(
-            &mut self,
-            node: &Node<Pay>,
-            payload: &Pay,
-            args: &[Arg<'_, Val>],
-            branch: &[usize],
-        ) -> Result<Val, String> {
-            self.calls.push((node.name.clone(), branch.to_vec()));
-            if self
-                .fail
-                .as_ref()
-                .is_some_and(|(n, b)| *n == node.name && b == branch)
-            {
-                return Err(format!("{} failed", node.name));
-            }
-            let values: Vec<Val> = args.iter().map(|a| a.value.clone()).collect();
-            payload(&values)
-        }
-
-        fn is_absent(&self, value: &Val) -> bool {
-            *value == Absent
-        }
-
-        fn blocks(&mut self) -> Option<&mut dyn Blocks<Pay, Val, String>> {
-            Some(self)
-        }
-
-        fn lookup(&mut self, node: &Node<Pay>, branch: &[usize]) -> Result<Option<Val>, String> {
-            self.asked.push((node.name.clone(), branch.to_vec()));
-            if self
-                .lookup_fails
-                .as_ref()
-                .is_some_and(|(n, b)| *n == node.name && b == branch)
-            {
-                return Err(format!("lookup of {} failed", node.name));
-            }
-            Ok(self
-                .hits
-                .get(&(node.name.clone(), branch.to_vec()))
-                .cloned())
-        }
-    }
-
-    impl Blocks<Pay, Val, String> for Fan {
-        fn iterate(
-            &mut self,
-            node: &Node<Pay>,
-            iterable: &Val,
-            branch: &[usize],
-        ) -> Result<Val, String> {
-            self.iterated.push((node.name.clone(), branch.to_vec()));
-            let (items, end) = match iterable {
-                Val::Gen(items, end) => (items.clone(), *end),
-                List(items) => (items.clone(), End::Done),
-                other => return Err(format!("{} gave {other:?}, not an iterable", node.name)),
-            };
-            self.open.push(Open {
-                items,
-                end,
-                given: 0,
-            });
-            Ok(Val::Iter(self.open.len() - 1))
-        }
-
-        fn next_item(&mut self, node: &Node<Pay>, iterator: &Val) -> Result<Item<Val>, String> {
-            let Val::Iter(at) = iterator else {
-                return Err("not an iterator".to_owned());
-            };
-            let open = &mut self.open[*at];
-            if let Some(item) = open.items.get(open.given) {
-                open.given += 1;
-                return Ok(Item::Next(item.clone()));
-            }
-            match open.end {
-                End::Done => Ok(Item::Done),
-                End::Decline => Ok(Item::Declined(Absent)),
-                End::Fail => Err(format!("{} failed while iterating", node.name)),
-            }
-        }
-
-        fn finish_items(
-            &mut self,
-            node: &Node<Pay>,
-            iterator: &Val,
-            exhausted: bool,
-        ) -> Result<Val, String> {
-            self.finished.push((node.name.clone(), exhausted));
-            let Val::Iter(at) = iterator else {
-                return Err("not an iterator".to_owned());
-            };
-            let open = &self.open[*at];
-            Ok(List(open.items[..open.given].to_vec()))
-        }
-
-        fn gather(
-            &mut self,
-            _consumer: &Node<Pay>,
-            _source: NodeId,
-            values: Vec<Val>,
-        ) -> Result<Val, String> {
-            Ok(List(values))
-        }
-    }
-
-    /// Logs every event with its branch; fails the events that start with `fail_on`.
-    #[derive(Default)]
-    struct Log {
-        events: Vec<String>,
-        fail_on: Option<&'static str>,
-    }
-
-    impl Observer<Val, String> for Log {
-        fn pre_node_in(
-            &mut self,
-            node: &str,
-            branch: &[usize],
-            _args: &[Arg<'_, Val>],
-        ) -> Result<(), String> {
-            self.events.push(format!("pre:{node}:{branch:?}"));
-            Ok(())
-        }
-        fn post_node_in(
-            &mut self,
-            node: &str,
-            branch: &[usize],
-            outcome: Result<&Val, &String>,
-        ) -> Result<(), String> {
-            self.events
-                .push(format!("post:{node}:{branch:?}:{}", outcome.is_ok()));
-            Ok(())
-        }
-        fn post_expand(
-            &mut self,
-            node: &str,
-            branch: &[usize],
-            items: usize,
-        ) -> Result<(), String> {
-            let event = format!("expand:{node}:{branch:?}:{items}");
-            self.events.push(event.clone());
-            match self.fail_on {
-                Some(prefix) if event.starts_with(prefix) => Err(event),
-                _ => Ok(()),
-            }
-        }
-        fn hit_in(&mut self, node: &str, branch: &[usize], _value: &Val) -> Result<(), String> {
-            self.events.push(format!("hit:{node}:{branch:?}"));
-            Ok(())
-        }
-        fn skipped(&mut self, node: &str, branch: &[usize]) -> Result<(), String> {
-            self.events.push(format!("skipped:{node}:{branch:?}"));
-            Ok(())
-        }
-    }
 
     type Outcome = Result<BTreeMap<String, Val>, RunError<String>>;
 
@@ -1044,20 +802,6 @@ mod tests {
             .iter()
             .map(|(n, v)| ((*n).to_owned(), v.clone()))
             .collect()
-    }
-
-    /// `picked` yields `of`; `details` is ten times each item plus the shared `zz_rate`;
-    /// `total` collects `details`.
-    fn fan(of: Val) -> Graph<Pay> {
-        Graph::build(vec![
-            expand("picked", &[], move |_| Ok(of.clone())),
-            node("zz_rate", &[], |_| Ok(Num(1))),
-            node("details", &[plain("picked"), plain("zz_rate")], |args| {
-                Ok(Num(10 * num(&args[0]) + num(&args[1])))
-            }),
-            node("total", &[collect("details")], first),
-        ])
-        .unwrap()
     }
 
     #[test]
@@ -1123,25 +867,6 @@ mod tests {
         let result = run(&g, &["total"], &[("total", Num(7))], &mut eval).unwrap();
         assert_eq!(result, out(&[("total", Num(7))]));
         assert_eq!(eval.calls, []);
-    }
-
-    /// `outer` yields `[2, 1]`; `inner` yields `0..k` for each outer item `k`; `leaf` is
-    /// `10 * outer + inner`; `inner_sum` collects `leaf` per outer branch, `outer_sum`
-    /// collects `inner_sum`.
-    fn nested() -> Graph<Pay> {
-        Graph::build(vec![
-            expand("outer", &[], |_| Ok(items(&[2, 1]))),
-            expand("inner", &[plain("outer")], |args| {
-                let k = num(&args[0]);
-                Ok(items(&(0..k).collect::<Vec<_>>()))
-            }),
-            node("leaf", &[plain("inner"), plain("outer")], |args| {
-                Ok(Num(num(&args[0]) + 10 * num(&args[1])))
-            }),
-            node("inner_sum", &[collect("leaf")], first),
-            node("outer_sum", &[collect("inner_sum")], first),
-        ])
-        .unwrap()
     }
 
     #[test]
@@ -1295,28 +1020,6 @@ mod tests {
         assert_eq!(Rc::strong_count(&marker), 1);
     }
 
-    /// `details` declines for the item 2; `total` keeps the present branches, `every`
-    /// every branch.
-    fn declining_details() -> Graph<Pay> {
-        Graph::build(vec![
-            expand("picked", &[], |_| Ok(items(&[1, 2, 3]))),
-            declines(node("details", &[plain("picked")], |args| {
-                if num(&args[0]) == 2 {
-                    Ok(Absent)
-                } else {
-                    tens(args)
-                }
-            })),
-            node("total", &[collect("details")], first),
-            node(
-                "every",
-                &[("details", Dependency::Required, Some(Collect::All))],
-                first,
-            ),
-        ])
-        .unwrap()
-    }
-
     #[test]
     fn collect_present_drops_absent_branches() {
         let g = declining_details();
@@ -1352,31 +1055,6 @@ mod tests {
             result,
             out(&[("every", List(vec![Num(10), Absent, Num(30)]))])
         );
-    }
-
-    /// `picked` yields `of` and may decline; `req`, `opt` and `adm` collect `details` with
-    /// each of the three dependencies.
-    fn absent_expand(of: Val) -> Graph<Pay> {
-        Graph::build(vec![
-            declines(expand("picked", &[], move |_| Ok(of.clone()))),
-            node("details", &[plain("picked")], tens),
-            node("req", &[collect("details")], echo),
-            node(
-                "opt",
-                &[("details", Dependency::Optional, Some(Collect::Present))],
-                echo,
-            ),
-            node(
-                "adm",
-                &[(
-                    "details",
-                    Dependency::Admits { optional: false },
-                    Some(Collect::Present),
-                )],
-                echo,
-            ),
-        ])
-        .unwrap()
     }
 
     #[test]
@@ -1470,31 +1148,6 @@ mod tests {
                 "post:total:[]:true",
             ]
         );
-    }
-
-    /// `a` reads each item, `b` reads `a`, `c` reads `a`; `total` collects `b` and `count`
-    /// collects `c`.
-    fn chain() -> Graph<Pay> {
-        Graph::build(vec![
-            expand("picked", &[], |_| Ok(items(&[1, 2, 3]))),
-            node("a", &[plain("picked")], tens),
-            node("b", &[plain("a")], tens),
-            node("c", &[plain("a")], tens),
-            node("total", &[collect("b")], first),
-            node("count", &[collect("c")], first),
-        ])
-        .unwrap()
-    }
-
-    fn hit(name: &str, branch: &[usize], value: Val) -> ((String, Vec<usize>), Val) {
-        ((name.to_owned(), branch.to_vec()), value)
-    }
-
-    fn asked(pairs: &[(&str, &[usize])]) -> Vec<(String, Vec<usize>)> {
-        pairs
-            .iter()
-            .map(|&(n, b)| (n.to_owned(), b.to_vec()))
-            .collect()
     }
 
     #[test]
@@ -1591,24 +1244,6 @@ mod tests {
         .unwrap();
         let result = run(&g, &["out"], &[], &mut Fan::default()).unwrap();
         assert_eq!(result, out(&[("out", nums(&[100, 200]))]));
-    }
-
-    /// `zb` yields `[1, 2]` and `zb_m` is ten times each; inside the block of `ca`, `n`
-    /// collects the sibling block of `zb`; `total` collects `n`. Named so that `ca`'s block
-    /// sorts before `zb`'s, which it must still wait for.
-    fn sibling_collect(inside: Option<&'static str>) -> Vec<NodeSpec<Pay>> {
-        let reads_of = |name: &'static str| -> Vec<Read<'static>> {
-            inside.map(plain).into_iter().chain([plain(name)]).collect()
-        };
-        vec![
-            expand("zb", &reads_of("seed"), |_| Ok(items(&[1, 2]))),
-            node("zb_m", &[plain("zb")], tens),
-            expand("ca", &reads_of("seed"), |_| Ok(items(&[5, 6]))),
-            node("n", &[plain("ca"), collect("zb_m")], |args| {
-                Ok(args[1].clone())
-            }),
-            node("total", &[collect("n")], first),
-        ]
     }
 
     #[test]
