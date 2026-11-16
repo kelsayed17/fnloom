@@ -150,14 +150,23 @@ These are the rules every task follows. "Attached" means the thread is attached 
    it, and returns from `detach`. It then attaches, calls the hooks, clears the flag and notifies one waiter.
     - On the GIL build the flag's holder may wait for the GIL. Whoever holds the GIL is never waiting for the flag,
       since that wait is detached, so the two can't deadlock.
-4. **Waiting** for work, for a slot or for the run to end is a `Condvar` wait inside `detach`. The calling thread
-   waits in slices of 50 ms (O22), and calls `check_signals` between them, attached.
+4. **Waiting** for work, for a slot or for the run to end is a `Condvar` wait inside `detach`. A thread with a Python
+   caller (the calling thread of a run, and a sequential driver's grant wait) waits in slices of 50 ms (O22), and
+   calls `check_signals` between them, attached, so `Ctrl-C` stops it.
 5. **Poison.** Every lock but the scheduler's recovers with `PoisonError::into_inner`, since each guards a counter, a
    flag or a queue that is consistent at every unlock. A poisoned scheduler lock marks the run broken. Every thread
    leaves it, and the run raises `RuntimeError: fnloom's scheduler panicked: <message>`.
 6. **Panics.** Node calls already go through `caught` (`errors.rs`). The worker loop's body also runs inside
    `catch_unwind`, so a panic outside a node call fails the run as a `PanicException`, raised once. The thread then
-   goes back to the pool.
+   goes back to the pool, except for PyO3's panic on attaching once `Py_IsFinalizing()` is true: a worker that meets
+   it exits.
+
+**Workers attach once, for their whole life.** A pool thread's body is one `Python::try_attach`, and it does every
+wait inside `py.detach`. It never attaches per task. In PyO3 0.30, `attach` on a thread with no thread state calls
+`PyGILState_Ensure` and releases that state when it returns (`internal/state.rs`), so attaching per task would make
+a thread state per task on 3.14t, against the 10 µs target, and would lose the O28 rename after every task. The
+rename is done once, on that lifelong thread state. `try_attach` returning `None`, at interpreter exit, ends the
+thread.
 
 **Values across threads.** A run's values are `Arc<Py<PyAny>>` inside the scheduler: `Py` is `Send` and `Sync`, and
 cloning an `Arc` for a task's arguments is pure Rust. A `Py` is only ever dropped attached (rule 2), never through
@@ -180,9 +189,17 @@ downstream node runs.
 - A `ContextVar.set` in one node is never seen by another, and no `Context` is entered by two threads.
 
 **Ancestry for runs inside runs.** The slots a run's tasks hold are recorded in `_threads.HELD`, a context variable
-holding `(limits id, group id)` pairs. It is set in each task's context, or, on the sequential path, set and reset
-around a limited node's call. A run started from inside a node reads it at its start and keeps it on the run, so the
-re-entrancy check holds at any depth and on any thread (Task 6).
+holding `(limits id, slot)` pairs, where a slot is a group, a node's own cap or the caller's worker slot.
+
+- It is set in each task's context, in the context copy the async driver passes to `run_in_executor`, or, on the
+  sequential path, set and reset around a limited node's call.
+- A run started from inside a node reads it at its start and keeps it on the run, so the re-entrancy check holds at
+  any depth and on any thread (Task 6).
+- The check refuses a nested run that needs a group or node slot whose every unit its ancestors hold. So a
+  `@limit(1)` node that runs its own driver on a request needing that same node raises at once, instead of waiting
+  forever.
+- It doesn't see two unrelated runs that each hold part of a group and wait on each other. That deadlock is not
+  detected, and the Threads docs say so (Task 12).
 
 **Hooks.** A run's hook calls never overlap, and a hook runs on the thread that ran the node.
 
@@ -206,23 +223,39 @@ driver waiting on that slot is woken, on any thread or loop (Tasks 6 and 7).
 **The pool's lifetime** (O23):
 
 - **Start and naming.** Pool threads start lazily at the first parallel run and are shared by the driver's runs.
-  Each is named `fnloom-worker-<n>` in Rust, and on its first attach it renames its Python `_DummyThread` to the same
-  name, so `threading.current_thread().name` says it (O28).
+  Each is named `fnloom-worker-<n>` in Rust. When its lifelong attach begins, it renames its Python `_DummyThread` to
+  the same name, so `threading.current_thread().name` says it (O28).
 - **When threads exit.** They exit when the driver's `Threads` is collected, or at interpreter exit. `Threads` is
   `#[pyclass(weakref)]`, so `_threads` can keep a `WeakSet` of live ones for its `atexit` hook.
-- **Joining.** Neither the collector nor the `atexit` hook ever joins a busy thread. They join idle threads, waiting
-  at most 1 s in all, and set a `finalizing` flag. A busy worker checks that flag before it attaches, and exits
-  without attaching once it is set.
-- **Abandoned tasks.** A task abandoned by a deadline releases its slots at once, and the pool starts a replacement
-  thread. The abandoned thread exits when its call returns (O27).
+- **Joining.** Neither the collector nor the `atexit` hook ever joins a busy thread. They set a `stopping` flag,
+  wake the idle threads, and join them, waiting at most 1 s in all.
+- **At exit.** An idle worker sees the flag inside its `detach` wait and leaves without re-attaching: its thread
+  ends with its thread state still detached. A busy worker can't avoid re-attaching, since leaving `detach` always
+  re-attaches (the guard's drop calls `PyEval_RestoreThread` unconditionally, `internal/state.rs`). During
+  finalization CPython hangs such a thread until the process ends, and it never runs Python again.
+- **Abandoned tasks** (O27). A task abandoned by a deadline releases its slots at once, and the pool starts a
+  replacement thread.
+    - When the call finally returns, it releases nothing more: its slots were already released, and a second release
+      would wrap an atomic counter.
+    - The abandoned thread exits then.
+    - The process's thread count grows by one for each abandoned call that stays hung.
 
 **Fork.** Each `Threads` and `Limits` records the pid that made it.
 
 - A driver whose pid differs builds a fresh pair at its next run, and keeps the inherited pair in a module list that
   is never dropped. Dropping it would lock or free mutexes another process's threads held.
 - Nothing inherited is ever locked.
-- A run inherited across a fork, as when a node calls `os.fork()`, raises `RuntimeError: this run was started in
-  process <pid>; a run doesn't survive os.fork()` in the child, before touching any lock.
+- A run inherited across a fork raises `RuntimeError: this run was started in process <pid>; a run doesn't survive
+  os.fork()` in the child, before touching any lock. That covers a node calling `os.fork()` on the run's calling
+  thread under `with_threads`: in the child, the node returns into the worker loop, which sees the pid. A run on a
+  driver without `with_threads` has no shared state, so in the child it simply finishes, as in 0.5.0. Only a
+  limited node's grant in it checks the pid, and raises that error rather than touch the inherited `Limits`.
+- A node calling `os.fork()` on a pool thread leaves no Python caller in the child. Only the forking thread
+  survives a fork, so the child's one thread is that worker, and the run's calling thread is gone.
+    - When the child's node returns into the worker loop, the loop sees the pid. It ends the thread without touching
+      any lock or raising, and with it the child process.
+    - A node that forks on a pool thread should therefore `exec` or `os._exit` in the child itself, as after any fork
+      from a thread. The Threads docs say so.
 
 **Your code.** A node that mutates a shared value races with its siblings now, as it raced with other threads' runs
 before. Within one run, hooks are serialized and nothing else is (§6.7).
@@ -531,8 +564,10 @@ The order, and why:
 4. **Two hung nodes abandoned by `timeout=`** on a `with_threads(2)` driver. A third run completes, and the
    interpreter then exits with status 0. (Task 9, `test_hung_abandoned_tasks_do_not_starve_later_runs` and
    `test_the_interpreter_exits_cleanly_with_an_abandoned_task`)
-5. **`os.fork()` from inside a running node.** The child's node returns into a `RuntimeError`, and the child's next
-   run starts a fresh pool and completes. The parent's run completes too. (Task 3,
+5. **`os.fork()` from inside a running node on the run's calling thread**, under `with_threads(1)`. The child's run
+   raises the inherited-run `RuntimeError` to the caller, and the child's next run starts a
+   fresh pool and completes. The parent's run completes too. A fork on a pool thread leaves no Python caller in the
+   child, and ends that child when its node returns, as the [fork rules](#free-threading-safety-rules) say. (Task 3,
    `test_a_fork_inside_a_node_raises_in_the_child`)
 
 ---
@@ -672,7 +707,8 @@ The order, and why:
         - one worker slot, unless its seat is `Held` (a nested run's caller), `Lent` (a slot a waiting caller lent its
           run) or `Threadless` (an async node);
         - plus its node's slot and its group's slot, when it computes or pulls that node.
-    - `Limits::held(&self, group: u32) -> usize`, for Task 6's re-entrancy check.
+    - `Limits::held(&self, slot: Slot) -> usize`, with `pub enum Slot { Worker, Node(NodeId), Group(u32) }`, for
+      Task 6's re-entrancy check, which compares it with the units a run's ancestors hold.
     - `Limits` has no wake: the binding's wrapper adds one (Task 6), since the core has no locks.
 - Produces, in `schedule.rs`:
     - `Options.in_flight`: an expand's iterator is pulled only while fewer than `in_flight` of its branches are
@@ -684,7 +720,9 @@ The order, and why:
         - When it fails, the waiter becomes ready and runs itself.
     - `Scheduler::blocked(&self) -> Option<NodeId>`: the lowest-key ready task's node, when the grant refused it and
       nothing of this run is in flight.
-    - `Scheduler::lend(&mut self)`: one task of this run may take `Seat::Lent`, used by Task 9.
+    - `Scheduler::lend(&mut self)`: the run has one lent worker seat, used by Task 9. It is held by at most one task
+      at a time, and is free again when that task completes, so the next task of the run may take it. A run may have
+      more tasks than the seat; they run one after another on it.
     - Stop.
         - `stop()`, or a `Failed` outcome, ends the handing out of compute, pull and probe tasks.
         - Failures are kept with their order keys.
@@ -695,7 +733,7 @@ The order, and why:
       Never more than two tasks are out, never more than one of a node capped at 1, and never more than the group's
       cap;
     - `no_worker_cap_without_max_workers`;
-    - `a_held_seat_takes_no_worker_slot`, `a_lent_seat_is_used_once`, and
+    - `a_held_seat_takes_no_worker_slot`, `a_lent_seat_is_held_by_one_task_at_a_time_and_reused`, and
       `a_threadless_seat_takes_node_and_group_slots_only`;
     - `the_in_flight_bound_holds_pulls_back`: with `in_flight: 4`, a 10,000-item expand never has more than four
       unfinished branches;
@@ -749,13 +787,16 @@ The order, and why:
             - `SharedObservers`;
             - the pid.
         - The calling thread works too, as one of the `max_workers`.
-    - The worker loop, inside `catch_unwind`, by the [safety rules](#free-threading-safety-rules):
-        1. take a task, by rule 1;
-        2. attach, and run the task through `task.rs`;
-        3. fire its hooks under the busy flag;
-        4. clear the flag, and call `on_value` or `late.store`;
-        5. `complete` the task, by rule 1;
-        6. drop `Report.released`, attached.
+    - The worker loop runs inside the thread's one lifelong attach, each iteration inside `catch_unwind`, by the
+      [safety rules](#free-threading-safety-rules):
+        1. take a task, by rule 1, waiting inside `detach` when there is none;
+        2. run it through `task.rs`;
+        3. as soon as the node call returns, release the task's node and group slots, with a wake, before any hook or
+           store write, since a limit counts concurrent calls and a hook may start a run needing that group;
+        4. fire its hooks under the busy flag;
+        5. clear the flag, and call `on_value` or `late.store`;
+        6. `complete` the task, which releases its worker slot, by rule 1;
+        7. drop `Report.released`.
     - The stop on failure. No new task starts. The run waits for the running tasks, then raises the lowest order key's
       error, with the note as today (`while computing 'details' for branch (3,) of 'picked'`). Every failure seen
       reaches `after_node` with `ok=False`.
@@ -786,6 +827,8 @@ The order, and why:
     - `test_with_threads_one_runs_on_the_callers_thread`: every node sees `threading.get_ident()` of the caller;
     - `test_pool_threads_are_named_fnloom_worker`: under `with_threads(4)`, a node on another thread than the caller's
       sees `threading.current_thread().name` starting with `fnloom-worker-`;
+    - `test_a_worker_keeps_one_thread_state_across_tasks`: every node a worker runs sees the same
+      `threading.current_thread()` object and name, over 100 tasks;
     - `test_no_pool_thread_starts_before_the_first_run`, and `test_the_pool_holds_max_workers_minus_one_threads`,
       counted with `_core.live_workers()`;
     - `test_a_failure_waits_for_running_branches`: no branch is still running when `execute` raises;
@@ -795,8 +838,11 @@ The order, and why:
     - `test_results_are_equal_over_worker_counts`, the hypothesis property, marked `threads`;
     - `test_with_threads_survives_pickle_copy_rebuild_and_build_async`;
     - `test_bad_max_workers_are_refused`: `0`, `-1`, `True` and `1.5`;
-    - `test_a_fork_inside_a_node_raises_in_the_child` (Review Focus 5; skipped on Windows), and
-      `test_a_forked_child_gets_a_new_pool`;
+    - `test_a_fork_inside_a_node_raises_in_the_child` (Review Focus 5; skipped on Windows): the node forks on the
+      calling thread under `with_threads(1)`, never on a pool thread;
+    - `test_a_sequential_run_continues_in_a_forked_child`: on a driver without `with_threads` the run has no shared
+      state, so in the child it simply finishes, as in 0.5.0;
+    - `test_a_forked_child_gets_a_new_pool`;
     - `test_a_panic_in_the_worker_loop_fails_the_run_once`, through `_core.arm_worker_panic()`;
     - `test_a_parallel_run_keeps_the_gil_off`: 3.14t only, in a subprocess;
     - `test_a_driver_without_with_threads_calls_plan_run`: a spy on `_core.Plan.run` sees `threads=None`.
@@ -835,7 +881,9 @@ The order, and why:
     - `LateKeys` (call 9):
         - `records(name, branch)`, `pulled(name, branch, item)` and `finished(name, branch, value)`;
         - `_pulling: dict[tuple[str, _Branch], list[bytes | None]]`, and no `_current`;
-        - a `threading.Lock` around `_memo`, `_items`, `_pulling` and `_replayed`, with no store call inside it.
+        - a `threading.Lock` around `_memo`, `_items`, `_pulling` and `_replayed`, with no store call inside it;
+        - `pulled` computes the item's fingerprint before it takes the lock, since a fingerprint can run user code
+          (`register_fingerprint`), then appends the version under the lock.
     - The binding stops calling `pulled` and `finished` (`plan.rs`'s `next_item` and `finish_items`). `Items` makes
       those calls with its `_branch`, given `late` by the factory.
     - `_checks.RESULTS`' sink is keyed by `(node, branch)`, with the branch from `current_branch()`. `Dispatch` pops
@@ -927,21 +975,26 @@ The order, and why:
     - **Every driver honours limits** (O9). On the `Plan::run` path, `task.rs` grants around the call of a node that
       has a limit:
         1. `try_start` while attached;
-        2. when refused, wait for the wake inside `detach` until granted;
+        2. when refused, run the re-entrancy check below, then wait for the wake inside `detach` until granted, in rule
+           4's 50 ms slices with `check_signals` between them, so `Ctrl-C` stops the wait;
         3. call the node, with `_threads.HELD` set and reset around the call;
-        4. release, which notifies.
+        4. release as soon as the call returns, before its hooks, which notifies.
     - The plan's `Call` carries a `limited: bool`, so an unlimited node pays one flag test, and `Plan::run` is
       untouched.
     - **The wake.** `_core.Limits.release` bumps the wake's counter and notifies its `Condvar`. Then, attached and after
       the lock, it calls each registered async waker once. `_core.Limits.add_waker(callback)` registers one, and Task 7
-      uses it.
+      uses it. An exception from a waker, such as `RuntimeError` from `call_soon_threadsafe` on a closed loop, is
+      dropped, so it never fails the unrelated run whose release called it.
     - `Options.in_flight` is `2 * max_workers`. Without `with_threads` it is `2 * (os.process_cpu_count() or 1)`.
     - **Runs inside runs**, by the safety rules' "Ancestry for runs inside runs":
         - A run reads `_threads.HELD` when it starts, and keeps it on the run.
+        - `_threads.HELD` records every slot a task holds: its worker slot, its node's slot and its group's slot.
         - A run started inside a task that holds a worker slot uses `Seat::Held` for the tasks its caller runs.
-        - When `Scheduler::blocked()`, or a refused sequential grant, names a node whose group's every slot is held by
-          this run's ancestors (`Limits::held` against the run's record), the run raises `RuntimeError: 'load' needs
-          group 'db', but every slot of it is held by the runs that called this one`.
+        - When `Scheduler::blocked()`, a refused sequential grant, or a stepper waiting on a limit (Task 7) names a node
+          whose node slot or group slot has every unit held by this run's ancestors (`Limits::held` against the run's
+          record), the run raises at once:
+            - `RuntimeError: 'load' needs group 'db', but every slot of it is held by the runs that called this one`;
+            - `RuntimeError: 'load' is limited to 1 call at a time, and the runs that called this one hold it`.
 - [ ] **Step 1: Write the failing tests** in `tests/test_limits.py`. Every counter is updated under a
   `threading.Lock`.
     - `test_limit_caps_a_nodes_concurrent_calls`: 32 branches, `limit(2)` and eight workers. A concurrency counter's
@@ -961,6 +1014,14 @@ The order, and why:
     - `test_a_node_may_run_its_own_driver_inside_its_slot`: nesting never waits for `max_workers`;
     - `test_an_inner_run_needing_a_group_its_callers_hold_is_refused` (Review Focus 3): at one and two levels of
       nesting, from a caller's thread and from a pool thread, and on a sequential driver;
+    - `test_a_limit_one_node_running_its_own_driver_on_itself_is_refused`: a `@limit(1)` node runs its driver on a
+      request needing that node, and gets the node-slot `RuntimeError` at once, on a sequential driver and under
+      `with_threads(2)`;
+    - `test_node_and_group_slots_are_released_before_hooks`: a hook of a `limit(1)` node runs that node in another
+      run, and it completes;
+    - `test_a_sequential_grant_wait_stops_on_interrupt`: `_thread.interrupt_main()` while the caller waits on a held
+      slot raises `KeyboardInterrupt` within 1 s;
+    - `test_a_waker_on_a_closed_loop_does_not_fail_the_releasing_run`;
     - `test_limit_stacks_with_every_decorator`, extending `tests/test_stacking.py`'s pair test;
     - `test_public_names`: `limit` is in `fnloom.__all__`.
 - [ ] **Step 2: Run them to see them fail. Step 3: Implement. Step 4: Run the tests to see them pass**, then
@@ -998,8 +1059,11 @@ The order, and why:
         - An async node is a task on the loop, and takes `Seat::Threadless`.
         - A sync node goes to the loop's default executor, or on a driver with `with_threads` to
           `Threads.submit(fn, context) -> concurrent.futures.Future`, wrapped by `asyncio.wrap_future`.
-        - When `next()` waits on a limit, the run registers a waker with `Limits.add_waker`, which calls
-          `loop.call_soon_threadsafe` to resolve a future it awaits.
+        - The context copy each sync node runs in, the one passed to `run_in_executor` or `submit`, has
+          `_threads.HELD` set to the slots that node holds, so a run it starts sees its ancestry.
+        - When `next()` waits on a limit, the run first runs Task 6's re-entrancy check, raising its `RuntimeError` when
+          the run's ancestors hold every unit of the slot. Otherwise it registers a waker with `Limits.add_waker`, which
+          calls `loop.call_soon_threadsafe` to resolve a future it awaits.
     - `_async.Schedule` and `CachedSchedule`'s dependency counts are removed. `CachedSchedule` keeps its keys and hit
       plans, and its late keys go through the stepper's probes.
     - `RunEnd.skipped` on the async driver is sorted by order (O6).
@@ -1018,6 +1082,8 @@ The order, and why:
     - in `tests/test_limits.py`, `test_async_limits_apply_to_async_nodes`: `limit(1)` keeps an async node's calls
       apart, with and without `with_threads`;
     - `test_an_async_run_waiting_on_a_limit_is_woken_by_another_thread`;
+    - `test_an_async_inner_run_needing_a_slot_its_callers_hold_is_refused`: a sync node in group `db` of size 1 runs
+      its own async driver on a request needing `db`, and gets the `RuntimeError` at once;
     - `test_with_threads_and_inline_are_refused`;
     - `test_async_events_equal_the_sync_drivers_with_one_worker`: for a graph of sync nodes on
       `sync_nodes="inline"`, the event sequence equals `Driver`'s, orders included;
@@ -1087,17 +1153,20 @@ The order, and why:
     - **A deadline run** (O8):
         - The calling thread runs no node, pull or probe task. It waits inside `detach`, in 50 ms slices.
         - The pool grows to `max_workers` threads for it.
-        - A caller that holds a worker slot itself, a nested run, lends it: `Scheduler::lend()` lets one of the run's
-          tasks take `Seat::Lent`, so a deadline run inside a node never waits for a slot its own caller holds.
+        - A caller that holds a worker slot itself, a nested run, lends it: `Scheduler::lend()` gives the run one lent
+          seat, which its tasks take one at a time (Task 2), so a deadline run inside a node never waits for a slot its
+          own caller holds, however many tasks it has.
     - **When the deadline passes:**
         1. the run stops, and `cancelled()` turns `True`;
         2. the calling thread runs the `Finish` tasks of the iterators with no pull in flight, attached;
         3. it raises `TimeoutError`.
     - An iterator whose pull is in flight at the deadline is finished by the worker whose pull returns.
     - **Abandonment** (O27). Each running task is abandoned. Its slots, worker, node and group, are released at once,
-      with a wake, and the pool starts a replacement thread. The abandoned thread's result is dropped when it returns,
-      and the thread then exits. While an abandoned call is still running, a limit may be exceeded, and the docs say
-      so.
+      with a wake, and the pool starts a replacement thread.
+        - When the abandoned call returns, its result is dropped and it releases nothing, since its slots were released
+          already and a second release would wrap a counter. The thread then exits.
+        - While an abandoned call is still running, a limit may be exceeded, and the process has one more thread for
+          each call that stays hung. The docs say both.
     - **`fnloom.cancelled() -> bool`** reads `_threads.CANCELLED`, a `ContextVar[_core.Stop | None]` set in each task's
       context copy.
         - It is `True` once its run is stopping, by a deadline, by a sibling's failure or by an interrupt.
@@ -1113,10 +1182,12 @@ The order, and why:
       returns early in each case;
     - `test_a_generator_is_closed_on_timeout_by_the_caller_when_no_pull_is_in_flight`;
     - `test_a_nested_run_with_a_deadline_uses_its_callers_lent_slot`: under `with_threads(1)`, a node runs
-      `execute(..., timeout=1)` on its own driver, which completes;
+      `execute(..., timeout=1)` on its own driver, over a graph of ten nodes run one after another on the lent seat,
+      which completes;
     - `test_hung_abandoned_tasks_do_not_starve_later_runs` (Review Focus 4): under `with_threads(2)`, two runs abandon
       nodes blocked on an `Event`, and a third run completes within 2 s;
-    - `test_a_deadline_releases_limits_at_abandonment`;
+    - `test_a_deadline_releases_limits_at_abandonment`, and `test_an_abandoned_call_releases_nothing_when_it_returns`:
+      once it returns, the limits' counters are back to zero, not wrapped;
     - `test_timeout_without_with_threads_is_a_type_error`;
     - `test_interrupt_main_stops_a_parallel_run`, with `_thread.interrupt_main()` from a node;
     - `test_the_interpreter_exits_cleanly_with_an_abandoned_task` (Review Focus 4): a subprocess exits with status 0
@@ -1307,7 +1378,10 @@ The order, and why:
   It covers:
     - what is shared, what one run serializes, and what your code must make safe;
     - the GIL build's behaviour: nodes that release the GIL overlap, and pure Python nodes take turns;
-    - limits on every driver, deadlines, `cancelled()`, runs inside runs, and fork.
+    - limits on every driver, deadlines, `cancelled()`, runs inside runs, and fork, with the pool-thread fork case;
+    - that a nested run needing a slot its own callers hold is refused, but two unrelated runs that each hold part of
+      a group and wait on each other are not detected, and wait until a deadline ends one;
+    - that abandoned calls may exceed a limit while they run, and keep their thread until they return.
 - [ ] **Step 4: Run `scripts/check.sh`, then commit** `Free-threading stress tests, and the Threads docs`.
 
 ## PR Z: close-out
@@ -1366,8 +1440,10 @@ The 0.6.0 release PR follows this plan's last merge, as 0.5.0's did (#98). It is
 ## Open questions
 
 Each question has the plan's answer marked **Recommended**, and the tasks above are written to it. Approving this
-plan approves every recommended answer, unless the maintainer says otherwise. O9, O4, O5, O6, O8, O11, O13, O17,
-O20, O21 and O23 were revised after the review of #99, and O26 to O28 are new.
+plan approves every recommended answer, unless the maintainer says otherwise. O4, O5, O6, O8, O9, O11, O13, O17,
+O20, O21 and O23 were revised after the first review of #99, and O26 to O28 are new. The re-review tightened O8 (a
+lent seat is reused), O9 (node slots, early release, interruptible waits), O23 (one lifelong attach per worker),
+O27 (no second release) and O28.
 
 ### Release and scope
 
@@ -1417,15 +1493,17 @@ O20, O21 and O23 were revised after the review of #99, and O26 to O28 are new.
 - **O8. Who runs tasks during a deadline.**
     - (a) Only pool threads run node, pull and probe tasks; the pool grows to `max_workers` threads, and the caller
       waits. **Recommended**: the only way the caller can raise at once. Two rules go with it:
-        - A nested deadline run lends its caller's worker slot to the run (`Seat::Lent`), so it never waits for a slot
-          its own caller holds.
+        - A nested deadline run lends its caller's worker slot to the run (`Seat::Lent`). Its tasks take that one seat
+          one at a time, so it never waits for a slot its own caller holds, however many tasks it has.
         - At the deadline, the caller runs the `Finish` tasks of iterators with no pull in flight, before raising. An
           iterator whose pull is in flight is finished by the worker whose pull returns.
     - (b) The caller works too, and raises when its current task returns.
 - **O27. Abandoned tasks.**
     - (a) An abandoned task releases its worker, node and group slots at once, the pool starts a replacement thread,
-      and the abandoned thread exits when its call returns. **Recommended**: hung nodes never starve later runs. The
-      cost is that a limit may be exceeded while an abandoned call still runs, which the docs say.
+      and the abandoned thread exits when its call returns, releasing nothing more. **Recommended**: hung nodes never
+      starve later runs. The costs, which the docs say:
+        - a limit may be exceeded while an abandoned call still runs;
+        - the process has one more thread for each abandoned call that stays hung.
     - (b) Keep node and group slots until the call returns, so limits hold strictly, but a hung limited node then
       blocks its group for good.
 
@@ -1434,8 +1512,13 @@ O20, O21 and O23 were revised after the review of #99, and O26 to O28 are new.
 - **O9. Where limits apply.**
     - (a) On every driver. **Recommended**: a sequential `Driver` shared by threads (`docs/running.md`, Threads) would
       otherwise run a `@limit(1)` node four at once.
-        - The `Plan::run` path takes the grant around a limited node's call, waiting inside `detach`. That costs an
-          unlimited node one flag test, and leaves `Plan::run` untouched.
+        - The `Plan::run` path takes the grant around a limited node's call. It waits inside `detach`, in 50 ms slices
+          with `check_signals`, so `Ctrl-C` stops it. That costs an unlimited node one flag test, and leaves
+          `Plan::run` untouched.
+        - A task's node and group slots are released as soon as its node call returns, before its hooks and store
+          writes, on every path.
+        - A nested run needing a node or group slot whose every unit its ancestors hold is refused at once, on every
+          driver. Two unrelated runs that each hold part of a group and wait on each other are not detected.
         - An unsized group is refused at build on every driver.
     - (b) Only where one run's nodes overlap, so `AsyncDriver` and `with_threads`, while a sequential driver ignores
       limits.
@@ -1524,9 +1607,14 @@ O20, O21 and O23 were revised after the review of #99, and O26 to O28 are new.
 - **O23. A pool's lifetime.**
     - (a) Its threads live until the driver's `Threads` is collected, or the interpreter exits, with no public
       `close()`. **Recommended**: no lifecycle for users to get wrong. The rules that go with it:
+        - a worker attaches once, for its whole life, with `Python::try_attach`, and does every wait inside `detach`;
         - a busy thread is never joined, at exit or by the collector;
-        - idle threads are joined with a bounded wait of at most 1 s in all;
-        - a `finalizing` flag stops busy threads attaching once exit has begun;
+        - a `stopping` flag wakes idle threads, which leave from inside `detach` without re-attaching, and they are
+          joined with a bounded wait of at most 1 s in all;
+        - a busy worker re-attaches when its call ends, since leaving `detach` always re-attaches; during finalization
+          CPython hangs that thread until the process ends;
+        - a worker that meets PyO3's panic on attaching after `Py_IsFinalizing()` exits, rather than going back to the
+          pool;
         - `Threads` is `#[pyclass(weakref)]`, for the `atexit` `WeakSet`;
         - `test_a_collected_driver_stops_its_threads` pins it.
     - (b) An idle timeout.
@@ -1540,8 +1628,9 @@ O20, O21 and O23 were revised after the review of #99, and O26 to O28 are new.
       sharing them across copies would make one copy's runs throttle another's silently.
     - (b) A copy shares its original's.
 - **O28. How a pool thread shows up in Python.**
-    - (a) It renames its `_DummyThread` to `fnloom-worker-<n>` on its first attach, and `_core.live_workers()` (under
-      `test-hooks`) counts pool threads for tests. **Recommended**: tracebacks, logs and `current_thread()` name the
-      worker. Rust threads never appear in `threading.enumerate()` as threads of their own, so counting needs the
-      hook.
+    - (a) It renames its `_DummyThread` to `fnloom-worker-<n>` once, when its lifelong attach begins, and
+      `_core.live_workers()` (under `test-hooks`) counts pool threads for tests. **Recommended**: tracebacks, logs and
+      `current_thread()` name the worker. Once `current_thread()` has made the dummy thread, it is in
+      `threading._active` and `threading.enumerate()` lists it. `live_workers()` is still the count to test with,
+      since it also counts workers that have not attached yet.
     - (b) Expose native thread ids on `NodeStart`.
