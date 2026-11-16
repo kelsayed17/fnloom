@@ -2,8 +2,8 @@
 
 **Status:** in progress, 2026-11-15. Plans 1, 2 and 4 are released in 0.1.0, and the Plan 4 follow-up and Plan 3 in
 0.2.0. Plans 5 to 9 (#24 to #28) and Plan 12's PR 0 (#33) are released in 0.3.0, and Plan 12's PRs A to G
-(#43, #44, #46 to #49, #53) in 0.4.0. Plan 10, typed absence and sequential fan-out, is built and ships as 0.5.0,
-not yet released (PRs #56, #61, #62, #63, #66, #68, #69, #72, follow-ups #83, #84 and #90, and its close-out).
+(#43, #44, #46 to #49, #53) in 0.4.0. Plan 10, typed absence and sequential fan-out, is released in 0.5.0
+(PRs #56, #61, #62, #63, #66, #68, #69, #72, follow-ups #83, #84 and #90, and its close-out #96).
 Plan 11 follows it, then Plan 13. Plan 11 is designed and approved, and its
 [implementation plan](2026-11-15-plan-11-parallel-executor.md) awaits the maintainer's approval; nothing of it is built.
 
@@ -58,7 +58,7 @@ and the design's change log takes a row when the item is approved.
 |---|---|
 | Lifecycle adapters (pre/post node, pre/post graph) | Done in Plan 6: `fnloom.Hook` with `before_run`, `before_node`, `after_node` and `after_run`, each given one frozen event with real values, on both drivers, any number per driver, checked when attached (Q84, Q86); cache outcomes on node events (Q85) |
 | Result builders (`do_build_result`, dict / pandas / polars builders) | Done in Plan 6: `Builder.with_result_builder(build)`, any callable given the raw dict in request order, typed through `Builder[R]` (Q19, Q24). No pandas or polars builder: a callable, with recipes, including a strict `frame` recipe that refuses the outer join `pandas.DataFrame` does (Q89) |
-| Dynamic execution (`Parallelizable`, `Collect`) | Designed and approved 2026-10-29: [the dynamic execution design](../design/2026-10-28-dynamic-execution-design.md). `Parallelizable[T]` and `Collect[T]` with no experimental flag, blocks compiled once into a reusable plan, nesting, content-addressed cache keys per branch, and `Builder.with_threads(...)` for a parallel executor on free-threaded 3.14t, correct on 3.14. Plan 10 built absence and sequential blocks, shipping in 0.5.0 (Q118 to Q132, Q135 to Q138); Plan 11 builds the executor |
+| Dynamic execution (`Parallelizable`, `Collect`) | Designed and approved 2026-10-29: [the dynamic execution design](../design/2026-10-28-dynamic-execution-design.md). `Parallelizable[T]` and `Collect[T]` with no experimental flag, blocks compiled once into a reusable plan, nesting, content-addressed cache keys per branch, and `Builder.with_threads(...)` for a parallel executor on free-threaded 3.14t, correct on 3.14. Plan 10 built absence and sequential blocks, released in 0.5.0 (Q118 to Q132, Q135 to Q138); Plan 11 builds the executor |
 | Plugin ecosystem (dask, ray, spark, pandera, mlflow, UI, tracker) | Not built in (design §2 non-goal). Plan 6's hooks make each one writable outside fnloom (Q84) |
 | A failing node logs its inputs | Done in Plan 6: `after_node` gets `ok=False` with the node, its inputs and its error, and `fnloom.LogFailures` (*new*) is the ready-made hook that logs them (Q88) |
 | `NodeExecutionMethod` and `GracefulErrorAdapter` (node-execution wrappers) | `NodeExecutionMethod` done in Plan 8: `Builder.with_node_wrappers(*wrappers)`, Q24's ordered chain, any number per driver (Q111). Graceful partial failure is designed for Plan 11: `@fnloom.absent_on(*errors)` and `Builder.with_absent_on(...)` turn chosen errors into absence, and `Collect` keeps the branches that succeeded ([design](../design/2026-10-28-dynamic-execution-design.md) §7.5) |
@@ -234,7 +234,7 @@ tests against Hamilton for every kept behaviour; benchmarks for anything on the 
    2026-11-03). Built: absence in the core and the front end (#56), at the edges of a run and on the async driver
    (#62), cached (#61); blocks in the core (#63), in the front end (#66), drawn and exported (#68), cached (#69), and
    across namespaces, decorators and absence (#72), with follow-ups (#83, #84, #90), benchmarks and docs in the
-   close-out. Not yet released.
+   close-out (#96). Released in 0.5.0 (2026-11-15).
 10. **Plan 11: the parallel executor and partial results.** The same design, milestones C to E: the core
     `Scheduler`, `with_threads(...)` for free-threaded 3.14t, `run_many`, the async driver on the scheduler, and
     `absent_on` for partial results. [Plan 11's implementation plan](2026-11-15-plan-11-parallel-executor.md) is
