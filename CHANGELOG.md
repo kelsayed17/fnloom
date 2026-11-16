@@ -70,6 +70,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
   `ValueError`. A sync node there that runs its own async driver never waits for the slot it holds. The pool keeps
   `max_workers` threads from an async run's first sync node, and a thread whose call the run abandons is replaced at
   once, leaving the pool once the call returns.
+  A failed async run's driver is collected with its run, so its pool stops: the collector follows the
+  run's stepper, which its traceback keeps.
 - Blocks on the async driver (Q132). `build_async()` runs fan-outs as `build()` does, with a block's branches
   overlapping on the loop and each `Collect` in item order, and an `async def` generator annotated
   `-> Parallelizable[T]` is an expand there, its items awaited on the loop and checked as a sync expand's are (Q32).

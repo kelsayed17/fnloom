@@ -15,6 +15,7 @@ import sysconfig
 import textwrap
 import threading
 import time
+import weakref
 from typing import TYPE_CHECKING, Any, NoReturn, override
 
 import pytest
@@ -1522,6 +1523,47 @@ def test_abandoned_pool_calls_are_replaced_and_their_threads_leave() -> None:
             outputs, 1
         )
     assert settled_workers() - before == 2  # noqa: PLR2004  # max_workers
+
+
+COLLECTED = """
+import asyncio
+
+DRIVER = []
+
+
+def ok(x: int) -> int:
+    return x
+
+
+async def fail(x: int) -> int:
+    await asyncio.sleep(0.01)
+    raise ValueError("fails")
+"""
+
+
+@pytest.mark.parametrize("threads", [2, None], ids=["with_threads", "executor"])
+def test_a_failed_async_runs_driver_is_collected_and_its_pool_stops(
+    threads: int | None,
+) -> None:
+    """The failure's traceback keeps the run's stepper, which the collector now follows.
+
+    The driver, kept in its module, is collected in one pass, and its threads leave.
+    """
+    before = settled_workers()
+    module = make_module(f"async_collected_{threads}", COLLECTED)
+    builder = fnloom.Builder().with_modules(module)
+    if threads is not None:
+        builder = builder.with_threads(threads)
+    driver = builder.build_async()
+    module.DRIVER.append(driver)
+    with pytest.raises(ValueError, match="fails") as info:
+        _async_run(driver.execute(["ok", "fail"], inputs={"x": 1}))
+    collected = weakref.ref(driver)
+    del sys.modules[module.__name__]
+    del driver, builder, module, info
+    gc.collect()
+    assert collected() is None
+    assert settled_workers() == before
 
 
 NESTED_WIDE = """

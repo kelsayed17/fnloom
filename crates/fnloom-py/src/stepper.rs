@@ -33,6 +33,7 @@ use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::sync::PyOnceLock;
 use pyo3::types::{PyDict, PyList, PyString, PyTuple};
+use pyo3::{PyTraverseError, PyVisit};
 
 use crate::absent;
 use crate::errors::run_error;
@@ -897,6 +898,31 @@ impl Stepper {
 
 #[pymethods]
 impl Stepper {
+    /// Lets the cyclic GC follow the run's references: its plan, whose graph holds the node
+    /// functions, and so their module and a driver kept there; its observers, `HELD`, stop
+    /// flag and running tasks. A failed run's stepper, kept by its traceback, is then
+    /// collected with its driver, whose pool stops.
+    ///
+    /// shortcut: the values the scheduler and report hold are not visited, as each is an
+    /// `Arc` they may share; a node value referring back to its driver keeps the run alive
+    /// until that value is dropped, so visit them once values are owned in one place.
+    fn __traverse__(&self, visit: PyVisit<'_>) -> Result<(), PyTraverseError> {
+        visit.call(&self.plan)?;
+        visit.call(&self.held)?;
+        visit.call(&self.stop)?;
+        self.observers.traverse(&visit)?;
+        for running in self.running.iter().flatten() {
+            for flag in &running.live {
+                visit.call(flag)?;
+            }
+            visit.call(&running.kwargs)?;
+            visit.call(&running.context)?;
+            visit.call(&running.lent)?;
+            visit.call(&running.order)?;
+        }
+        Ok(())
+    }
+
     /// The next task to run, as `(task, node, branch, work, payload, context)`; or, when
     /// none is ready, the run's status: `1` set when nothing is left, `2` when it was
     /// refused a slot, which a release may give it, and `4` when it is stopping.

@@ -8,6 +8,7 @@
 use fnloom_core::plan::Plan as CorePlan;
 use fnloom_core::run::Observer;
 use pyo3::prelude::*;
+use pyo3::{PyTraverseError, PyVisit};
 
 use crate::graph::Graph;
 use crate::keys::Keys;
@@ -39,6 +40,15 @@ impl SharedObservers {
             on_value: on_value.map(Bound::unbind),
             late: late.map(|late| late.clone().unbind()),
         }
+    }
+
+    /// Visits every object kept, for a holder's `__traverse__`.
+    pub fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+        for (observer, _) in &self.observers {
+            visit.call(observer)?;
+        }
+        visit.call(&self.on_value)?;
+        visit.call(&self.late)
     }
 
     /// Whether the run has observers, so its events need the busy flag.
