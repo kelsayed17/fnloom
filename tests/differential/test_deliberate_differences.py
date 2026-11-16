@@ -6463,6 +6463,45 @@ def test_q170_a_run_has_a_deadline() -> None:
         ours.RELEASE.set()
 
 
+_BATCHED = """
+def picked(n: int) -> Parallelizable[int]:
+    yield from range(n)
+
+
+def squared(picked: int) -> int:
+    return picked * picked
+
+
+def summed(squared: Collect[int]) -> int:
+    return sum(squared)
+"""
+
+
+@pytest.mark.deliberate("Q171")
+@pytest.mark.threads
+@pytest.mark.parametrize("threads", [None, 4])
+def test_q171_one_request_runs_over_many_input_sets(threads: int | None) -> None:
+    """Hamilton has only a loop of `execute`; fnloom's `run_many` equals that loop."""
+    given = [{"n": n} for n in range(50)]
+    hamilton = block_module("q171_h", _BATCHED, "hamilton")
+    built = (
+        hamilton_driver.Builder()
+        .with_modules(hamilton)
+        .enable_dynamic_execution(allow_experimental_mode=True)
+        .build()
+    )
+    public = {name for name in dir(built) if not name.startswith("_")}
+    assert not any("many" in name or "batch" in name for name in public)
+    looped = [built.execute(["summed"], inputs=inputs) for inputs in given]
+    ours = block_module("q171_f", _BATCHED, "fnloom")
+    builder = fnloom.Builder().with_modules(ours)
+    if threads is not None:
+        builder = builder.with_threads(threads)
+    plan = builder.build().prepare(["summed"], inputs={"n": 0})
+    assert plan.run_many(given) == [plan.run(inputs=inputs) for inputs in given]
+    assert plan.run_many(given) == looped
+
+
 _MET_BRANCHES = """
 def picked(n: int) -> Parallelizable[int]:
     yield from range(n)

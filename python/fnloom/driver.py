@@ -144,6 +144,10 @@ class _Threaded:
         """The native plan."""
         return self._plan
 
+    def workers(self) -> _threads.Workers:
+        """The driver's limits and pool."""
+        return self._workers
+
     def run(
         self,
         inputs: dict[str, Any],
@@ -696,6 +700,83 @@ class PreparedPlan[R = dict[str, object]]:
             return values
         return {name: values[name] for name in self._outputs}
 
+    def run_many(
+        self,
+        inputs_seq: Iterable[Mapping[str, object] | None],
+        *,
+        overrides: Mapping[str, object] | None = None,
+        timeout: float | None = None,
+    ) -> list[R]:
+        """Runs the plan once per input set: each set's result, in order (Q171).
+
+        Each set is its own run, as `run` would run it, with `overrides` shared by
+        all of them. Every set is checked as `run` checks it before any runs, and
+        a set that fails the checks raises, noted with its index, running none.
+
+        On a driver built `with_threads`, the sets run on its pool, under its
+        limits, at most `max_workers` open at once, opening in index order. Once
+        one fails, no set opens and every open set stops, as a failed run stops;
+        the failure of the lowest-indexed failing set is raised, noted with its
+        index. Without `with_threads`, the sets run one after another on the
+        calling thread, and the first failure is raised. `timeout`, in seconds,
+        covers every set together, and needs `Builder.with_threads`.
+        """
+        if isinstance(inputs_seq, Mapping):
+            msg = (
+                "run_many takes an iterable of input mappings, one per run, "
+                "not one mapping"
+            )
+            raise TypeError(msg)
+        sets: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for index, inputs in enumerate(inputs_seq):
+            try:
+                # A copy: the iterable may hand out one dict, changed for each set.
+                given = None if inputs is None else dict(inputs)
+                sets.append(self._checked(given, overrides))
+            except BaseException as error:
+                error.add_note(f"in input set {index} of run_many")
+                raise
+        plan = self._plan
+        seconds = None if timeout is None else _timeout(plan, timeout)
+        runners = 1
+        workers = plan.workers() if isinstance(plan, (_Threaded, CacheRun)) else None
+        threads = None if workers is None else workers.threads()
+        # Inside a task of this driver, the sets share that task's worker slot.
+        if threads is not None and not threads.nested():
+            runners = min(threads.max_workers, len(sets))
+
+        def one(index: int, left: float | None) -> R:
+            given_inputs, given_overrides = sets[index]
+            return self._run_checked(given_inputs, given_overrides, left)
+
+        permits = None if workers is None else workers.helpers()
+        return _threads.run_sets(one, len(sets), runners, seconds, permits)
+
+    def _run_checked(
+        self,
+        given_inputs: dict[str, Any],
+        given_overrides: dict[str, Any],
+        timeout: float | None,
+    ) -> R:
+        """`run` with values `_checked` already passed, for `run_many`."""
+        # This class runs only without a result builder, so `R` is the raw dict.
+        return self._raw_checked(given_inputs, given_overrides, timeout)  # ty: ignore[invalid-return-type]  # `R` is the raw dict here
+
+    def _raw_checked(
+        self,
+        given_inputs: dict[str, Any],
+        given_overrides: dict[str, Any],
+        timeout: float | None,
+    ) -> dict[str, object]:
+        """`run_raw` with values `_checked` already passed, for `run_many`."""
+        if timeout is None:
+            values = self._plan.run(given_inputs, given_overrides)
+        else:
+            values = self._plan.run(given_inputs, given_overrides, timeout=timeout)
+        if self._sorted:
+            return values
+        return {name: values[name] for name in self._outputs}
+
     def _explain(
         self,
         inputs: Mapping[str, object] | None,
@@ -782,6 +863,16 @@ class _BuiltPlan[R](PreparedPlan[R]):
             self.run_raw(inputs=inputs, overrides=overrides, timeout=timeout)
         )
 
+    @override
+    def _run_checked(
+        self,
+        given_inputs: dict[str, Any],
+        given_overrides: dict[str, Any],
+        timeout: float | None,
+    ) -> R:
+        """`run` with values already checked, for `run_many`: the built result."""
+        return self._finish(self._raw_checked(given_inputs, given_overrides, timeout))
+
 
 class _HookedPlan[R](PreparedPlan[R]):
     """A `PreparedPlan` of a driver with hooks: its runs fire the hooks' events.
@@ -838,6 +929,16 @@ class _HookedPlan[R](PreparedPlan[R]):
         return typing.cast(
             "dict[str, object]", self._fired(inputs, overrides, None, timeout)
         )
+
+    @override
+    def _run_checked(
+        self,
+        given_inputs: dict[str, Any],
+        given_overrides: dict[str, Any],
+        timeout: float | None,
+    ) -> R:
+        """`run` for `run_many`, firing the hooks' events: the set is its own run."""
+        return self._fired(given_inputs, given_overrides, self._build, timeout)  # ty: ignore[invalid-return-type]  # the raw dict is `R` when there is no builder
 
     def _fired(
         self,

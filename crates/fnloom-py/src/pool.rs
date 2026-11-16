@@ -602,6 +602,12 @@ impl Threads {
         Ok(future)
     }
 
+    /// Whether a run started here runs inside a task of this pool's driver, on the worker
+    /// slot that task holds: `run_many` then runs its input sets one after another.
+    fn nested(&self, py: Python<'_>) -> PyResult<bool> {
+        parallel::inside(py, &self.pool.limits)
+    }
+
     /// An async run abandoned a call a pool thread is in: the pool starts another thread
     /// in its place at once, so its other calls, and an iterator's end, never wait for it.
     fn abandon(&self, py: Python<'_>) {
