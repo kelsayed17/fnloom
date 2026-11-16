@@ -10,7 +10,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
 ### Added
 
 - Rust core: the scheduler. `schedule::Scheduler` runs a plan as a state machine over one run, with no threads, no
-  clock and no locks, and borrows nothing: each method takes the plan and graph. `next` hands out the ready `Task`
+  clock and no locks, and borrows nothing: each method takes the plan and graph, and `new` the plan's
+  `schedule::Layout`, built once per plan. `next` hands out the ready `Task`
   with the lowest `OrderKey` that a `limits::Grant` lets a `Seat` start (a compute, an iterate, a pull, a finish, or a
   new branch's probe, which `schedule::probe` runs with the embedder's lookup); `complete` takes its `Outcome` back
   and adds to a caller-owned `Report`, cleared and reused, the values to drop, the nodes skipped, the expands

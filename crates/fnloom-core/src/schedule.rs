@@ -13,6 +13,7 @@
 //! taken its arguments, and handed back in `Report::released`, never dropped here.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::branch::{Need, declined_wrongly, needs, node_error};
 use crate::graph::Graph;
@@ -273,7 +274,7 @@ pub fn probe<P, V, E, K>(
 
 /// A value of a scope that its readers count down: a step's, the branch's item, or what a
 /// collect reads of a nested block.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 enum Use {
     Slot(u32),
     Item,
@@ -284,7 +285,7 @@ enum Use {
 const KEEP: u32 = u32::MAX;
 
 /// What one scope's instances start from: the outer plan's, or a block's.
-#[derive(Default)]
+#[derive(Debug, Default)]
 struct Template {
     /// Per step, how many steps of the scope it waits for.
     waiting: Vec<u32>,
@@ -305,15 +306,33 @@ struct Template {
     gather_readers: Vec<u32>,
 }
 
-/// Every scope's template, and where each collected node's gathered values sit.
-#[derive(Default)]
-struct Layout {
+/// What every scheduler of one plan starts from: each scope's template, what each step waits
+/// for and how many steps read its value, and where each step and each collected value sits.
+///
+/// Fixed by the plan and its graph, so it is built once per plan, with `Layout::new`, and
+/// shared by every run of it; a run then costs nothing to set up but its own state.
+#[derive(Debug, Default)]
+pub struct Layout {
+    /// The plan's and graph's sizes, checked against each run's.
+    shape: (usize, usize, usize, usize),
+    /// Why the plan and graph can't be run together, if they can't.
+    broken: Option<String>,
     /// The outer plan's, then each block's, by `BlockId` plus one.
     templates: Vec<Template>,
     /// Per collected node, its entry in the gathered table of its expand's scope.
     gather_at: Vec<u32>,
     /// Per node, its step's position in the steps of its scope.
     positions: Vec<u32>,
+}
+
+/// The sizes of a plan and its graph, which a scheduler checks on every call.
+fn shape_of<P>(plan: &Plan, graph: &Graph<P>) -> (usize, usize, usize, usize) {
+    (
+        plan.steps().len(),
+        plan.blocks().len(),
+        plan.outputs().len(),
+        graph.nodes().len(),
+    )
 }
 
 /// The scope holding `node`'s step: 0 for the outer plan, a block's id plus one.
@@ -365,7 +384,18 @@ fn use_of<P>(
 }
 
 impl Layout {
-    fn new<P>(plan: &Plan, graph: &Graph<P>) -> Self {
+    /// The layout of `plan`, prepared from `graph`. A plan that reads a node the graph
+    /// doesn't have gives a layout whose runs fail with `RunError::BrokenPlan`.
+    #[must_use]
+    pub fn new<P>(plan: &Plan, graph: &Graph<P>) -> Self {
+        let shape = shape_of(plan, graph);
+        if let Some(detail) = mismatch(plan, graph) {
+            return Self {
+                shape,
+                broken: Some(detail),
+                ..Self::default()
+            };
+        }
         let count = graph.nodes().len();
         let mut collected = vec![false; count];
         for sub in plan.blocks() {
@@ -383,6 +413,8 @@ impl Layout {
             .map(|scope| template(plan, graph, scope, &collected, &mut gather_at, &positions))
             .collect();
         Self {
+            shape,
+            broken: None,
             templates,
             gather_at,
             positions,
@@ -807,7 +839,7 @@ fn mismatch<P>(plan: &Plan, graph: &Graph<P>) -> Option<String> {
 pub struct Scheduler<V, E, K> {
     /// The plan's and graph's sizes, checked on every call.
     shape: (usize, usize, usize, usize),
-    layout: Layout,
+    layout: Arc<Layout>,
     options: Options,
     instances: Slab<Instance<V, K>>,
     frames: Slab<Frame<V>>,
@@ -847,8 +879,9 @@ struct Flight {
 const OUTER: usize = 0;
 
 impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
-    /// A scheduler for one run of `plan`, prepared from `graph`. What its seeded values settle
-    /// before any task, consumers skipped by an absent override, is added to `report`.
+    /// A scheduler for one run of `plan`, prepared from `graph`, from `layout`, the plan's
+    /// (`Layout::new`). What its seeded values settle before any task, consumers skipped by
+    /// an absent override, is added to `report`.
     ///
     /// `seeded` holds, by node id, the value of each `UseInput` and `UseOverride` step,
     /// absent only for an override of a node that may be absent (`Node::may_be_absent`)
@@ -857,13 +890,14 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
     pub fn new<P>(
         plan: &Plan,
         graph: &Graph<P>,
+        layout: Arc<Layout>,
         seeded: Vec<Option<Slot<V>>>,
         options: Options,
         report: &mut Report<V>,
     ) -> Self {
         let mut this = Self {
-            shape: Self::shape_of(plan, graph),
-            layout: Layout::default(),
+            shape: shape_of(plan, graph),
+            layout,
             options,
             instances: Slab::default(),
             frames: Slab::default(),
@@ -892,7 +926,12 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
     /// Seeds the outer plan and makes its first steps ready.
     fn start<P>(&mut self, plan: &Plan, graph: &Graph<P>, seeded: Vec<Option<Slot<V>>>) {
         let this = self;
-        let detail = mismatch(plan, graph).or_else(|| {
+        let detail = this.layout.broken.clone().or_else(|| {
+            (this.layout.shape != this.shape).then(|| {
+                "the scheduler was given another plan or graph than its layout's".to_owned()
+            })
+        });
+        let detail = detail.or_else(|| {
             (seeded.len() != graph.nodes().len()).then(|| {
                 format!(
                     "{} seeded values for a graph of {} nodes",
@@ -906,7 +945,6 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             this.fail(OrderKey::default(), broken(detail));
             return;
         }
-        this.layout = Layout::new(plan, graph);
         this.wanted = vec![false; graph.nodes().len()];
         this.open_instance(0, None, None, Vec::new(), Vec::new(), None);
         let mut seeded = seeded;
@@ -965,7 +1003,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         grant: &dyn Grant,
         seat: Seat,
     ) -> Next<V> {
-        if self.shape != Self::shape_of(plan, graph) {
+        if self.shape != shape_of(plan, graph) {
             self.fail(OrderKey::default(), another_plan());
         }
         self.refused = None;
@@ -1100,7 +1138,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         if seat == Seat::Lent && self.lent.is_some() {
             self.lent = Some(false);
         }
-        if self.shape == Self::shape_of(plan, graph) {
+        if self.shape == shape_of(plan, graph) {
             let waiters = match self.flight_key(graph, &entry) {
                 Some(key)
                     if self
@@ -1199,7 +1237,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
     ///
     /// The run's first failure in key order, or a `RunError::BrokenPlan`.
     pub fn finish<P>(mut self, plan: &Plan, graph: &Graph<P>) -> Result<Outputs<V>, RunError<E>> {
-        if self.shape != Self::shape_of(plan, graph) {
+        if self.shape != shape_of(plan, graph) {
             return Err(another_plan());
         }
         if !self.failures.is_empty() {
@@ -1226,15 +1264,6 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                 }
             })
             .collect()
-    }
-
-    fn shape_of<P>(plan: &Plan, graph: &Graph<P>) -> (usize, usize, usize, usize) {
-        (
-            plan.steps().len(),
-            plan.blocks().len(),
-            plan.outputs().len(),
-            graph.nodes().len(),
-        )
     }
 
     /// Takes the caller's `report` in, with what was released since the last call added.
@@ -2493,7 +2522,8 @@ mod tests {
         options: Options,
     ) -> (Scheduler<V, String, String>, Report<V>) {
         let mut report = Report::default();
-        let scheduler = Scheduler::new(plan, graph, seeded, options, &mut report);
+        let layout = Arc::new(Layout::new(plan, graph));
+        let scheduler = Scheduler::new(plan, graph, layout, seeded, options, &mut report);
         (scheduler, report)
     }
 
@@ -3992,6 +4022,25 @@ mod tests {
             Next::Done
         );
         assert_eq!(scheduler.finish(&plan, &graph).unwrap_err(), another_plan());
+        // A layout of another plan.
+        let layout = Arc::new(Layout::new(&shorter, &graph));
+        let seeded = seed(&graph, &plan, &[("x", Num(1))], &[], &Fan::default());
+        let mut scheduler = Sched::new(
+            &plan,
+            &graph,
+            layout,
+            seeded,
+            Options::default(),
+            &mut Report::default(),
+        );
+        assert_eq!(
+            scheduler.next(&plan, &graph, &Unlimited, Seat::Take),
+            Next::Done
+        );
+        assert!(matches!(
+            scheduler.finish(&plan, &graph),
+            Err(RunError::BrokenPlan { .. })
+        ));
         // A plan that reads ids the graph doesn't have.
         let small = Graph::build(vec![node("q", &[], tens)]).unwrap();
         let (mut scheduler, _) = open::<Val>(&plan, &small, vec![None], Options::default());

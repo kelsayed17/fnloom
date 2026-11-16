@@ -13,7 +13,7 @@ use fnloom_core::node::{Collect, Dependency, InputSpec, Node, NodeId, NodeSpec};
 use fnloom_core::plan::{Plan, Request};
 use fnloom_core::run::{Arg, Blocks, Evaluate, Item, Slot};
 use fnloom_core::schedule::{
-    ArgValue, Next, Options, Outcome, Report, Scheduler, Seat, Task, Work, probe,
+    ArgValue, Layout, Next, Options, Outcome, Report, Scheduler, Seat, Task, Work, probe,
 };
 
 /// An iterator's items and how far it got; shared, since a pull may run on any thread.
@@ -332,6 +332,7 @@ fn eight_threads(items: i64, grant: &dyn Grant) -> Watch {
     let scheduler = Scheduler::new(
         &plan,
         &graph,
+        Arc::new(Layout::new(&plan, &graph)),
         seeded,
         Options::default(),
         &mut Report::default(),

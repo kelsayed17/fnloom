@@ -150,8 +150,11 @@ aborts the run, and `post_graph(false)` still runs so observers can close what t
 and no locks, and it borrows nothing: every method takes the plan and graph it was made with, so a caller with several
 workers keeps it behind one lock. `Plan::run` stays the reference it is tested against.
 
-- `Scheduler::new(&plan, &graph, seeded, options, &mut report)` takes each input's and override's value by node id,
-  as a `run::Slot` that says whether it is absent, and adds to `report` what they settle before any task.
+- `schedule::Layout::new(&plan, &graph)` computes, once per plan, what every run of it starts from: per scope, what
+  each step waits for and how many steps read its value. Keep it in an `Arc` beside the plan.
+- `Scheduler::new(&plan, &graph, layout, seeded, options, &mut report)` takes the plan's layout and each input's and
+  override's value by node id, as a `run::Slot` that says whether it is absent, and adds to `report` what they settle
+  before any task.
 - `next(&plan, &graph, &grant, seat)` hands out the ready task with the lowest **order key** that the `Grant` lets the
   `Seat` start, skipping over the ones it refuses. It gives `Next::Wait` while tasks are in flight or refused, and
   `Next::Done` when nothing is left.

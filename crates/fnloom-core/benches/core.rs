@@ -41,8 +41,11 @@ mod suite {
     use fnloom_core::node::{Collect, Dependency, InputSpec, Node, NodeId, NodeSpec};
     use fnloom_core::plan::{Action, Plan, Request};
     use fnloom_core::run::{Arg, Blocks, Evaluate, Item, Outputs, RunError, Slot};
-    use fnloom_core::schedule::{ArgValue, Next, Options, Outcome, Report, Scheduler, Seat, Work};
+    use fnloom_core::schedule::{
+        ArgValue, Layout, Next, Options, Outcome, Report, Scheduler, Seat, Work,
+    };
     use gungraun::prelude::*;
+    use std::sync::Arc;
 
     /// Row width of the layered shape, as in `benches/generate.py`.
     const LAYER_WIDTH: usize = 10;
@@ -462,6 +465,7 @@ mod suite {
     fn scheduled(
         graph: &Graph<()>,
         plan: &Plan,
+        layout: &Arc<Layout>,
         inputs: &BTreeMap<String, u64>,
     ) -> Result<Outputs<u64>, RunError<Infallible>> {
         let mut seeded = vec![None; graph.nodes().len()];
@@ -479,6 +483,7 @@ mod suite {
         let mut scheduler = Scheduler::<u64, Infallible, ()>::new(
             plan,
             graph,
+            Arc::clone(layout),
             seeded,
             Options::default(),
             &mut report,
@@ -503,16 +508,26 @@ mod suite {
         scheduler.finish(plan, graph)
     }
 
+    /// `planned`, with the plan's scheduler layout, built once per plan as `prepare` is.
+    fn laid_out(shape: Shape, n: usize) -> Laid {
+        let (graph, plan, inputs) = planned(shape, n);
+        let layout = Arc::new(Layout::new(&plan, &graph));
+        (graph, plan, layout, inputs)
+    }
+
+    /// A graph, its plan, the plan's layout and the inputs.
+    type Laid = (Graph<()>, Plan, Arc<Layout>, BTreeMap<String, u64>);
+
     // The scheduler with one worker on the shapes `run` measures: what it adds per node.
     // Reported, not gated, until its baseline is committed (Plan 11, Task 13).
     #[library_benchmark]
-    #[bench::chain_1000(args = (Shape::Chain, 1_000), setup = planned)]
-    #[bench::chain_10000(args = (Shape::Chain, 10_000), setup = planned)]
-    #[bench::layered_1000(args = (Shape::Layered, 1_000), setup = planned)]
-    #[bench::layered_10000(args = (Shape::Layered, 10_000), setup = planned)]
-    fn schedule((graph, plan, inputs): (Graph<()>, Plan, BTreeMap<String, u64>)) -> impl Sized {
-        let values = scheduled(&graph, &plan, black_box(&inputs));
-        (graph, plan, values)
+    #[bench::chain_1000(args = (Shape::Chain, 1_000), setup = laid_out)]
+    #[bench::chain_10000(args = (Shape::Chain, 10_000), setup = laid_out)]
+    #[bench::layered_1000(args = (Shape::Layered, 1_000), setup = laid_out)]
+    #[bench::layered_10000(args = (Shape::Layered, 10_000), setup = laid_out)]
+    fn schedule((graph, plan, layout, inputs): Laid) -> impl Sized {
+        let values = scheduled(&graph, &plan, &layout, black_box(&inputs));
+        (graph, plan, layout, values)
     }
 
     library_benchmark_group!(
