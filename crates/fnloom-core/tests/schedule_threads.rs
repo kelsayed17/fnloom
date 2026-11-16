@@ -2,13 +2,14 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use fnloom_core::graph::Graph;
-use fnloom_core::limits::{Grant, Limits, Slot as LimitSlot, Unlimited};
+use fnloom_core::limits::{Grant, Limits, Resource, Unlimited};
 use fnloom_core::node::{Collect, Dependency, InputSpec, Node, NodeId, NodeSpec};
 use fnloom_core::plan::{Plan, Request};
 use fnloom_core::run::{Arg, Blocks, Evaluate, Item, Slot};
@@ -189,9 +190,17 @@ fn nested(n: i64) -> Graph<Op> {
     .unwrap_or_else(|error| unreachable!("the graph builds: {error}"))
 }
 
-/// Runs one task, after a short sleep that depends on its id.
+/// Up to 50 µs, by the task's node and key: a sleep that differs from task to task.
+fn jitter(task: &Task<Val>) -> u64 {
+    let mix = task.key.as_slice().iter().fold(task.node.0, |hash, &part| {
+        hash.wrapping_mul(31).wrapping_add(part)
+    });
+    u64::from(mix.wrapping_mul(2_654_435_761) % 50)
+}
+
+/// Runs one task, after a short sleep that depends on it.
 fn perform(plan: &Plan, graph: &Graph<Op>, task: &Task<Val>) -> Outcome<Val, String, String> {
-    let micros = u64::from(task.id.0.wrapping_mul(2_654_435_761) % 50);
+    let micros = jitter(task);
     thread::sleep(Duration::from_micros(micros));
     let node = graph.node(task.node);
     match &task.work {
@@ -371,10 +380,10 @@ fn eight_threads_never_exceed_their_limits() {
         .id_of("leaf")
         .unwrap_or_else(|| unreachable!("the graph has a leaf"));
     let mut caps = vec![None; graph.nodes().len()];
-    caps[leaf.index()] = Some(2);
-    let limits = Limits::new(Some(3), caps, Vec::new(), Vec::new());
+    caps[leaf.index()] = NonZeroUsize::new(2);
+    let limits = Limits::new(NonZeroUsize::new(3), caps, Vec::new(), Vec::new());
     let watch = eight_threads(300, &limits);
     assert!(watch.most.load(Ordering::Acquire) <= 3);
     assert!(watch.most_leaves.load(Ordering::Acquire) <= 2);
-    assert_eq!(limits.held(LimitSlot::Worker), 0);
+    assert_eq!(limits.held(Resource::Worker), 0);
 }

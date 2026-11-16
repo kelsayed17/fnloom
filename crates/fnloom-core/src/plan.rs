@@ -2,6 +2,7 @@
 
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::error::{MissingInput, OutputInBlock, PlanError};
 use crate::graph::Graph;
@@ -97,6 +98,27 @@ pub struct Plan {
     positions: Vec<u32>,
     /// Per node, the sub-plan whose steps hold its step; empty without an expand.
     within: Vec<Option<BlockId>>,
+    identity: Identity,
+}
+
+/// Which `prepare` made a plan, for the scheduler's check that a layout and a run are of one
+/// plan. A clone keeps it, and equality leaves it out: two plans of one request compare equal.
+#[derive(Clone, Copy, Debug, Eq)]
+struct Identity(usize);
+
+impl PartialEq for Identity {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+/// The identities given so far.
+static PLANS: AtomicUsize = AtomicUsize::new(0);
+
+impl Identity {
+    fn next() -> Self {
+        Self(PLANS.fetch_add(1, Ordering::Relaxed))
+    }
 }
 
 impl Plan {
@@ -175,6 +197,11 @@ impl Plan {
             .iter()
             .position(|step| step.node == node)
             .unwrap_or(usize::MAX)
+    }
+
+    /// Which `prepare` made this plan; a clone has its original's.
+    pub(crate) const fn identity(&self) -> usize {
+        self.identity.0
     }
 
     /// The sub-plan whose steps hold `node`'s step; `None` for an outer step.
@@ -263,6 +290,7 @@ impl<P> Graph<P> {
         let needs_rules = self.has_absence() && order.iter().any(|&id| self.node(id).may_be_absent);
         let steps = self.build_steps(&order, &actions, &resolved.outputs);
         Ok(Plan {
+            identity: Identity::next(),
             positions: Vec::new(),
             within: Vec::new(),
             steps,
@@ -445,6 +473,7 @@ impl<P> Graph<P> {
             })
             .collect();
         Plan {
+            identity: Identity::next(),
             steps,
             outputs: resolved.outputs,
             needs_rules,

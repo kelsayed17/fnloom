@@ -190,15 +190,21 @@ for every branch of its block and gathers them in branch order, whatever order t
 - **Limits.** `limits::Limits::new(max_workers, node_caps, node_groups, group_caps)` is a `Grant` of atomic counters
   only, shared by every run of a driver. A task takes a worker slot when its seat is `Seat::Take`, and none when it is
   `Held` (a run's caller), `Lent` or `Threadless` (an async node); a compute or a pull also takes its node's slot and
-  its group's. `held(Slot)` says how many are taken. `limits::Unlimited` refuses nothing.
+  its group's. Every cap is a `NonZeroUsize`, since a cap of 0 would refuse for good. `held(Resource)` says how many
+  are taken. `limits::Unlimited` refuses nothing.
 - **In flight.** `Options::in_flight` bounds how many branches of an expand are unfinished at once: its iterator is
   pulled only while fewer are.
 - **Single-flight.** A probe's `Outcome::Needs` gives each step's key, or `None`. A step whose key a running compute
   has waits for it and completes as a hit with its value or declared absence (in `Report::hits`); if that compute
   fails, the step is ready again. Steps without a key never wait.
-- **Stopping.** A failure, or `stop()`, ends the handing out of computes, pulls, iterates and probes. Then one `Finish`
-  is handed out per open iterator with no pull in flight, innermost first; an iterator whose pull is in flight is
-  finished once its pull returns. Failures keep their order keys, and `finish` returns the lowest key's.
+- **Stopping.** A failure, or `stop()`, ends the handing out of computes, pulls, iterates and probes. Then one
+  `Finish` is handed out per open iterator with no pull in flight, innermost first; an iterator whose pull is in flight
+  is finished once its pull returns. Failures keep their order keys, and `finish` returns the lowest key's.
+- **Task ids.** A `TaskId` names one hand-out, so `complete` ignores one already completed (a stale or repeated id),
+  releasing its outcome's values and giving back no slot. A layout, a plan or a graph other than the run's is a
+  `RunError::BrokenPlan`, even of the same shape: each plan has its own identity from `prepare`, which a clone keeps.
+- **Events.** A caller that sends observer events sends each report's `hits`, then its `expanded`, then its
+  `skipped`: with one worker they then come in `Plan::run`'s order.
 - `blocked()` names the lowest-key ready task's node when the grant refused it and nothing of the run is in flight,
   and `lend()` gives the run one lent seat, which `Seat::Lent` tasks take one at a time.
 

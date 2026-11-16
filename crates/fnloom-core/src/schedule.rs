@@ -25,8 +25,14 @@ use crate::plan::{Action, BlockId, Plan, Step, positions};
 use crate::run::{Item, Outputs, RunError, Slot, broken, planned_to_compute};
 
 /// Names a task `Scheduler::next` handed out, for `Scheduler::complete`.
+///
+/// A task's slot is reused once it completes, so an id also holds the hand-out it names: one
+/// kept past its task's completion names no other task, and `complete` ignores it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct TaskId(pub u32);
+pub struct TaskId {
+    slot: u32,
+    generation: u32,
+}
 
 /// Where a task falls in reference order (`Plan::run`'s).
 ///
@@ -241,6 +247,10 @@ pub enum Next<V> {
 }
 
 /// What a `complete` (or `Scheduler::new`) settled, for the caller to act on.
+///
+/// A caller that sends observer events sends each report's `hits` first, then its `expanded`,
+/// then its `skipped`, each in order: with one worker the events then come in `Plan::run`'s
+/// order, since a report's hits precede its expands, which precede its skips, in that order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Report<V> {
     /// Values no step reads any more: the caller drops them, so a value is never dropped
@@ -392,10 +402,10 @@ struct Template {
 ///
 /// Fixed by the plan and its graph, so it is built once per plan, with `Layout::new`, and
 /// shared by every run of it; a run then costs nothing to set up but its own state.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct Layout {
     /// The plan's and graph's sizes, checked against each run's.
-    shape: (usize, usize, usize, usize),
+    shape: (usize, usize, usize, usize, usize),
     /// Why the plan and graph can't be run together, if they can't.
     broken: Option<String>,
     /// The outer plan's, then each block's, by `BlockId` plus one.
@@ -406,9 +416,11 @@ pub struct Layout {
     positions: Vec<u32>,
 }
 
-/// The sizes of a plan and its graph, which a scheduler checks on every call.
-fn shape_of<P>(plan: &Plan, graph: &Graph<P>) -> (usize, usize, usize, usize) {
+/// A plan's identity and sizes and its graph's, which a scheduler checks on every call: a plan
+/// of another `prepare`, even of the same shape, is refused.
+fn shape_of<P>(plan: &Plan, graph: &Graph<P>) -> (usize, usize, usize, usize, usize) {
     (
+        plan.identity(),
         plan.steps().len(),
         plan.blocks().len(),
         plan.outputs().len(),
@@ -474,7 +486,9 @@ impl Layout {
             return Self {
                 shape,
                 broken: Some(detail),
-                ..Self::default()
+                templates: Vec::new(),
+                gather_at: Vec::new(),
+                positions: Vec::new(),
             };
         }
         let count = graph.nodes().len();
@@ -740,6 +754,8 @@ struct Entry {
     position: usize,
     /// The seat it was handed out to, while it runs.
     seat: Option<Seat>,
+    /// Which hand-out it is, while it runs: its `TaskId`'s generation.
+    generation: u32,
 }
 
 impl Entry {
@@ -919,7 +935,7 @@ fn mismatch<P>(plan: &Plan, graph: &Graph<P>) -> Option<String> {
 /// graph other than the ones it was made with is a `RunError::BrokenPlan`.
 pub struct Scheduler<V, E, K> {
     /// The plan's and graph's sizes, checked on every call.
-    shape: (usize, usize, usize, usize),
+    shape: (usize, usize, usize, usize, usize),
     layout: Arc<Layout>,
     options: Options,
     instances: Slab<Instance<V, K>>,
@@ -948,6 +964,8 @@ pub struct Scheduler<V, E, K> {
     lent: Option<bool>,
     /// The node of the lowest-key ready task the grant refused at the last `next`.
     refused: Option<NodeId>,
+    /// How many tasks were handed out: the generation of the last `TaskId`.
+    handed: u32,
 }
 
 /// The running compute of a single-flight key, and the entries waiting for its value.
@@ -997,6 +1015,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             flights: BTreeMap::new(),
             lent: None,
             refused: None,
+            handed: 0,
         };
         this.adopt(report);
         this.start(plan, graph, seeded);
@@ -1174,6 +1193,10 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
     /// lowest key's is what `finish` returns. An outcome after the run stopped is dropped,
     /// its values released. What this settled is added to `report`, which the caller clears
     /// and reuses, so a run allocates no report per task.
+    ///
+    /// An `id` that names no running task, one already completed or never handed out, is
+    /// ignored: its outcome's values are released, and no slot is given back to `grant`,
+    /// since its task's slots were already given back.
     pub fn complete<P>(
         &mut self,
         plan: &Plan,
@@ -1196,21 +1219,20 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         id: TaskId,
         outcome: Outcome<V, E, K>,
     ) {
+        let slot = id.slot as usize;
         let running = self
             .entries
-            .get(id.0 as usize)
-            .is_some_and(|entry| entry.seat.is_some());
+            .get(slot)
+            .is_some_and(|entry| entry.seat.is_some() && entry.generation == id.generation);
         let entry = if running {
-            self.entries.remove(id.0 as usize)
+            self.entries.remove(slot)
         } else {
             None
         };
         let Some(entry) = entry else {
+            // A stale or repeated id: its task already completed. Ignored, its values released;
+            // it gives back no slot, since its task already did.
             self.discard(outcome);
-            self.fail(
-                OrderKey::default(),
-                broken(format!("task {} completed but not running", id.0)),
-            );
             return;
         };
         let seat = entry.seat.unwrap_or(Seat::Take);
@@ -1225,7 +1247,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                     if self
                         .flights
                         .get(&key)
-                        .is_some_and(|flight| flight.task == id.0 as usize) =>
+                        .is_some_and(|flight| flight.task == slot) =>
                 {
                     self.flights
                         .remove(&key)
@@ -1473,6 +1495,20 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         }
     }
 
+    /// Counts a hand-out, giving its generation.
+    fn hand_out(&mut self) -> u32 {
+        self.handed = self.handed.wrapping_add(1);
+        self.handed
+    }
+
+    /// The id of running entry `id`.
+    fn task_id(&self, id: usize) -> TaskId {
+        TaskId {
+            slot: as_u32(id),
+            generation: self.entries.get(id).map_or(0, |entry| entry.generation),
+        }
+    }
+
     /// Entry `id`'s order key, built.
     fn key_of(&self, id: usize) -> OrderKey {
         self.entries
@@ -1537,6 +1573,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             let (node, scope) = (frame.node, frame.scope);
             let tail = [as_u32(frame.position), as_u32(frame.pulled)];
             let branch = self.instance(scope).branch.clone();
+            let generation = self.hand_out();
             let id = self.entries.insert(Entry {
                 kind: Kind::Finish(false),
                 base: scope,
@@ -1546,12 +1583,13 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                 at,
                 position: 0,
                 seat: Some(seat),
+                generation,
             });
             let key = self.key_of(id);
             self.frame_mut(at).finishing = Some(id);
             self.running += 1;
             return Next::Task(Task {
-                id: TaskId(as_u32(id)),
+                id: self.task_id(id),
                 node,
                 branch,
                 key,
@@ -1661,12 +1699,14 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             }
             Kind::Skip => return Err(broken(format!("task {id} is a skip"))),
         };
+        let generation = self.hand_out();
         if let Some(entry) = self.entries.get_mut(id) {
             entry.seat = Some(seat);
+            entry.generation = generation;
         }
         let key = self.key_of(id);
         Ok(Task {
-            id: TaskId(as_u32(id)),
+            id: self.task_id(id),
             node,
             branch,
             key,
@@ -1878,6 +1918,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             at,
             position,
             seat: None,
+            generation: 0,
         });
         self.ready_push(id);
         id
@@ -2347,10 +2388,20 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                 self.probed(plan, graph, entry.at, hits);
             }
             (Kind::Probe, Outcome::LookupFailed(node, error)) => {
+                let Some(target) = graph.nodes().get(node.index()) else {
+                    // A node the graph doesn't have: the caller's bug, not that node's failure.
+                    self.dropped.push(error);
+                    let failure = broken(format!(
+                        "a lookup failed for node {}, which the graph does not have",
+                        node.0
+                    ));
+                    self.fail(self.entry_key(&entry), failure);
+                    return;
+                };
                 let found = self.instance(entry.at);
-                let key = extend(&found.prefix, &[as_u32(self.layout.position(node))]);
-                let failure = node_error(graph, graph.node(node), error, &found.branch, Vec::new());
-                self.fail(OrderKey::new(&key), failure);
+                let key = OrderKey::joined(&found.prefix, &[as_u32(self.layout.position(node))]);
+                let failure = node_error(graph, target, error, &found.branch, Vec::new());
+                self.fail(key, failure);
             }
             (kind, Outcome::Failed(error)) => {
                 let branch = match kind {
@@ -2578,11 +2629,12 @@ fn no_value<P, E>(graph: &Graph<P>, consumer: NodeId, arg: NodeId) -> RunError<E
 mod tests {
     use std::cell::Cell;
     use std::collections::BTreeMap;
+    use std::num::NonZeroUsize;
     use std::rc::Rc;
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use super::*;
-    use crate::limits::{Limits, Slot as LimitSlot, Unlimited};
+    use crate::limits::{Limits, Resource, Unlimited};
     use crate::node::{Dependency, NodeSpec};
     use crate::run::{Arg, Blocks, Evaluate};
     use crate::testing::blocks::{
@@ -3746,11 +3798,11 @@ mod tests {
         let plan = graph.prepare(&request(&["total"], &[], &[])).unwrap();
         let id = |name: &str| graph.id_of(name).unwrap();
         let mut caps = vec![None; graph.nodes().len()];
-        caps[id("details").index()] = Some(1);
+        caps[id("details").index()] = NonZeroUsize::new(1);
         let mut groups = vec![None; graph.nodes().len()];
         groups[id("picked").index()] = Some(0);
         groups[id("zz_rate").index()] = Some(0);
-        let limits = Limits::new(Some(2), caps, groups, vec![1]);
+        let limits = Limits::new(NonZeroUsize::new(2), caps, groups, vec![NonZeroUsize::MIN]);
         let mut evals = [Fan::default(), Fan::default()];
         let mut schedulers: Vec<Sched> = evals
             .iter()
@@ -3799,7 +3851,7 @@ mod tests {
             let outputs = named(&graph, scheduler.finish(&plan, &graph)).unwrap();
             assert_eq!(outputs["total"], nums(&[11, 21, 31, 41, 51, 61]));
         }
-        assert_eq!(limits.held(LimitSlot::Worker), 0);
+        assert_eq!(limits.held(Resource::Worker), 0);
     }
 
     #[test]
@@ -4162,5 +4214,127 @@ mod tests {
             scheduler.finish(&plan, &graph).unwrap_err(),
             RunError::MissingValues(vec!["x".to_owned()])
         );
+    }
+
+    /// Runs `scheduler` with one worker to its end, by `eval`.
+    fn to_the_end(scheduler: &mut Sched, plan: &Plan, graph: &Graph<Pay>, eval: &mut Fan) {
+        while let Next::Task(task) = scheduler.next(plan, graph, &Unlimited, Seat::Take) {
+            let outcome = perform(plan, graph, eval, &task, &mut Vec::new());
+            done(scheduler, plan, graph, &Unlimited, task.id, outcome);
+        }
+    }
+
+    #[test]
+    fn a_layout_or_plan_of_another_prepare_is_refused_even_of_the_same_shape() {
+        // Both plans have 2 outer steps, 1 block and 1 output, of a graph of 5 nodes; their
+        // blocks have 1 step and 2.
+        let graph = Graph::build(vec![
+            expand("picked", &[], |_| Ok(items(&[1, 2]))),
+            node("u", &[plain("picked")], tens),
+            node("v", &[plain("u")], tens),
+            node("cu", &[collect("u")], first),
+            node("cv", &[collect("v")], first),
+        ])
+        .unwrap();
+        let cu = graph.prepare(&request(&["cu"], &[], &[])).unwrap();
+        let cv = graph.prepare(&request(&["cv"], &[], &[])).unwrap();
+        let sizes = |plan: &Plan| {
+            (
+                plan.steps().len(),
+                plan.blocks().len(),
+                plan.outputs().len(),
+            )
+        };
+        assert_eq!(sizes(&cu), sizes(&cv));
+        let nothing = || vec![None; graph.nodes().len()];
+        // A layout of another plan.
+        let mut scheduler = Sched::new(
+            &cu,
+            &graph,
+            Arc::new(Layout::new(&cv, &graph)),
+            nothing(),
+            Options::default(),
+            &mut Report::default(),
+        );
+        to_the_end(&mut scheduler, &cu, &graph, &mut Fan::default());
+        assert!(matches!(
+            scheduler.finish(&cu, &graph),
+            Err(RunError::BrokenPlan { .. })
+        ));
+        // Another plan given to `next`.
+        let (mut scheduler, _) = open::<Val>(&cu, &graph, nothing(), Options::default());
+        to_the_end(&mut scheduler, &cv, &graph, &mut Fan::default());
+        assert_eq!(scheduler.finish(&cu, &graph).unwrap_err(), another_plan());
+        // A clone is the same plan, so its layout serves.
+        let mut scheduler = Sched::new(
+            &cu,
+            &graph,
+            Arc::new(Layout::new(&cu.clone(), &graph)),
+            nothing(),
+            Options::default(),
+            &mut Report::default(),
+        );
+        to_the_end(&mut scheduler, &cu, &graph, &mut Fan::default());
+        let outputs = named(&graph, scheduler.finish(&cu, &graph)).unwrap();
+        assert_eq!(outputs["cu"], nums(&[10, 20]));
+        assert_eq!(cu, cu.clone());
+    }
+
+    #[test]
+    fn a_lookup_failure_of_a_node_the_graph_lacks_is_a_broken_plan() {
+        let graph = chain();
+        let (plan, mut scheduler) = start(&graph, &["total"], &[]);
+        let mut eval = Fan::default();
+        let probe = until(&mut scheduler, &plan, &graph, &mut eval, |task| {
+            matches!(task.work, Work::Probe { .. })
+        });
+        let outcome = Outcome::LookupFailed(NodeId(999), "lookup failed".to_owned());
+        done(&mut scheduler, &plan, &graph, &Unlimited, probe.id, outcome);
+        assert!(scheduler.is_stopping());
+        to_the_end(&mut scheduler, &plan, &graph, &mut eval);
+        let Err(RunError::BrokenPlan { detail, .. }) = scheduler.finish(&plan, &graph) else {
+            unreachable!("a broken plan");
+        };
+        assert!(detail.contains("node 999"), "{detail}");
+    }
+
+    #[test]
+    fn a_stale_task_id_is_ignored_and_gives_back_no_slot() {
+        let graph = diamond();
+        let (plan, mut scheduler) = start(&graph, &["d"], &[("x", Num(1))]);
+        let limits = Limits::new(NonZeroUsize::new(1), Vec::new(), Vec::new(), Vec::new());
+        let mut eval = Fan::default();
+        let a = task_of(scheduler.next(&plan, &graph, &limits, Seat::Take));
+        let outcome = perform(&plan, &graph, &mut eval, &a, &mut Vec::new());
+        done(&mut scheduler, &plan, &graph, &limits, a.id, outcome);
+        // `b` reuses `a`'s slot, under another id.
+        let b = task_of(scheduler.next(&plan, &graph, &limits, Seat::Take));
+        assert_eq!(a.id.slot, b.id.slot);
+        assert_ne!(a.id, b.id);
+        // `a`'s id again: ignored, its value released, and `b` keeps its worker slot.
+        let stale = Outcome::Value {
+            value: Num(-5),
+            absent: false,
+        };
+        let report = done(&mut scheduler, &plan, &graph, &limits, a.id, stale);
+        assert_eq!(report.released, [Num(-5)]);
+        assert_eq!(limits.held(Resource::Worker), 1);
+        assert!(!scheduler.is_stopping());
+        let outcome = perform(&plan, &graph, &mut eval, &b, &mut Vec::new());
+        done(&mut scheduler, &plan, &graph, &limits, b.id, outcome);
+        // And `b`'s twice.
+        let twice = Outcome::Value {
+            value: Num(-6),
+            absent: false,
+        };
+        let report = done(&mut scheduler, &plan, &graph, &limits, b.id, twice);
+        assert_eq!(report.released, [Num(-6)]);
+        while let Next::Task(task) = scheduler.next(&plan, &graph, &limits, Seat::Take) {
+            let outcome = perform(&plan, &graph, &mut eval, &task, &mut Vec::new());
+            done(&mut scheduler, &plan, &graph, &limits, task.id, outcome);
+        }
+        assert_eq!(limits.held(Resource::Worker), 0);
+        let outputs = named(&graph, scheduler.finish(&plan, &graph)).unwrap();
+        assert_eq!(outputs["d"], Num(1110));
     }
 }

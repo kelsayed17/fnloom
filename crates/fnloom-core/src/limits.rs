@@ -1,5 +1,6 @@
 //! How many tasks may run at once: the `Grant` a scheduler asks before it hands one out.
 
+use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::node::NodeId;
@@ -32,9 +33,9 @@ impl Grant for Unlimited {
     fn release(&self, _node: Option<NodeId>, _seat: Seat) {}
 }
 
-/// One kind of slot a task may hold, for `Limits::held`.
+/// One kind of capped resource a task may hold a unit of, for `Limits::held`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub enum Slot {
+pub enum Resource {
     /// A worker slot, of `max_workers`.
     Worker,
     /// A slot of a node's own cap.
@@ -51,9 +52,9 @@ struct Cap {
 }
 
 impl Cap {
-    const fn new(limit: usize) -> Self {
+    const fn new(limit: NonZeroUsize) -> Self {
         Self {
-            limit,
+            limit: limit.get(),
             held: AtomicUsize::new(0),
         }
     }
@@ -107,13 +108,14 @@ pub struct Limits {
 impl Limits {
     /// Caps of `max_workers` workers (`None`: no worker cap, a driver without threads), each
     /// node's own cap by `NodeId::index`, each node's group, and each group's size by id. A
-    /// node past the tables, or in a group with no size, has no cap of that kind.
+    /// node past the tables, or in a group with no size, has no cap of that kind. A cap is
+    /// never 0, which would refuse every task for good.
     #[must_use]
     pub fn new(
-        max_workers: Option<usize>,
-        node_caps: Vec<Option<usize>>,
+        max_workers: Option<NonZeroUsize>,
+        node_caps: Vec<Option<NonZeroUsize>>,
         node_groups: Vec<Option<u32>>,
-        group_caps: Vec<usize>,
+        group_caps: Vec<NonZeroUsize>,
     ) -> Self {
         Self {
             workers: max_workers.map(Cap::new),
@@ -123,13 +125,13 @@ impl Limits {
         }
     }
 
-    /// How many units of `slot` are held now; 0 for a slot with no cap.
+    /// How many units of `resource` are held now; 0 for one with no cap.
     #[must_use]
-    pub fn held(&self, slot: Slot) -> usize {
-        let cap = match slot {
-            Slot::Worker => self.workers.as_ref(),
-            Slot::Node(node) => self.node_cap(node),
-            Slot::Group(group) => self.groups.get(group as usize),
+    pub fn held(&self, resource: Resource) -> usize {
+        let cap = match resource {
+            Resource::Worker => self.workers.as_ref(),
+            Resource::Node(node) => self.node_cap(node),
+            Resource::Group(group) => self.groups.get(group as usize),
         };
         cap.map_or(0, |cap| cap.held.load(Ordering::Acquire))
     }
@@ -179,10 +181,10 @@ mod tests {
     /// Two capped nodes: `n0` at 1, and `n1` and `n2` in group 0, of size 1.
     fn limits(max_workers: Option<usize>) -> Limits {
         Limits::new(
-            max_workers,
-            vec![Some(1), None, None],
+            max_workers.and_then(NonZeroUsize::new),
+            vec![NonZeroUsize::new(1), None, None],
             vec![None, Some(0), Some(0)],
-            vec![1],
+            vec![NonZeroUsize::MIN],
         )
     }
 
@@ -196,22 +198,22 @@ mod tests {
         assert!(limits.try_start(N0, Seat::Take));
         // `n0` is at its cap; a refusal takes nothing.
         assert!(!limits.try_start(N0, Seat::Take));
-        assert_eq!(limits.held(Slot::Worker), 1);
+        assert_eq!(limits.held(Resource::Worker), 1);
         assert!(limits.try_start(N1, Seat::Take));
-        assert_eq!(limits.held(Slot::Group(0)), 1);
+        assert_eq!(limits.held(Resource::Group(0)), 1);
         // Two workers are out.
         assert!(!limits.try_start(None, Seat::Take));
         limits.release(N0, Seat::Take);
         assert_eq!(
             (
-                limits.held(Slot::Worker),
-                limits.held(Slot::Node(NodeId(0)))
+                limits.held(Resource::Worker),
+                limits.held(Resource::Node(NodeId(0)))
             ),
             (1, 0)
         );
         // `n2` shares `n1`'s group.
         assert!(!limits.try_start(N2, Seat::Take));
-        assert_eq!(limits.held(Slot::Worker), 1);
+        assert_eq!(limits.held(Resource::Worker), 1);
         limits.release(N1, Seat::Take);
         assert!(limits.try_start(N2, Seat::Take));
     }
@@ -222,7 +224,7 @@ mod tests {
         for _ in 0..100 {
             assert!(limits.try_start(None, Seat::Take));
         }
-        assert_eq!(limits.held(Slot::Worker), 0);
+        assert_eq!(limits.held(Resource::Worker), 0);
         // Node caps still hold.
         assert!(limits.try_start(N0, Seat::Take));
         assert!(!limits.try_start(N0, Seat::Take));
@@ -237,7 +239,7 @@ mod tests {
             assert!(limits.try_start(None, seat));
             limits.release(None, seat);
         }
-        assert_eq!(limits.held(Slot::Worker), 1);
+        assert_eq!(limits.held(Resource::Worker), 1);
     }
 
     #[test]
@@ -248,19 +250,19 @@ mod tests {
         assert!(!limits.try_start(N0, Seat::Threadless));
         assert!(limits.try_start(N1, Seat::Threadless));
         assert!(!limits.try_start(N2, Seat::Threadless));
-        assert_eq!(limits.held(Slot::Worker), 1);
+        assert_eq!(limits.held(Resource::Worker), 1);
         limits.release(N1, Seat::Threadless);
-        assert_eq!(limits.held(Slot::Group(0)), 0);
+        assert_eq!(limits.held(Resource::Group(0)), 0);
     }
 
     #[test]
     fn a_release_never_wraps_and_an_unknown_slot_holds_nothing() {
         let limits = limits(Some(1));
         limits.release(N0, Seat::Take);
-        assert_eq!(limits.held(Slot::Worker), 0);
-        assert_eq!(limits.held(Slot::Node(NodeId(0))), 0);
-        assert_eq!(limits.held(Slot::Node(NodeId(9))), 0);
-        assert_eq!(limits.held(Slot::Group(7)), 0);
+        assert_eq!(limits.held(Resource::Worker), 0);
+        assert_eq!(limits.held(Resource::Node(NodeId(0))), 0);
+        assert_eq!(limits.held(Resource::Node(NodeId(9))), 0);
+        assert_eq!(limits.held(Resource::Group(7)), 0);
         // A node past the tables is unlimited.
         assert!(limits.try_start(Some(NodeId(9)), Seat::Threadless));
     }

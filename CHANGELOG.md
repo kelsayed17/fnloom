@@ -11,21 +11,22 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 - Rust core: the scheduler. `schedule::Scheduler` runs a plan as a state machine over one run, with no threads, no
   clock and no locks, and borrows nothing: each method takes the plan and graph, and `new` the plan's
-  `schedule::Layout`, built once per plan. `next` hands out the ready `Task`
-  with the lowest `OrderKey` that a `limits::Grant` lets a `Seat` start (a compute, an iterate, a pull, a finish, or a
-  new branch's probe, which `schedule::probe` runs with the embedder's lookup); `complete` takes its `Outcome` back
-  and adds to a caller-owned `Report`, cleared and reused, the values to drop, the nodes skipped, the expands
-  exhausted and the hits; `recycle` takes a compute's emptied arguments back for reuse; `finish` returns the outputs,
-  or the failure with the lowest key. Stepped one task at a time, it makes the calls `Plan::run`
-  makes, in the same order, and `Plan::run` is unchanged. `Plan::order_key(node, branch)` gives any step's key, and
-  `run::Slot` is public, to seed a scheduler with each value's absence.
-- Rust core: limits, the in-flight bound, single-flight and stopping, in the scheduler. `limits::Limits` caps
-  workers, each node and each group with atomic counters, shared by the schedulers of one driver; a `Seat::Held`,
-  `Lent` or `Threadless` task takes no worker slot. `Options::in_flight` bounds an expand's unfinished branches. A
-  step whose single-flight key a running compute has waits for it and completes as a hit. A failure or `stop()`
-  hands out only the finishes of open iterators, innermost first, an iterator whose pull is in flight once the pull
-  returns, and `finish` returns the lowest key's failure. `blocked()` names the node a run waits for, and `lend()`
-  gives it one lent seat.
+  `schedule::Layout`, built once per plan and shared. `next` hands out the ready `Task` with the lowest `OrderKey`
+  that a `limits::Grant` lets a `Seat` start (a compute, an iterate, a pull, a finish, or a new branch's probe, which
+  `schedule::probe` runs with the embedder's lookup); `complete` takes its `Outcome` back and adds to a caller-owned
+  `Report`, cleared and reused, the values to drop, the nodes skipped, the expands exhausted and the hits; `recycle`
+  takes a compute's emptied arguments back for reuse; `finish` returns the outputs, or the failure with the lowest
+  key. A `TaskId` names one hand-out, so a stale or repeated one is ignored, and a layout, plan or graph other than
+  the run's is a `RunError::BrokenPlan`, even of the same shape. Stepped one task at a time, it makes the calls
+  `Plan::run` makes, in the same order, and `Plan::run` is unchanged. `Plan::order_key(node, branch)` gives any step's
+  key, and `run::Slot` is public, to seed a scheduler with each value's absence.
+- Rust core: limits, the in-flight bound, single-flight and stopping, in the scheduler. `limits::Limits` caps workers,
+  each node and each group with atomic counters, shared by the schedulers of one driver; every cap is a
+  `NonZeroUsize`, `held(Resource)` says how many units are taken, and a `Seat::Held`, `Lent` or `Threadless` task
+  takes no worker slot. `Options::in_flight` bounds an expand's unfinished branches. A step whose single-flight key a
+  running compute has waits for it and completes as a hit. A failure or `stop()` hands out only the finishes of open
+  iterators, innermost first, an iterator whose pull is in flight once the pull returns, and `finish` returns the
+  lowest key's failure. `blocked()` names the node a run waits for, and `lend()` gives it one lent seat.
 
 ## [0.5.0] - 2026-11-15
 
