@@ -1139,6 +1139,23 @@ def test_a_panic_holding_the_busy_flag_fails_the_run_and_frees_the_flag() -> Non
     }
 
 
+def test_a_panic_reporting_a_completed_task_fails_the_run_and_ends_it() -> None:
+    """A Rust panic reporting a completed task unwinds through its guards.
+
+    It is outside every node call: the run fails once, and still ends, the flag free.
+    """
+    hook = Alone(pause=0.0)
+    driver = fan("report_panic", 4, (hook,))
+    inputs = {"n": 16, "fail": (), "pause": 0.002}
+    _core.arm_report_panic()
+    with pytest.raises(BaseException, match="deliberate panic while reporting") as info:
+        driver.execute(["summary"], inputs=inputs)
+    assert type(info.value).__name__ == "PanicException"
+    assert driver.execute(["summary"], inputs=inputs) == {
+        "summary": [i * 10 for i in range(16)]
+    }
+
+
 class RaisesForOne(fnloom.Hook):
     """Raises in `after_node` for branch (1,) of `details`."""
 

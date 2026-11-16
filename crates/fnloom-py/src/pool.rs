@@ -20,7 +20,6 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
-use fnloom_core::limits::Limits as CoreLimits;
 use fnloom_core::schedule::{Report, Seat};
 use pyo3::exceptions::PyValueError;
 use pyo3::intern;
@@ -28,7 +27,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyCFunction, PyDict};
 
 use crate::errors::panic_error;
-use crate::limits::Limits;
+use crate::limits::{Caps, Limits};
 use crate::parallel::{self, Run, Step};
 
 /// Pool threads alive in this process, started and not yet ended.
@@ -38,14 +37,14 @@ static NEXT: AtomicUsize = AtomicUsize::new(1);
 
 /// How long closing a pool waits for its idle threads, in all.
 const CLOSING: Duration = Duration::from_secs(1);
-/// How long an idle thread sleeps before it looks at the stop flag again, should a stop
-/// that could not take the lock have woken no one.
+/// How long an idle thread sleeps before it looks for work and at the stop flag again,
+/// should a stop that could not take the lock, or a refused grant, have woken no one.
 const IDLE: Duration = Duration::from_secs(1);
 
 /// A driver's pool: its caps, its threads and the runs that want work.
 pub struct Pool {
     /// The driver's caps, which every run's scheduler is granted slots by.
-    pub limits: Arc<CoreLimits>,
+    pub limits: Arc<Caps>,
     /// The threads it starts: `max_workers - 1`.
     size: usize,
     /// `max_workers`.
@@ -97,16 +96,25 @@ impl Pool {
         self.wake.notify_all();
     }
 
-    /// Waits, detached, until the generation is no longer `generation`.
+    /// Gives back `node`'s own slot and its group's, waking the limits' waiters and every
+    /// thread of the pool, since a run of the driver may wait for that slot.
+    pub fn release(&self, py: Python<'_>, node: fnloom_core::node::NodeId) {
+        self.limits.release(py, node);
+        self.notify(py);
+    }
+
+    /// Waits, detached, until the generation is no longer `generation`, or at most `IDLE`:
+    /// a grant that refused a task and gave its slots back woke no one, so an idle thread
+    /// looks for work again now and then.
     fn wait(&self, py: Python<'_>, generation: u64) {
         py.detach(|| {
-            let mut state = self.locked();
-            while state.generation == generation && !self.stopping.load(Ordering::Acquire) {
-                state = self
-                    .wake
-                    .wait_timeout(state, IDLE)
-                    .unwrap_or_else(PoisonError::into_inner)
-                    .0;
+            let state = self.locked();
+            if state.generation == generation && !self.stopping.load(Ordering::Acquire) {
+                drop(
+                    self.wake
+                        .wait_timeout(state, IDLE)
+                        .unwrap_or_else(PoisonError::into_inner),
+                );
             }
         });
     }
@@ -303,7 +311,7 @@ impl Threads {
         }
         Ok(Self {
             pool: Arc::new(Pool {
-                limits: Arc::clone(limits.get().core()),
+                limits: Arc::clone(limits.get().caps()),
                 size: max_workers - 1,
                 max_workers,
                 state: Mutex::new(State {

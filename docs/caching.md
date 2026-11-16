@@ -641,6 +641,12 @@ The second run calls `sales` once, for `"us"`, and prints `sales us`.
 - **Within a branch, a hit at the block's exit skips its upstream** in that branch: the cache is asked from the nodes
   the collects read, back. Branch hits fire `before_node` and `after_node` with `cache` a hit and their `branch`, as
   an outer hit does (Q85).
+- **Equal items compute once per run.** On a driver built `with_threads`, branches run at once, so two equal items
+  could both miss and both compute. Instead, a block node whose key equals one already running in the same run waits
+  for that value, holding no worker, and reports a hit (Q85). If the running one fails, the run stops, as on any
+  failure. This single-flight holds within one run only: two runs at once that need one key both compute it. A
+  `recompute` or uncacheable node is never shared. Without `with_threads` the branches run one after another, so the
+  second finds the first stored.
 - **Policies apply per branch.** A `recompute` or `disable` block node runs in every branch, and what reads it in the
   branch is uncacheable, since its result is known only once the branch ran.
 - **A collect inside a block is keyed before its block runs,** so it can hit only when its expand's items are stored

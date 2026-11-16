@@ -15,6 +15,8 @@ __all__ = [
     "UnfingerprintableError",
     "_panic_for_test",
     "arm_hook_panic",
+    "arm_perform_panic",
+    "arm_report_panic",
     "arm_worker_panic",
     "core_version",
     "fingerprint",
@@ -52,6 +54,8 @@ def _panic_for_test() -> None: ...
 def live_workers() -> int: ...
 def arm_worker_panic() -> None: ...
 def arm_hook_panic() -> None: ...
+def arm_report_panic() -> None: ...
+def arm_perform_panic() -> None: ...
 
 @final
 class Graph:
@@ -90,6 +94,7 @@ class Plan:
         late: object | None = None,
         *,
         threads: Threads | None = None,
+        limits: Limits | None = None,
     ) -> dict[str, object]: ...
     def steps(self) -> list[tuple[str, str]]: ...
     def late(self) -> list[str]: ...
@@ -97,7 +102,15 @@ class Plan:
 
 @final
 class Limits:
-    def __new__(cls, max_workers: int | None = None) -> Self: ...
+    def __new__(
+        cls,
+        graph: Graph,
+        max_workers: int | None = None,
+        node_caps: Mapping[str, int] | None = None,
+        node_groups: Mapping[str, str] | None = None,
+        group_caps: Mapping[str, int] | None = None,
+    ) -> Self: ...
+    def add_waker(self, waker: Callable[[], object], /) -> None: ...
 
 @final
 class Threads:

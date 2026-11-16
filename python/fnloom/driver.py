@@ -119,14 +119,22 @@ class _Runnable(Protocol):
 
 
 class _Threaded:
-    """A native plan whose runs run on a driver's pool (`Builder.with_threads`)."""
+    """A native plan whose runs run on a driver's pool, or are granted by its limits.
+
+    A pool is `Builder.with_threads`'; limits are `limit`'s and `with_limits`'.
+    """
 
     __slots__ = ("_plan", "_workers")
 
     def __init__(self, plan: _core.Plan, workers: _threads.Workers) -> None:
-        """Runs `plan` on `workers`' pool."""
+        """Runs `plan` on `workers`' pool, or granted by its limits."""
         self._plan = plan
         self._workers = workers
+
+    @property
+    def threaded(self) -> bool:
+        """Whether its runs are on a driver's pool."""
+        return self._workers.max_workers is not None
 
     def run(
         self,
@@ -136,8 +144,13 @@ class _Threaded:
         /,
     ) -> dict[str, object]:
         """Runs as the native plan does, its tasks on the pool and the caller."""
+        workers = self._workers
         return self._plan.run(
-            inputs, overrides, observers, threads=self._workers.threads()
+            inputs,
+            overrides,
+            observers,
+            threads=workers.threads(),
+            limits=workers.limits(),
         )
 
 
@@ -790,9 +803,7 @@ class _HookedPlan[R](PreparedPlan[R]):
         dispatch = _hooks.Dispatch(
             self._hooks, self._views, {} if cached else None, checks_owner=owner
         )
-        dispatch.parallel = isinstance(plan, _Threaded) or (
-            isinstance(plan, CacheRun) and plan.threaded
-        )
+        dispatch.parallel = isinstance(plan, (_Threaded, CacheRun)) and plan.threaded
         error: BaseException | None = None
         try:
             if mismatches:
@@ -969,6 +980,7 @@ class Driver[R = dict[str, object]]:
         result_builder: _ResultBuilder[R] | None = None,
         value_checks: Sequence[ValueCheck] = (),
         threads: int | None = None,
+        limits: _threads.Caps | None = None,
     ) -> None:
         """Wraps a native graph; `Builder` is the way to make one from modules.
 
@@ -983,11 +995,18 @@ class Driver[R = dict[str, object]]:
         override the default check refuses, as `Builder.with_value_check` adds
         them; the output checks and extracted fields' checks are in the graph's
         payloads already. `threads`, when given, is `Builder.with_threads`'
-        `max_workers`: each run's tasks run on this driver's own pool.
+        `max_workers`: each run's tasks run on this driver's own pool. `limits`
+        are the nodes' caps, as `limit` and `Builder.with_limits` give them,
+        which this driver's own counters hold across its runs.
         """
         self._graph = graph
-        # This driver's own pool, started at its first run; `None` runs `Plan::run`.
-        self._workers = None if threads is None else _threads.Workers(threads)
+        # This driver's own pool, started at its first run, and limits; `None` runs
+        # `Plan::run`, with no limit.
+        self._workers = (
+            None
+            if threads is None and limits is None
+            else _threads.Workers(typing.cast("_core.Graph", graph), threads, limits)
+        )
         # The modules it was built from, each once: `Builder` sets them.
         self._modules: tuple[ModuleType, ...] = ()
         # Made on first use and kept: a graph with many inputs pays only if asked.
@@ -1085,6 +1104,7 @@ class Driver[R = dict[str, object]]:
             result_builder=self._build,
             value_checks=self._value_checks,
             threads=None if self._workers is None else self._workers.max_workers,
+            limits=None if self._workers is None else self._workers.caps,
         )
         copied._modules = self._modules
         copied._builder = self._builder
@@ -3023,6 +3043,7 @@ class _Changes(TypedDict, total=False):
     edge_checks: bool
     loose_edges: tuple[str, ...]
     threads: int | None
+    limits: Mapping[str, int]
 
 
 class _Settings(TypedDict):
@@ -3045,6 +3066,7 @@ class _Settings(TypedDict):
     edge_checks: bool
     loose_edges: tuple[str, ...]
     threads: int | None
+    limits: Mapping[str, int]
 
 
 class Builder[R = dict[str, object]]:
@@ -3084,6 +3106,7 @@ class Builder[R = dict[str, object]]:
         edge_checks: bool = True,
         loose_edges: Sequence[str] = (),
         threads: int | None = None,
+        limits: Mapping[str, int] | None = None,
     ) -> None:
         """Starts with the given modules (none by default), checking input types.
 
@@ -3103,7 +3126,8 @@ class Builder[R = dict[str, object]]:
         `with_declared_inputs`, `with_deep_type_checks`,
         `with_numeric_widening`, `with_hooks`, `with_result_builder`,
         `with_output_type_checks`, `with_value_check`, `with_node_wrappers` and
-        `with_threads`, whose `max_workers` `threads` is, `None` for none.
+        `with_threads`, whose `max_workers` `threads` is, `None` for none, and
+        `with_limits`, whose group sizes `limits` are.
         `TypeError` when an item of `modules` is not a module, or of
         `declared_inputs` is not a `str`; see `with_functions` for the errors
         `functions` raises, `with_hooks` for those of `hooks`,
@@ -3131,6 +3155,7 @@ class Builder[R = dict[str, object]]:
         self._threads = (
             None if threads is None else _threads.checked_max_workers(threads)
         )
+        self._limits = _threads.checked_groups({} if limits is None else limits)
         self._store = store
         self._cache_settings = cache_settings
         # Never changed once made: `with_config` makes a new dict.
@@ -3201,6 +3226,7 @@ class Builder[R = dict[str, object]]:
             "edge_checks": self._edge_checks,
             "loose_edges": self._loose_edges,
             "threads": self._threads,
+            "limits": self._limits,
         }
 
     def _edge_setting(self) -> str | list[str]:
@@ -3543,6 +3569,22 @@ class Builder[R = dict[str, object]]:
         """
         return self._with(threads=_threads.checked_max_workers(max_workers))
 
+    def with_limits(self, groups: Mapping[str, int]) -> Builder[R]:
+        """Returns a new builder whose drivers size the groups `@limit` puts nodes in.
+
+        `groups` maps each group's name to how many calls of its nodes may run at
+        once, across every run of a driver, with or without `with_threads`.
+        Cumulative: a group sized again takes the new size. Each driver object has
+        its own counters: a copy, a rebuilt or an unpickled driver starts free.
+
+        A non-mapping, a name that is no `str` or a size that is no `int` is a
+        `TypeError`, and an empty name or a size under 1 a `ValueError`. The build
+        refuses, with a `ValueError`, a group a node is in that has no size, and a
+        size of a group no node is in, on every driver.
+        """
+        checked = _threads.checked_groups(groups)
+        return self._with(limits={**self._limits, **checked})
+
     def with_result_builder[T](self, build: _ResultBuilder[T]) -> Builder[T]:
         """Returns a new builder whose drivers' `execute` returns `build(outputs)`.
 
@@ -3641,13 +3683,14 @@ class Builder[R = dict[str, object]]:
         `@config.default` gives, are a `ValueError` naming each (Q57, Q58).
         """
         nodes, views, graph, unmatched, left_out, owner = self._scanned(awaits=False)
+        caps = _threads.caps_of(nodes, self._limits)
         # Called here, so a `CacheWarning` points at the caller's `build`.
         cache = (
             None
             if self._store is None
             else Cache.of(self._store, nodes, self._cache_settings)
         )
-        return self._driver(graph, views, unmatched, left_out, cache, owner)
+        return self._driver(graph, views, unmatched, left_out, cache, owner, caps=caps)
 
     def build_async(
         self, *, sync_nodes: Literal["thread", "inline"] = "thread"
@@ -3667,6 +3710,8 @@ class Builder[R = dict[str, object]]:
         """
         checked = _async.checked_sync_nodes(sync_nodes)
         nodes, views, graph, unmatched, left_out, owner = self._scanned(awaits=True)
+        # Checked on every driver; the async driver honours limits from Plan 11's C4.
+        _threads.caps_of(nodes, self._limits)
         # Called here, so a `CacheWarning` points at the caller's `build_async`.
         cache = (
             None
@@ -3813,8 +3858,12 @@ class Builder[R = dict[str, object]]:
         owner: object,
         *,
         threaded: bool = True,
+        caps: _threads.Caps | None = None,
     ) -> Driver[R]:
-        """This builder's driver over a scanned graph; on its pool when `threaded`."""
+        """This builder's driver over a scanned graph.
+
+        On its pool when `threaded`, its limited nodes granted by `caps`.
+        """
         driver = Driver(
             graph,
             views,
@@ -3828,6 +3877,7 @@ class Builder[R = dict[str, object]]:
             result_builder=self._result_builder,
             value_checks=self._value_checks,
             threads=self._threads if threaded else None,
+            limits=caps,
         )
         driver._modules = tuple(dict.fromkeys(self._modules))  # noqa: SLF001  # the builder's own driver
         driver._unmatched = unmatched  # noqa: SLF001  # the builder's own driver

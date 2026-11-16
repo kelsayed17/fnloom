@@ -420,6 +420,7 @@ def test_public_api_is_exported() -> None:
         "frame",
         "group",
         "inject",
+        "limit",
         "mutate",
         "node",
         "parameterize",

@@ -43,6 +43,20 @@ change the public API; such changes are listed under **Changed** and **Removed**
   store writes run after them, so a slow store holds up no other node's hooks; each node sees the context variables
   its caller set (Q167). `NodeStart.order`, `NodeEnd.order` and `ExpandEnd.order` give the step's order key as a
   tuple, so a parallel run's events sort into the order one worker gives; `()` on the async driver.
+- Single-flight per key within a run. On a driver built `with_threads` with a cache, a block node whose key equals one
+  already running in the same run waits for that value, holding no worker, and reports a hit (Q85); a `recompute` or
+  uncacheable node never does, nor do two runs share one.
+- `@fnloom.limit(n=None, *, group=None)` caps how many calls of a node run at once, across every run of a driver, and
+  `Builder.with_limits({group: size})` sizes the groups nodes share a cap in (Q134). Every driver honours them, with
+  or without `with_threads`; the async driver checks them at build and honours them from a later release. A call
+  takes its slots after its `before_node` hooks and gives them back as it returns, before its `after_node` hooks,
+  and a sequential run waits for one detached, `Ctrl-C` ending the wait; grants are not fair. A group with no size,
+  or a size of a group no node is in, fails the build. A run started inside a node that needs a slot its callers
+  hold every unit of is refused at once with a `RuntimeError` naming the node and the slot, instead of waiting for
+  good, and a run started on a thread that carries a node's context takes its tasks on that node's worker slot.
+  Each driver object has its own counters, through pickling, `copy`, `rebuild()` and a fork.
+- A run of a driver built `with_threads` fails at once on a panic in fnloom's own code outside a node call, instead
+  of ending as a success or waiting for good.
 
 ### Changed
 

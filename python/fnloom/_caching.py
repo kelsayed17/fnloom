@@ -997,7 +997,8 @@ class CacheRun:
 
         `fresh` holds the producers an enclosing run's `recompute` fields need
         fresh, so a nested run computing one never looks it up either.
-        `workers`, when given, is the driver's pool, which every core run uses.
+        `workers`, when given, is the driver's pool and limits, which every core
+        run uses.
         """
         self._workers = workers
         self._store = cache.store
@@ -1152,7 +1153,7 @@ class CacheRun:
     @property
     def threaded(self) -> bool:
         """Whether its core runs are on a driver's pool."""
-        return self._workers is not None
+        return self._workers is not None and self._workers.max_workers is not None
 
     @property
     def blocks(self) -> _Blocks | None:
@@ -1221,6 +1222,7 @@ class CacheRun:
                 on_value=on_value,
                 late=begun.late,
                 threads=workers.threads(),
+                limits=workers.limits(),
             )
         if begun.values is not None:
             begun.values.update(begun.hits)
@@ -1898,6 +1900,21 @@ class LateKeys:
         key = self._expand_key(name, prefix)
         if isinstance(key, bytes) and isinstance(value, list):
             self._run.put(key, name, value, self._warned)
+
+    def probe(self, name: str, branch: _Branch) -> tuple[object] | bytes | None:
+        """`lookup` of late node `name` in `branch`; on a miss, its single-flight key.
+
+        A hit as a 1-tuple; else the key a stored node is stored under, which the
+        run's steps of an equal key wait on; else `None`: a node that is not
+        stored, such as a `recompute` one, or whose key is uncacheable or not
+        known yet, is never shared. One call per step a parallel run probes.
+        """
+        found = self.lookup(name, branch)
+        if found is not None or not self._stores(name):
+            return found
+        # `lookup` keyed it: a known key is in the memo, an unknown one is not.
+        key = self._memo.get((name, branch))
+        return key if isinstance(key, bytes) else None
 
     def outcome(self, name: str, branch: _Branch, *, hit: bool) -> CacheOutcome:
         """Late node `name`'s cache outcome in `branch`, for its node events."""

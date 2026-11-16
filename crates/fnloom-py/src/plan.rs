@@ -20,6 +20,7 @@ use crate::call::{Keywords, vectorcall};
 use crate::errors::{caught, run_error};
 use crate::graph::Graph;
 use crate::keys::Keys;
+use crate::limits::{Caps, Limits};
 use crate::observer::{ObserverBase, PyObserver};
 use crate::parallel;
 use crate::pool::Threads;
@@ -122,6 +123,7 @@ impl Plan {
     }
 
     /// `run` on the calling thread, by `Plan::run`: the default path.
+    #[expect(clippy::too_many_arguments, reason = "`run`'s parts, passed on")]
     fn run_here<'py>(
         &self,
         py: Python<'py>,
@@ -130,6 +132,7 @@ impl Plan {
         observers: Vec<Bound<'py, ObserverBase>>,
         on_value: Option<Bound<'py, PyAny>>,
         late: Option<&Bound<'py, PyAny>>,
+        limits: Option<&Caps>,
     ) -> PyResult<Bound<'py, PyDict>> {
         let graph = self.graph.get();
         let keywords = graph.keywords();
@@ -195,6 +198,7 @@ impl Plan {
                 outputs: self.core.outputs(),
                 calls: &self.calls,
                 late,
+                limits,
             },
             lookup,
             &mut hooks,
@@ -240,11 +244,15 @@ impl Plan {
     ///
     /// With `threads`, the run is on the core scheduler, its tasks on `threads`' pool and
     /// on the calling thread, each call in its own copy of the caller's context, and its
-    /// hooks one at a time, each on the thread that ran its node (`parallel`).
+    /// hooks one at a time, each on the thread that ran its node (`parallel`), granted
+    /// slots by the pool's limits.
+    ///
+    /// Without `threads`, `limits` grants each limited node's call its slots, waiting
+    /// detached for a release while refused, and releasing them as soon as the call returns.
     // PyO3 renders the `Vec::new()` default as `Ellipsis`, so the signature says `()` itself.
     #[pyo3(
-        signature = (inputs, overrides, observers = Vec::new(), on_value = None, late = None, *, threads = None),
-        text_signature = "($self, /, inputs, overrides, observers=(), on_value=None, late=None, *, threads=None)"
+        signature = (inputs, overrides, observers = Vec::new(), on_value = None, late = None, *, threads = None, limits = None),
+        text_signature = "($self, /, inputs, overrides, observers=(), on_value=None, late=None, *, threads=None, limits=None)"
     )]
     #[expect(
         clippy::too_many_arguments,
@@ -259,12 +267,14 @@ impl Plan {
         on_value: Option<Bound<'py, PyAny>>,
         late: Option<&Bound<'py, PyAny>>,
         threads: Option<&Bound<'py, Threads>>,
+        limits: Option<&Bound<'py, Limits>>,
     ) -> PyResult<Bound<'py, PyDict>> {
         if let Some(threads) = threads {
             return parallel::run(slf, inputs, overrides, observers, on_value, late, threads);
         }
         let this = slf.get();
-        this.run_here(py, inputs, overrides, observers, on_value, late)
+        let limits = limits.map(|limits| &**limits.get().caps());
+        this.run_here(py, inputs, overrides, observers, on_value, late, limits)
     }
 
     /// The steps in execution order, as `(node, action)` pairs.
@@ -373,13 +383,14 @@ pub struct Kwargs<'py, 'g> {
     graph: &'g Graph,
     /// The dict built for the observers of the node about to run, until its call.
     pending: RefCell<Option<(NodeId, Bound<'py, PyDict>)>>,
-    /// The last order key made, by the address of the node name it was made for and the
-    /// branch: a node's events come one after another, so `post_node` reuses `pre_node`'s.
+    /// The last order key made, by the address and length of the node name it was made
+    /// for and the branch: a node's events come one after another, so `post_node` reuses
+    /// `pre_node`'s.
     order: RefCell<Option<LastOrder<'py>>>,
 }
 
-/// An order key made, with the address of its node's name and its branch.
-type LastOrder<'py> = (usize, Vec<usize>, Bound<'py, PyTuple>);
+/// An order key made, with the address and length of its node's name, and its branch.
+type LastOrder<'py> = (usize, usize, Vec<usize>, Bound<'py, PyTuple>);
 
 impl<'py, 'g> Kwargs<'py, 'g> {
     /// The keyword arguments of a run of `plan` over `graph`, none built yet.
@@ -428,10 +439,11 @@ impl<'py> Kwargs<'py, '_> {
 
     /// `node`'s order key in `branch`, as a tuple (`Plan::order_key`).
     pub fn order(&self, node: &str, branch: &[usize]) -> PyResult<Bound<'py, PyTuple>> {
-        // The core passes each node's own name, so its address names the node.
+        // The core passes each node's own name, so its address and length name the node;
+        // the length too, so a caller passing a slice of a name can't match it.
         let address = node.as_ptr() as usize;
-        if let Some((at, of, order)) = self.order.borrow().as_ref() {
-            if *at == address && of.as_slice() == branch {
+        if let Some((at, len, of, order)) = self.order.borrow().as_ref() {
+            if *at == address && *len == node.len() && of.as_slice() == branch {
                 return Ok(order.clone());
             }
         }
@@ -445,7 +457,7 @@ impl<'py> Kwargs<'py, '_> {
         } else {
             PyTuple::new(self.py, self.plan.core.order_key(id, branch).as_slice())?
         };
-        *self.order.borrow_mut() = Some((address, branch.to_vec(), order.clone()));
+        *self.order.borrow_mut() = Some((address, node.len(), branch.to_vec(), order.clone()));
         Ok(order)
     }
 
@@ -499,6 +511,9 @@ struct Caller<'k, 'py, 'g> {
     calls: &'k [Option<Call>],
     /// A cached run's late keys, as `Plan.run`'s `late` describes; `None` uncached.
     late: Option<&'k Bound<'py, PyAny>>,
+    /// The driver's limits, granting each limited node's call; `None` for a driver with
+    /// none, whose calls test nothing more.
+    limits: Option<&'k Caps>,
 }
 
 impl<'py> Evaluate<Py<PyAny>> for Caller<'_, 'py, '_> {
@@ -593,7 +608,13 @@ impl<'py> Blocks<Py<PyAny>, Value<'py>, PyErr> for Caller<'_, 'py, '_> {
         node: &Node<Py<PyAny>>,
         iterator: &Value<'py>,
     ) -> PyResult<Item<Value<'py>>> {
-        self.scope().next_item(&Direct, node, iterator)
+        // A generator's body runs as its items are read, so its pulls are its calls.
+        match self.limits.filter(|limits| limits.limited(node.id)) {
+            Some(limits) => limits.around(self.kwargs.py, node.id, || {
+                self.scope().next_item(&Direct, node, iterator)
+            }),
+            None => self.scope().next_item(&Direct, node, iterator),
+        }
     }
 
     fn finish_items(
@@ -719,11 +740,27 @@ impl<'py> Observer<Value<'py>, PyErr> for LateHook<'py, '_> {
 }
 
 impl<'py> Caller<'_, 'py, '_> {
+    /// Calls `function`, the payload of `consumer`, with `args` as keyword arguments,
+    /// inside its grant when `consumer` is limited.
+    fn call(
+        &self,
+        consumer: &Node<Py<PyAny>>,
+        function: &Py<PyAny>,
+        args: &[Arg<'_, Value<'py>>],
+    ) -> PyResult<Value<'py>> {
+        match self.limits.filter(|limits| limits.limited(consumer.id)) {
+            Some(limits) => limits.around(self.kwargs.py, consumer.id, || {
+                self.call_unlimited(consumer, function, args)
+            }),
+            None => self.call_unlimited(consumer, function, args),
+        }
+    }
+
     /// Calls `function`, the payload of `consumer`, with `args` as keyword arguments.
     ///
     /// A `TypeError` when the function returns `fnloom.ABSENT` but `consumer` does not
     /// decline: its return annotation does not admit `fnloom.Absent`.
-    fn call(
+    fn call_unlimited(
         &self,
         consumer: &Node<Py<PyAny>>,
         function: &Py<PyAny>,
