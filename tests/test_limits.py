@@ -810,3 +810,279 @@ def test_a_panic_before_a_tasks_completion_fails_the_run_and_ends_it() -> None:
     assert driver.execute(["loads"], inputs={"n": 4, "pause": 0.0}) == {
         "loads": [0, 1, 2, 3]
     }
+
+
+# Limits on the async driver (task 7).
+
+# Seconds within which a refusal comes, rather than a wait.
+PROMPTLY = 2
+
+ASYNC_COUNTED = """
+import asyncio
+import threading
+
+from fnloom import limit
+
+LOCK = threading.Lock()
+NOW = {"g": 0, "alone": 0}
+MOST = {"g": 0, "alone": 0}
+
+
+async def _counted(key: str) -> None:
+    with LOCK:
+        NOW[key] += 1
+        MOST[key] = max(MOST[key], NOW[key])
+    await asyncio.sleep(0.01)
+    with LOCK:
+        NOW[key] -= 1
+
+
+@limit(group="g")
+async def a(x: int) -> int:
+    await _counted("g")
+    return x
+
+
+@limit(group="g")
+async def b(x: int) -> int:
+    await _counted("g")
+    return x + 1
+
+
+@limit(group="g")
+def c(x: int) -> int:
+    with LOCK:
+        NOW["g"] += 1
+        MOST["g"] = max(MOST["g"], NOW["g"])
+    threading.Event().wait(0.01)
+    with LOCK:
+        NOW["g"] -= 1
+    return x + 2
+
+
+@limit(1)
+async def alone(x: int) -> int:
+    await _counted("alone")
+    return x
+
+
+def total(a: int, b: int, c: int) -> int:
+    return a + b + c
+"""
+
+
+@pytest.mark.parametrize("threads", [None, 2], ids=["no-threads", "threads"])
+def test_async_limits_apply_to_async_nodes(threads: int | None) -> None:
+    """A group of size 1 keeps async and sync members apart; `limit(1)` across runs."""
+    module = make_module(f"async_counted_{threads}", ASYNC_COUNTED)
+    builder = fnloom.Builder().with_modules(module).with_limits({"g": 1})
+    if threads is not None:
+        builder = builder.with_threads(threads)
+    driver = builder.build_async()
+
+    async def scenario() -> list[object]:
+        runs = [driver.execute(["total"], inputs={"x": 1}) for _ in range(3)]
+        alone = [driver.execute(["alone"], inputs={"x": i}) for i in range(4)]
+        return await asyncio.wait_for(asyncio.gather(*runs, *alone), 10)
+
+    results = asyncio.run(scenario())
+    assert results[:3] == [{"total": 6}] * 3
+    assert results[3:] == [{"alone": i} for i in range(4)]
+    assert module.MOST == {"g": 1, "alone": 1}
+    assert module.NOW == {"g": 0, "alone": 0}
+
+
+ASYNC_HELD = """
+import threading
+
+from fnloom import limit
+
+HOLDING = threading.Event()
+RELEASE = threading.Event()
+
+
+@limit(group="db")
+def load(x: int) -> int:
+    if x < 0:
+        HOLDING.set()
+        assert RELEASE.wait(5)
+    return x
+"""
+
+
+def test_an_async_run_waiting_on_a_limit_is_woken_by_another_thread() -> None:
+    """A run on another thread holds the group's slot; its release wakes this loop."""
+    module = make_module("async_woken", ASYNC_HELD)
+    driver = fnloom.Builder().with_modules(module).with_limits({"db": 1}).build_async()
+    held = threading.Thread(
+        target=lambda: asyncio.run(driver.execute(["load"], inputs={"x": -1}))
+    )
+    held.start()
+    assert module.HOLDING.wait(5)
+
+    async def waiting() -> tuple[object, float]:
+        run = asyncio.ensure_future(driver.execute(["load"], inputs={"x": 2}))
+        await asyncio.sleep(0.05)
+        assert not run.done()
+        released = time.monotonic()
+        module.RELEASE.set()
+        result = await asyncio.wait_for(run, 5)
+        return result, time.monotonic() - released
+
+    result, waited = asyncio.run(waiting())
+    held.join(5)
+    assert result == {"load": 2}
+    assert waited < 1
+
+
+ASYNC_INNER = """
+import asyncio
+
+from fnloom import limit
+
+DRIVER = []
+
+
+@limit(group="db")
+def outer(x: int) -> int:
+    return asyncio.run(DRIVER[0].execute(["inner"], inputs={"x": x}))["inner"]
+
+
+@limit(group="db")
+async def inner(x: int) -> int:
+    return x
+"""
+
+
+@pytest.mark.parametrize("threads", [None, 2], ids=["no-threads", "threads"])
+def test_an_async_inner_run_needing_a_slot_its_callers_hold_is_refused(
+    threads: int | None,
+) -> None:
+    """A sync node in group `db` of size 1 runs its own async driver needing `db`."""
+    module = make_module(f"async_inner_{threads}", ASYNC_INNER)
+    builder = fnloom.Builder().with_modules(module).with_limits({"db": 1})
+    if threads is not None:
+        builder = builder.with_threads(threads)
+    driver = builder.build_async()
+    module.DRIVER.append(driver)
+    started = time.monotonic()
+    with pytest.raises(RuntimeError) as info:
+        asyncio.run(asyncio.wait_for(driver.execute(["outer"], inputs={"x": 1}), 10))
+    assert time.monotonic() - started < PROMPTLY
+    assert str(info.value) == (
+        "'inner' needs group 'db', but every slot of it is held by the runs that "
+        "called this one"
+    )
+
+
+HOOKED_LIMIT = """
+from fnloom import limit
+
+CALLS = []
+
+
+@limit(1)
+def once(x: int) -> int:
+    CALLS.append(x)
+    return x
+"""
+
+
+class _RunsOnce(fnloom.Hook):
+    """Before `once`, runs `once` on its driver's sync twin, which shares its limits."""
+
+    def __init__(self) -> None:
+        """No twin yet."""
+        self.twin: fnloom.Driver[dict[str, object]] | None = None
+        self.seen: list[object] = []
+
+    @override
+    def before_node(self, event: fnloom.NodeStart) -> None:
+        # Once: the twin's own run fires this hook too.
+        twin, self.twin = self.twin, None
+        if event.node.name == "once" and twin is not None:
+            self.seen.append(twin.execute(["once"], inputs={"x": -1}))
+
+
+def test_an_async_nodes_slots_are_given_back_before_its_hooks() -> None:
+    """A `before_node` hook may run the same `limit(1)` node: no slot is held."""
+    module = make_module("async_hooked_limit", HOOKED_LIMIT)
+    hook = _RunsOnce()
+    driver = fnloom.Builder().with_modules(module).with_hooks(hook).build_async()
+    hook.twin = driver._driver  # noqa: SLF001  # the sync driver sharing its limits
+    done: list[object] = []
+    thread = threading.Thread(
+        target=lambda: done.append(
+            asyncio.run(driver.execute(["once"], inputs={"x": 1}))
+        ),
+        daemon=True,
+    )
+    thread.start()
+    thread.join(10)
+    assert not thread.is_alive()
+    assert done == [{"once": 1}]
+    assert hook.seen == [{"once": -1}]
+    assert module.CALLS == [-1, 1]
+
+
+PARKED = """
+import threading
+
+from fnloom import limit
+
+ENTERED = threading.Event()
+RELEASE = threading.Event()
+LOCK = threading.Lock()
+NOW = [0]
+MOST = [0]
+
+
+@limit(1)
+def slow(x: int) -> int:
+    with LOCK:
+        NOW[0] += 1
+        MOST[0] = max(MOST[0], NOW[0])
+    if x < 0:
+        ENTERED.set()
+        assert RELEASE.wait(5)
+    with LOCK:
+        NOW[0] -= 1
+    return x
+"""
+
+
+class _TakesTheSlot(fnloom.Hook):
+    """Before `slow`, starts a run of `slow` on another thread, which takes its slot."""
+
+    def __init__(self, module: types.ModuleType) -> None:
+        """The run starts on the twin of `module`'s driver, set later."""
+        self.module = module
+        self.twin: fnloom.Driver[dict[str, object]] | None = None
+        self.thread: threading.Thread | None = None
+
+    @override
+    def before_node(self, event: fnloom.NodeStart) -> None:
+        twin = self.twin
+        if twin is None or self.thread is not None:
+            return
+        self.thread = threading.Thread(
+            target=lambda: twin.execute(["slow"], inputs={"x": -1})
+        )
+        self.thread.start()
+        assert self.module.ENTERED.wait(5)
+        threading.Timer(0.1, self.module.RELEASE.set).start()
+
+
+def test_a_node_whose_slot_is_taken_during_its_hooks_waits_parked_for_it() -> None:
+    """The slot is taken while its `before_node` runs: the node waits, then runs."""
+    module = make_module("async_parked", PARKED)
+    hook = _TakesTheSlot(module)
+    driver = fnloom.Builder().with_modules(module).with_hooks(hook).build_async()
+    hook.twin = driver._driver  # noqa: SLF001  # the sync driver sharing its limits
+    result = asyncio.run(
+        asyncio.wait_for(driver.execute(["slow"], inputs={"x": 1}), 10)
+    )
+    assert hook.thread is not None
+    hook.thread.join(5)
+    assert result == {"slow": 1}
+    assert module.MOST == [1]

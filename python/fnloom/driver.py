@@ -136,6 +136,11 @@ class _Threaded:
         """Whether its runs are on a driver's pool."""
         return self._workers.max_workers is not None
 
+    @property
+    def plan(self) -> _core.Plan:
+        """The native plan."""
+        return self._plan
+
     def run(
         self,
         inputs: dict[str, Any],
@@ -597,6 +602,8 @@ class PreparedPlan[R = dict[str, object]]:
         # This plan as each of the last few `AsyncDriver`s over its driver ran it,
         # made on first use: kept here, so it goes when the driver drops this plan.
         self._async: dict[AsyncDriver[R], AsyncPreparedPlan[R]] = {}
+        # Held to read or change `_async`, which threads preparing at once share.
+        self._async_lock = threading.Lock()
 
     @override
     def __reduce__(
@@ -2170,6 +2177,8 @@ class _HookedAsyncPlan[R](AsyncPreparedPlan[R]):
         dispatch = _hooks.Dispatch(
             hooks, views, {} if cached else None, checks_owner=owner
         )
+        # Its nodes overlap between their start and their end.
+        dispatch.parallel = True
         error: BaseException | None = None
         try:
             if mismatches:
@@ -2217,11 +2226,16 @@ class AsyncDriver[R = dict[str, object]]:
         *,
         sync_nodes: Literal["thread", "inline"] = "thread",
     ) -> None:
-        """Runs `driver`'s plans; `nodes` are its graph's nodes, by name."""
+        """Runs `driver`'s plans, on its pool and limits; `nodes` are its graph's nodes.
+
+        `ValueError` for `sync_nodes="inline"` on a driver with `with_threads`.
+        """
+        workers = driver._workers  # noqa: SLF001  # the driver this one runs
+        threaded = workers is not None and workers.max_workers is not None
         self._driver = driver
         self._nodes = nodes
-        self._sync_nodes: Literal["thread", "inline"] = sync_nodes
-        self._calls = _async.calls(nodes, sync_nodes)
+        self._sync_nodes = _async.checked_sync_nodes(sync_nodes, threaded=threaded)
+        self._runner = _async.Runner(_async.calls(nodes, self._sync_nodes), workers)
         # The builder that built this driver, which pickling rebuilds it from.
         self._builder: Builder[R] | None = None
 
@@ -2428,14 +2442,19 @@ class AsyncDriver[R = dict[str, object]]:
         keeps them.
         """
         prepared = self._driver.prepare(final_vars, inputs=inputs, overrides=overrides)
-        plan = prepared._async.get(self)  # noqa: SLF001  # this driver's own plan
+        kept = prepared._async  # noqa: SLF001  # this driver's own plan
+        lock = prepared._async_lock  # noqa: SLF001  # this driver's own plan
+        with lock:
+            plan = kept.get(self)
         if plan is None:
             runnable = prepared._plan  # noqa: SLF001  # this driver's own plan
+            if isinstance(runnable, _Threaded):
+                runnable = runnable.plan
             schedule: _async.Schedule | _async.CachedSchedule
             if isinstance(runnable, CacheRun):
-                schedule = _async.CachedSchedule(runnable, self._calls)
+                schedule = _async.CachedSchedule(runnable, self._runner)
             elif isinstance(runnable, _core.Plan):
-                schedule = _async.Schedule(runnable, self._calls)
+                schedule = _async.Schedule(runnable, self._runner)
             else:
                 msg = f"an AsyncDriver cannot run {type(runnable).__name__}"
                 raise TypeError(msg)
@@ -2447,12 +2466,12 @@ class AsyncDriver[R = dict[str, object]]:
             else:
                 plan = AsyncPreparedPlan(prepared, self, schedule)
             # Two threads may both get here: either plan will do, and one is kept.
-            kept = prepared._async  # noqa: SLF001  # this driver's own plan
-            kept[self] = plan
-            # A few, the oldest dropped: an AsyncDriver made per request over one
-            # long-lived Driver would otherwise stay alive with each hot plan.
-            while len(kept) > ASYNC_PLANS_PER_PLAN:
-                kept.pop(next(iter(kept)), None)
+            with lock:
+                kept[self] = plan
+                # A few, the oldest dropped: an AsyncDriver made per request over one
+                # long-lived Driver would otherwise stay alive with each hot plan.
+                while len(kept) > ASYNC_PLANS_PER_PLAN:
+                    kept.pop(next(iter(kept)), None)
         return plan
 
     def validate(
@@ -2680,9 +2699,9 @@ def _graph_of(
 
     Each node says whether it declines: its return annotation admits
     `fnloom.Absent` (Q135). Each expand gets its item iterator factory from
-    `items`, or the unchecked `_blocks.Items` when it is not given.
+    `items`, or the unchecked `_blocks.items` when it is not given.
     """
-    make = items or (lambda n: functools.partial(_blocks.Items, n.name, None))
+    make = items or (lambda n: functools.partial(_blocks.items, n.name, None))
     return _core.Graph(
         [
             (
@@ -2710,7 +2729,7 @@ def _item_factory(
     def factory(node: NodeDef) -> Callable[..., object]:
         item = _blocks.expanded_type(node.returns)
         check = _blocks.item_check(item, rules, value_checks) if checked else None
-        return functools.partial(_blocks.Items, node.name, check)
+        return functools.partial(_blocks.items, node.name, check)
 
     return factory
 
@@ -3708,10 +3727,11 @@ class Builder[R = dict[str, object]]:
         store (Q68): each node is stored as it succeeds, and a node that fails,
         or that a failure cancels, stores nothing. Store calls run on the loop.
         """
-        checked = _async.checked_sync_nodes(sync_nodes)
+        checked = _async.checked_sync_nodes(
+            sync_nodes, threaded=self._threads is not None
+        )
         nodes, views, graph, unmatched, left_out, owner = self._scanned(awaits=True)
-        # Checked on every driver; the async driver honours limits from Plan 11's C4.
-        _threads.caps_of(nodes, self._limits)
+        caps = _threads.caps_of(nodes, self._limits)
         # Called here, so a `CacheWarning` points at the caller's `build_async`.
         cache = (
             None
@@ -3719,9 +3739,7 @@ class Builder[R = dict[str, object]]:
             else Cache.of(self._store, nodes, self._cache_settings)
         )
         built = AsyncDriver(
-            self._driver(
-                graph, views, unmatched, left_out, cache, owner, threaded=False
-            ),
+            self._driver(graph, views, unmatched, left_out, cache, owner, caps=caps),
             {node.name: node for node in nodes},
             sync_nodes=checked,
         )
@@ -3857,12 +3875,11 @@ class Builder[R = dict[str, object]]:
         cache: Cache | None,
         owner: object,
         *,
-        threaded: bool = True,
         caps: _threads.Caps | None = None,
     ) -> Driver[R]:
         """This builder's driver over a scanned graph.
 
-        On its pool when `threaded`, its limited nodes granted by `caps`.
+        On its pool, with `with_threads`, its limited nodes granted by `caps`.
         """
         driver = Driver(
             graph,
@@ -3876,7 +3893,7 @@ class Builder[R = dict[str, object]]:
             hooks=self._hooks,
             result_builder=self._result_builder,
             value_checks=self._value_checks,
-            threads=self._threads if threaded else None,
+            threads=self._threads,
             limits=caps,
         )
         driver._modules = tuple(dict.fromkeys(self._modules))  # noqa: SLF001  # the builder's own driver

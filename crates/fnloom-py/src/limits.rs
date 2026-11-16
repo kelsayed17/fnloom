@@ -211,6 +211,12 @@ impl Caps {
     /// exception is dropped, so it never fails the run whose release called it.
     pub fn release(&self, py: Python<'_>, node: NodeId) {
         self.core.release(Some(node), Seat::Threadless);
+        self.notify(py);
+    }
+
+    /// Wakes every waiter, as a release does: a slot was given back elsewhere, such as an
+    /// async run's worker slot.
+    pub fn notify(&self, py: Python<'_>) {
         match self.wake.try_lock() {
             Ok(mut count) => *count = count.wrapping_add(1),
             Err(TryLockError::Poisoned(poisoned)) => {
@@ -223,6 +229,11 @@ impl Caps {
             }),
         }
         self.released.notify_all();
+        self.wake_async(py);
+    }
+
+    /// Calls each registered async waker once, attached and after the lock.
+    pub fn wake_async(&self, py: Python<'_>) {
         if self.waiting.load(Ordering::Acquire) == 0 {
             return;
         }

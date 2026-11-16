@@ -11,7 +11,7 @@ annotations, checks the items and holds the branch a node runs in.
 import inspect
 import types
 import typing
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import AsyncIterable, Callable, Iterable, Iterator
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Annotated, Final, Literal, Union, override
 
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "BRANCH",
+    "AsyncItems",
     "Collect",
     "Items",
     "Parallelizable",
@@ -34,6 +35,7 @@ __all__ = [
     "expanded_type",
     "expands",
     "item_check",
+    "items",
     "refuse",
 ]
 
@@ -229,7 +231,10 @@ class Items(Iterator[object]):
     @override
     def __next__(self) -> object:
         """The next item, checked; `StopIteration` as the iterable raised it."""
-        item = self._in_branch(next, self._iterator)
+        return self._kept(self._in_branch(next, self._iterator))
+
+    def _kept(self, item: object) -> object:
+        """`item`, the next one read, once checked, recorded and reported."""
         index = self._index
         self._index += 1
         if item is ABSENT:
@@ -275,3 +280,68 @@ class Items(Iterator[object]):
         elif self._late is not None:
             self._late.finished(self._node, self._branch, self._items)
         return self._items
+
+
+class AsyncItems(Items):
+    """`Items` of an async generator expand, read with `__anext__` by the async driver.
+
+    `current_branch()` is the expand's in each read, since the driver awaits every
+    read of one iterator in one context, in the expand's branch.
+    """
+
+    __slots__ = ("_aiterator",)
+
+    def __init__(  # noqa: PLR0913, PLR0917  # as `Items`
+        self,
+        node: str,
+        check: Callable[[object], str | None] | None,
+        iterable: AsyncIterable[object],
+        record: bool,  # noqa: FBT001  # the binding passes it by position
+        branch: tuple[int, ...] = (),
+        late: LateKeys | None = None,
+    ) -> None:
+        """Iterates `iterable`, as `Items` does."""
+        super().__init__(node, check, (), record, branch, late)
+        self._aiterator = aiter(iterable)
+
+    @override
+    def __next__(self) -> object:
+        """`TypeError`: async items are read only by the async driver."""
+        msg = (
+            f"the items of {self._node!r} are an async iterable, which only "
+            "build_async() reads"
+        )
+        raise TypeError(msg)
+
+    async def __anext__(self) -> object:
+        """The next item, checked; `StopAsyncIteration` at the end."""
+        return self._kept(await anext(self._aiterator))
+
+    async def afinish(self, exhausted: bool) -> list[object] | None:  # noqa: FBT001  # as `finish`
+        """Ends the iteration, closing it unless `exhausted`; the items, if recorded.
+
+        An async generator is closed with `aclose()`, so its `finally` runs.
+        """
+        if not exhausted:
+            close = getattr(self._aiterator, "aclose", None)
+            if callable(close):
+                await close()
+            return self._items
+        return self.finish(exhausted)
+
+
+def items(  # noqa: PLR0913, PLR0917  # the factory's two, then the binding's four
+    node: str,
+    check: Callable[[object], str | None] | None,
+    iterable: Iterable[object] | AsyncIterable[object],
+    record: bool,  # noqa: FBT001  # the binding passes it by position
+    branch: tuple[int, ...] = (),
+    late: LateKeys | None = None,
+) -> Items:
+    """The item iterator of one run of expand `node`, `Items` or `AsyncItems`.
+
+    `AsyncItems` over an async iterable, which only the async driver reads.
+    """
+    if isinstance(iterable, AsyncIterable):
+        return AsyncItems(node, check, iterable, record, branch, late)
+    return Items(node, check, iterable, record, branch, late)

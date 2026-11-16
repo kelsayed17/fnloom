@@ -1,17 +1,14 @@
 """`fnloom.Hook` on the async driver: the sync driver's events, on the loop's thread."""
 
-import ast
 import asyncio
-import inspect
 import logging
-import textwrap
 import threading
 from typing import TYPE_CHECKING, Any, Literal, cast, override
 
 import pytest
 
 import fnloom
-from fnloom import Hook, NodeEnd, NodeStart, RunEnd, RunStart, _async
+from fnloom import Hook, NodeEnd, NodeStart, RunEnd, RunStart
 from helpers import make_module
 from test_hooks import GRAPH, SHAPES, CheckError, HookError, Recorder, raising_check
 
@@ -560,53 +557,6 @@ def test_a_failing_node_and_a_raising_hook_are_one_group_led_by_the_node(
     assert (end.ok, end.error) == (False, group)
 
 
-class _NoBegin(ast.NodeTransformer):
-    """Drops the docstring and every `if not self._begin(...): return`."""
-
-    @override
-    def visit_If(self, node: ast.If) -> ast.AST | None:
-        test = node.test
-        if (
-            isinstance(test, ast.UnaryOp)
-            and isinstance(test.op, ast.Not)
-            and isinstance(test.operand, ast.Call)
-            and isinstance(test.operand.func, ast.Attribute)
-            and test.operand.func.attr == "_begin"
-        ):
-            return None
-        return self.generic_visit(node)
-
-
-def _drain_body(method: object, *, hooked: bool) -> str:
-    """The method's body as an AST dump, without its docstring or `_begin` lines."""
-    tree = ast.parse(textwrap.dedent(inspect.getsource(cast("Any", method))))
-    function = tree.body[0]
-    assert isinstance(function, ast.FunctionDef)
-    body = function.body
-    if (
-        body
-        and isinstance(body[0], ast.Expr)
-        and isinstance(body[0].value, ast.Constant)
-    ):
-        body = body[1:]
-    module = ast.Module(body=body, type_ignores=[])
-    if hooked:
-        module = _NoBegin().visit(module)
-    return ast.dump(module)
-
-
-def test_the_hooked_drain_mirrors_the_plain_drain() -> None:
-    """`_HookedRun._drain` is `_Run._drain` plus `_begin`, kept apart for speed (R6)."""
-    plain = _drain_body(_async._Run._drain, hooked=False)  # noqa: SLF001  # the guarded copy
-    hooked = _drain_body(_async._HookedRun._drain, hooked=True)  # noqa: SLF001  # the guarded copy
-    assert hooked == plain, (
-        "_HookedRun._drain has drifted from _Run._drain: mirror the change in both, "
-        "keeping only the `if not self._begin(name, kwargs): return` line extra"
-    )
-    # The guard does strip something: the hooked copy does call `_begin`.
-    assert hooked != _drain_body(_async._HookedRun._drain, hooked=False)  # noqa: SLF001  # the guarded copy
-
-
 def test_log_failures_logs_on_the_async_driver(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -625,3 +575,74 @@ def test_log_failures_logs_on_the_async_driver(
     assert record.levelno == logging.ERROR
     assert isinstance(record.exc_info, tuple)
     assert record.exc_info[1] is raised.value
+
+
+class Events(Hook):
+    """Every event, as `(kind, node, branch, order)`, and `RunEnd.skipped`."""
+
+    def __init__(self) -> None:
+        """None yet."""
+        self.seen: list[tuple[object, ...]] = []
+
+    @override
+    def before_node(self, event: NodeStart) -> None:
+        self.seen.append(("start", event.node.name, event.branch, event.order))
+
+    @override
+    def after_node(self, event: NodeEnd) -> None:
+        self.seen.append(("end", event.node.name, event.branch, event.order, event.ok))
+
+    @override
+    def after_expand(self, event: fnloom.ExpandEnd) -> None:
+        self.seen.append(("expand", event.node.name, event.branch, event.order))
+
+    @override
+    def after_run(self, event: RunEnd) -> None:
+        self.seen.append(("run", event.ok, event.skipped))
+
+
+SEQUENCED = """
+from fnloom import ABSENT, Absent
+
+
+def first(x: int) -> int:
+    return x + 1
+
+
+def maybe(first: int) -> int | Absent:
+    return ABSENT if first % 2 else first
+
+
+def needs(maybe: int) -> int:
+    return maybe * 2
+
+
+def other(first: int, x: int) -> int:
+    return first + x
+"""
+
+
+# The input whose `maybe` declines, so `needs` is skipped.
+DECLINING = 2
+
+
+@pytest.mark.parametrize("x", [1, DECLINING])
+def test_async_events_equal_the_sync_drivers_with_one_worker(x: int) -> None:
+    """Sync nodes on `sync_nodes="inline"`: the sync driver's events and orders."""
+    module = make_module(f"async_sequenced_{x}", SEQUENCED)
+    request = ["needs", "other"]
+    inputs = {"x": x}
+    sync_events, async_events = Events(), Events()
+    fnloom.Builder().with_modules(module).with_hooks(sync_events).build().execute(
+        request, inputs=inputs
+    )
+    _run(
+        fnloom.Builder()
+        .with_modules(module)
+        .with_hooks(async_events)
+        .build_async(sync_nodes="inline")
+        .execute(request, inputs=inputs)
+    )
+    assert async_events.seen == sync_events.seen
+    # With x == 2, `maybe` declines and `needs` is skipped.
+    assert bool(sync_events.seen[-1][2]) == (x == DECLINING)

@@ -46,6 +46,11 @@ impl SharedObservers {
         !self.observers.is_empty()
     }
 
+    /// Whether nothing hears of a node's outcome: no observer, `on_value` or `late`.
+    pub fn quiet(&self) -> bool {
+        self.observers.is_empty() && self.on_value.is_none() && self.late.is_none()
+    }
+
     /// The run's late keys, if it is cached.
     pub fn late<'py>(&self, py: Python<'py>) -> Option<Bound<'py, PyAny>> {
         self.late.as_ref().map(|late| late.bind(py).clone())
@@ -76,7 +81,8 @@ impl SharedObservers {
     }
 
     /// Hands a computed node's outcome to `on_value` and `late.store`, as `Plan::run`'s
-    /// last observers, called through `context`, a `Context.run`; the errors they raised.
+    /// last observers, called through `context`, a `Context.run`, or in place without one;
+    /// the errors they raised.
     #[expect(
         clippy::too_many_arguments,
         reason = "the node's event, and where its stores run"
@@ -84,7 +90,7 @@ impl SharedObservers {
     pub fn stored<'py>(
         &self,
         py: Python<'py>,
-        context: &Bound<'py, PyAny>,
+        context: Option<&Bound<'py, PyAny>>,
         plan: &CorePlan,
         graph: &Graph,
         node: &str,
@@ -101,7 +107,7 @@ impl SharedObservers {
                 },
                 graph,
                 keywords: graph.keywords(),
-                context: Some(context),
+                context,
             };
             errors.extend(hook.post_node_in(node, branch, outcome).err());
         }
@@ -112,7 +118,7 @@ impl SharedObservers {
                 plan,
                 graph,
                 keywords: graph.keywords(),
-                context: Some(context),
+                context,
             };
             errors.extend(hook.post_node_in(node, branch, outcome).err());
         }

@@ -145,8 +145,8 @@ pub struct Flags {
     hits: bool,
     /// Whether the class overrides `skipped`, which is sent only then.
     skips: bool,
-    /// Whether the class sets `orders = True`: its node, expand and skip events then get
-    /// `order`, the step's order key, as a tuple.
+    /// Whether the class sets `orders = True`: its node, expand, hit and skip events are then
+    /// called by position, `branch` and `order`, the step's order key, as tuples, last.
     orders: bool,
 }
 
@@ -188,16 +188,6 @@ impl<'py, 's> PyObserver<'py, 's> {
             flags,
             context,
         }
-    }
-
-    /// Adds `order`, `node`'s order key in `branch`, to `kwargs`, for an observer that
-    /// wants it.
-    fn ordered(&self, kwargs: &Bound<'py, PyDict>, node: &str, branch: &[usize]) -> PyResult<()> {
-        if self.flags.orders {
-            let py = self.observer.py();
-            kwargs.set_item(intern!(py, "order"), self.kwargs.order(node, branch)?)?;
-        }
-        Ok(())
     }
 
     /// `post_node`'s keyword arguments, with `branch` when it is not empty.
@@ -278,6 +268,32 @@ fn overrides(observer: &Bound<'_, ObserverBase>, name: &str) -> bool {
     }
 }
 
+impl<'py> PyObserver<'py, '_> {
+    /// `branch` as a tuple: the shared empty one outside blocks.
+    fn branch(&self, branch: &[usize]) -> PyResult<Bound<'py, PyTuple>> {
+        let py = self.observer.py();
+        if branch.is_empty() {
+            return Ok(PyTuple::empty(py));
+        }
+        PyTuple::new(py, branch)
+    }
+
+    /// `pre_node`, called by position for an observer that wants orders: `(node, kwargs,
+    /// branch, order)`, so no keyword dict is made per event.
+    fn pre_node_ordered(
+        &self,
+        node: &str,
+        branch: &[usize],
+        args: &[Arg<'_, Value<'py>>],
+    ) -> PyResult<()> {
+        let py = self.observer.py();
+        let kwargs = self.kwargs.for_observers(node, args)?;
+        let order = self.kwargs.order(node, branch)?;
+        let args = (node, kwargs, self.branch(branch)?, order);
+        self.call(intern!(py, "pre_node"), args, None)
+    }
+}
+
 impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
     fn pre_graph(&mut self) -> PyResult<()> {
         let py = self.observer.py();
@@ -288,13 +304,11 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
         if !self.flags.nodes {
             return Ok(());
         }
+        if self.flags.orders {
+            return self.pre_node_ordered(node, &[], args);
+        }
         let py = self.observer.py();
         let kwargs = self.kwargs.for_observers(node, args)?;
-        if self.flags.orders {
-            let keywords = PyDict::new(py);
-            self.ordered(&keywords, node, &[])?;
-            return self.call(intern!(py, "pre_node"), (node, kwargs), Some(&keywords));
-        }
         self.call(intern!(py, "pre_node"), (node, kwargs), None)
     }
 
@@ -314,11 +328,13 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
         if !self.flags.nodes {
             return Ok(());
         }
+        if self.flags.orders {
+            return self.pre_node_ordered(node, branch, args);
+        }
         let py = self.observer.py();
         let kwargs = self.kwargs.for_observers(node, args)?;
         let keywords = PyDict::new(py);
         keywords.set_item(intern!(py, "branch"), PyTuple::new(py, branch)?)?;
-        self.ordered(&keywords, node, branch)?;
         self.call(intern!(py, "pre_node"), (node, kwargs), Some(&keywords))
     }
 
@@ -332,8 +348,24 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
             return Ok(());
         }
         let py = self.observer.py();
+        if self.flags.orders {
+            let missing = py.None().into_bound(py);
+            let (value, error) = match outcome {
+                Ok(value) => (value.clone(), missing),
+                Err(error) => (missing, error.value(py).clone().into_any()),
+            };
+            let order = self.kwargs.order(node, branch)?;
+            let args = (
+                node,
+                outcome.is_ok(),
+                value,
+                error,
+                self.branch(branch)?,
+                order,
+            );
+            return self.call(intern!(py, "post_node"), args, None);
+        }
         let kwargs = self.outcome(branch, outcome)?;
-        self.ordered(&kwargs, node, branch)?;
         self.call(intern!(py, "post_node"), (node,), Some(&kwargs))
     }
 
@@ -342,10 +374,14 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
             return Ok(());
         }
         let py = self.observer.py();
+        if self.flags.orders {
+            let order = self.kwargs.order(node, branch)?;
+            let args = (node, self.branch(branch)?, items, order);
+            return self.call(intern!(py, "post_expand"), args, None);
+        }
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "branch"), PyTuple::new(py, branch)?)?;
         kwargs.set_item(intern!(py, "items"), items)?;
-        self.ordered(&kwargs, node, branch)?;
         self.call(intern!(py, "post_expand"), (node,), Some(&kwargs))
     }
 
@@ -354,10 +390,14 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
             return Ok(());
         }
         let py = self.observer.py();
+        if self.flags.orders {
+            let order = self.kwargs.order(node, branch)?;
+            let args = (node, self.branch(branch)?, value, order);
+            return self.call(intern!(py, "hit_in"), args, None);
+        }
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "branch"), PyTuple::new(py, branch)?)?;
         kwargs.set_item(intern!(py, "value"), value)?;
-        self.ordered(&kwargs, node, branch)?;
         self.call(intern!(py, "hit_in"), (node,), Some(&kwargs))
     }
 
@@ -366,9 +406,13 @@ impl<'py> Observer<Value<'py>, PyErr> for PyObserver<'py, '_> {
             return Ok(());
         }
         let py = self.observer.py();
+        if self.flags.orders {
+            let order = self.kwargs.order(node, branch)?;
+            let args = (node, self.branch(branch)?, order);
+            return self.call(intern!(py, "skipped"), args, None);
+        }
         let kwargs = PyDict::new(py);
         kwargs.set_item(intern!(py, "branch"), PyTuple::new(py, branch)?)?;
-        self.ordered(&kwargs, node, branch)?;
         self.call(intern!(py, "skipped"), (node,), Some(&kwargs))
     }
 

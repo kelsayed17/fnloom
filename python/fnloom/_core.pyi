@@ -1,3 +1,5 @@
+import concurrent.futures
+import contextvars
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Final, Literal, Never, NoReturn, Self, final, override
 
@@ -11,12 +13,14 @@ __all__ = [
     "MemoryStore",
     "ObserverBase",
     "Plan",
+    "Stepper",
     "Threads",
     "UnfingerprintableError",
     "_panic_for_test",
     "arm_hook_panic",
     "arm_perform_panic",
     "arm_report_panic",
+    "arm_stepper_panic",
     "arm_worker_panic",
     "core_version",
     "fingerprint",
@@ -56,6 +60,7 @@ def arm_worker_panic() -> None: ...
 def arm_hook_panic() -> None: ...
 def arm_report_panic() -> None: ...
 def arm_perform_panic() -> None: ...
+def arm_stepper_panic() -> None: ...
 
 @final
 class Graph:
@@ -99,6 +104,30 @@ class Plan:
     def steps(self) -> list[tuple[str, str]]: ...
     def late(self) -> list[str]: ...
     def blocks(self) -> dict[str, list[tuple[str, str]]]: ...
+    def start(
+        self,
+        inputs: dict[str, Any],
+        overrides: dict[str, Any],
+        observers: Sequence[ObserverBase] = (),
+        on_value: Callable[[str, object], None] | None = None,
+        late: object | None = None,
+        *,
+        limits: Limits | None = None,
+        threads: Threads | None = None,
+        pooled: Sequence[str] = (),
+        in_flight: int = ...,
+    ) -> Stepper: ...
+
+type Work = Literal["compute", "pull", "finish", "close"]
+type Completion = Literal["value", "error", "done", "dropped"]
+type Handed = tuple[int, str, tuple[int, ...], Work, Any, contextvars.Context | None]
+
+@final
+class Stepper:
+    def next(self) -> Handed | int: ...
+    def complete(self, task: int, kind: Completion, value: object, /) -> bool: ...
+    def stop(self) -> None: ...
+    def outputs(self) -> dict[str, object]: ...
 
 @final
 class Limits:
@@ -118,6 +147,9 @@ class Threads:
     @property
     def max_workers(self) -> int: ...
     def close(self) -> None: ...
+    def submit(
+        self, function: Callable[[], object], context: contextvars.Context, /
+    ) -> concurrent.futures.Future[Any]: ...
 
 @final
 class KeyPlan:

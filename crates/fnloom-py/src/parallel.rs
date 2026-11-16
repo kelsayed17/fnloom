@@ -42,9 +42,9 @@ use crate::task::{Calls, Scope};
 
 /// A value of a parallel run: a strong reference any thread may hold, and clone without
 /// attaching. Only ever dropped attached.
-type Shared = Arc<Py<PyAny>>;
-type Sched = Scheduler<Shared, PyErr, [u8; 32]>;
-type Out = Outcome<Shared, PyErr, [u8; 32]>;
+pub(crate) type Shared = Arc<Py<PyAny>>;
+pub(crate) type Sched = Scheduler<Shared, PyErr, [u8; 32]>;
+pub(crate) type Out = Outcome<Shared, PyErr, [u8; 32]>;
 
 /// How long a calling thread waits before it checks for signals again.
 const SLICE: Duration = Duration::from_millis(50);
@@ -73,7 +73,7 @@ struct State {
 }
 
 /// A failure the run saw.
-enum Failure {
+pub(crate) enum Failure {
     /// A task failed; the scheduler holds its error. The observer errors its `post_node`
     /// raised go with it.
     Task(Vec<PyErr>),
@@ -322,7 +322,7 @@ impl Events for Report<Shared> {
 }
 
 /// The iterator of a pair `Copied::paired` made.
-fn unpaired<'py>(pair: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub(crate) fn unpaired<'py>(pair: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
     pair.get_item(0)
 }
 
@@ -379,7 +379,7 @@ impl Landed {
     }
 }
 
-fn shared(value: Bound<'_, PyAny>) -> Shared {
+pub(crate) fn shared(value: Bound<'_, PyAny>) -> Shared {
     Arc::new(value.unbind())
 }
 
@@ -793,7 +793,7 @@ fn land(
 
 /// A compute's arguments, bound: a gathered collect argument as a `list`, an omitted
 /// one left out.
-fn bound_args<'g, 'py>(
+pub(crate) fn bound_args<'g, 'py>(
     py: Python<'py>,
     graph: &'g Graph,
     args: Vec<(NodeId, ArgValue<Shared>)>,
@@ -897,7 +897,7 @@ fn compute<'py>(
     });
     errors.extend(run.observers.stored(
         py,
-        &calls.run,
+        Some(&calls.run),
         plan.core(),
         graph,
         &node.name,
@@ -933,7 +933,7 @@ fn compute<'py>(
 
 /// The value of each input and override the plan reads, by node id; `MissingValues`
 /// before any hook when one is missing.
-fn seed(
+pub(crate) fn seed(
     py: Python<'_>,
     core: &CorePlan,
     graph: &Graph,
@@ -994,7 +994,7 @@ fn closed(mut error: RunError<PyErr>, closing: Vec<PyErr>) -> RunError<PyErr> {
     clippy::result_large_err,
     reason = "`RunError` is the core's, and is made once per run"
 )]
-fn outcome_of(
+pub(crate) fn outcome_of(
     finished: Result<Vec<(NodeId, Shared)>, RunError<PyErr>>,
     mut failures: Vec<(OrderKey, Failure)>,
 ) -> Result<Vec<(NodeId, Shared)>, RunError<PyErr>> {

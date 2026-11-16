@@ -2256,6 +2256,28 @@ def test_q65_sync_nodes_run_off_the_loop() -> None:
         }, sync_nodes
 
 
+_WHERE = """
+import threading
+
+
+def where(x: int) -> str:
+    return threading.current_thread().name
+"""
+
+
+@pytest.mark.deliberate("Q65")
+@pytest.mark.threads
+def test_q65_with_threads_runs_sync_nodes_on_the_drivers_pool() -> None:
+    """Under `with_threads(2)`, a sync node runs on the pool, not in the executor."""
+    module = make_module("differential_q65_pool", _WHERE)
+    pooled = fnloom.Builder().with_modules(module).with_threads(2).build_async()
+    plain = fnloom.Builder().with_modules(module).build_async()
+    pooled_name = asyncio.run(pooled.execute(["where"], inputs={"x": 1}))["where"]
+    plain_name = asyncio.run(plain.execute(["where"], inputs={"x": 1}))["where"]
+    assert str(pooled_name).startswith("fnloom-worker-")
+    assert not str(plain_name).startswith("fnloom-worker-")
+
+
 _FAILING = """
 import asyncio
 

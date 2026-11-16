@@ -4,6 +4,7 @@ Every wait here is bounded: barriers and joins take a timeout, so a deadlock fai
 test that hit it, and the `threads` watchdog in `conftest.py` is the last resort.
 """
 
+import asyncio
 import copy
 import gc
 import os
@@ -1227,3 +1228,169 @@ def test_an_iterators_hooks_never_enter_its_context_while_it_pulls() -> None:
     for _ in range(19):
         assert driver.execute(["everything"], inputs={"n": 8}) == expected
     assert hook.count == 20 * 9
+
+
+# The async driver on `with_threads`: its sync nodes on the pool (task 7, Q65).
+
+# How many async forms of a plan its prepared plan keeps, as `driver.py` says.
+ASYNC_PLANS_PER_PLAN = 8
+
+ON_POOL = """
+import asyncio
+import contextvars
+import threading
+
+SEEN = contextvars.ContextVar("seen", default="unset")
+MEET = threading.Barrier(2, timeout=5)
+
+
+def left(x: int) -> tuple[str, str]:
+    MEET.wait()
+    SEEN.set("left")
+    return threading.current_thread().name, SEEN.get()
+
+
+def right(x: int) -> tuple[str, str]:
+    MEET.wait()
+    return threading.current_thread().name, SEEN.get()
+
+
+async def both(left: tuple[str, str], right: tuple[str, str]) -> list[object]:
+    return [left, right, SEEN.get()]
+"""
+
+
+def _async_run(coroutine: Any) -> Any:  # noqa: ANN401  # what the run returns
+    """`coroutine` on a fresh loop, bounded, so a hang fails the test."""
+    return asyncio.run(asyncio.wait_for(coroutine, 10))
+
+
+def test_async_with_threads_runs_sync_nodes_on_the_pool() -> None:
+    """Two sync nodes overlap on the pool's threads, each in the caller's context."""
+    module = make_module("async_on_pool", ON_POOL)
+    driver = fnloom.Builder().with_modules(module).with_threads(2).build_async()
+    token = module.SEEN.set("caller")
+    try:
+        result = _async_run(driver.execute(["both"], inputs={"x": 1}))
+    finally:
+        module.SEEN.reset(token)
+    (left, left_seen), (right, right_seen), after = result["both"]
+    assert left.startswith("fnloom-worker-")
+    assert right.startswith("fnloom-worker-")
+    assert left != right
+    # Each node runs in its own copy of the caller's context.
+    assert (left_seen, right_seen, after) == ("left", "caller", "caller")
+
+
+ASYNC_MEETING = """
+import asyncio
+
+MEET = []
+
+
+async def a(x: int) -> int:
+    await asyncio.wait_for(MEET[0].wait(), 5)
+    return x
+
+
+async def b(x: int) -> int:
+    await asyncio.wait_for(MEET[0].wait(), 5)
+    return x + 1
+
+
+def c(a: int, b: int) -> int:
+    return a + b
+"""
+
+
+def test_async_nodes_hold_no_worker_slot() -> None:
+    """Under `with_threads(1)`, two `async def` nodes overlap, and a sync one runs."""
+    module = make_module("async_slotless", ASYNC_MEETING)
+    driver = fnloom.Builder().with_modules(module).with_threads(1).build_async()
+
+    async def scenario() -> object:
+        module.MEET.append(asyncio.Barrier(2))
+        return await driver.execute(["c"], inputs={"x": 1})
+
+    assert _async_run(scenario()) == {"c": 3}
+
+
+def test_with_threads_and_inline_are_refused() -> None:
+    """`with_threads` runs sync nodes on the pool, so `sync_nodes="inline"` can't."""
+    builder = fnloom.Builder().with_modules(make_module("inline_pool", ON_POOL))
+    with pytest.raises(ValueError, match="sync_nodes='inline' can't apply") as info:
+        builder.with_threads(2).build_async(sync_nodes="inline")
+    assert str(info.value) == (
+        "with_threads runs sync nodes on the driver's pool, so sync_nodes='inline' "
+        "can't apply; drop one"
+    )
+    plain = builder.build_async()._driver  # noqa: SLF001  # the sync driver it wraps
+    threaded = builder.with_threads(2).build_async()._driver  # noqa: SLF001  # as above
+    assert fnloom.AsyncDriver(plain, {}, sync_nodes="inline") is not None
+    with pytest.raises(ValueError, match="drop one"):
+        fnloom.AsyncDriver(threaded, {}, sync_nodes="inline")
+
+
+def test_async_plans_of_one_prepared_plan_from_many_threads() -> None:
+    """16 threads make async plans of one prepared plan at once, and none fails."""
+    module = make_module("async_plans_threads", ON_POOL)
+    first = fnloom.Builder().with_modules(module).build_async()
+    base = first._driver  # noqa: SLF001  # the driver the async ones share
+    nodes = first._nodes  # noqa: SLF001  # its nodes
+    prepared = base.prepare(["left"], inputs={"x": 1})
+    start = threading.Barrier(16, timeout=5)
+    errors: list[BaseException] = []
+
+    def make() -> None:
+        try:
+            start.wait()
+            for _ in range(50):
+                fnloom.AsyncDriver(base, nodes).prepare(["left"], inputs={"x": 1})
+        except BaseException as error:  # noqa: BLE001  # collected for the assert
+            errors.append(error)
+
+    threads = [threading.Thread(target=make) for _ in range(16)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert errors == []
+    assert 0 < len(prepared._async) <= ASYNC_PLANS_PER_PLAN  # noqa: SLF001  # the plans kept
+
+
+NESTED_ASYNC = """
+import asyncio
+
+DRIVER = []
+
+
+def outer(x: int) -> int:
+    # A run of this very driver, on this pool thread's own loop.
+    return asyncio.run(DRIVER[0].execute(["inner"], inputs={"x": x}))["inner"]
+
+
+def inner(x: int) -> int:
+    return x * 10
+"""
+
+
+def test_an_async_run_inside_a_pooled_node_takes_no_worker_slot() -> None:
+    """A sync node on `with_threads(1)` runs its driver: it never waits for itself."""
+    module = make_module("async_nested_pool", NESTED_ASYNC)
+    driver = fnloom.Builder().with_modules(module).with_threads(1).build_async()
+    module.DRIVER.append(driver)
+    assert _async_run(driver.execute(["outer"], inputs={"x": 2})) == {"outer": 20}
+
+
+def test_a_panic_in_the_stepper_fails_the_run_and_frees_its_slots() -> None:
+    """A Rust panic stepping a run raises once; the next run finds every slot free."""
+    module = make_module("async_stepper_panic", ON_POOL)
+    driver = fnloom.Builder().with_modules(module).with_threads(2).build_async()
+    _core.arm_stepper_panic()
+    with pytest.raises(BaseException, match="deliberate panic") as info:
+        _async_run(driver.execute(["both"], inputs={"x": 1}))
+    assert type(info.value).__name__ == "PanicException"
+    gc.collect()
+    module.MEET.reset()
+    result = _async_run(driver.execute(["both"], inputs={"x": 1}))
+    assert result["both"][2] == "unset"

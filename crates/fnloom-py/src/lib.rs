@@ -13,6 +13,7 @@ mod parallel;
 mod plan;
 mod pool;
 mod shared;
+mod stepper;
 mod store;
 mod task;
 
@@ -49,6 +50,7 @@ fn core(module: &Bound<'_, PyModule>) -> PyResult<()> {
         module.add_function(wrap_pyfunction!(parallel::arm_hook_panic, module)?)?;
         module.add_function(wrap_pyfunction!(parallel::arm_report_panic, module)?)?;
         module.add_function(wrap_pyfunction!(parallel::arm_perform_panic, module)?)?;
+        module.add_function(wrap_pyfunction!(stepper::arm_stepper_panic, module)?)?;
     }
     module.add_function(wrap_pyfunction!(fingerprint::fingerprint, module)?)?;
     module.add_function(wrap_pyfunction!(fingerprint::hash_parts, module)?)?;
@@ -64,6 +66,7 @@ fn core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<plan::Plan>()?;
     module.add_class::<limits::Limits>()?;
     module.add_class::<pool::Threads>()?;
+    module.add_class::<stepper::Stepper>()?;
     module.add_class::<keys::KeyPlan>()?;
     module.add_class::<keys::Keys>()?;
     module.add_class::<store::MemoryStore>()?;

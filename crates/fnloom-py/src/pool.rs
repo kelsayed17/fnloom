@@ -15,18 +15,19 @@
 //! generation, so a waiter that read the generation before it looked for work never
 //! misses the change.
 
+use std::collections::VecDeque;
 use std::panic::{self, AssertUnwindSafe};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError, TryLockError};
 use std::time::{Duration, Instant};
 
 use fnloom_core::schedule::{Report, Seat};
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyRuntimeError, PyValueError};
 use pyo3::intern;
 use pyo3::prelude::*;
 use pyo3::types::{PyCFunction, PyDict};
 
-use crate::errors::panic_error;
+use crate::errors::{caught, panic_error};
 use crate::limits::{Caps, Limits};
 use crate::parallel::{self, Run, Step};
 
@@ -63,6 +64,10 @@ struct State {
     generation: u64,
     /// The runs that want work, oldest first.
     runs: Vec<Arc<Run>>,
+    /// Calls submitted by async runs, oldest first, each taken by one thread.
+    jobs: VecDeque<Job>,
+    /// Threads waiting for work.
+    idle: usize,
     /// Threads started, and threads ended.
     started: usize,
     exited: usize,
@@ -94,6 +99,8 @@ impl Pool {
     pub fn notify(&self, py: Python<'_>) {
         self.with_state(py, |state| state.generation += 1);
         self.wake.notify_all();
+        // An async run may wait for the worker slot a task gave back.
+        self.limits.wake_async(py);
     }
 
     /// Gives back `node`'s own slot and its group's, waking the limits' waiters and every
@@ -108,13 +115,14 @@ impl Pool {
     /// looks for work again now and then.
     fn wait(&self, py: Python<'_>, generation: u64) {
         py.detach(|| {
-            let state = self.locked();
+            let mut state = self.locked();
             if state.generation == generation && !self.stopping.load(Ordering::Acquire) {
-                drop(
-                    self.wake
-                        .wait_timeout(state, IDLE)
-                        .unwrap_or_else(PoisonError::into_inner),
-                );
+                state.idle += 1;
+                let (mut state, _) = self
+                    .wake
+                    .wait_timeout(state, IDLE)
+                    .unwrap_or_else(PoisonError::into_inner);
+                state.idle -= 1;
             }
         });
     }
@@ -141,7 +149,11 @@ impl Pool {
         let wanted = self.with_state(py, move |state| {
             state.runs.push(run);
             state.generation += 1;
-            let wanted = if stopping { 0 } else { size - state.started };
+            let wanted = if stopping {
+                0
+            } else {
+                size.saturating_sub(state.started)
+            };
             state.started += wanted;
             wanted
         });
@@ -234,11 +246,33 @@ impl Pool {
         });
     }
 
-    /// The runs that want work, the generation, and whether the pool is stopping.
-    fn snapshot(&self, py: Python<'_>) -> (u64, bool, Vec<Arc<Run>>) {
-        let (generation, runs) =
-            self.with_state(py, |state| (state.generation, state.runs.clone()));
-        (generation, self.stopping.load(Ordering::Acquire), runs)
+    /// The runs that want work, the generation, whether the pool is stopping, and the
+    /// oldest submitted call, taken.
+    fn snapshot(&self, py: Python<'_>) -> (u64, bool, Vec<Arc<Run>>, Option<Job>) {
+        let (generation, runs, job) = self.with_state(py, |state| {
+            let job = state.jobs.pop_front();
+            (state.generation, state.runs.clone(), job)
+        });
+        (generation, self.stopping.load(Ordering::Acquire), runs, job)
+    }
+
+    /// Queues `job`, starting a thread when no idle one is left to take it: an async
+    /// run's calls are capped by its worker slots, not by the threads started so far.
+    fn submit(self: &Arc<Self>, py: Python<'_>, job: Job) {
+        let stopping = self.stopping.load(Ordering::Acquire);
+        let spawn = self.with_state(py, move |state| {
+            state.jobs.push_back(job);
+            state.generation += 1;
+            let spawn = !stopping && state.jobs.len() > state.idle;
+            if spawn {
+                state.started += 1;
+            }
+            spawn
+        });
+        self.wake.notify_all();
+        if spawn && self.spawn(py).is_err() {
+            self.with_state(py, |state| state.started -= 1);
+        }
     }
 
     /// A thread is leaving.
@@ -254,7 +288,15 @@ fn work(py: Python<'_>, pool: &Arc<Pool>) {
     let forked = (|| {
         let mut report = Report::default();
         loop {
-            let (generation, stopping, runs) = pool.snapshot(py);
+            let (generation, stopping, runs, job) = pool.snapshot(py);
+            if let Some(job) = job {
+                job.run(py);
+                // The call forked: as for a node's, this child's one thread ends here.
+                if std::process::id() != pool.pid {
+                    return true;
+                }
+                continue;
+            }
             if stopping {
                 return false;
             }
@@ -317,6 +359,8 @@ impl Threads {
                 state: Mutex::new(State {
                     generation: 0,
                     runs: Vec::new(),
+                    jobs: VecDeque::new(),
+                    idle: 0,
                     started: 0,
                     exited: 0,
                 }),
@@ -338,6 +382,65 @@ impl Threads {
     #[getter]
     fn max_workers(&self) -> usize {
         self.pool.max_workers
+    }
+
+    /// Runs `context.run(function)` on a pool thread, for an async run's sync node: the
+    /// `concurrent.futures.Future` of its result. A future cancelled before a thread takes
+    /// it never runs. `RuntimeError` once the pool is closed, or in a forked child.
+    fn submit<'py>(
+        &self,
+        py: Python<'py>,
+        function: Bound<'py, PyAny>,
+        context: Bound<'py, PyAny>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        if self.pool.pid != std::process::id() {
+            return Err(PyRuntimeError::new_err(format!(
+                "this pool was made in process {}; a pool doesn't survive os.fork()",
+                self.pool.pid
+            )));
+        }
+        if self.pool.stopping.load(Ordering::Acquire) {
+            return Err(PyRuntimeError::new_err("this pool is closed"));
+        }
+        let future = py
+            .import(intern!(py, "concurrent.futures"))?
+            .getattr(intern!(py, "Future"))?
+            .call0()?;
+        let job = Job {
+            future: future.clone().unbind(),
+            function: function.unbind(),
+            context: context.unbind(),
+        };
+        self.pool.submit(py, job);
+        Ok(future)
+    }
+}
+
+/// A call `Threads.submit` queued: `context.run(function)`, its outcome set on `future`.
+struct Job {
+    future: Py<PyAny>,
+    function: Py<PyAny>,
+    context: Py<PyAny>,
+}
+
+impl Job {
+    /// Runs the call unless its future was cancelled, and sets its outcome, a panic as a
+    /// `PanicException`. What setting the outcome raises is dropped: the future is done.
+    fn run(self, py: Python<'_>) {
+        let future = self.future.bind(py);
+        let started = future
+            .call_method0(intern!(py, "set_running_or_notify_cancel"))
+            .and_then(|started| started.is_truthy());
+        if !matches!(started, Ok(true)) {
+            return;
+        }
+        let context = self.context.bind(py);
+        let outcome =
+            caught(|| context.call_method1(intern!(py, "run"), (self.function.bind(py),)));
+        drop(match outcome {
+            Ok(value) => future.call_method1(intern!(py, "set_result"), (value,)),
+            Err(error) => future.call_method1(intern!(py, "set_exception"), (error.value(py),)),
+        });
     }
 }
 
