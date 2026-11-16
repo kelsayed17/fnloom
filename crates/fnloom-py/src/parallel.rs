@@ -47,9 +47,9 @@ use crate::task::{Calls, Scope};
 
 /// A value of a parallel run: a strong reference any thread may hold, and clone without
 /// attaching. Only ever dropped attached.
-type Shared = Arc<Py<PyAny>>;
-type Sched = Scheduler<Shared, PyErr, [u8; 32]>;
-type Out = Outcome<Shared, PyErr, [u8; 32]>;
+pub(crate) type Shared = Arc<Py<PyAny>>;
+pub(crate) type Sched = Scheduler<Shared, PyErr, [u8; 32]>;
+pub(crate) type Out = Outcome<Shared, PyErr, [u8; 32]>;
 
 /// How long a calling thread waits before it checks for signals again.
 const SLICE: Duration = Duration::from_millis(50);
@@ -145,6 +145,32 @@ impl Stop {
 }
 
 impl Stop {
+    /// A new run's flag, unset, under the run whose task, at any depth, the current context
+    /// is in, if any.
+    pub(crate) fn current(py: Python<'_>) -> PyResult<Self> {
+        let parent = cancelled_variable(py)?
+            .bind(py)
+            .call_method0(intern!(py, "get"))?;
+        let ancestors = parent
+            .cast::<Self>()
+            .map(|parent| parent.get().chain())
+            .unwrap_or_default();
+        Ok(Self {
+            own: Arc::new(AtomicBool::new(false)),
+            ancestors,
+        })
+    }
+
+    /// The run is stopping.
+    pub(crate) fn set(&self) {
+        self.own.store(true, Ordering::Release);
+    }
+
+    /// Whether a run that started this one has stopped.
+    pub(crate) fn followed(&self) -> bool {
+        stopping(&self.ancestors)
+    }
+
     /// This flag and its ancestors': the ancestors of a run this one's tasks start.
     fn chain(&self) -> Vec<Arc<AtomicBool>> {
         let mut chain = Vec::with_capacity(self.ancestors.len() + 1);
@@ -180,7 +206,7 @@ pyo3::create_exception!(
 );
 
 /// The `StoppedError` a run raises when it stopped for the run that started it.
-fn stopped() -> PyErr {
+pub(crate) fn stopped() -> PyErr {
     StoppedError::new_err("the run that started this one has stopped or ended, so this one stopped")
 }
 
@@ -251,7 +277,7 @@ fn settle(state: &mut State, seat: Seat, held: Option<&Arc<Held>>) {
 }
 
 /// A failure the run saw.
-enum Failure {
+pub(crate) enum Failure {
     /// A task failed; the scheduler holds its error. The observer errors its `post_node`
     /// raised go with it.
     Task(Vec<PyErr>),
@@ -507,7 +533,7 @@ impl Events for Report<Shared> {
 }
 
 /// The iterator of a pair `Copied::paired` made.
-fn unpaired<'py>(pair: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
+pub(crate) fn unpaired<'py>(pair: &Bound<'py, PyAny>) -> PyResult<Bound<'py, PyAny>> {
     pair.get_item(0)
 }
 
@@ -564,7 +590,7 @@ impl Landed {
     }
 }
 
-fn shared(value: Bound<'_, PyAny>) -> Shared {
+pub(crate) fn shared(value: Bound<'_, PyAny>) -> Shared {
     Arc::new(value.unbind())
 }
 
@@ -752,9 +778,7 @@ impl Run {
             return;
         }
         let plan = self.plan.get();
-        let graph = plan.graph().get();
-        let core = graph.core();
-        let kwargs = Kwargs::new(py, plan, graph);
+        let kwargs = Kwargs::new(py, plan, plan.graph().get());
         let context = calls.map(|calls| &calls.run);
         let busy = self.acquire(py);
         #[cfg(feature = "test-hooks")]
@@ -765,41 +789,7 @@ impl Run {
         if self.abandoned.load(Ordering::SeqCst) {
             return;
         }
-        let mut failed = None;
-        for (node, branch, value) in &report.hits {
-            let name = &core.node(*node).name;
-            let errors = self.observers.fire(py, &kwargs, context, |hook| {
-                hook.hit_in(name, branch, value.bind(py))
-            });
-            if !errors.is_empty() {
-                failed = Some((plan.core().order_key(*node, branch), "hit", errors));
-                break;
-            }
-        }
-        if failed.is_none() {
-            for (node, branch, items) in &report.expanded {
-                let name = &core.node(*node).name;
-                let errors = self.observers.fire(py, &kwargs, context, |hook| {
-                    hook.post_expand(name, branch, *items)
-                });
-                if !errors.is_empty() {
-                    failed = Some((plan.core().order_key(*node, branch), "post_expand", errors));
-                    break;
-                }
-            }
-        }
-        if failed.is_none() {
-            for (node, branch, key) in &report.skipped {
-                let name = &core.node(*node).name;
-                let errors = self
-                    .observers
-                    .fire(py, &kwargs, context, |hook| hook.skipped(name, branch));
-                if !errors.is_empty() {
-                    failed = Some((key.clone(), "skipped", errors));
-                    break;
-                }
-            }
-        }
+        let failed = fire_report(py, &self.observers, &kwargs, context, plan, report);
         drop(busy);
         // A hook that forked: the child locks nothing it inherited.
         if std::process::id() != self.pid {
@@ -809,6 +799,46 @@ impl Run {
             self.fail_at(py, key, RunError::Observers { event, errors });
         }
     }
+}
+
+/// Fires what `report` settled to `observers`: its hits, then its expands, then its skips,
+/// in `context`, or else the current one. The first event an observer raised in, with its
+/// order key and its errors, after which no event fires.
+pub(crate) fn fire_report<'py>(
+    py: Python<'py>,
+    observers: &SharedObservers,
+    kwargs: &Kwargs<'py, '_>,
+    context: Option<&Bound<'py, PyAny>>,
+    plan: &Plan,
+    report: &Report<Shared>,
+) -> Option<(OrderKey, &'static str, Vec<PyErr>)> {
+    let core = plan.graph().get().core();
+    for (node, branch, value) in &report.hits {
+        let name = &core.node(*node).name;
+        let errors = observers.fire(py, kwargs, context, |hook| {
+            hook.hit_in(name, branch, value.bind(py))
+        });
+        if !errors.is_empty() {
+            return Some((plan.core().order_key(*node, branch), "hit", errors));
+        }
+    }
+    for (node, branch, items) in &report.expanded {
+        let name = &core.node(*node).name;
+        let errors = observers.fire(py, kwargs, context, |hook| {
+            hook.post_expand(name, branch, *items)
+        });
+        if !errors.is_empty() {
+            return Some((plan.core().order_key(*node, branch), "post_expand", errors));
+        }
+    }
+    for (node, branch, key) in &report.skipped {
+        let name = &core.node(*node).name;
+        let errors = observers.fire(py, kwargs, context, |hook| hook.skipped(name, branch));
+        if !errors.is_empty() {
+            return Some((key.clone(), "skipped", errors));
+        }
+    }
+    None
 }
 
 /// Takes one task of `run` for `seat`, if one is ready, runs it, completes it and sends
@@ -1147,7 +1177,7 @@ fn land(
 
 /// A compute's arguments, bound: a gathered collect argument as a `list`, an omitted
 /// one left out.
-fn bound_args<'g, 'py>(
+pub(crate) fn bound_args<'g, 'py>(
     py: Python<'py>,
     graph: &'g Graph,
     args: Vec<(NodeId, ArgValue<Shared>)>,
@@ -1280,7 +1310,7 @@ fn compute<'py>(
     }
     errors.extend(run.observers.stored(
         py,
-        &calls.run,
+        Some(&calls.run),
         plan.core(),
         graph,
         &node.name,
@@ -1316,7 +1346,7 @@ fn compute<'py>(
 
 /// The value of each input and override the plan reads, by node id; `MissingValues`
 /// before any hook when one is missing.
-fn seed(
+pub(crate) fn seed(
     py: Python<'_>,
     core: &CorePlan,
     graph: &Graph,
@@ -1377,7 +1407,7 @@ fn closed(mut error: RunError<PyErr>, closing: Vec<PyErr>) -> RunError<PyErr> {
     clippy::result_large_err,
     reason = "`RunError` is the core's, and is made once per run"
 )]
-fn outcome_of(
+pub(crate) fn outcome_of(
     finished: Result<Vec<(NodeId, Shared)>, RunError<PyErr>>,
     mut failures: Vec<(OrderKey, Failure)>,
 ) -> Result<Vec<(NodeId, Shared)>, RunError<PyErr>> {

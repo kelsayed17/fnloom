@@ -782,7 +782,7 @@ threaded.execute(["summary"], inputs={"category": "furniture", "endpoint": endpo
   `3.14` a plain `threading.Thread` doesn't carry the context, so a run it starts waits for a free worker like any
   other run, and with `with_threads(1)` for the one its node holds. An inner run with a `timeout=` lends the worker to
   its own nodes, which run on the pool.
-- An `AsyncDriver` built from such a builder ignores the setting for now.
+- An `AsyncDriver` built from such a builder runs its sync nodes on the driver's pool ([Async](#async)).
 
 fnloom can't make your own code safe:
 
@@ -865,7 +865,8 @@ Here at most four `details` calls, and six calls of `details` and `reviews` toge
   `RuntimeError` naming the node and the slot: a `@limit(1)` node that runs its own driver on a request needing
   itself, or a node in a full group whose inner run needs that group. Two unrelated runs that each hold part of a
   group and wait for each other are not detected.
-- An `AsyncDriver` checks the limits at build, and honours them from a later release.
+- **On an `AsyncDriver`**, an `async def` node waiting for a slot holds no thread: its run awaits the release on the
+  loop, woken by a release from any thread or loop, while its other nodes go on.
 
 ## Deadlines and cancellation
 
@@ -915,10 +916,11 @@ fnloom.build(lookups).execute(["answer"], inputs={"question": "why"}, timeout=0.
 - **A failure first.** A run that had failed and was waiting for its running nodes raises that failure at the
   deadline, not `TimeoutError`.
 - **`fnloom.cancelled()`** is `True` inside a node once its run is stopping: its deadline passed, another node failed,
-  or it was interrupted. It is `False` outside a run, and in a run of a driver without `with_threads`.
+  or it was interrupted. On an `AsyncDriver`, with or without `with_threads`, it turns `True` once the run fails or
+  its caller is cancelled. It is `False` outside a run, and in a run of a `Driver` without `with_threads`.
 - **Runs inside runs** stop with the run that started them. A node of a run started inside a node of a stopping run,
-  on any driver and at any depth, sees `cancelled()` turn `True` too. A parallel inner run also starts no new node.
-  Once its running nodes return, it returns its outputs if they were all computed. Otherwise it raises a
+  on any driver and at any depth, sees `cancelled()` turn `True` too. A parallel or async inner run also starts no new
+  node. Once its running nodes return, it returns its outputs if they were all computed. Otherwise it raises a
   `RuntimeError`: `the run that started this one has stopped or ended, so this one stopped`. The outer run never
   raises that error in place of the failure that stopped it. A context that outlives a stopped run, such as one a
   thread copied, keeps it stopped, so a run started from it later stops at once.
@@ -1083,11 +1085,69 @@ your context variables, so the event loop keeps running while it does. A thread 
 more than a cheap node such as `converted`. For a graph of cheap sync nodes, `build_async(sync_nodes="inline")` runs
 them on the loop instead. The nodes `@extract_fields` and `@extract_columns` generate always run on the loop.
 
+**With `with_threads`,** a sync node runs on the driver's own pool instead of the loop's default executor, so at most
+`max_workers` of them run at once, on threads named `fnloom-worker-<n>`, while `async def` nodes take no worker and
+await on the loop as before ([Threads](#threads)). `sync_nodes="inline"` can't apply then, and is a `ValueError`.
+Either way the run is scheduled as the sync driver's is: ready nodes start in reference order, `@limit` and
+`with_limits` hold ([Limits](#limits)), and each `NodeStart` and `NodeEnd` carries its `order`. With
+`sync_nodes="inline"` and no `async def` node, its events come exactly as the sync driver's do.
+
+**Blocks** run on the async driver as on `Driver` ([Fan-out and fan-in](#fan-out-and-fan-in)), with every branch's
+nodes overlapping, and each `Collect` in item order. The expand may be an `async def` generator, whose items are
+awaited on the loop:
+
+```python
+# file: catalog_async.py
+import asyncio
+
+from fnloom import Collect, Parallelizable
+
+
+async def picked(items: list[str]) -> Parallelizable[str]:
+    """Each item, as a paged listing would stream it."""
+    for item in items:
+        await asyncio.sleep(0)
+        yield item
+
+
+async def details(picked: str) -> str:
+    """One item's details, fetched concurrently with the others'."""
+    await asyncio.sleep(0)
+    return picked.upper()
+
+
+def summary(details: Collect[str]) -> list[str]:
+    """Every item's details, in the order the items came."""
+    return details
+```
+
+```python
+import catalog_async
+
+streamed = fnloom.Builder().with_modules(catalog_async).build_async()
+asyncio.run(streamed.execute(["summary"], inputs={"items": ["chair", "desk"]}))
+# -> {'summary': ['CHAIR', 'DESK']}
+```
+
+A sync generator's items are read where its node would run: in a thread, on the pool, or on the loop. It is closed
+on the loop when its node is inline, and else in the loop's default executor, which a hung call never holds. A
+generator keeps one context from its first item to its last. When a branch fails, every running node and
+every pending read of an async generator is cancelled once, and the generator is closed once, after any read of it in
+a thread returns.
+
+An expand is read only while fewer than `2 * max_workers` of its branches are unfinished, or `2 *
+os.process_cpu_count()` without `with_threads`, as on the sync driver ([Threads](#threads)). That bounds how many
+branches overlap, `async def` ones too: under `with_threads(1)` two at a time. Give a fan-out of slow `async def`
+branches enough workers for the overlap you want.
+
 **When a node fails,** the run cancels every node still running, waits for each `async def` node to stop, and raises
 the failed node's own exception, with the same note naming the node as the sync driver adds. There's no
 `ExceptionGroup`, so `except ZeroDivisionError` works as it does with `Driver`. A sync node in a thread can't be
-interrupted: the run doesn't wait for it, and drops its result when it comes. `asyncio.run` still waits for running
-threads when the loop shuts down, since it shuts the default executor down. If the caller is cancelled, as by
+interrupted: the run doesn't wait for it, and drops its result when it comes, but its `@limit` and worker slots stay
+taken until it returns. On the driver's pool, its thread is replaced at once, and leaves the pool once the call
+returns. An expand's end, which holds no slot, runs in the loop's default executor, so a generator's `finally` never
+waits for a hung call's thread. `asyncio.run` still waits for running threads when the loop shuts down, since it
+shuts the default executor down. If the caller is cancelled, as by
 `asyncio.timeout`, the run cancels its nodes the same way, and the cancellation reaches the caller once each
 `async def` node has stopped. Each node is cancelled once: a second cancellation of the caller, or one after a node
 failed, doesn't interrupt a node's cleanup, and the caller still waits for it.

@@ -120,8 +120,8 @@ event by position, so a new field never breaks a hook.
     - `branch`: the branch a [block](writing-nodes.md#fan-out-and-fan-in) node runs in, one item index per block,
       outermost first; `()` outside every block. A block node fires its events once per item.
     - `order`: the step's order key, a tuple of ints. Sorting a run's events by it puts them in the order one worker
-      runs them, across blocks too, so a hook can rebuild that order from a [parallel run](#with-threads).
-      `()` on the async driver.
+      runs them, across blocks too, so a hook can rebuild that order from a [parallel run](#with-threads) or an
+      [async one](#on-the-async-driver).
 - **`NodeEnd`**: `NodeStart`'s fields, plus:
     - `ok`: whether the node returned.
     - `result`: what it returned; `None` unless `ok`.
@@ -142,9 +142,8 @@ event by position, so a new field never breaks a hook.
       in. A run that only its result builder failed has them, with `ok=False` and the builder's error.
     - `skipped`: each node the run [skipped](writing-nodes.md#declining) because an argument it needs was
       `fnloom.ABSENT`, as `(node, branch)` pairs. `branch` is `()` outside a block. `()` when nothing was skipped.
-      The sync driver sorts them by order key, which is plan order, with or without threads; the async driver lists
-      them in the order its walk reaches each node, as its node events report, which can vary between runs when
-      nodes run in threads.
+      Every driver sorts them by order key, which is plan order, with or without threads, so they never vary
+      between runs.
 
 ```python
 class Ends(fnloom.Hook):
@@ -479,7 +478,8 @@ An [`AsyncDriver`](running.md#async) fires the same events as a `Driver`, with t
 - `before_node` fires as a node starts, and `after_node` once its value or error is in. Both carry real values: the
   node's arguments, then its result, or `ok=False` and its own exception.
 - Nodes that run at once report in the order they start and finish, so another node's events can come between a
-  node's `before_node` and its `after_node`.
+  node's `before_node` and its `after_node`; sort by `order` for the order one worker gives. With
+  `sync_nodes="inline"` and no `async def` node, the events are exactly the sync driver's.
 - `RunStart.nodes` lists the nodes in plan order ([Execution order](running.md#execution-order)), not the order of
   the events, which can change from one run to the next. On a driver with a cache it lists the hits first, then the
   nodes the run computes in plan order, as on `Driver` ([With a cache](#with-a-cache)).

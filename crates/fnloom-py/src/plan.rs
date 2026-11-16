@@ -24,6 +24,7 @@ use crate::limits::{Caps, Limits};
 use crate::observer::{ObserverBase, PyObserver};
 use crate::parallel;
 use crate::pool::Threads;
+use crate::stepper::{self, Stepper};
 use crate::task::{Direct, Scope, undeclared_absence};
 
 /// A value flowing along an edge: a strong reference, held under the GIL a run holds
@@ -288,6 +289,39 @@ impl Plan {
         this.run_here(py, inputs, overrides, observers, on_value, late, limits)
     }
 
+    /// A run of the plan on the core scheduler, for the async driver to step from its loop
+    /// (`Stepper`): seeded from `inputs` and `overrides` as `run` reads them, its events
+    /// sent to `observers`, `on_value` and `late` as `run` sends them, but for `pre_graph`
+    /// and `post_graph`, which the driver fires itself.
+    ///
+    /// `limits` grants each task its slots: a node named in `pooled`, which runs on
+    /// `threads`' pool, takes a worker slot; every other task none. An expand is pulled
+    /// only while fewer than `in_flight` of its branches are unfinished.
+    #[pyo3(
+        signature = (inputs, overrides, observers = Vec::new(), on_value = None, late = None, *, limits = None, threads = None, pooled = Vec::new(), in_flight = usize::MAX),
+        text_signature = "($self, /, inputs, overrides, observers=(), on_value=None, late=None, *, limits=None, threads=None, pooled=(), in_flight=...)"
+    )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Python's keyword arguments, one per part of a run"
+    )]
+    fn start<'py>(
+        slf: &Bound<'py, Self>,
+        inputs: &Bound<'py, PyDict>,
+        overrides: &Bound<'py, PyDict>,
+        observers: Vec<Bound<'py, ObserverBase>>,
+        on_value: Option<Bound<'py, PyAny>>,
+        late: Option<&Bound<'py, PyAny>>,
+        limits: Option<&Bound<'py, Limits>>,
+        threads: Option<&Bound<'py, Threads>>,
+        pooled: Vec<String>,
+        in_flight: usize,
+    ) -> PyResult<Stepper> {
+        stepper::start(
+            slf, inputs, overrides, observers, on_value, late, limits, threads, pooled, in_flight,
+        )
+    }
+
     /// The steps in execution order, as `(node, action)` pairs.
     ///
     /// Each block's steps follow its expand's step, in the order one branch runs them, so
@@ -470,6 +504,30 @@ impl<'py> Kwargs<'py, '_> {
         };
         *self.order.borrow_mut() = Some((address, node.len(), branch.to_vec(), order.clone()));
         Ok(order)
+    }
+
+    /// The dict lent for `node`'s observers, if one is: a running node's arguments, which
+    /// its `post_node` reports too.
+    pub fn lent(&self, node: &str) -> Option<Bound<'py, PyDict>> {
+        let consumer = self.graph.core().id_of(node)?;
+        let pending = self.pending.borrow();
+        let (id, kwargs) = pending.as_ref()?;
+        (*id == consumer).then(|| kwargs.clone())
+    }
+
+    /// The last order key made, which `post_node` of the same step reuses.
+    pub fn last_order(&self) -> Option<Bound<'py, PyTuple>> {
+        self.order
+            .borrow()
+            .as_ref()
+            .map(|(_, _, _, order)| order.clone())
+    }
+
+    /// Keeps `order` as `node`'s key in `branch`, made by an earlier event of that step:
+    /// `node` must be the graph's own name of it, which keys the cache by address.
+    pub fn reuse_order(&self, node: &str, branch: &[usize], order: Bound<'py, PyTuple>) {
+        *self.order.borrow_mut() =
+            Some((node.as_ptr() as usize, node.len(), branch.to_vec(), order));
     }
 
     /// The dict `node`'s function is about to be called with, built by the first

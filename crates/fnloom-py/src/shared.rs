@@ -8,6 +8,7 @@
 use fnloom_core::plan::Plan as CorePlan;
 use fnloom_core::run::Observer;
 use pyo3::prelude::*;
+use pyo3::{PyTraverseError, PyVisit};
 
 use crate::graph::Graph;
 use crate::keys::Keys;
@@ -41,9 +42,23 @@ impl SharedObservers {
         }
     }
 
+    /// Visits every object kept, for a holder's `__traverse__`.
+    pub fn traverse(&self, visit: &PyVisit<'_>) -> Result<(), PyTraverseError> {
+        for (observer, _) in &self.observers {
+            visit.call(observer)?;
+        }
+        visit.call(&self.on_value)?;
+        visit.call(&self.late)
+    }
+
     /// Whether the run has observers, so its events need the busy flag.
     pub fn any(&self) -> bool {
         !self.observers.is_empty()
+    }
+
+    /// Whether nothing hears of a node's outcome: no observer, `on_value` or `late`.
+    pub fn quiet(&self) -> bool {
+        self.observers.is_empty() && self.on_value.is_none() && self.late.is_none()
     }
 
     /// The run's late keys, if it is cached.
@@ -76,7 +91,8 @@ impl SharedObservers {
     }
 
     /// Hands a computed node's outcome to `on_value` and `late.store`, as `Plan::run`'s
-    /// last observers, called through `context`, a `Context.run`; the errors they raised.
+    /// last observers, called through `context`, a `Context.run`, or in place without one;
+    /// the errors they raised.
     #[expect(
         clippy::too_many_arguments,
         reason = "the node's event, and where its stores run"
@@ -84,7 +100,7 @@ impl SharedObservers {
     pub fn stored<'py>(
         &self,
         py: Python<'py>,
-        context: &Bound<'py, PyAny>,
+        context: Option<&Bound<'py, PyAny>>,
         plan: &CorePlan,
         graph: &Graph,
         node: &str,
@@ -101,7 +117,7 @@ impl SharedObservers {
                 },
                 graph,
                 keywords: graph.keywords(),
-                context: Some(context),
+                context,
             };
             errors.extend(hook.post_node_in(node, branch, outcome).err());
         }
@@ -112,7 +128,7 @@ impl SharedObservers {
                 plan,
                 graph,
                 keywords: graph.keywords(),
-                context: Some(context),
+                context,
             };
             errors.extend(hook.post_node_in(node, branch, outcome).err());
         }

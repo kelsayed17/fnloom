@@ -51,10 +51,11 @@ CANCELLED: Final[ContextVar[_core.Stop | None]] = ContextVar(
 def cancelled() -> bool:
     """Whether the run calling this is stopping, so a node can return early.
 
-    `True` once a run of a driver built `with_threads` is stopping: its
-    `timeout=` passed, another node failed, or it was interrupted. `False`
-    outside a run, and in a run of a driver without `with_threads`, unless that
-    run was started by a node of a stopping one.
+    `True` once a run of a driver built `with_threads`, or an async run, is
+    stopping: its `timeout=` passed, another node failed, it was interrupted,
+    or its caller was cancelled. `False` outside a run, and in a run of a
+    `Driver` without `with_threads`, unless that run was started by a node of a
+    stopping one.
     """
     stop = CANCELLED.get()
     return stop is not None and bool(stop)

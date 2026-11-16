@@ -2256,6 +2256,28 @@ def test_q65_sync_nodes_run_off_the_loop() -> None:
         }, sync_nodes
 
 
+_WHERE = """
+import threading
+
+
+def where(x: int) -> str:
+    return threading.current_thread().name
+"""
+
+
+@pytest.mark.deliberate("Q65")
+@pytest.mark.threads
+def test_q65_with_threads_runs_sync_nodes_on_the_drivers_pool() -> None:
+    """Under `with_threads(2)`, a sync node runs on the pool, not in the executor."""
+    module = make_module("differential_q65_pool", _WHERE)
+    pooled = fnloom.Builder().with_modules(module).with_threads(2).build_async()
+    plain = fnloom.Builder().with_modules(module).build_async()
+    pooled_name = asyncio.run(pooled.execute(["where"], inputs={"x": 1}))["where"]
+    plain_name = asyncio.run(plain.execute(["where"], inputs={"x": 1}))["where"]
+    assert str(pooled_name).startswith("fnloom-worker-")
+    assert not str(plain_name).startswith("fnloom-worker-")
+
+
 _FAILING = """
 import asyncio
 
@@ -6180,15 +6202,18 @@ def test_q127_items_are_checked_as_inputs() -> None:
 
 
 @pytest.mark.deliberate("Q132")
-def test_q132_build_async_refuses_blocks_until_plan_11() -> None:
-    """Hamilton's async builder refuses the flag; fnloom's refuses the graph."""
+def test_q132_the_async_driver_runs_blocks() -> None:
+    """Hamilton's async builder refuses dynamic execution; fnloom's runs the block.
+
+    Its value is the sync driver's, which is Hamilton's sync one's (Q119).
+    """
     with pytest.raises(ValueError, match="not supported for the async driver"):
         hamilton_async.Builder().enable_dynamic_execution(allow_experimental_mode=True)
+    hamilton, _ = both_blocks(PICKED, ["summary"], {"n": 3, "rate": 2})
     module = block_module("q132_f", PICKED, "fnloom")
-    with pytest.raises(
-        TypeError, match="blocks run on the async driver from Plan 11; 'picked' expands"
-    ):
-        fnloom.Builder().with_modules(module).build_async()
+    driver = fnloom.Builder().with_modules(module).build_async()
+    ours = asyncio.run(driver.execute(["summary"], inputs={"n": 3, "rate": 2}))
+    assert hamilton == Outcome(ours, None)
 
 
 _BOTH_KINDS = """

@@ -843,7 +843,7 @@ class Dispatch:
 class _Forward(_core.ObserverBase):
     """The core observer of a hooked run: sends each node event to its `Dispatch`."""
 
-    # The binding passes each event's order key.
+    # The binding passes each event's branch and order key, by position.
     orders: ClassVar[bool] = True
 
     def __init__(self, dispatch: Dispatch) -> None:
@@ -856,33 +856,39 @@ class _Forward(_core.ObserverBase):
         self,
         node: str,
         kwargs: dict[str, object],
-        *,
         branch: tuple[int, ...] = (),
         order: tuple[int, ...] = (),
     ) -> None:
         # One node at a time, so its end is the next `post_node`.
         self._kwargs = kwargs
         dispatch = self._dispatch
-        dispatch.node_started(
-            node, kwargs, dispatch.outcome(node, branch), branch=branch, order=order
-        )
+        # Read only on a cached run: an uncached one has none.
+        outcome = None if dispatch.outcomes is None else dispatch.outcome(node, branch)
+        dispatch.node_started(node, kwargs, outcome, branch=branch, order=order)
 
     @override
-    def post_node(  # the core's keywords
+    def post_node(  # the binding's arguments, by position
         self,
         node: str,
-        *,
-        ok: bool,
-        value: object,
-        error: BaseException | None,
+        ok: bool = True,  # the binding passes it by position
+        value: object = None,
+        error: BaseException | None = None,
         branch: tuple[int, ...] = (),
         order: tuple[int, ...] = (),
+        kwargs: Mapping[str, object] | None = None,
     ) -> None:
+        """Ends the node; `kwargs` are its arguments, while the binding lends them.
+
+        Without them, they are the last `pre_node`'s.
+        """
+        del ok
         dispatch = self._dispatch
+        # Read only on a cached run: an uncached one has none.
+        outcome = None if dispatch.outcomes is None else dispatch.outcome(node, branch)
         dispatch.node_ended(
             node,
-            self._kwargs,
-            dispatch.outcome(node, branch),
+            self._kwargs if kwargs is None else kwargs,
+            outcome,
             value,
             error,
             branch=branch,
@@ -893,16 +899,15 @@ class _Forward(_core.ObserverBase):
     def hit_in(
         self,
         node: str,
-        *,
-        branch: tuple[int, ...],
-        value: object,
+        branch: tuple[int, ...] = (),
+        value: object = None,
         order: tuple[int, ...] = (),
     ) -> None:
         self._dispatch.hit(node, branch, value, order)
 
     @override
     def skipped(
-        self, node: str, *, branch: tuple[int, ...], order: tuple[int, ...] = ()
+        self, node: str, branch: tuple[int, ...] = (), order: tuple[int, ...] = ()
     ) -> None:
         self._dispatch.skipped(node, branch, order)
 
@@ -910,64 +915,38 @@ class _Forward(_core.ObserverBase):
     def post_expand(
         self,
         node: str,
-        *,
-        branch: tuple[int, ...],
-        items: int,
+        branch: tuple[int, ...] = (),
+        items: int = 0,
         order: tuple[int, ...] = (),
     ) -> None:
         self._dispatch.expanded(node, branch, items, order)
 
 
 class _Running(_Forward):
-    """`_Forward` for a run on a pool, whose nodes overlap between start and end."""
+    """`_Forward` for a run whose nodes overlap between their start and their end.
 
-    def __init__(self, dispatch: Dispatch) -> None:
-        """Forwards to `dispatch`, keeping each running node's arguments."""
-        super().__init__(dispatch)
-        self._running: dict[tuple[str, tuple[int, ...]], Mapping[str, object]] = {}
+    Each `post_node` gets its node's own arguments from the binding, on a pool or a
+    loop, so nothing is kept between a node's events.
+    """
 
     @override
     def pre_node(
         self,
         node: str,
         kwargs: dict[str, object],
-        *,
-        branch: tuple[int, ...] = (),
-        order: tuple[int, ...] = (),
-    ) -> None:
-        self._running[node, branch] = kwargs
-        dispatch = self._dispatch
-        dispatch.node_started(
-            node, kwargs, dispatch.outcome(node, branch), branch=branch, order=order
-        )
-
-    @override
-    def post_node(
-        self,
-        node: str,
-        *,
-        ok: bool,
-        value: object,
-        error: BaseException | None,
         branch: tuple[int, ...] = (),
         order: tuple[int, ...] = (),
     ) -> None:
         dispatch = self._dispatch
-        dispatch.node_ended(
-            node,
-            self._running.pop((node, branch), None),
-            dispatch.outcome(node, branch),
-            value,
-            error,
-            branch=branch,
-            order=order,
-        )
+        # Read only on a cached run: an uncached one has none.
+        outcome = None if dispatch.outcomes is None else dispatch.outcome(node, branch)
+        dispatch.node_started(node, kwargs, outcome, branch=branch, order=order)
 
 
 class _Skips(_core.ObserverBase):
     """The core observer of a run that wants skips or expands, and no node event."""
 
-    # The binding passes each event's order key.
+    # The binding passes each event's branch and order key, by position.
     orders: ClassVar[bool] = True
 
     def __init__(self, dispatch: Dispatch) -> None:
@@ -976,7 +955,7 @@ class _Skips(_core.ObserverBase):
 
     @override
     def skipped(
-        self, node: str, *, branch: tuple[int, ...], order: tuple[int, ...] = ()
+        self, node: str, branch: tuple[int, ...] = (), order: tuple[int, ...] = ()
     ) -> None:
         self._dispatch.skipped(node, branch, order)
 
@@ -984,9 +963,8 @@ class _Skips(_core.ObserverBase):
     def post_expand(
         self,
         node: str,
-        *,
-        branch: tuple[int, ...],
-        items: int,
+        branch: tuple[int, ...] = (),
+        items: int = 0,
         order: tuple[int, ...] = (),
     ) -> None:
         self._dispatch.expanded(node, branch, items, order)

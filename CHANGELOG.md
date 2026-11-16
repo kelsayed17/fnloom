@@ -37,18 +37,18 @@ change the public API; such changes are listed under **Changed** and **Removed**
   called one at a time. A
   failure starts no new node: the run waits for the running ones, then raises the failure first in reference order,
   once (Q66, Q128). The setting survives pickling, `copy`, `rebuild()` and `build_async()`, each driver with a pool of
-  its own, and a forked child makes a new one; an `AsyncDriver` ignores it for now. A driver without it runs exactly
+  its own, and a forked child makes a new one. A driver without it runs exactly
   as before.
 - Hooks under threads. A run's hooks are called one at a time, each on the thread that ran its node (Q168), and its
   store writes run after them, so a slow store holds up no other node's hooks; each node sees the context variables
   its caller set (Q167). `NodeStart.order`, `NodeEnd.order` and `ExpandEnd.order` give the step's order key as a
-  tuple, so a parallel run's events sort into the order one worker gives; `()` on the async driver.
+  tuple, so a parallel run's events sort into the order one worker gives.
 - Single-flight per key within a run. On a driver built `with_threads` with a cache, a block node whose key equals one
   already running in the same run waits for that value, holding no worker, and reports a hit (Q85); a `recompute` or
   uncacheable node never does, nor do two runs share one.
 - `@fnloom.limit(n=None, *, group=None)` caps how many calls of a node run at once, across every run of a driver, and
   `Builder.with_limits({group: size})` sizes the groups nodes share a cap in (Q134). Every driver honours them, with
-  or without `with_threads`; the async driver checks them at build and honours them from a later release. A call
+  or without `with_threads`. A call
   takes its slots after its `before_node` hooks and gives them back as it returns, before its `after_node` hooks,
   and a sequential run waits for one detached, `Ctrl-C` ending the wait; grants are not fair. A group with no size,
   or a size of a group no node is in, fails the build. A run started inside a node that needs a slot its callers
@@ -57,6 +57,28 @@ change the public API; such changes are listed under **Changed** and **Removed**
   Each driver object has its own counters, through pickling, `copy`, `rebuild()` and a fork.
 - A run of a driver built `with_threads` fails at once on a panic in fnloom's own code outside a node call, instead
   of ending as a success or waiting for good.
+- The async driver runs on the core scheduler, as a `with_threads` run does, stepped from the event loop through
+  `_core.Plan.start` and its `Stepper` (Q65). Ready nodes start in reference order, `RunEnd.skipped` is sorted by
+  order key, and `NodeStart.order`, `NodeEnd.order` and `ExpandEnd.order` carry the step's key; with
+  `sync_nodes="inline"` and only sync nodes, the events are the sync driver's, orders included. It honours `@limit`
+  and `with_limits`: an `async def` node waiting for a slot holds no thread, and is woken by a release from any
+  thread or loop. A node's slots are given back before its hooks, as on the sync driver, and a run inside a node
+  needing a slot its callers hold is refused at once. A sync node a failed or cancelled run abandons in a thread keeps
+  its slots until its call returns.
+- `with_threads` on `build_async()`: each sync node runs on the driver's own pool, holding a worker slot, so at most
+  `max_workers` run at once, while `async def` nodes hold none (Q65). `sync_nodes="inline"` with it is a
+  `ValueError`. A sync node there that runs its own async driver never waits for the slot it holds. The pool keeps
+  `max_workers` threads from an async run's first sync node, and a thread whose call the run abandons is replaced at
+  once, leaving the pool once the call returns.
+  A failed async run's driver is collected with its run, so its pool stops: the collector follows the
+  run's stepper, which its traceback keeps.
+- Blocks on the async driver (Q132). `build_async()` runs fan-outs as `build()` does, with a block's branches
+  overlapping on the loop and each `Collect` in item order, and an `async def` generator annotated
+  `-> Parallelizable[T]` is an expand there, its items awaited on the loop and checked as a sync expand's are (Q32).
+  A sync generator's items are read where its node runs, and it is closed in the loop's default executor, so its
+  `finally` never waits for a pool thread a hung call holds. A generator keeps one context across its
+  items. A failing branch cancels every running node and pending read once, and the generator is closed once.
+  `build()` refuses an async generator expand, saying to use `build_async()`.
 - Deadlines (Q170). On a driver built `with_threads`, `execute`, `raw_execute`, `PreparedPlan.run` and `run_raw` take
   `timeout=` in seconds: the run's nodes then run on the pool only, and once the time passes the run raises
   `TimeoutError` at once, or the failure it already had. The nodes still running are abandoned: their worker and
@@ -65,7 +87,8 @@ change the public API; such changes are listed under **Changed** and **Removed**
   inside a node lends that node's worker to its own nodes. Without `with_threads`, `timeout=` is a `TypeError`.
 - `fnloom.cancelled()` tells a node whether its parallel run is stopping, by its deadline, another node's failure or
   an interrupt, so it can return early; `False` outside one. A run started inside a node of a stopping run, on any
-  driver, sees it too, and a parallel one stops starting nodes. It then returns its outputs if they were all computed,
+  driver, sees it too, and a parallel or async one stops starting nodes. On the async driver, `cancelled()` turns true
+  once the run fails or its caller is cancelled. It then returns its outputs if they were all computed,
   or else raises a `RuntimeError`, which the outer run never raises in place of the failure that stopped it.
 - `Ctrl-C` ends a parallel run at once, abandoning its running nodes as a deadline does, so a node hung on a worker
   thread no longer keeps the run waiting. A `KeyboardInterrupt` a node raises does the same.

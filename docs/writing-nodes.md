@@ -444,7 +444,10 @@ nodes, up to the `Collect` parameters that gather them. A block node may also re
   absent expand isn't an empty one, which gives `[]`. A default on a `Collect` parameter whose expand can't decline
   is never used, and is refused as a [shadowed default](#defaults-the-build-refuses). A cached branch that declined
   replays its absence, so the block nodes reading it skip again.
-- `build_async()` refuses a graph with an expand until Plan 11.
+- `build_async()` runs blocks too ([Async](running.md#async)), and there an expand may also be an `async def`
+  generator annotated `-> Parallelizable[T]`: its items are awaited on the event loop, its branches overlap there,
+  and its `finally` runs once, when it is exhausted or the run stops. `build()` refuses one, as it refuses any
+  `async def` node.
 
 ## Annotations
 
@@ -1692,7 +1695,7 @@ be called that way are refused when you build, each with a `ValueError` naming t
 | A positional-only parameter (`def f(a, /)`) | It cannot be passed by keyword. |
 | `*args` or `**kwargs` | Neither binds one named argument as a parameter. |
 | A missing parameter or return annotation | Every edge is typed where it is declared. |
-| A generator function, sync or async, and an `async def` given to `build()` | Calling one returns a generator or a coroutine, not the node's value. [`build_async()`](running.md#async) awaits an `async def`. |
+| A generator function, sync or async, that is no expand, and an `async def` given to `build()` | Calling one returns a generator or a coroutine, not the node's value. [`build_async()`](running.md#async) awaits an `async def`, and the items of an async generator expand. |
 | A dependency cycle, including a function reading itself | A cycle has no order to run in; the error names the cycle. |
 
 Hamilton silently accepts the first, second and fourth, and overflows the stack on a cycle. See

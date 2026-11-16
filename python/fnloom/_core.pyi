@@ -1,3 +1,5 @@
+import concurrent.futures
+import contextvars
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Final, Literal, Never, NoReturn, Self, final, override
 
@@ -5,12 +7,14 @@ __all__ = [
     "ABSENT",
     "Absent",
     "Graph",
+    "Held",
     "KeyPlan",
     "Keys",
     "Limits",
     "MemoryStore",
     "ObserverBase",
     "Plan",
+    "Stepper",
     "Stop",
     "StoppedError",
     "Threads",
@@ -20,6 +24,7 @@ __all__ = [
     "arm_perform_panic",
     "arm_report_panic",
     "arm_state_panic",
+    "arm_stepper_panic",
     "arm_worker_panic",
     "core_version",
     "fingerprint",
@@ -64,6 +69,7 @@ def arm_worker_panic() -> None: ...
 def arm_hook_panic() -> None: ...
 def arm_report_panic() -> None: ...
 def arm_perform_panic() -> None: ...
+def arm_stepper_panic() -> None: ...
 def arm_state_panic() -> None: ...
 def held_slots(limits: Limits) -> tuple[int, dict[str, int], dict[str, int]]: ...
 
@@ -110,6 +116,39 @@ class Plan:
     def steps(self) -> list[tuple[str, str]]: ...
     def late(self) -> list[str]: ...
     def blocks(self) -> dict[str, list[tuple[str, str]]]: ...
+    def start(
+        self,
+        inputs: dict[str, Any],
+        overrides: dict[str, Any],
+        observers: Sequence[ObserverBase] = (),
+        on_value: Callable[[str, object], None] | None = None,
+        late: object | None = None,
+        *,
+        limits: Limits | None = None,
+        threads: Threads | None = None,
+        pooled: Sequence[str] = (),
+        in_flight: int = ...,
+    ) -> Stepper: ...
+
+type Work = Literal["compute", "pull", "finish", "close"]
+type Completion = Literal["value", "error", "done", "dropped"]
+type Handed = tuple[int, str, tuple[int, ...], Work, Any, contextvars.Context | None]
+
+@final
+class Held:
+    def release(self) -> None: ...
+
+@final
+class Stepper:
+    def next(self) -> Handed | int: ...
+    def complete(self, task: int, kind: Completion, value: object, /) -> bool: ...
+    def stop(self) -> None: ...
+    def detach(self, task: int, /) -> Held | None: ...
+    @property
+    def pooling(self) -> bool: ...
+    @property
+    def cancelled(self) -> Stop: ...
+    def outputs(self) -> dict[str, object]: ...
 
 @final
 class Limits:
@@ -129,6 +168,12 @@ class Threads:
     @property
     def max_workers(self) -> int: ...
     def close(self) -> None: ...
+    def submit(
+        self, function: Callable[[], object], context: contextvars.Context, /
+    ) -> concurrent.futures.Future[Any]: ...
+    def abandon(self) -> None: ...
+    @staticmethod
+    def leave() -> None: ...
 
 @final
 class Stop:
