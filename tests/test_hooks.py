@@ -739,6 +739,12 @@ def test_hooks_survive_pickling_copy_rebuild_and_build_async() -> None:
     builder = fnloom.Builder().with_modules(picklable_nodes).with_hooks(hook)
     driver = builder.build()
     inputs = {"a": 3, "b": 1}
+    plan = driver.prepare(["total"], inputs=inputs)
+    # The driver a plan loads on: its `_rebuilt`, pickled with it.
+    _, planned = cast(
+        "tuple[object, fnloom.Driver]",
+        _round_trip((plan, plan._rebuilt)),  # noqa: SLF001  # the plan's driver
+    )
     assert copy.copy(driver).hooks == (hook,)
     assert driver.rebuild().hooks == (hook,)
     assert builder.build_async().hooks == (hook,)
@@ -748,7 +754,7 @@ def test_hooks_survive_pickling_copy_rebuild_and_build_async() -> None:
         _round_trip(driver),
         copy.deepcopy(driver),
         _round_trip(builder).build(),
-        _round_trip(driver.prepare(["total"], inputs=inputs))._driver,  # noqa: SLF001  # the plan's driver
+        planned,
     ):
         assert carried is not None
         (again,) = carried.hooks
@@ -904,10 +910,9 @@ def test_log_failures_uses_the_given_logger_and_level(
     (record,) = _failures(caplog)
     assert (record.name, record.levelno) == ("my.app", logging.WARNING)
     assert record.getMessage() == "node 'boom' failed; inputs: a=2, big=[1]"
-    # It overrides only `after_node`, so no other method is called.
+    # It overrides only `after_node`, and `after_run` for an absent expand's error.
     assert type(hook).before_node is Hook.before_node
     assert type(hook).before_run is Hook.before_run
-    assert type(hook).after_run is Hook.after_run
     # The driver pickles with it, and the copy logs too.
     caplog.clear()
     again = pickle.loads(pickle.dumps(driver))  # noqa: S301  # our own driver

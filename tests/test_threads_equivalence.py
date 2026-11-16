@@ -78,8 +78,12 @@ def ratios(ratio: Collect[int | Absent]) -> list[object]:
 """
 
 WORKERS: tuple[int | None, ...] = (None, 1, 2, 8)
-# The CI `stress` job sets HYPOTHESIS_PROFILE=stress for many more examples.
-EXAMPLES = 500 if os.environ.get("HYPOTHESIS_PROFILE") == "stress" else 50
+# The CI `stress` job sets HYPOTHESIS_PROFILE=stress for its profile's examples.
+EXAMPLES = (
+    settings.get_profile("stress").max_examples
+    if os.environ.get("HYPOTHESIS_PROFILE") == "stress"
+    else 50
+)
 OUTPUTS = ("everything", "present", "total", "ratios")
 
 

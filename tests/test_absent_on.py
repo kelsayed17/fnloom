@@ -452,6 +452,30 @@ def test_an_expand_absent_on_its_error_has_no_branches(kind: Kind, mode: str) ->
     assert (node, branch, type(error)) == ("item", (), ConnectionError)
 
 
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("mode", ["before", "while"])
+def test_log_failures_logs_an_absent_expand_once(
+    kind: Kind, mode: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    """Before it yields, from its `after_node`; while, from `RunEnd.absent_errors`.
+
+    An expand that raised while yielding has no second `after_node`.
+    """
+    module = make_module(f"expands_logged_{kind}_{mode}", EXPANDS)
+    module.MODE[0] = mode
+    builder = fnloom.Builder().with_modules(module).with_hooks(fnloom.LogFailures())
+    with caplog.at_level(logging.ERROR, logger="fnloom"):
+        assert executed(kind, builder, ["opt"], {"n": 0}) == {"opt": []}
+    (record,) = caplog.records
+    assert record.getMessage() == (
+        "node 'item' failed; inputs: n=0"
+        if mode == "before"
+        else "node 'item' failed while yielding its items"
+    )
+    assert isinstance(record.exc_info, tuple)
+    assert type(record.exc_info[1]) is ConnectionError
+
+
 NESTED = """
 from fnloom import Absent, Collect, Parallelizable, absent_on
 

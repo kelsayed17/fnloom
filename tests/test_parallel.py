@@ -22,7 +22,7 @@ import pytest
 
 import fnloom
 import picklable_nodes
-from fnloom import _core
+from fnloom import _async, _core
 from helpers import make_module
 
 if TYPE_CHECKING:
@@ -1233,9 +1233,6 @@ def test_an_iterators_hooks_never_enter_its_context_while_it_pulls() -> None:
 
 # The async driver on `with_threads`: its sync nodes on the pool (task 7, Q65).
 
-# How many async forms of a plan its prepared plan keeps, as `driver.py` says.
-ASYNC_PLANS_PER_PLAN = 8
-
 ON_POOL = """
 import asyncio
 import contextvars
@@ -1332,13 +1329,29 @@ def test_with_threads_and_inline_are_refused() -> None:
         fnloom.AsyncDriver(threaded, {}, sync_nodes="inline")
 
 
+def test_a_sync_call_detached_before_its_thread_began_it_never_runs() -> None:
+    """A stopping run that detaches a call not yet begun never has it run after.
+
+    Its thread had taken the job, but not yet begun the call: the run, seeing it
+    not started, replaces no thread, so the call must not run on that thread.
+    """
+    guard = _async._Guard()  # noqa: SLF001  # the guard under test
+    with guard.lock:  # as `_Run._cancel` detaches it
+        guard.detached = True
+    calls: list[int] = []
+    assert guard.call(lambda: calls.append(1)) is None
+    assert calls == []
+    assert guard.started
+    assert guard.returned
+
+
 def test_async_plans_of_one_prepared_plan_from_many_threads() -> None:
     """16 threads make async plans of one prepared plan at once, and none fails."""
     module = make_module("async_plans_threads", ON_POOL)
     first = fnloom.Builder().with_modules(module).build_async()
     base = first._driver  # noqa: SLF001  # the driver the async ones share
     nodes = first._nodes  # noqa: SLF001  # its nodes
-    prepared = base.prepare(["left"], inputs={"x": 1})
+    base.prepare(["left"], inputs={"x": 1})
     start = threading.Barrier(16, timeout=5)
     errors: list[BaseException] = []
 
@@ -1356,7 +1369,6 @@ def test_async_plans_of_one_prepared_plan_from_many_threads() -> None:
     for thread in threads:
         thread.join(10)
     assert errors == []
-    assert 0 < len(prepared._async) <= ASYNC_PLANS_PER_PLAN  # noqa: SLF001  # the plans kept
 
 
 NESTED_ASYNC = """

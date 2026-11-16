@@ -1115,10 +1115,12 @@ class LogFailures(Hook):
     Logs nothing on success or for a cache hit. The record's message names the
     node and lists its inputs sorted by name, `name=repr`, each `repr` cut to 50
     characters and ended with `...` when it was; the node's error is the record's
-    `exc_info`. A node without inputs shows `inputs: none`.
+    `exc_info`. A node without inputs shows `inputs: none`. An expand an error
+    made absent while it yielded, which has no second `after_node`, is logged
+    from `RunEnd.absent_errors` as `node 'x' failed while yielding its items`.
     """
 
-    __slots__ = ("_level", "_logger")
+    __slots__ = ("_level", "_lock", "_logged", "_logger")
 
     def __init__(
         self, logger: logging.Logger | None = None, *, level: int = logging.ERROR
@@ -1126,18 +1128,50 @@ class LogFailures(Hook):
         """Logs to `logger`, by default the `fnloom` logger, at `level`."""
         self._logger = logging.getLogger("fnloom") if logger is None else logger
         self._level = level
+        # Per run, the ids of the errors `after_node` logged: `after_run` logs the
+        # run's other error absences. Under the lock, as runs share the hook.
+        self._logged: dict[str, set[int]] = {}
+        self._lock = threading.Lock()
+
+    @override
+    def __getstate__(self) -> tuple[logging.Logger, int]:
+        """The settings: a lock and a run's errors are not pickled."""
+        return (self._logger, self._level)
+
+    def __setstate__(self, state: tuple[logging.Logger, int]) -> None:
+        """Restores the settings, with no run in flight."""
+        self._logger, self._level = state
+        self._logged = {}
+        self._lock = threading.Lock()
 
     @override
     def after_node(self, event: NodeEnd) -> None:
         if event.ok:
             return
-        shown = _inputs_text(event.inputs)
         error = event.error
-        self._logger.log(
-            self._level,
+        if error is not None:
+            with self._lock:
+                self._logged.setdefault(event.run_id, set()).add(id(error))
+        self._log(
+            error,
             "node '%s' failed; inputs: %s",
             event.node.name,
-            shown,
+            _inputs_text(event.inputs),
+        )
+
+    @override
+    def after_run(self, event: RunEnd) -> None:
+        with self._lock:
+            logged = self._logged.pop(event.run_id, ())
+        for name, _, error in event.absent_errors:
+            if id(error) not in logged:
+                self._log(error, "node '%s' failed while yielding its items", name)
+
+    def _log(self, error: BaseException | None, message: str, *args: object) -> None:
+        self._logger.log(
+            self._level,
+            message,
+            *args,
             exc_info=None
             if error is None
             else (type(error), error, error.__traceback__),

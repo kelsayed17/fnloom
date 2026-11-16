@@ -171,10 +171,12 @@ class Runner:
         )
         # A run inside a pooled task pools nothing: its own loop's executor runs them.
         pool = threads if stepper.pooling else None
+        # The stop flag of the run that started this one, if any, which it follows.
+        parent = CANCELLED.get()
         # Its stop flag, for `fnloom.cancelled()` and the runs its nodes start.
         token = CANCELLED.set(stepper.cancelled)
         try:
-            return await _Run(stepper, self.calls, pool, limits).wait()
+            return await _Run(stepper, self.calls, pool, limits, parent).wait()
         finally:
             CANCELLED.reset(token)
 
@@ -372,24 +374,32 @@ class _Guard:
     The run then hands the guard the call's slots (`Stepper.detach`), which it gives
     back once the call returns, so a limit holds while an abandoned call runs. A call
     abandoned on the driver's pool has its thread replaced at once (`Threads.abandon`),
-    and the thread leaves the pool once the call returns (`Threads.leave`).
+    and the thread leaves the pool once the call returns (`Threads.leave`). A call
+    the run detached before its thread began it never runs.
     """
 
-    __slots__ = ("abandoned", "held", "lock", "returned", "started")
+    __slots__ = ("abandoned", "detached", "held", "lock", "returned", "started")
 
     def __init__(self) -> None:
         """A call not yet started, holding its own slots."""
         self.lock = threading.Lock()
         self.started = False
         self.returned = False
+        self.detached = False
         self.abandoned = False
         self.held: _core.Held | None = None
 
     def call(self, function: Callable[[], object]) -> object:
-        """`function()`, then the abandoned call's slots given back, if it was."""
-        self.started = True
+        """`function()`, then the abandoned call's slots given back, if it was.
+
+        `None`, without calling it, once its run detached it: so a stopping run
+        sees either a call it must replace the thread of, or one that never runs.
+        """
+        with self.lock:
+            self.started = True
+            detached = self.detached
         try:
-            return function()
+            return None if detached else function()
         finally:
             with self.lock:
                 self.returned = True
@@ -414,6 +424,8 @@ _STOPPING = (KeyboardInterrupt, SystemExit)
 _DONE = 1
 _WAITING = 2
 _HALTED = 4
+# How often a run started inside another run looks whether that one stopped (O22).
+_FOLLOW = 0.05
 
 
 class _Run:
@@ -433,6 +445,7 @@ class _Run:
         "_limits",
         "_loop",
         "_over",
+        "_parent",
         "_running",
         "_stepper",
         "_stopped",
@@ -446,12 +459,15 @@ class _Run:
         calls: Mapping[str, Call],
         threads: _core.Threads | None,
         limits: _core.Limits | None,
+        parent: _core.Stop | None = None,
     ) -> None:
         """A run of `stepper`, each node called by `calls`, on `threads` if given.
 
-        It waits for `limits`' slots when refused one.
+        It waits for `limits`' slots when refused one, and stops once `parent`,
+        the stop flag of the run that started it, is set.
         """
         self._stepper = stepper
+        self._parent = parent
         self._calls = calls
         self._threads = threads
         self._limits = limits
@@ -482,6 +498,8 @@ class _Run:
         """
         try:
             self._drain()
+            if self._parent is not None and not self._finished.done():
+                self._loop.call_later(_FOLLOW, self._follow)
             await self._finished
         except asyncio.CancelledError:
             # The caller was cancelled: its nodes stop before the caller hears of it.
@@ -718,6 +736,7 @@ class _Run:
             if guard is not None:
                 with guard.lock:
                     if not guard.returned:
+                        guard.detached = True
                         guard.held = self._stepper.detach(task)
                         del self._running[future]
                         detached = True
@@ -749,6 +768,27 @@ class _Run:
         self._stop()
         if not self._finished.done():
             self._finished.set_exception(error)
+
+    def _follow(self) -> None:
+        """Stops the run once the run that started it stopped, else looks again later.
+
+        The stepper notices too, but only as a task of this run completes: one
+        `async def` node awaiting for long would keep the run going meanwhile.
+        """
+        if self._over or self._finished.done():
+            return
+        parent = self._parent
+        if parent is not None and not bool(parent):
+            self._loop.call_later(_FOLLOW, self._follow)
+            return
+        try:
+            # The stepper stops as it sees the stopped parent, and the drain cancels
+            # what runs.
+            self._drain()
+        except _STOPPING:
+            raise
+        except BaseException as error:  # noqa: BLE001  # raised by the run's `wait`
+            self._broke(error)
 
     def _wait_for_slot(self) -> None:
         """Wakes the run at the next release of a slot of the driver's limits.

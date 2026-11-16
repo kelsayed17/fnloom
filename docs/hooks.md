@@ -473,10 +473,13 @@ On a driver built with [`with_threads`](running.md#threads), a run's nodes run o
 - report nodes in the order they start and finish, as on the async driver: sort by `order` for the order one worker
   gives. With `with_threads(1)` the events come exactly as without threads, orders included.
 
-A store write runs after the hooks of its node, outside that one-at-a-time section, so a slow store never holds up
-another node's hooks. A hook shared by several runs, from several threads or of several drivers, sees their events
-interleaved, as before: one that keeps state across runs must be safe to call from several threads at once. Hamilton
-calls its hooks from its pool threads at once (Q168).
+A slow hook holds up the run's other hooks, since they take turns, and the node it reports on waits on its worker
+meanwhile. A [limited](running.md#limits) node gives its slots back while its `before_node` hooks run, so slow hooks
+never hold a slot, but its group's other tasks wait on their workers to take theirs back. A store write runs after
+the hooks of its node, outside that one-at-a-time section, so a slow store never holds up another node's hooks. A
+hook shared by several runs, from several threads or of several drivers, sees their events interleaved, as before:
+one that keeps state across runs must be safe to call from several threads at once. Hamilton calls its hooks from its
+pool threads at once (Q168).
 
 ## On the async driver
 

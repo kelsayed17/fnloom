@@ -98,8 +98,50 @@ type _Check = tuple[str, object, _types.Classes | None, _types.Matcher]
 
 # How many compiled plans a driver keeps; the least recently used one goes first.
 PLAN_CACHE_SIZE = 128
-# How many AsyncDrivers over one Driver keep their own form of a plan at once.
-ASYNC_PLANS_PER_PLAN = 8
+
+_NATIVE = (
+    "cannot pickle a Driver made from a native graph; "
+    "make it with Builder or build to pickle it"
+)
+_NATIVE_ASYNC = (
+    "cannot pickle an AsyncDriver made from a Driver; "
+    "make it with Builder.build_async to pickle it"
+)
+
+
+class _Rebuilt:
+    """What a driver pickles as, held by its plans in place of the driver.
+
+    A driver keeps its plans, so a plan holding its driver would make a cycle,
+    and a dropped driver's pool would wait for the cyclic collector to stop.
+    Loaded, this is the driver built again by `builder`, with `sync_nodes` for
+    an `AsyncDriver`. A driver and its plans pickled together share it, so they
+    load as one driver and its plans.
+    """
+
+    __slots__ = ("builder", "sync_nodes")
+
+    def __init__(self, sync_nodes: str | None = None) -> None:
+        """No builder yet: the one building the driver sets it."""
+        self.builder: Builder[Any] | None = None
+        self.sync_nodes = sync_nodes
+
+    @override
+    def __reduce__(
+        self,
+    ) -> tuple[Callable[..., Driver[Any] | AsyncDriver[Any]], tuple[object, ...]]:
+        """The driver, built again on load; `TypeError` without a builder."""
+        if self.builder is None:
+            msg = _NATIVE if self.sync_nodes is None else _NATIVE_ASYNC
+            raise TypeError(msg)
+        if self.sync_nodes is None:
+            return Builder.build, (self.builder,)
+        return _build_async_again, (self.builder, self.sync_nodes)
+
+
+def _loaded[T](driver: T) -> T:
+    """The driver its `_Rebuilt` loaded as."""
+    return driver
 
 
 class _Runnable(Protocol):
@@ -624,24 +666,22 @@ class PreparedPlan[R = dict[str, object]]:
         self._absent_overrides: frozenset[str] = _NO_NAMES
         # The driver's result builder, which only a subclass applies.
         self._build: _ResultBuilder[R] | None = None
-        # The driver that prepared this plan, which pickling rebuilds it through.
-        self._driver: Driver[R] | None = None
-        # This plan as each of the last few `AsyncDriver`s over its driver ran it,
-        # made on first use: kept here, so it goes when the driver drops this plan.
-        self._async: dict[AsyncDriver[R], AsyncPreparedPlan[R]] = {}
-        # Held to read or change `_async`, which threads preparing at once share.
-        self._async_lock = threading.Lock()
+        # How the driver that prepared this plan pickles, which pickling rebuilds
+        # it through: never the driver itself, which keeps this plan (`_Rebuilt`).
+        self._rebuilt: _Rebuilt | None = None
+        # What its driver's output checks report results under: see `_checks`.
+        self._checks_owner: object = None
 
     @override
     def __reduce__(
         self,
-    ) -> tuple[Callable[..., PreparedPlan[R]], tuple[Driver[R], _PlanKey]]:
+    ) -> tuple[Callable[..., PreparedPlan[R]], tuple[_Rebuilt, _PlanKey]]:
         """The driver and the request, prepared again on load; see the class."""
-        if self._driver is None:
+        if self._rebuilt is None:
             msg = "cannot pickle a PreparedPlan made without a Driver"
             raise TypeError(msg)
         return _prepare_again, (
-            self._driver,
+            self._rebuilt,
             (self._outputs, self._input_names, self._override_names),
         )
 
@@ -957,9 +997,11 @@ class _HookedPlan[R](PreparedPlan[R]):
         if timeout is not None:
             timeout = _timeout(plan, timeout)
         cached = isinstance(plan, CacheRun)
-        owner = None if self._driver is None else self._driver._checks_owner  # noqa: SLF001  # the plan's own driver
         dispatch = _hooks.Dispatch(
-            self._hooks, self._views, {} if cached else None, checks_owner=owner
+            self._hooks,
+            self._views,
+            {} if cached else None,
+            checks_owner=self._checks_owner,
         )
         dispatch.parallel = isinstance(plan, (_Threaded, CacheRun)) and plan.threaded
         error: BaseException | None = None
@@ -1214,23 +1256,28 @@ class Driver[R = dict[str, object]]:
         # The last request and its plan, which is the most recently used one, so a
         # repeat of it, the common case in a loop, skips the key and the lock.
         self._last: _LastRequest[R] | None = None
-        # The builder that built this driver, which pickling rebuilds it from.
-        self._builder: Builder[R] | None = None
+        # How this driver pickles: its builder, which its plans share (`_Rebuilt`).
+        self._rebuilt = _Rebuilt()
         # What its nodes' output checks report results under: see `_checks`.
         self._checks_owner: object = None
+
+    @property
+    def _builder(self) -> Builder[R] | None:
+        """The builder that built this driver, which pickling rebuilds it from."""
+        return typing.cast("Builder[R] | None", self._rebuilt.builder)
+
+    @_builder.setter
+    def _builder(self, builder: Builder[R] | None) -> None:
+        self._rebuilt.builder = builder
 
     @override
     def __reduce__(
         self,
-    ) -> tuple[Callable[[Builder[Any]], Driver[Any]], tuple[Builder[R]]]:
+    ) -> tuple[Callable[[Driver[Any]], Driver[Any]], tuple[_Rebuilt]]:
         """The builder, built again on load; see the class."""
         if self._builder is None:
-            msg = (
-                "cannot pickle a Driver made from a native graph; "
-                "make it with Builder or build to pickle it"
-            )
-            raise TypeError(msg)
-        return Builder.build, (self._builder,)
+            raise TypeError(_NATIVE)
+        return _loaded, (self._rebuilt,)
 
     def rebuild(self) -> Driver[R]:
         """A new driver, built again from this driver's builder (Q83).
@@ -1399,7 +1446,8 @@ class Driver[R = dict[str, object]]:
                 runnable, outputs, input_names, override_names, checks
             )
         prepared._absent_overrides = self._may_be_absent(override_names)  # noqa: SLF001  # the driver's own plan
-        prepared._driver = self  # noqa: SLF001  # the driver's own plan
+        prepared._rebuilt = self._rebuilt  # noqa: SLF001  # the driver's own plan
+        prepared._checks_owner = self._checks_owner  # noqa: SLF001  # the driver's own plan
         return prepared
 
     def _may_be_absent(self, names: AbstractSet[str]) -> frozenset[str]:
@@ -2201,16 +2249,21 @@ class AsyncPreparedPlan[R = dict[str, object]]:
         driver: AsyncDriver[R],
         schedule: _async.Schedule | _async.CachedSchedule,
     ) -> None:
-        """The async form of `prepared`, run by `schedule`, for `driver`."""
+        """The async form of `prepared`, run by `schedule`, for `driver`.
+
+        It holds how `driver` pickles, never `driver` itself, which keeps it.
+        """
         self._prepared = prepared
-        self._driver = driver
+        self._rebuilt = driver._rebuilt  # noqa: SLF001  # the driver making it
+        # Whether its nodes all run inline, one at a time.
+        self._sequential = driver._runner.sequential  # noqa: SLF001  # the driver making it
         self._schedule = schedule
         self._outputs = prepared._outputs  # noqa: SLF001  # the plan this wraps
 
     @override
     def __reduce__(
         self,
-    ) -> tuple[Callable[..., AsyncPreparedPlan[R]], tuple[AsyncDriver[R], _PlanKey]]:
+    ) -> tuple[Callable[..., AsyncPreparedPlan[R]], tuple[_Rebuilt, _PlanKey]]:
         """The driver and the request, prepared again on load; see the class."""
         prepared = self._prepared
         key: _PlanKey = (
@@ -2218,7 +2271,7 @@ class AsyncPreparedPlan[R = dict[str, object]]:
             prepared._input_names,  # noqa: SLF001  # the plan this wraps
             prepared._override_names,  # noqa: SLF001  # the plan this wraps
         )
-        return _prepare_async_again, (self._driver, key)
+        return _prepare_async_again, (self._rebuilt, key)
 
     def __copy__(self) -> AsyncPreparedPlan[R]:
         """The plan itself: nothing about a plan changes once it is compiled."""
@@ -2337,13 +2390,12 @@ class _HookedAsyncPlan[R](AsyncPreparedPlan[R]):
         schedule = self._schedule
         cached = isinstance(schedule, _async.CachedSchedule)
         hooks, views = prepared._hooks, prepared._views  # noqa: SLF001  # the plan this wraps
-        driver = prepared._driver  # noqa: SLF001  # the plan this wraps
-        owner = None if driver is None else driver._checks_owner  # noqa: SLF001  # its driver
+        owner = prepared._checks_owner  # noqa: SLF001  # the plan this wraps
         dispatch = _hooks.Dispatch(
             hooks, views, {} if cached else None, checks_owner=owner
         )
         # Its nodes overlap between their start and their end, unless all run inline.
-        dispatch.parallel = not self._driver._runner.sequential  # noqa: SLF001  # its own
+        dispatch.parallel = not self._sequential
         error: BaseException | None = None
         try:
             if mismatches:
@@ -2401,21 +2453,32 @@ class AsyncDriver[R = dict[str, object]]:
         self._nodes = nodes
         self._sync_nodes = _async.checked_sync_nodes(sync_nodes, threaded=threaded)
         self._runner = _async.Runner(_async.calls(nodes, self._sync_nodes), workers)
-        # The builder that built this driver, which pickling rebuilds it from.
-        self._builder: Builder[R] | None = None
+        # How this driver pickles: its builder and `sync_nodes` (`_Rebuilt`).
+        self._rebuilt = _Rebuilt(self._sync_nodes)
+        # Each plan of `driver` as this driver runs it, made on first use; the
+        # oldest go first. Kept here, not on the plan, which would make a cycle
+        # through this driver's own `driver`.
+        self._plans: dict[PreparedPlan[R], AsyncPreparedPlan[R]] = {}
+        # Held to read or change `_plans`, which threads preparing at once share.
+        self._plans_lock = threading.Lock()
+
+    @property
+    def _builder(self) -> Builder[R] | None:
+        """The builder that built this driver, which pickling rebuilds it from."""
+        return typing.cast("Builder[R] | None", self._rebuilt.builder)
+
+    @_builder.setter
+    def _builder(self, builder: Builder[R] | None) -> None:
+        self._rebuilt.builder = builder
 
     @override
     def __reduce__(
         self,
-    ) -> tuple[Callable[..., AsyncDriver[R]], tuple[Builder[R], str]]:
+    ) -> tuple[Callable[[AsyncDriver[Any]], AsyncDriver[Any]], tuple[_Rebuilt]]:
         """The builder and `sync_nodes`, built again on load; see the class."""
         if self._builder is None:
-            msg = (
-                "cannot pickle an AsyncDriver made from a Driver; "
-                "make it with Builder.build_async to pickle it"
-            )
-            raise TypeError(msg)
-        return _build_async_again, (self._builder, self._sync_nodes)
+            raise TypeError(_NATIVE_ASYNC)
+        return _loaded, (self._rebuilt,)
 
     def rebuild(self) -> AsyncDriver[R]:
         """A new driver, built again from this driver's builder and `sync_nodes`.
@@ -2607,10 +2670,10 @@ class AsyncDriver[R = dict[str, object]]:
         keeps them.
         """
         prepared = self._driver.prepare(final_vars, inputs=inputs, overrides=overrides)
-        kept = prepared._async  # noqa: SLF001  # this driver's own plan
-        lock = prepared._async_lock  # noqa: SLF001  # this driver's own plan
+        kept = self._plans
+        lock = self._plans_lock
         with lock:
-            plan = kept.get(self)
+            plan = kept.get(prepared)
         if plan is None:
             runnable = prepared._plan  # noqa: SLF001  # this driver's own plan
             if isinstance(runnable, _Threaded):
@@ -2632,10 +2695,9 @@ class AsyncDriver[R = dict[str, object]]:
                 plan = AsyncPreparedPlan(prepared, self, schedule)
             # Two threads may both get here: either plan will do, and one is kept.
             with lock:
-                kept[self] = plan
-                # A few, the oldest dropped: an AsyncDriver made per request over one
-                # long-lived Driver would otherwise stay alive with each hot plan.
-                while len(kept) > ASYNC_PLANS_PER_PLAN:
+                kept[prepared] = plan
+                # As many as `driver` keeps, the oldest dropped.
+                while len(kept) > PLAN_CACHE_SIZE:
                     kept.pop(next(iter(kept)), None)
         return plan
 
