@@ -968,10 +968,10 @@ lengths.run_many([{"word": "tea"}, {"word": 3}])
   worker that node holds.
 - **Failures.** Once a set fails, no set opens, and every open set stops as a failed run does: its running nodes
   finish, `fnloom.cancelled()` turns `True` in them, and it starts no new node. Then the failure of the
-  lowest-indexed failing set is raised, with the note `while running input set 3 of run_many`. A set that was
-  stopped before its outputs were in raises the "this one stopped" `RuntimeError` of a [run inside a
-  run](#deadlines-and-cancellation), which is never raised in place of the failure that stopped it. A set that never
-  opened fires no hook event.
+  lowest-indexed failing set seen is raised, with the note `while running input set 3 of run_many`; with one failing
+  set, that is always its failure. A set that was stopped before its outputs were in raises the "this one stopped"
+  `RuntimeError` of a [run inside a run](#deadlines-and-cancellation), which is never raised in place of the failure
+  that stopped it. A set that never opened fires no hook event.
 - **`timeout=`** covers every set together, and needs `with_threads`. Each set gets what is left of it as it opens,
   and a set not open when it passes never opens.
 - **`Ctrl-C`** stops every open set and is raised at once. A set the calling thread is running abandons its running

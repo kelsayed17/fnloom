@@ -730,7 +730,9 @@ class PreparedPlan[R = dict[str, object]]:
         sets: list[tuple[dict[str, Any], dict[str, Any]]] = []
         for index, inputs in enumerate(inputs_seq):
             try:
-                sets.append(self._checked(inputs, overrides))
+                # A copy: the iterable may hand out one dict, changed for each set.
+                given = None if inputs is None else dict(inputs)
+                sets.append(self._checked(given, overrides))
             except BaseException as error:
                 error.add_note(f"in input set {index} of run_many")
                 raise

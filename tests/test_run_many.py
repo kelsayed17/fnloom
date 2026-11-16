@@ -16,6 +16,7 @@ from fnloom import _core, _threads
 from helpers import make_module
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from types import ModuleType
 
 pytestmark = pytest.mark.threads
@@ -375,6 +376,43 @@ def test_a_stopped_set_never_hides_the_failure_that_stopped_it() -> None:
     assert raised.value.__notes__[-1] == "while running input set 1 of run_many"
 
 
+def test_a_stopped_sets_hook_errors_never_hide_the_failure() -> None:
+    """A hook raising on every failed run groups set 0's stop with its error.
+
+    That group still only says set 0 was stopped: set 1's failure leads.
+    """
+
+    class OnFailure(fnloom.Hook):
+        @override
+        def after_run(self, event: fnloom.RunEnd) -> None:
+            if not event.ok:
+                raise LookupError(event.inputs["x"])
+
+    nodes = module("rm_stopped_hooked")
+    nodes.TOOLS["failed"] = threading.Event()
+    plan = driver(nodes, 2, hooks=(OnFailure(),)).prepare(["second"], inputs={"x": 0})
+    with pytest.raises(BaseExceptionGroup) as raised:
+        plan.run_many(sets(0, 1))
+    lead = raised.value.exceptions[0]
+    assert isinstance(lead, ValueError)
+    assert lead.args == (1,)
+    assert raised.value.__notes__[-1] == "while running input set 1 of run_many"
+
+
+def test_each_set_is_copied_before_it_is_checked() -> None:
+    """An iterable that hands out one dict, changed for each set, runs every set."""
+    nodes = module("rm_reused")
+    plan = driver(nodes, 2).prepare(["doubled"], inputs={"x": 0, "pause": 0.0})
+
+    def reused() -> Iterator[dict[str, object]]:
+        given: dict[str, object] = {"pause": 0.0}
+        for x in range(4):
+            given["x"] = x
+            yield given
+
+    assert plan.run_many(reused()) == [{"doubled": 2 * x} for x in range(4)]
+
+
 def test_each_set_fires_its_own_run_events() -> None:
     """Each set is its own run: one `run_id`, one start, one end, its own nodes."""
     nodes = module("rm_events")
@@ -477,9 +515,13 @@ def test_a_set_not_open_at_the_deadline_never_opens() -> None:
         )
         runs.starts.clear()
         given = [{"x": x, "pause": 0.0} for x in range(threads + 3)]
-        with pytest.raises(TimeoutError, match=f"input set {threads} and the sets"):
+        with pytest.raises(
+            TimeoutError, match=f"input set {threads} and the sets"
+        ) as raised:
             plan.run_many(given, timeout=0.2)
         assert runs.opened() == list(range(threads))
+        # It never ran, so no note says it did.
+        assert not getattr(raised.value, "__notes__", [])
 
 
 def test_timeout_needs_threads_and_a_good_value() -> None:
@@ -537,7 +579,8 @@ def test_interrupt_stops_run_many_at_once() -> None:
     """`Ctrl-C` in the caller stops every open set and is raised at once."""
     nodes = module("rm_interrupt")
     nodes.TOOLS["gate"] = threading.Event()
-    plan = driver(nodes, 2).prepare(["interrupting"], inputs={"x": 0})
+    built = driver(nodes, 2)
+    plan = built.prepare(["interrupting"], inputs={"x": 0})
     start = time.monotonic()
     try:
         with pytest.raises(KeyboardInterrupt):
@@ -545,6 +588,18 @@ def test_interrupt_stops_run_many_at_once() -> None:
         assert time.monotonic() - start < 1 + PROMPT
     finally:
         nodes.TOOLS["gate"].set()
+    # Once the other set's node returns, its helper leaves and no slot stays held.
+    for thread in threading.enumerate():
+        if thread.name.startswith("fnloom-run-many"):
+            thread.join(WAIT)
+            assert not thread.is_alive()
+    workers = built._workers  # noqa: SLF001  # the driver's own limits
+    assert workers is not None
+    deadline = time.monotonic() + WAIT
+    while _core.held_slots(workers.limits())[0] and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert _core.held_slots(workers.limits())[0] == 0
+    assert plan.run_many(sets(0)) == [{"interrupting": 0}]
 
 
 def test_run_many_inside_a_node_of_its_own_driver_runs_its_sets_in_turn() -> None:

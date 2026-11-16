@@ -275,16 +275,16 @@ def run_sets[T](
     (O17). Each set runs in its own copy of the caller's context, whose
     `CANCELLED` is the batch's stop flag: once a set fails, no set opens, and
     every open set stops, its running nodes finishing first. Then the failure of
-    the lowest-indexed failing set is raised, a `StoppedError` only when no set
-    failed otherwise, since it means only that the set was stopped. A
+    the lowest-indexed failing set seen is raised (`_Batch.outcome`). A
     `KeyboardInterrupt` in the caller stops the open sets and is raised at once.
     """
     deadline = None if timeout is None else time.monotonic() + timeout
     if runners <= 1:
         results: list[T] = []
         for index in range(count):
+            left = _left(deadline, timeout, index)
             try:
-                results.append(one(index, _left(deadline, timeout, index)))
+                results.append(one(index, left))
             except BaseException as error:
                 _noted(error, index)
                 raise
@@ -331,6 +331,17 @@ def _noted(error: BaseException, index: int) -> None:
     error.add_note(f"while running input set {index} of run_many")
 
 
+def _derived(error: BaseException) -> bool:
+    """Whether `error` only says its set was stopped.
+
+    That is a `StoppedError`, alone or leading the group its run's hooks added
+    their errors to.
+    """
+    if isinstance(error, BaseExceptionGroup):
+        return isinstance(error.exceptions[0], _core.StoppedError)
+    return isinstance(error, _core.StoppedError)
+
+
 class _Batch[T]:
     """The input sets of one `run_many` call, opened in index order by its runners."""
 
@@ -341,6 +352,7 @@ class _Batch[T]:
         "_lock",
         "_next",
         "_one",
+        "_pid",
         "_results",
         "_timeout",
         "failures",
@@ -362,11 +374,13 @@ class _Batch[T]:
         self._lock = threading.Lock()
         self._next = 0
         self._results: list[object] = [_MISSING] * count
-        self.failures: list[tuple[int, BaseException]] = []
+        # Each failure: the set's index, its error, and whether the set opened.
+        self.failures: list[tuple[int, BaseException, bool]] = []
         # Under the run the caller is in, if any: so the sets stop with it too.
         self.stop = _core.Stop()
         self._context = contextvars.copy_context()
         self._context.run(CANCELLED.set, self.stop)
+        self._pid = os.getpid()
 
     def work(self, *, caller: bool = False) -> None:
         """Opens the next set and runs it, until none is left or the batch stops."""
@@ -376,27 +390,45 @@ class _Batch[T]:
                     return
                 index = self._next
                 self._next += 1
+            opened = False
             try:
                 left = _left(self._deadline, self._timeout, index)
+                opened = True
                 self._results[index] = self._context.copy().run(self._one, index, left)
             except BaseException as error:
+                if os.getpid() != self._pid:
+                    # A node forked, and this is the child: its lock may be held by
+                    # a thread it doesn't have. The caller raises; a helper ends.
+                    if caller:
+                        raise
+                    return
                 with self._lock:
-                    self.failures.append((index, error))
-                self.stop.set()
+                    self.failures.append((index, error, opened))
+                    # Under the lock: no runner opens a set once one has failed.
+                    self.stop.set()
                 if caller and isinstance(error, KeyboardInterrupt):
                     _noted(error, index)
                     raise
 
     def outcome(self) -> list[T]:
-        """Every set's result, once every runner is done; see `run_sets` on failures."""
+        """Every set's result, once every runner is done.
+
+        With failures, the lowest-indexed one is raised, noted with its index
+        when its set opened. An interrupt or an exit (no `Exception`) comes
+        before any error, and a set's `StoppedError` only when no set failed
+        otherwise, since it means only that the set was stopped.
+        """
         if self.failures:
-            roots = [
-                failure
-                for failure in self.failures
-                if not isinstance(failure[1], _core.StoppedError)
-            ]
-            index, error = min(roots or self.failures, key=lambda failure: failure[0])
-            _noted(error, index)
+            index, error, opened = min(
+                self.failures,
+                key=lambda failure: (
+                    isinstance(failure[1], Exception),
+                    _derived(failure[1]),
+                    failure[0],
+                ),
+            )
+            if opened:
+                _noted(error, index)
             raise error
         if any(result is _MISSING for result in self._results):
             msg = "the run that started this run_many has stopped, so it stopped"
