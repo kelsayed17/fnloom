@@ -26,6 +26,7 @@ run as without the cache, and nothing is stored for that node.
 import functools
 import os
 import threading
+import time
 import typing
 import warnings
 from collections import abc
@@ -1171,27 +1172,33 @@ class CacheRun:
         overrides: dict[str, object],
         observers: Sequence[_core.ObserverBase] = (),
         /,
+        *,
+        timeout: float | None = None,
     ) -> dict[str, object]:
         """Runs the plan, already checked, through the store; the outputs, sorted.
 
         `observers` see the nodes the final core run computes: not a hit, nor a
-        node of the nested run.
+        node of the nested run. `timeout`, in seconds, bounds both core runs
+        together, on a driver's pool only.
         """
-        return self._finished(self.begin(inputs, overrides), inputs, observers)
+        deadline = None if timeout is None else time.monotonic() + timeout
+        begun = self.begin(inputs, overrides, deadline=deadline)
+        return self._finished(begun, inputs, observers, deadline=deadline)
 
-    def _execute(
+    def _execute(  # noqa: PLR0913, PLR0917  # a nested run's request, and its deadline
         self,
         inputs: dict[str, object],
         overrides: dict[str, object],
         versions: dict[str, bytes | None],
         warned: set[str],
         values: dict[str, object],
+        deadline: float | None,
     ) -> dict[str, object]:
         """A nested run; `values` receives every value it computed or loaded."""
         begun = self.begin(
             inputs, overrides, versions=versions, warned=warned, values=values
         )
-        return self._finished(begun, inputs)
+        return self._finished(begun, inputs, deadline=deadline)
 
     def _finished(
         self,
@@ -1199,11 +1206,14 @@ class CacheRun:
         inputs: dict[str, object],
         observers: Sequence[_core.ObserverBase] = (),
         on_value: Callable[[str, object], None] | _core.Keys | None = None,
+        *,
+        deadline: float | None = None,
     ) -> dict[str, object]:
         """Runs a begun run's plan, storing each value as its node succeeds.
 
         `on_value`, when given, takes each value instead: by default the binding's
-        keys store it, or else `finish` does.
+        keys store it, or else `finish` does. `deadline`, a `time.monotonic()`
+        time, is when a run on a driver's pool is abandoned.
         """
         if on_value is None:
             on_value = begun.pending
@@ -1223,6 +1233,9 @@ class CacheRun:
                 late=begun.late,
                 threads=workers.threads(),
                 limits=workers.limits(),
+                timeout=None
+                if deadline is None
+                else max(0.0, deadline - time.monotonic()),
             )
         if begun.values is not None:
             begun.values.update(begun.hits)
@@ -1240,11 +1253,13 @@ class CacheRun:
         values: dict[str, object] | None = None,
         native: bool = True,
         reasons: dict[str, str] | None = None,
+        deadline: float | None = None,
     ) -> Begun:
         """Everything a cached run does before its core run: versions, keys, hits.
 
         `known` holds the values of the nested run, when the caller ran it; when
-        it is `None`, the nested run, if any, runs here, synchronously. `versions`
+        it is `None`, the nested run, if any, runs here, synchronously, abandoned
+        at `deadline`, a `time.monotonic()` time. `versions`
         are the inputs' and overrides' when the caller already has them, and
         `warned` the nodes it already warned about. `values`, when given, receives
         every value the run computes or loads. With `native`, a plain
@@ -1263,7 +1278,9 @@ class CacheRun:
         if known is None:
             known = {}
             if self._nested is not None:
-                self._nested._execute(inputs, overrides, dict(versions), warned, known)  # noqa: SLF001  # the same class
+                self._nested._execute(  # noqa: SLF001  # the same class
+                    inputs, overrides, dict(versions), warned, known, deadline
+                )
         if reasons is None:
             for name in self._first:
                 versions[name] = _version(known[name], name, warned)
@@ -1441,12 +1458,16 @@ class CacheRun:
         overrides: dict[str, object],
         dispatch: Dispatch,
         start: Callable[[tuple[str, ...]], None],
+        *,
+        timeout: float | None = None,
     ) -> dict[str, object]:
         """`run`, reporting every node to `dispatch`, a run's own dispatcher.
 
         Runs `reported_levels`: each level's nodes report through `dispatch`'s
         observers, and a node whose `after_node` raised is not stored (`kept`).
+        `timeout`, in seconds, bounds every level's core run together.
         """
+        deadline = None if timeout is None else time.monotonic() + timeout
         levels = self.reported_levels(inputs, overrides, dispatch, start)
         level, begun = next(levels)
         while True:
@@ -1458,6 +1479,7 @@ class CacheRun:
                 inputs,
                 dispatch.observers(),
                 functools.partial(level.kept, begun, dispatch),
+                deadline=deadline,
             )
             try:
                 level, begun = levels.send(

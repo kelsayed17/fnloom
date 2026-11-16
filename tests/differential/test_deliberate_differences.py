@@ -6408,6 +6408,36 @@ def test_q167_block_nodes_see_the_callers_context_variables() -> None:
         ours.VAR.reset(token)
 
 
+# A node that hangs until the test releases it (Plan 11, task 9).
+_HUNG = """
+import threading
+
+RELEASE = threading.Event()
+
+
+def hung(n: int) -> int:
+    RELEASE.wait(5)
+    return n
+"""
+
+
+@pytest.mark.deliberate("Q170")
+@pytest.mark.threads
+def test_q170_a_run_has_a_deadline() -> None:
+    """Hamilton's `execute` takes no timeout; fnloom's abandons a hung node at one."""
+    for method in (hamilton_driver.Driver.execute, hamilton_driver.Driver.raw_execute):
+        assert "timeout" not in inspect.signature(method).parameters
+    ours = block_module("q170_f", _HUNG, "fnloom")
+    driver = fnloom.Builder().with_modules(ours).with_threads(2).build()
+    start = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError):
+            driver.execute(["hung"], inputs={"n": 1}, timeout=0.2)
+        assert time.monotonic() - start < 1
+    finally:
+        ours.RELEASE.set()
+
+
 _MET_BRANCHES = """
 def picked(n: int) -> Parallelizable[int]:
     yield from range(n)

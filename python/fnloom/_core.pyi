@@ -11,6 +11,7 @@ __all__ = [
     "MemoryStore",
     "ObserverBase",
     "Plan",
+    "Stop",
     "Threads",
     "UnfingerprintableError",
     "_panic_for_test",
@@ -21,6 +22,7 @@ __all__ = [
     "core_version",
     "fingerprint",
     "hash_parts",
+    "held_slots",
     "live_workers",
 ]
 
@@ -56,6 +58,7 @@ def arm_worker_panic() -> None: ...
 def arm_hook_panic() -> None: ...
 def arm_report_panic() -> None: ...
 def arm_perform_panic() -> None: ...
+def held_slots(limits: Limits) -> tuple[int, dict[str, int], dict[str, int]]: ...
 
 @final
 class Graph:
@@ -95,6 +98,7 @@ class Plan:
         *,
         threads: Threads | None = None,
         limits: Limits | None = None,
+        timeout: float | None = None,
     ) -> dict[str, object]: ...
     def steps(self) -> list[tuple[str, str]]: ...
     def late(self) -> list[str]: ...
@@ -118,6 +122,12 @@ class Threads:
     @property
     def max_workers(self) -> int: ...
     def close(self) -> None: ...
+
+@final
+class Stop:
+    # A run's stop flag: true once the run is stopping. Made by the binding only.
+    def __new__(cls, never: Never, /) -> NoReturn: ...
+    def __bool__(self) -> bool: ...
 
 @final
 class KeyPlan:
