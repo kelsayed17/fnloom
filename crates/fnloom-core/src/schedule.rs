@@ -13,6 +13,8 @@
 //! taken its arguments, and handed back in `Report::released`, never dropped here.
 
 use std::collections::BTreeMap;
+use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 
 use crate::branch::{Need, declined_wrongly, needs, node_error};
@@ -32,8 +34,87 @@ pub struct TaskId(pub u32);
 /// from the outermost plan inwards, then the step's position in its own scope. Keys compare
 /// lexicographically, a prefix first: the pull of item `i` of the expand keyed `k` is `k`
 /// then `i`, just before that branch's first step, `k`, `i`, `0`.
-#[derive(Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct OrderKey(pub Vec<u32>);
+///
+/// A key of up to five parts, a step outside every block or in a block nested once, is held
+/// inline, so building one allocates nothing.
+#[derive(Clone)]
+pub struct OrderKey(Parts);
+
+/// How many parts an `OrderKey` holds without allocating.
+const INLINE: usize = 5;
+
+#[derive(Clone)]
+enum Parts {
+    Inline(u8, [u32; INLINE]),
+    Heap(Vec<u32>),
+}
+
+impl OrderKey {
+    /// The key of these parts.
+    #[must_use]
+    pub fn new(parts: &[u32]) -> Self {
+        Self::joined(parts, &[])
+    }
+
+    /// The key of `prefix` then `tail`.
+    pub(crate) fn joined(prefix: &[u32], tail: &[u32]) -> Self {
+        let len = prefix.len() + tail.len();
+        if len > INLINE {
+            return Self(Parts::Heap(extend(prefix, tail)));
+        }
+        let mut parts = [0; INLINE];
+        parts[..prefix.len()].copy_from_slice(prefix);
+        parts[prefix.len()..len].copy_from_slice(tail);
+        Self(Parts::Inline(u8::try_from(len).unwrap_or(0), parts))
+    }
+
+    /// Its parts, outermost first.
+    #[must_use]
+    pub fn as_slice(&self) -> &[u32] {
+        match &self.0 {
+            Parts::Inline(len, parts) => &parts[..usize::from(*len)],
+            Parts::Heap(parts) => parts,
+        }
+    }
+}
+
+impl Default for OrderKey {
+    fn default() -> Self {
+        Self::new(&[])
+    }
+}
+
+impl fmt::Debug for OrderKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("OrderKey").field(&self.as_slice()).finish()
+    }
+}
+
+impl PartialEq for OrderKey {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl Eq for OrderKey {}
+
+impl PartialOrd for OrderKey {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for OrderKey {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_slice().cmp(other.as_slice())
+    }
+}
+
+impl Hash for OrderKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_slice().hash(state);
+    }
+}
 
 /// One argument of a `Compute` task, by the absence rules.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1405,7 +1486,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             .instances
             .get(entry.base)
             .map_or(&[][..], |found| found.prefix.as_slice());
-        OrderKey(extend(prefix, entry.tail()))
+        OrderKey::joined(prefix, entry.tail())
     }
 
     fn ready_push(&mut self, id: usize) {
@@ -1489,7 +1570,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             return;
         };
         // By the expand's own key: an inner frame's extends its outer one's.
-        let key = OrderKey(frame.key.clone());
+        let key = OrderKey::new(&frame.key);
         if self.closing.iter().any(|&(_, frame)| frame == at) {
             return;
         }
@@ -1830,7 +1911,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             Ok(false) => Kind::Compute,
             Err(failure) => {
                 let prefix = &self.instance(instance).prefix;
-                self.fail(OrderKey(extend(prefix, &[as_u32(position)])), failure);
+                self.fail(OrderKey::joined(prefix, &[as_u32(position)]), failure);
                 return;
             }
         };
@@ -2094,7 +2175,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         }
         if let Some(node) = missing {
             self.fail(
-                OrderKey(found.prefix),
+                OrderKey::new(&found.prefix),
                 broken(format!(
                     "collected node '{}' has no value at the end of a branch",
                     graph.node(node).name
@@ -2139,7 +2220,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             for (&node, slots) in collected.iter().zip(frame.collected) {
                 let Some(slots) = slots.into_iter().collect::<Option<Vec<_>>>() else {
                     self.fail(
-                        OrderKey(frame.key.clone()),
+                        OrderKey::new(&frame.key),
                         broken(format!(
                             "a branch of '{}' was lost",
                             graph.node(frame.node).name
@@ -2269,7 +2350,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                 let found = self.instance(entry.at);
                 let key = extend(&found.prefix, &[as_u32(self.layout.position(node))]);
                 let failure = node_error(graph, graph.node(node), error, &found.branch, Vec::new());
-                self.fail(OrderKey(key), failure);
+                self.fail(OrderKey::new(&key), failure);
             }
             (kind, Outcome::Failed(error)) => {
                 let branch = match kind {
@@ -2396,7 +2477,7 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                     } else {
                         None
                     };
-                    let key = OrderKey(frame.key.clone());
+                    let key = OrderKey::new(&frame.key);
                     self.release(value);
                     self.release_all(iterator);
                     self.fail(key, declined_wrongly(node));
@@ -3127,12 +3208,21 @@ mod tests {
 
     #[test]
     fn order_keys_compare_by_step_then_branch() {
-        let key = |parts: &[u32]| OrderKey(parts.to_vec());
+        let key = |parts: &[u32]| OrderKey::new(parts);
         assert!(key(&[0, 3, 1]) < key(&[0, 3, 2]));
         assert!(key(&[0, 3, 2]) < key(&[1]));
         // A pull precedes its branch's first step, which precedes the next pull.
         assert!(key(&[2, 0]) < key(&[2, 0, 0]));
         assert!(key(&[2, 0, 5]) < key(&[2, 1]));
+        // A key held inline compares with one that allocated as their parts do.
+        assert!(key(&[1, 2, 3, 4, 5]) < key(&[1, 2, 3, 4, 5, 0]));
+        assert!(key(&[1, 2, 3, 4, 6]) > key(&[1, 2, 3, 4, 5, 9]));
+        assert_eq!(
+            OrderKey::joined(&[1, 2, 3, 4], &[5, 6]).as_slice(),
+            [1, 2, 3, 4, 5, 6]
+        );
+        assert_eq!(OrderKey::joined(&[7], &[8]), key(&[7, 8]));
+        assert_eq!(OrderKey::default().as_slice(), [] as [u32; 0]);
         let graph = fan(items(&[7, 8]));
         let plan = graph.prepare(&request(&["total"], &[], &[])).unwrap();
         let picked = plan.order_key(graph.id_of("picked").unwrap(), &[]);
@@ -3142,7 +3232,7 @@ mod tests {
             .filter(|t| matches!(t.work, Work::Pull { .. }))
             .map(|t| &t.key)
             .collect();
-        let items = |i: u32| key(&[picked.0[0], i]);
+        let items = |i: u32| key(&[picked.as_slice()[0], i]);
         assert_eq!(pulls, [&items(0), &items(1), &items(2)]);
         let details = tasks
             .iter()

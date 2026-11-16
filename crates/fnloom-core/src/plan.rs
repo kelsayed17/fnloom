@@ -203,7 +203,7 @@ impl Plan {
             }
             key.push(as_u32(self.position(at)));
         }
-        OrderKey(key)
+        OrderKey::new(&key)
     }
 }
 

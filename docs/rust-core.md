@@ -165,8 +165,8 @@ workers keeps it behind one lock. `Plan::run` stays the reference it is tested a
 - `recycle(args)` hands a compute's emptied argument vector back, so the next compute reuses its buffer.
 - `finish(&plan, &graph)` returns the outputs by id, or the failure with the lowest order key.
 
-The ready set is a heap of entry ids whose keys are compared in place, never stored: one run allocates an `OrderKey`
-only for each task it hands out.
+The ready set is a heap of entry ids whose keys are compared in place, never stored: an `OrderKey` is built only for a
+task handed out, and one of up to five parts (`OrderKey::new`, `as_slice`) is held inline, with no allocation.
 
 An order key (`OrderKey`, also given by `Plan::order_key(node, branch)`) is the (step position, branch index) pairs of
 the expands whose blocks hold a step, outermost first, then the step's position. Keys compare lexicographically, so
