@@ -4,6 +4,7 @@ import copy
 import dataclasses
 import logging
 import pickle
+import threading
 import time
 from dataclasses import FrozenInstanceError
 from typing import Any, cast, override
@@ -919,6 +920,24 @@ def test_log_failures_uses_the_given_logger_and_level(
     with caplog.at_level(logging.DEBUG), pytest.raises(ValueError, match="bad"):
         again.execute(["boom"], inputs={"x": 1, "big": [1]})
     assert [r.name for r in _failures(caplog)] == ["my.app"]
+
+
+class TaggedLogFailures(fnloom.LogFailures):
+    """A subclass with an attribute of its own, at module level so pickle finds it."""
+
+    def __init__(self, tag: str) -> None:
+        """Logs to `my.app` at `WARNING`, tagged `tag`."""
+        super().__init__(logging.getLogger("my.app"), level=logging.WARNING)
+        self.tag = tag
+
+
+def test_a_log_failures_subclass_keeps_its_own_attributes_when_pickled() -> None:
+    """Pickling keeps a subclass's attributes beside the settings, and a fresh lock."""
+    again = _round_trip(TaggedLogFailures("mine"))
+    assert again.tag == "mine"
+    assert (again._logger.name, again._level) == ("my.app", logging.WARNING)  # noqa: SLF001  # its settings
+    assert again._logged == {}  # noqa: SLF001  # no run in flight
+    assert isinstance(again._lock, type(threading.Lock()))  # noqa: SLF001  # a lock of its own
 
 
 def test_log_failures_is_silent_on_success_and_on_hits(
