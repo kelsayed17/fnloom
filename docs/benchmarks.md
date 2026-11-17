@@ -617,6 +617,9 @@ of the 48 rows; the others fall within these ranges:
 | layered, 1,000 | async | 0.991 → 0.861 / 0.990 → 0.869 | 2.394 → 2.555 / 2.403 → 2.563 | 1.07 / 1.07 |
 | layered, 1,000 | sync | 0.781 → 0.669 / 23.2 → 23.7 | 2.178 → 2.362 / 26.3 → 26.6 | 1.08 / 1.01 |
 
+On 3.14t (three processes per side) the unhooked rows are 0.87 to 1.17 times 0.5.0's, over 10% only on the fan-in of
+100 (1.12 to 1.17), and the hooked ones 1.02 to 1.24.
+
 The hooked async rows cost about 0.2 to 0.3 µs more per node than 0.5.0's. Profiled, the event code in Python is
 the same; what is new is the path to it: the async driver steps the core scheduler, which sends each node event
 from Rust through the hooked run's observer to its `Dispatch`, with the node's order key, where 0.5.0's async driver
