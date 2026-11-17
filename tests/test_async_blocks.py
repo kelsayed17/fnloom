@@ -69,15 +69,48 @@ def test_an_async_generator_expand_fans_out(
     assert sorted(module.SEEN) == [(i,) for i in range(5)]
 
 
+# Each branch waits, bounded, for the branch after it, so they finish in reverse order.
+REVERSED = """
+import asyncio
+
+from fnloom import Collect, Parallelizable, current_branch
+
+SEEN = []
+FINISHED = {}
+
+
+async def picked(n: int) -> Parallelizable[int]:
+    for item in range(n):
+        FINISHED.setdefault(item, asyncio.Event())
+        yield item
+
+
+async def doubled(picked: int, n: int) -> int:
+    if picked + 1 < n:
+        after = FINISHED.setdefault(picked + 1, asyncio.Event())
+        await asyncio.wait_for(after.wait(), 5)
+    SEEN.append(current_branch())
+    FINISHED[picked].set()
+    return picked * 2
+
+
+def plus(doubled: int) -> int:
+    return doubled + 1
+
+
+def total(plus: Collect[int]) -> list[int]:
+    return plus
+"""
+
+
 def test_async_collect_is_in_branch_order() -> None:
     """Branches finish in reverse, and the collect is still in item order."""
-    module = make_module("async_reversed", FANNED)
+    module = make_module("async_reversed", REVERSED)
     driver = fnloom.Builder().with_modules(module).with_threads(4).build_async()
     assert _run(driver.execute(["total"], inputs={"n": 5})) == {
         "total": [1, 3, 5, 7, 9]
     }
-    # The last item's branch, which slept least, finished first.
-    assert module.SEEN[0] == (4,)
+    assert [(i,) for i in reversed(range(5))] == module.SEEN
 
 
 MEETING = """

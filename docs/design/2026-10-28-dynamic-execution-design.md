@@ -1,7 +1,7 @@
 # fnloom — dynamic execution, design
 
-**Status:** approved by the maintainer 2026-10-29, with the open questions of §13 decided. Plan 10's PR A1 (typed
-absence in the core and the front end) is merged in #56; the rest is pending.
+**Status:** approved by the maintainer 2026-10-29, with the open questions of §13 decided, and built: milestones A
+and B as Plan 10 (released in 0.5.0), and C to E as Plan 11 (released in 0.6.0); see §14.
 It designs Plans 10 and 11 of the [roadmap](../plans/2026-10-28-roadmap-ahead-of-hamilton.md): dynamic fan-out and
 fan-in, a parallel executor, and a typed absent outcome, and it says which parts of the roadmap's "Beyond Hamilton" it
 delivers and which it only leaves room for. Facts about Hamilton were read in the `apache-hamilton 1.90.0` wheel and
@@ -596,6 +596,9 @@ is written into Plan 10's last task.
 Plan 12's PRs A to G ship as 0.4.0. Plan 10's implementation plan follows Plan 12, and Plan 10 ends in the release after
 that instead of 0.3.0.
 
+**Implementation plan for milestones C to E (2026-11-15):** [Plan 11](../plans/2026-11-15-plan-11-parallel-executor.md),
+approved 2026-11-16 and built in #104 to #112; it ships as 0.6.0.
+
 **Implementation plan (2026-11-05):** [Plan 10](../plans/2026-11-05-plan-10-absence-and-fan-out.md), built after
 Plan 12's PRs A to G merge. Per the maintainer's 2026-11-03 decision above, Plan 12 is 0.4.0 and Plan 10 ships as
 0.5.0, the release after it.
@@ -691,9 +694,32 @@ Plan 12's PRs A to G merge. Per the maintainer's 2026-11-03 decision above, Plan
   departs from this design, each recorded in the plan's calls: `Evaluate::is_absent` and an opt-in `Blocks` trait
   instead of an `evaluate` returning an outcome and §5's `expand` iterator; `InputSpec.collect` instead of a collect
   dependency;
-  `Step.block` instead of §5's action set; `PlanError::OutputsInBlocks` and `OverridesInBlocks`, each listing every
+  `Plan::block_of(expand)`, kept beside the steps, instead of §5's action set (corrected 2026-11-16: an earlier
+  version of this entry said a `Step.block` field); `PlanError::OutputsInBlocks` and `OverridesInBlocks`, each listing every
   culprit, instead of §4.3's `OutputInBlock`; `Parallelizable[T | Absent]` refused, and `bool(ABSENT)` a `TypeError`;
   the builtin SVG engine labels block nodes and edges instead of boxing a block; `build_async()` refuses an expand
   until Plan 11 (Q132); and a block reading its own collect back through nodes outside it refused at build. §12.2's
   rows without threads are in the [benchmarks](../benchmarks.md#fan-out-and-absence): a branch costs about 0.5 µs,
   under the 2 µs target.
+- **2026-11-16:** milestones C to E are built, as [Plan 11](../plans/2026-11-15-plan-11-parallel-executor.md) (#104
+  to #111, and the close-out #112), released in 0.6.0: the core `Scheduler`, `with_threads`, per-node and per-group
+  limits, single-flight per key, deadlines and `cancelled()`, `run_many`, the async driver on the scheduler with
+  blocks, and `absent_on` for partial results (Q133, Q134, Q167 to Q171). The maintainer approved every departure
+  in the plan's calls and its PRs, as merged: the `Scheduler` borrows nothing, and takes a `Layout` built once per
+  plan, a caller-owned `Report` and `recycle`, with an opaque `TaskId`; one task call path in the binding;
+  `_core.Plan.run(..., threads=, limits=, timeout=)` as the one entry point; a branch's hits from a `Probe` task;
+  an expand iterated on the worker that computed it; a collect's arguments gathered; stop as scheduler state;
+  public order keys (`Plan::order_key`) on node events, with `RunEnd.skipped` and `absent_errors` sorted by them;
+  `LateKeys` told the branch, and check results keyed by node and branch; error absence through the core
+  (`Evaluate::absent_on_error`, `Observer::absent_error`, `Outcome::ErrorAbsent`); `absent_on`'s annotation checked
+  at build; group sizes set by `Builder.with_limits`, apart from `with_threads(max_workers)` (§6.2's
+  `with_threads(max_workers, limits)` departs); the async driver stepping the core scheduler through
+  `_core.Stepper`; `timeout=` only with `with_threads`, the caller running no node task under a deadline; pool
+  workers as daemon `threading.Thread`s, each attached once for life; one wake per pool; a run's own failure
+  leading at its deadline, `Ctrl-C` abandoning like a deadline, and a pool thread more per lending run;
+  `fnloom.StoppedError` for a run stopped by its caller's stop, never raised in place of the root failure; abandoned
+  async sync calls keeping their slots until they return; `run_many` in Python over each set's own `run`, nested
+  sets run one after another, and per-driver helper permits; a plan holding what its driver pickles as, not the
+  driver; and a flat scheduler path for a plan without blocks or absence rules, about 1.8 times `Plan::run`'s
+  instructions per node with one worker, against the plan's target of 2 (O19). §12.2's parallel rows are in the
+  [benchmarks](../benchmarks.md#parallel-fan-out).

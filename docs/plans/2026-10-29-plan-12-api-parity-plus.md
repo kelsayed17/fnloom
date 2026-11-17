@@ -30,7 +30,7 @@ Plans 5 to 9 settled. Anything that changes what a node computes enters its cach
 - Every deliberate difference from Hamilton is a register row with a `deliberate("Qn")` test.
 - Every kept behaviour has a differential test in `tests/differential/` running both libraries.
 - No output may depend on `PYTHONHASHSEED`, dict insertion of a set, or the machine (Graphviz present or not).
-- fnloom is generic: examples use neutral domains (sales, taxes, regions).
+- fnloom is generic: examples use neutral domains (shipping, weather, regions).
 
 ## Decisions, one per item
 

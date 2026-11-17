@@ -219,7 +219,7 @@ def _limits(typevar: TypeVar) -> tuple[object, tuple[object, ...]]:
 def _alias_value(annotation: object) -> object | None:  # noqa: PLR0911  # one return per form
     """What a PEP 695 alias names (Q44), or `None` when `annotation` is no alias.
 
-    `type Price = float` names `float`. A subscripted generic alias, `Pair[int]`
+    `type Weight = float` names `float`. A subscripted generic alias, `Pair[int]`
     for `type Pair[T] = tuple[T, T]`, names its value with the arguments put in:
     when the value is one of the alias's own type parameters, or a generic whose
     free parameters are exactly the alias's, in order. Any other generic alias

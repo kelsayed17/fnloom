@@ -450,6 +450,7 @@ class _Run:
         "_stepper",
         "_stopped",
         "_threads",
+        "_timer",
         "_waking",
     )
 
@@ -488,6 +489,8 @@ class _Run:
         self._over = False
         # Whether a waker is registered for a slot this run waits on.
         self._waking = False
+        # The next look at `parent`, cancelled as `wait` ends, so the loop keeps no run.
+        self._timer: asyncio.TimerHandle | None = None
 
     async def wait(self) -> dict[str, object]:
         """Runs every task; the outputs, or the run's failure, raised.
@@ -499,7 +502,7 @@ class _Run:
         try:
             self._drain()
             if self._parent is not None and not self._finished.done():
-                self._loop.call_later(_FOLLOW, self._follow)
+                self._timer = self._loop.call_later(_FOLLOW, self._follow)
             await self._finished
         except asyncio.CancelledError:
             # The caller was cancelled: its nodes stop before the caller hears of it.
@@ -516,6 +519,8 @@ class _Run:
             raise
         finally:
             self._over = True
+            if self._timer is not None:
+                self._timer.cancel()
         return self._stepper.outputs()
 
     def _drain(self) -> None:
@@ -779,7 +784,7 @@ class _Run:
             return
         parent = self._parent
         if parent is not None and not bool(parent):
-            self._loop.call_later(_FOLLOW, self._follow)
+            self._timer = self._loop.call_later(_FOLLOW, self._follow)
             return
         try:
             # The stepper stops as it sees the stopped parent, and the drain cancels

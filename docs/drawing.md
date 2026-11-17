@@ -4,29 +4,29 @@ A driver draws its graph as text: DOT, which Graphviz lays out, with nothing to 
 one module:
 
 ```python
-# file: prices.py
+# file: parcels.py
 from fnloom import config
 
 
-def subtotal(price: float, quantity: int) -> float:
-    """What the items cost."""
-    return price * quantity
+def load(weight: float, quantity: int) -> float:
+    """What the items weigh."""
+    return weight * quantity
 
 
-def shipping(subtotal: float, free_above: float = 50.0) -> float:
-    """Free above a threshold, a flat rate below it."""
-    return 0.0 if subtotal > free_above else 4.5
+def packaging(load: float, bare_above: float = 50.0) -> float:
+    """None above a threshold, a fixed box below it."""
+    return 0.0 if load > bare_above else 4.5
 
 
 @config.when(region="eu")
-def tax__eu(subtotal: float) -> float:
-    """VAT."""
-    return subtotal * 0.2
+def pallet__eu(load: float) -> float:
+    """The EU's pallet."""
+    return load * 0.2
 
 
-def total(subtotal: float, shipping: float, tax: float) -> float:
-    """What the customer pays."""
-    return subtotal + shipping + tax
+def total(load: float, packaging: float, pallet: float) -> float:
+    """What the shipment weighs."""
+    return load + packaging + pallet
 ```
 
 ## A drawing
@@ -36,14 +36,14 @@ broken by name, and its `edges`, each a `(dependency, node)` pair:
 
 ```python
 import fnloom
-import prices
+import parcels
 
-driver = fnloom.Builder().with_modules(prices).with_config({"region": "eu"}).build()
+driver = fnloom.Builder().with_modules(parcels).with_config({"region": "eu"}).build()
 drawing = driver.draw()
 [node.name for node in drawing.nodes]
-# -> ['free_above', 'price', 'quantity', 'subtotal', 'shipping', 'tax', 'total']
+# -> ['bare_above', 'quantity', 'weight', 'load', 'packaging', 'pallet', 'total']
 drawing.edges[:2]
-# -> (('price', 'subtotal'), ('quantity', 'subtotal'))
+# -> (('quantity', 'load'), ('weight', 'load'))
 ```
 
 Each input is a node of its own, drawn with a dashed outline, with an edge to every node that reads it. Config is not
@@ -51,9 +51,9 @@ drawn, since it is never a node; a `@config.when` node's label shows the conditi
 node's name, or its `display_name` tag, over its whole type:
 
 ```python
-tax = drawing.nodes[5]
-(tax.title, tax.type, tax.condition)
-# -> ('tax', 'float', "region == 'eu'")
+pallet = drawing.nodes[5]
+(pallet.title, pallet.type, pallet.condition)
+# -> ('pallet', 'float', "region == 'eu'")
 ```
 
 `to_dot()` writes the text, and `str(drawing)` is the same. `orient` sets the direction edges point (`"LR"`, `"TB"`,
@@ -80,9 +80,9 @@ test.
 Each node's `marks` say how it is drawn:
 
 ```python
-path = driver.draw_path_between("subtotal", "total")
+path = driver.draw_path_between("load", "total")
 {node.name: sorted(node.marks) for node in path.nodes}
-# -> {'free_above': ['context'], 'price': ['context'], 'quantity': ['context'], 'subtotal': ['path'], 'shipping': ['path'], 'tax': ['path'], 'total': ['path']}
+# -> {'bare_above': ['context'], 'weight': ['context'], 'quantity': ['context'], 'load': ['path'], 'packaging': ['path'], 'pallet': ['path'], 'total': ['path']}
 ```
 
 A node that [may be absent](writing-nodes.md#declining) is marked `may be absent` in every drawing, and drawn with a
@@ -92,8 +92,8 @@ dashed outline, named in the legend.
 nodes with no path between them are a `ValueError` too:
 
 ```python
-driver.draw_path_between("total", "subtotal")
-# raises ValueError: no path from 'total' to 'subtotal'
+driver.draw_path_between("total", "load")
+# raises ValueError: no path from 'total' to 'load'
 ```
 
 ## A run
@@ -104,10 +104,10 @@ drawn:
 
 ```python
 run = driver.draw_execution(
-    ["total"], inputs={"price": 9.5, "quantity": 2}, overrides={"shipping": 0.0}
+    ["total"], inputs={"weight": 9.5, "quantity": 2}, overrides={"packaging": 0.0}
 )
 {node.name: sorted(node.marks) for node in run.nodes}
-# -> {'price': [], 'quantity': [], 'subtotal': [], 'shipping': ['override'], 'tax': [], 'total': ['output']}
+# -> {'weight': [], 'quantity': [], 'load': [], 'packaging': ['override'], 'pallet': [], 'total': ['output']}
 ```
 
 It refuses what `validate` refuses, every problem in one `ValueError`, so a drawing never shows a run that can't
@@ -115,9 +115,9 @@ happen. `validate=False` draws as if every required input were supplied:
 
 ```python
 driver.draw_execution(["total"])
-# raises ValueError: missing inputs: 'price' (needed by 'subtotal'); 'quantity' (needed by 'subtotal')
+# raises ValueError: missing inputs: 'quantity' (needed by 'load'); 'weight' (needed by 'load')
 [node.name for node in driver.draw_execution(["total"], validate=False).nodes][:3]
-# -> ['price', 'quantity', 'subtotal']
+# -> ['quantity', 'weight', 'load']
 ```
 
 The async driver draws the same drawings.
@@ -140,14 +140,14 @@ from fnloom import tag
 
 class Totals(TypedDict):
     net: float
-    tax: float
+    tare: float
 
 
-@tag(owner=["sales", "support"], stage="raw")
-def order_total(price: float, quantity: int) -> Totals:
-    """The order's net and tax."""
-    net = price * quantity
-    return {"net": net, "tax": net * 0.2}
+@tag(owner=["warehouse", "support"], stage="raw")
+def order_total(weight: float, quantity: int) -> Totals:
+    """The order's net weight and tare."""
+    net = weight * quantity
+    return {"net": net, "tare": net * 0.2}
 ```
 
 ```python
@@ -158,7 +158,7 @@ shown = orders_driver.draw(show_tags=("owner",), show_schema=True, hide_inputs=T
 [node.name for node in shown.nodes]
 # -> ['order_total']
 shown.to_mermaid().splitlines()[1]
-# -> '  n0["order_total<br>orders.Totals<br>owner=sales, support<br>net: float<br>tax: float"]'
+# -> '  n0["order_total<br>orders.Totals<br>owner=warehouse, support<br>net: float<br>tare: float"]'
 orders_driver.draw(show_types=False, hide_inputs=True).to_mermaid().splitlines()[1]
 # -> '  n0["order_total"]'
 ```
@@ -187,8 +187,8 @@ def variants(view, drawn):
 styled = driver.draw().styled(
     node=Style(stroke="navy"), edge=Style(stroke="gray", dashed=True), style=variants
 )
-[line for line in styled.to_dot().splitlines() if line.startswith('  "tax" [')]
-# -> ['  "tax" [label="tax\\nfloat\\nregion == \'eu\'" fillcolor="#ffd700" color="#000080"]']
+[line for line in styled.to_dot().splitlines() if line.startswith('  "pallet" [')]
+# -> ['  "pallet" [label="pallet\\nfloat\\nregion == \'eu\'" fillcolor="#ffd700" color="#000080"]']
 styled.to_mermaid().splitlines()[-2:]
 # -> ['  style n5 fill:#ffd700,stroke:#000080', '  style n6 stroke:#000080']
 ```
@@ -202,7 +202,7 @@ so a typo never draws black:
 
 ```python
 driver.draw().styled(style=lambda view, drawn: Style(fill="gren"))
-# raises ValueError: style for node 'free_above': Style fill 'gren' is not a colour: give '#rrggbb' or a CSS name in Style.COLOURS, such as 'red'
+# raises ValueError: style for node 'bare_above': Style fill 'gren' is not a colour: give '#rrggbb' or a CSS name in Style.COLOURS, such as 'red'
 ```
 
 `dot={...}` and `mermaid={...}` pass attributes only their writer reads: keys are identifiers (a Mermaid key may hold
@@ -214,7 +214,7 @@ field is a `ValueError`. Attributes are written in a fixed order, passthrough ke
 text is the same under every `PYTHONHASHSEED`.
 
 ```python
-boxed = driver.draw_upstream_of("subtotal").styled(
+boxed = driver.draw_upstream_of("load").styled(
     graph=Style(fill="whitesmoke"), node=Style(shape="box", dot={"peripheries": "2"})
 )
 boxed.to_dot().splitlines()[1]
@@ -241,8 +241,8 @@ together: each block node gets a `for each item of <expand>` line, and its edges
 `to_mermaid()` writes the drawing as a Mermaid flowchart, which GitHub and many Markdown tools show as a diagram:
 
 ```python
-driver.draw_upstream_of("subtotal").to_mermaid().splitlines()[:3]
-# -> ['flowchart LR', '  n0["price<br>float"]', '  n1["quantity<br>int"]']
+driver.draw_upstream_of("load").to_mermaid().splitlines()[:3]
+# -> ['flowchart LR', '  n0["quantity<br>int"]', '  n1["weight<br>float"]']
 ```
 
 `to_svg()` draws it as an SVG image in pure Python, with nothing to install. Each node sits one layer past every node
@@ -265,9 +265,9 @@ import tempfile
 from pathlib import Path
 
 with tempfile.TemporaryDirectory() as folder:
-    written = driver.draw().render(Path(folder) / "prices.dot")
+    written = driver.draw().render(Path(folder) / "parcels.dot")
     text = written.read_text()
-    image = driver.draw().render(Path(folder) / "prices.svg", engine="builtin")
+    image = driver.draw().render(Path(folder) / "parcels.svg", engine="builtin")
     svg = image.read_text()
 text == driver.draw().to_dot()
 # -> True
@@ -284,11 +284,11 @@ checked the same way. It runs nothing and holds no value: the request lists name
 ```python
 import json
 
-document = driver.export(["total"], inputs={"price": 9.5, "quantity": 2})
+document = driver.export(["total"], inputs={"weight": 9.5, "quantity": 2})
 document["format"], document["config"], document["request"]["outputs"]
 # -> ('fnloom.export/1', {'region': "'eu'"}, ['total'])
 [node["name"] for node in document["nodes"]]
-# -> ['price', 'quantity', 'subtotal', 'shipping', 'tax', 'total']
+# -> ['quantity', 'weight', 'load', 'packaging', 'pallet', 'total']
 text = json.dumps(document, sort_keys=True)
 ```
 
@@ -301,12 +301,12 @@ is in or `None`; a node's kind may also be `"expand"` or `"collect"`, and each p
 `block` and each parameter's `collect` too:
 
 ```python
-tax = document["nodes"][4]
-tax["kind"], tax["type"], tax["config"], tax["marks"]
+pallet = document["nodes"][4]
+pallet["kind"], pallet["type"], pallet["config"], pallet["marks"]
 # -> ('function', 'float', ["region == 'eu'"], [])
-price = document["nodes"][0]
-price["kind"], price["required"], price["consumers"], price["version"]
-# -> ('input', True, ['subtotal'], None)
+weight = document["nodes"][1]
+weight["kind"], weight["required"], weight["consumers"], weight["version"]
+# -> ('input', True, ['load'], None)
 ```
 
 A function node's `version` is its code version, the one the [result cache](caching.md) keys on. It covers the
@@ -344,17 +344,17 @@ outputs = ["total"]
 region = "eu"
 
 [inputs]
-price = 9.5
+weight = 9.5
 quantity = 2
 ```
 
 ```bash
-fnloom draw prices.py --config region=eu > prices.dot
-fnloom draw prices.py --config region=eu --upstream subtotal --format mermaid
-fnloom draw prices.py --config region=eu --execution --outputs total \
-    --input price=9.5 --input quantity=2 -o run.svg
-fnloom validate prices.py --config region=eu --outputs total --input price=9.5
-fnloom export prices.py --context run.toml -o before.json
+fnloom draw parcels.py --config region=eu > parcels.dot
+fnloom draw parcels.py --config region=eu --upstream load --format mermaid
+fnloom draw parcels.py --config region=eu --execution --outputs total \
+    --input weight=9.5 --input quantity=2 -o run.svg
+fnloom validate parcels.py --config region=eu --outputs total --input weight=9.5
+fnloom export parcels.py --context run.toml -o before.json
 fnloom diff before.json after.json
 ```
 

@@ -85,7 +85,7 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `final_vars="total"` | One output per character | `TypeError` (Q6) |
 | A function in `final_vars` | Its `__name__`, even when no node has that name, and a forged function is accepted | The node it makes, matched by the function itself. A `@parameterize` function is a `TypeError` listing its rows; a function no node comes from is a `ValueError` (Q30) |
 | Overriding an input | Only when it's also supplied | Any node. It beats or replaces the input (Q7) ; `with_strict_overrides()` restores Hamilton's rule, and `with_declared_inputs(...)` turns a misspelled parameter into a build error (Q75) |
-| A node named like a parameter that has a default | The node silently replaces the default, and a supplied input of that name is ignored | `ValueError` at build, naming the parameter and the node. `@fnloom.defaults(shadowed=("cost",))` on the consumer lets the node win (Q76) |
+| A node named like a parameter that has a default | The node silently replaces the default, and a supplied input of that name is ignored | `ValueError` at build, naming the parameter and the node. `@fnloom.defaults(shadowed=("limit",))` on the consumer lets the node win (Q76) |
 | Two functions with different defaults for one input | Each keeps its own default | `ValueError` at build, naming every consumer and its default. `@fnloom.defaults(differing=("shared",))` on each consumer but one keeps them (Q76) |
 | An input or override naming a parameter only `value()` supplies | Silently dropped, even a wrong-typed one | `ValueError`, as for any unknown name; when another node reads the name, it's an input for that node alone, as in Hamilton (Q77) |
 | `__all__` in a module | Ignored: every public function the module defines is a node | Only the functions it names are nodes, by attribute name, so a `@config` variant is listed as `foo__a`. A malformed `__all__` is a `TypeError`. A missing input named like a function it left out says so (Q73) |
@@ -120,6 +120,7 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `NodeExecutionMethod` (`run_to_execute_node`) | Replaces how a node is called; one per driver | `with_node_wrappers(*wrappers)`: any number, an ordered chain, each `wrapper(node, call, inputs)` ([Node wrappers](running.md#node-wrappers), Q111) |
 | `lifecycle.default.GracefulErrorAdapter` | Keeps running past a failure, giving what depends on it a sentinel | `@fnloom.absent_on(*errors)` on a node, or `Builder.with_absent_on(*errors, tags=None)` for a driver, makes the node `ABSENT` on those errors: each consumer decides by its signature, `Collect[T]` drops the branch and `Collect[T \| Absent]` keeps its place, `after_node` still reports the error, and nothing computed from it is cached ([Partial results](writing-nodes.md#partial-results), Q133, Q157) |
 | `Parallelizable[T]` and `Collect[T]` from `hamilton.htypes` | Need `enable_dynamic_execution(allow_experimental_mode=True)` and an executor setting | The same names from `fnloom`, with no flag and no executor setting (Q118, Q137). Items run one after another, or at once with `Builder.with_threads` (Q134), and collect in item order either way; an empty expand gives `[]`, and an expand requested as an output gives its items as a `list` (Q119 to Q121, Q138). On `build_async()` too, where an `async def` generator may be the expand (Q132) ([Fan-out and fan-in](running.md#fan-out-and-fan-in)) |
+| `with_remote_executor(executors.MultiThreadingExecutor(max_tasks))`, `MultiProcessingExecutor`, the Ray, Dask and Spark plugins | Only block tasks go to the remote executor, nodes outside every block one at a time on the local one; `max_tasks` is the only limit | `Builder.with_threads(max_workers=None)`: every node of a run is a task of one scheduler, so independent nodes outside blocks overlap as branches do, on a per-driver pool of threads, parallel on 3.14t. `@fnloom.limit(n, group=)` and `Builder.with_limits({group: size})` cap a node's or a group's calls on every driver. No process or cluster executor ([Running in parallel](running.md#running-in-parallel), [Limits](running.md#limits), Q134, Q169) |
 | `TaskExecutionHook` and the other task hooks | Hooks on dynamic execution's tasks | None: `NodeStart.branch` and `NodeEnd.branch` name a block node's branch, and `Hook.after_expand` gets each expand's item count ([The events](hooks.md#the-events), Q130) |
 | `display_all_functions()`, `display_upstream_of(*names)`, `display_downstream_of(*names)` | A `graphviz.Digraph`, or `None` and a logged traceback without the graphviz package; node order follows `PYTHONHASHSEED` | `draw()`, `draw_upstream_of(*names)`, `draw_downstream_of(*names)`: a `fnloom.Drawing`, whose `to_dot()`, `to_mermaid()` and `to_svg()` need nothing installed and give the same text every run ([Drawing](drawing.md), Q90, Q94, Q146) |
 | `visualize_path_between(a, b, strict_path_visualization=True)` | The path, and its nodes' parents unless strict | `draw_path_between(a, b, context=False)`; with `context=True`, the parents are drawn and marked `context` (Q90) |
@@ -167,6 +168,8 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | Hamilton's `AsyncDriver` on Python 3.14 | `DeprecationWarning` on every node; breaks on 3.16 | No warning (Q13) |
 | An input nobody supplied, requested as an output | `None` for it | `ValueError: missing inputs: 'x' (requested as an output)` (Q78) |
 | One driver shared between threads | Works, undocumented | A documented guarantee, stress-tested on the default and free-threaded builds ([Threads](running.md#threads)) |
+| A `ContextVar` the caller set, read in a block node under a thread executor | Its default: the pool's threads don't get the caller's context (on 3.14t they inherit it) | The caller's value, on any worker: each node's call runs in its own copy of the run's context, so a value one node sets is never seen by another (Q167) |
+| Node hooks under a thread executor | Called from the pool's threads at once | One at a time per run, each on the thread that ran its node; `NodeStart.order` and `NodeEnd.order` sort a parallel run's events into reference order (Q168, Q86) |
 | A function passed where a module goes | An empty graph | `TypeError` (Q52) |
 | A hook that raises | The later hooks of the event are skipped; a raising before-graph hook skips after-graph too | Every hook sees the event, and after-run always fires (Q23) |
 | A node returning a value its annotation refuses | Never checked by default | Never checked by default either; `with_output_type_checks()` fails the node with a `TypeError` (Q87) |
@@ -276,7 +279,7 @@ Hamilton makes it a namespaced input. A `bind=` key no node reads is a `ValueErr
 `config=` gives a copy its own config, as `@subdag(config=)` does:
 `with_modules(taxes, namespace="eu", config={"region": "eu"})` overlays the driver's config for that namespace's
 `@config` variants, `@resolve`s and `config.matches` predicates, while `driver.config` stays the driver's own (Q112).
-`@parameterized_subdag` isn't built: loop over `with_modules(taxes, namespace=name, bind=...)`, one call per copy.
+`@parameterized_subdag` isn't built: loop over `with_modules(zones, namespace=name, bind=...)`, one call per copy.
 
 ### `@does`
 
@@ -469,10 +472,8 @@ fnloom is pre-alpha. The core, the native path, `@parameterize` and its sugar, `
 `@extract_columns`, `@exclude`, graph inspection, `validate`, graphs from plain functions, namespaces, type checks,
 result caching, the async driver, hooks, result builders, output checks, custom value checks, drawing, export, the
 CLI, `@check_output` validators, step injection, `@inject`, `@resolve`, node wrappers, typed absence, partial
-results (`absent_on`) and sequential fan-out and fan-in (`Parallelizable` and `Collect`) are done. These Hamilton
-features come next, roughly in this order:
-
-1. **The rest of the parallel executor**: `Builder.with_threads`, `@limit`, `timeout=` and `run_many` are built, but
-   the stress tests and the benchmarks against Hamilton's thread executor are still to come.
-
-If your pipeline depends on one of these, it's worth waiting for it before you switch.
+results (`absent_on`), fan-out and fan-in (`Parallelizable` and `Collect`), and the parallel executor
+(`with_threads`, limits, deadlines and `run_many`) are done. No Hamilton feature on the
+[roadmap](plans/2026-10-28-roadmap-ahead-of-hamilton.md) is left to build. What fnloom deliberately leaves out, such
+as process and cluster executors (Q134), is in [the register](quirk-register.md), each with the fnloom way to get the
+same result.

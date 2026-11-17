@@ -16,6 +16,8 @@ type Shape = Literal[
     "chain", "fan_in", "layered", "rows", "extract", "types", "fan_out"
 ]
 type Spelling = Literal["hamilton", "fnloom"]
+# What a fan-out branch does before adding one to its item (`fan_out_source`).
+type Body = Literal["trivial", "sleeping", "cpu"]
 type Request = tuple[list[str], dict[str, object]]
 
 LAYER_WIDTH = 10
@@ -120,13 +122,31 @@ def _types(n: int, spelling: Spelling) -> str:
     )
 
 
-def _fan_out(spelling: Spelling) -> str:
+# Iterations of the `cpu` body's loop: about 1 ms of pure Python on the benchmarks
+# machine (an Apple M2 Pro) on 3.14, a little more on 3.14t.
+CPU_LOOP = 30_000
+
+# Each body's code, run in `branch` before it returns; `sleeping` releases the GIL.
+_BODIES: dict[Body, str] = {
+    "trivial": "",
+    "sleeping": "    time.sleep(0.01)\n",
+    "cpu": f"    spin = 0\n    for i in range({CPU_LOOP}):\n        spin += i * i\n",
+}
+
+
+def fan_out_source(spelling: Spelling = "fnloom", body: Body = "trivial") -> str:
+    """The `fan_out` shape, its `branch` running `body` first.
+
+    `trivial` does nothing more, `sleeping` sleeps 10 ms, and `cpu` runs a loop of
+    `CPU_LOOP` multiplications in pure Python. The answer is the same for each.
+    """
     package = "hamilton.htypes" if spelling == "hamilton" else "fnloom"
     return (
+        f"{'import time' + chr(10) * 2 if body == 'sleeping' else ''}"
         f"from {package} import Collect, Parallelizable\n\n\n"
         "def items(count: int) -> Parallelizable[int]:\n"
         "    yield from range(count)\n\n\n"
-        "def branch(items: int) -> int:\n    return items + 1\n\n\n"
+        f"def branch(items: int) -> int:\n{_BODIES[body]}    return items + 1\n\n\n"
         "def total(branch: Collect[int]) -> int:\n    return sum(branch)\n"
     )
 
@@ -150,7 +170,7 @@ def absent_chain_source(n: int) -> str:
 def module_source(shape: Shape, n: int, spelling: Spelling = "fnloom") -> str:
     """Returns the source of `make_module(shape, n, spelling)`."""
     if shape == "fan_out":
-        return _fan_out(spelling)
+        return fan_out_source(spelling)
     if shape == "rows":
         return _rows(n, spelling)
     if shape == "extract":

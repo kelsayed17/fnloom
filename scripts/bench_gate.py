@@ -16,11 +16,20 @@ rose too far or is missing, 2 when an input cannot be read: not JSON, no benchma
 a count that is not an integer (booleans included), or one benchmark listed twice.
 An id with no baseline is reported only. `--write-baseline` replaces the baseline with
 the run's counts; do that deliberately, with the reason in the commit message.
+
+`--ratio NUMERATOR:DENOMINATOR:LIMIT`, repeatable, also fails the gate (status 1) when
+the run's count for the id `NUMERATOR` exceeds `LIMIT` times its count for the id
+`DENOMINATOR`, or when either is missing from the run: for example
+`core::engine::schedule.layered_1000:core::engine::run.layered_1000:2.0`. The ids are
+split from each other and from the limit at the colons that are not part of a `::`.
 """
 
 import argparse
 import json
+import re
 import sys
+from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 from typing import TYPE_CHECKING, TypeIs
 
@@ -34,6 +43,40 @@ THRESHOLD_PERCENT = 2
 
 EXIT_REGRESSED = 1
 EXIT_UNREADABLE = 2
+
+# A colon that separates a `--ratio`'s parts: one that is not part of a `::`.
+_PART = re.compile(r"(?<!:):(?!:)")
+
+
+@dataclass(frozen=True)
+class Ratio:
+    """`numerator`'s count may be at most `limit` times `denominator`'s."""
+
+    numerator: str
+    denominator: str
+    limit: Fraction
+
+
+def parse_ratio(text: str) -> Ratio:
+    """Parses `NUMERATOR:DENOMINATOR:LIMIT`, or raises `argparse.ArgumentTypeError`."""
+    parts = _PART.split(text)
+    # An empty part, or a run of colons other than `::`, as in `a:::b`, is no id.
+    malformed = any(
+        not part or ":::" in part or part.strip(":") != part for part in parts
+    )
+    if len(parts) != 3 or malformed:  # noqa: PLR2004  # the three parts
+        msg = f"{text!r} is not NUMERATOR:DENOMINATOR:LIMIT"
+        raise argparse.ArgumentTypeError(msg)
+    numerator, denominator, limit = parts
+    try:
+        bound = Fraction(limit)
+    except (ValueError, ZeroDivisionError) as error:
+        msg = f"{text!r}: the limit {limit!r} is not a number"
+        raise argparse.ArgumentTypeError(msg) from error
+    if bound <= 0:
+        msg = f"{text!r}: the limit must be positive"
+        raise argparse.ArgumentTypeError(msg)
+    return Ratio(numerator, denominator, bound)
 
 
 class GateError(Exception):
@@ -155,6 +198,31 @@ def compare(baseline: Counts, current: Counts) -> tuple[list[str], bool]:
     return lines, passed
 
 
+def check_ratios(ratios: Sequence[Ratio], current: Counts) -> tuple[list[str], bool]:
+    """Returns the report lines for `ratios` and whether each holds in `current`."""
+    lines: list[str] = []
+    passed = True
+    for ratio in ratios:
+        missing = [
+            key for key in (ratio.numerator, ratio.denominator) if key not in current
+        ]
+        name = f"ratio {ratio.numerator} / {ratio.denominator}"
+        if missing:
+            lines.append(f"MISSING  {name}: {', '.join(missing)} not in this run")
+            passed = False
+            continue
+        top, bottom = current[ratio.numerator], current[ratio.denominator]
+        failed = bottom <= 0 or top > ratio.limit * bottom
+        passed = passed and not failed
+        verdict = "FAIL" if failed else "ok"
+        shown = f"{top / bottom:.3f}x" if bottom > 0 else "n/a"
+        lines.append(
+            f"{verdict:8} {name}: {top:,} / {bottom:,} = {shown}"
+            f" (limit {float(ratio.limit)}x)",
+        )
+    return lines, passed
+
+
 def _parser() -> argparse.ArgumentParser:
     """Builds the command-line parser."""
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
@@ -169,6 +237,14 @@ def _parser() -> argparse.ArgumentParser:
         "--write-baseline",
         action="store_true",
         help="replace the baseline with this run's counts instead of comparing",
+    )
+    parser.add_argument(
+        "--ratio",
+        action="append",
+        default=[],
+        type=parse_ratio,
+        metavar="NUMERATOR:DENOMINATOR:LIMIT",
+        help="fail when NUMERATOR's count exceeds LIMIT times DENOMINATOR's",
     )
     return parser
 
@@ -187,8 +263,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stderr.write(f"bench_gate: {error}\n")
         return EXIT_UNREADABLE
     lines, passed = compare(baseline, current)
-    sys.stdout.write("\n".join(lines) + "\n")
-    return 0 if passed else EXIT_REGRESSED
+    ratio_lines, ratios_hold = check_ratios(args.ratio, current)
+    sys.stdout.write("\n".join([*lines, *ratio_lines]) + "\n")
+    return 0 if passed and ratios_hold else EXIT_REGRESSED
 
 
 if __name__ == "__main__":

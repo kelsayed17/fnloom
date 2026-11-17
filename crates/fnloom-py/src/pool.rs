@@ -35,7 +35,7 @@ use fnloom_core::schedule::{Report, Seat};
 use pyo3::exceptions::{PyKeyboardInterrupt, PyRuntimeError, PyValueError};
 use pyo3::intern;
 use pyo3::prelude::*;
-use pyo3::types::{PyCFunction, PyDict};
+use pyo3::types::{PyCFunction, PyDict, PyString};
 
 use crate::errors::{caught, panic_error};
 use crate::limits::{Caps, Limits};
@@ -92,10 +92,10 @@ struct State {
     /// Runs with a lent seat registered: the pool keeps a thread more for each, since the
     /// caller that lent its slot runs none of its tasks.
     lenders: usize,
-    /// The native ids of the threads that left as the pool stopped, which `close` hands
-    /// to its caller to join: a thread counted in `exited` may still be in `threading`'s
-    /// own cleanup.
-    left: Vec<u64>,
+    /// The native ids and idents of the threads that left as the pool stopped, which
+    /// `close` hands to its caller to join: a thread counted in `exited` may still be in
+    /// `threading`'s own cleanup. Both, since the system may reuse either once it ends.
+    left: Vec<(u64, u64)>,
     /// Threads waiting for work in `wait`.
     idle: usize,
 }
@@ -331,9 +331,9 @@ impl Pool {
     }
 
     /// Stops the threads, then waits, detached, at most `budget` for the idle ones to
-    /// leave. A busy thread is never waited for past that. Idempotent. The native ids of
-    /// the threads that left since the last call, for the caller to join.
-    pub fn close(&self, py: Python<'_>, budget: Duration) -> Vec<u64> {
+    /// leave. A busy thread is never waited for past that. Idempotent. The native ids and
+    /// idents of the threads that left since the last call, for the caller to join.
+    pub fn close(&self, py: Python<'_>, budget: Duration) -> Vec<(u64, u64)> {
         self.stop();
         self.with_state(py, |state| state.generation += 1);
         self.wake.notify_all();
@@ -400,10 +400,11 @@ impl Pool {
         }
     }
 
-    /// Whether a stopping thread, of native id `id`, leaves: only once no job is queued,
+    /// Whether a stopping thread, of native id and ident `id`, leaves: only once no job is
+    /// queued,
     /// counted as it leaves under the same lock, so a job queued meanwhile is taken back by
     /// `submit`.
-    fn leaves(&self, py: Python<'_>, id: u64) -> bool {
+    fn leaves(&self, py: Python<'_>, id: (u64, u64)) -> bool {
         let leaves = self.with_state(py, |state| {
             let leaves = state.jobs.is_empty();
             if leaves {
@@ -441,12 +442,19 @@ fn interrupt_again(py: Python<'_>) {
     );
 }
 
-/// This thread's native id, as `threading.get_native_id()` gives it; 0 if that fails.
-fn native_id(py: Python<'_>) -> u64 {
-    py.import(intern!(py, "threading"))
-        .and_then(|threading| threading.call_method0(intern!(py, "get_native_id")))
-        .and_then(|id| id.extract())
-        .unwrap_or(0)
+/// This thread's native id and ident, as `threading.get_native_id()` and
+/// `threading.get_ident()` give them; 0 for one that fails.
+fn thread_ids(py: Python<'_>) -> (u64, u64) {
+    let id = |name: &Bound<'_, PyString>| {
+        py.import(intern!(py, "threading"))
+            .and_then(|threading| threading.call_method0(name))
+            .and_then(|id| id.extract())
+            .unwrap_or(0)
+    };
+    (
+        id(intern!(py, "get_native_id")),
+        id(intern!(py, "get_ident")),
+    )
 }
 
 /// Why a pool thread leaves.
@@ -498,7 +506,7 @@ fn work(py: Python<'_>, pool: &Arc<Pool>) {
             }
             // A job queued as the pool stopped is still run, so its future resolves.
             if stopping {
-                if pool.leaves(py, native_id(py)) {
+                if pool.leaves(py, thread_ids(py)) {
                     return Leave::Stopped;
                 }
                 continue;
@@ -583,10 +591,10 @@ impl Threads {
     /// Stops the pool's threads; idempotent. A run still going finishes on its caller.
     ///
     /// Waits at most `timeout` seconds for the idle ones to leave, and returns the native
-    /// ids of those that left since the last call: each may still be in `threading`'s own
-    /// cleanup, so `_threads.close_all` joins them.
+    /// ids and idents of those that left since the last call: each may still be in
+    /// `threading`'s own cleanup, so `_threads.close_all` joins them.
     #[pyo3(signature = (timeout = CLOSING.as_secs_f64()))]
-    fn close(&self, py: Python<'_>, timeout: f64) -> Vec<u64> {
+    fn close(&self, py: Python<'_>, timeout: f64) -> Vec<(u64, u64)> {
         if self.pool.pid != std::process::id() {
             return Vec::new();
         }

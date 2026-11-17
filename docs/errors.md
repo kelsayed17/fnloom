@@ -9,22 +9,22 @@ was wrong.
 The examples use this module and driver:
 
 ```python
-# file: pricing.py
-def total(price: float, quantity: int) -> float:
+# file: shipping.py
+def total(weight: float, quantity: int) -> float:
     """What the line costs."""
-    return price * quantity
+    return weight * quantity
 
 
-def label(total: float, currency: str = "EUR") -> str:
-    """The price as shown to a customer."""
-    return f"{total:.2f} {currency}"
+def label(total: float, unit: str = "kg") -> str:
+    """The weight as printed on the parcel."""
+    return f"{total:.2f} {unit}"
 ```
 
 ```python
 import fnloom
-import pricing
+import shipping
 
-driver = fnloom.build(pricing)
+driver = fnloom.build(shipping)
 ```
 
 ## When you build
@@ -49,9 +49,9 @@ driver = fnloom.build(pricing)
 | A config-decorated function defined twice in one module | `ValueError: function 'foo__a' is defined more than once in module 'm' (lines 4, 8); Python keeps only the last` |
 | A config value whose `==` returns something other than a `bool` (NumPy's boolean scalar counts as one), such as an array, every such key listed, sorted | `TypeError: == on these config keys did not return a bool: 'mode' (numpy.ndarray)` |
 | A config that isn't a mapping, or a key that isn't a `str`, given to `with_config` | `TypeError: config keys must be str, got: int` |
-| A parameter with a default that reads a node of its name (Q76) | `ValueError: shadowed default: parameter 'cost' of 'f' has a default, but it reads the node 'cost', which replaces it; rename one, or let the node win with @fnloom.defaults(shadowed=('cost',)) on 'f'` |
+| A parameter with a default that reads a node of its name (Q76) | `ValueError: shadowed default: parameter 'limit' of 'f' has a default, but it reads the node 'limit', which replaces it; rename one, or let the node win with @fnloom.defaults(shadowed=('limit',)) on 'f'` |
 | One input given different defaults by its consumers (Q76) | `ValueError: differing defaults: input 'x' has different defaults in 'f' (parameter 'x') = 1, 'g' (parameter 'x') = 2; make them equal, or write @fnloom.defaults(differing=(<parameter>,)) on each of these consumers but one` |
-| With `with_declared_inputs`, an input not declared, or a declared name that is no input, one line each (Q75) | `ValueError: declared name 'prise' is not an input of the graph (did you mean 'price'?)`, then `undeclared input 'price' (did you mean 'prise'?)` |
+| With `with_declared_inputs`, an input not declared, or a declared name that is no input, one line each (Q75) | `ValueError: declared name 'prise' is not an input of the graph (did you mean 'weight'?)`, then `undeclared input 'weight' (did you mean 'prise'?)` |
 | A module's `__all__` that isn't a list or tuple of `str` (Q73) | `TypeError: module 'm': __all__ must be a list or tuple of str, got str` |
 | Something that isn't a plain function given to `with_functions` or `node()`, such as a `functools.partial` (Q72) | `TypeError: a functools.partial of 'm.f' is not a function: give the function itself with bind={'parameter': value(...)}` |
 | A function whose name no node can take, such as a lambda, given to `with_functions` (Q72) | `ValueError: function 'm.<lambda>' has no name a node can take: give it one with fnloom.node(fn, name=...)` |
@@ -82,14 +82,14 @@ raised:
 ```python
 driver.execute(["nope"])
 # raises ValueError: unknown outputs: 'nope'
-driver.execute(["label"], inputs={"price": 1.0, "quantity": 2, "typo": 3})
+driver.execute(["label"], inputs={"weight": 1.0, "quantity": 2, "typo": 3})
 # raises ValueError: unknown inputs: 'typo'
 driver.execute(["label"], overrides={"tota": 5.0})
 # raises ValueError: unknown overrides: 'tota' (did you mean 'total'?)
-driver.execute(["label"], inputs={"price": 1.0})
+driver.execute(["label"], inputs={"weight": 1.0})
 # raises ValueError: missing inputs: 'quantity' (needed by 'total')
-driver.execute(["total", "price"])
-# raises ValueError: missing inputs: 'price' (requested as an output, needed by 'total'); 'quantity' (needed by 'total')
+driver.execute(["total", "weight"])
+# raises ValueError: missing inputs: 'quantity' (needed by 'total'); 'weight' (requested as an output, needed by 'total')
 ```
 
 An unknown name is followed by `(did you mean 'x'?)`, after a space, when a node is close to it: the closest one that
@@ -124,8 +124,8 @@ the request's other output problems, each kind on its own line, in one error:
 | --- | --- |
 | A function in `final_vars` that makes several nodes, such as a `@parameterize` one (Q30) | `TypeError: final_vars items must be str or a function: function m.rows makes 2 nodes: pass 'a', 'b' instead` |
 | A function in `final_vars` that no node of the driver comes from (Q30) | `ValueError: final_vars: function m.f is not the function of any node of this driver (...): pass a node name` |
-| With `with_strict_overrides`, an override of an input not supplied in `inputs` too (Q75) | `ValueError: override of input 'price' refused: not supplied, though needed by 'total' (supply it in inputs= too; strict overrides are on)` |
-| A value checked against an annotation that didn't resolve at build (Q81) | `TypeError: amount: cannot check a value against unresolved 'Decimal': ...` |
+| With `with_strict_overrides`, an override of an input not supplied in `inputs` too (Q75) | `ValueError: override of input 'weight' refused: not supplied, though needed by 'total' (supply it in inputs= too; strict overrides are on)` |
+| A value checked against an annotation that didn't resolve at build (Q81) | `TypeError: length: cannot check a value against unresolved 'Decimal': ...` |
 | With `with_output_type_checks`, a node returning a value its annotation refuses (Q87) | `TypeError: score: returned int, expected float`, as the node's failure, with its `in node` note |
 | A custom value check that raises (Q21) | Its own exception, as it is: from the run's checks, or from a node when it checks a result |
 | A deep check with more than 10,000 questions open about one value (see below) | `TypeError: value too cyclic to check against ...: more than 10,000 groups open about one value` |
@@ -134,11 +134,11 @@ the request's other output problems, each kind on its own line, in one error:
 
 Before any node runs, each input the run reads and each override is checked against its node's type. Every value
 that doesn't fit gets its own line, sorted. The first call below raises with a second line too,
-`quantity: expected int, got float`:
+`weight: expected float, got str`:
 
 ```python
-driver.execute(["label"], inputs={"price": "cheap", "quantity": 2.5})
-# raises ValueError: price: expected float, got str
+driver.execute(["label"], inputs={"weight": "heavy", "quantity": 2.5})
+# raises ValueError: quantity: expected int, got float
 driver.execute(["label"], overrides={"total": "ten"})
 # raises ValueError: total: expected float, got str
 ```
@@ -148,13 +148,13 @@ a `TypeVar` that is free or whose bound or a constraint admits it (Q79). Annotat
 accept it. A fixed-length tuple is checked by length and by item, so `(1,)` for `tuple[int, str]` is refused (Q80):
 
 ```python
-driver.execute(["label"], inputs={"price": None, "quantity": 2})
-# raises ValueError: price: expected float, got NoneType
+driver.execute(["label"], inputs={"weight": None, "quantity": 2})
+# raises ValueError: weight: expected float, got NoneType
 ```
 
 A value checked against an annotation that didn't resolve at build, such as a name imported only under
 `TYPE_CHECKING`, raises a `TypeError` instead, listing the plain mismatches with it (Q81):
-`amount: cannot check a value against unresolved 'Decimal': it did not resolve when the graph was built; import what
+`length: cannot check a value against unresolved 'Decimal': it did not resolve when the graph was built; import what
 it names at run time, not only under TYPE_CHECKING`. An extracted field names its producer and field first.
 
 A [custom value check](running.md#custom-value-checks) can admit a value these refuse; one that raises fails the
@@ -173,9 +173,9 @@ afresh on each reading, piles questions onto one value, and raises
 A prepared plan accepts the input and override names it was compiled for, and no others:
 
 ```python
-plan = driver.prepare(["label"], inputs={"price": 0.0, "quantity": 0})
-plan.run(inputs={"price": 1.0})
-# raises ValueError: inputs ['price'] differ from the prepared ['price', 'quantity']
+plan = driver.prepare(["label"], inputs={"weight": 0.0, "quantity": 0})
+plan.run(inputs={"weight": 1.0})
+# raises ValueError: inputs ['weight'] differ from the prepared ['quantity', 'weight']
 ```
 
 ## When a node raises
