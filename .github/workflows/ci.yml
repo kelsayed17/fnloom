@@ -178,14 +178,32 @@ jobs:
           mode: simulation,memory
           run: uv run --no-sync python -m pytest benchmarks --codspeed
 
+  audit:
+    name: Dependency vulnerability audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+        with:
+          version: "0.13.8"
+      - run: uv audit --frozen --preview-features audit-command
+      # The runner's own cargo builds the RustSec checker; it reads Cargo.lock and needs no toolchain beyond that.
+      - run: cargo install --locked cargo-audit
+      - run: cargo audit
+
   zizmor:
     name: Workflow security audit
     runs-on: ubuntu-latest
     permissions:
       contents: read # checkout
-      security-events: write # upload zizmor's SARIF results to code scanning
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          version: "1.31.1"
+          # Findings fail this check; SARIF mode would exit 0 and leave them to code scanning, which is not required.
+          advanced-security: false
