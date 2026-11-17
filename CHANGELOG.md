@@ -124,6 +124,17 @@ change the public API; such changes are listed under **Changed** and **Removed**
   helper threads for `run_many`, however many callers run it at once.
 - `fnloom.StoppedError`, the `RuntimeError` a run stopped by the run that started it raises, is public. A node that
   sees `fnloom.cancelled()` may raise it to stop: it is never raised in place of the failure that stopped its run.
+- Benchmarks of the parallel executor: `python -m benches.parallel` times trivial, sleeping and CPU-bound fan-outs
+  against Hamilton's synchronous and `MultiThreadingExecutor(8)` executors, a cached fan-out at one and eight workers,
+  and a graph without blocks on one worker, one JSON row per shape, runtime, worker count, build and core count. The
+  results for 3.14 and 3.14t are on the benchmarks page. `benchmarks/test_parallel.py` measures the one-worker rows
+  for CodSpeed, and `benchmarks-smoke` runs on 3.14t too.
+- `scripts/bench_gate.py --ratio NUMERATOR:DENOMINATOR:LIMIT`, repeatable, fails the instruction-count gate when one
+  benchmark costs more than `LIMIT` times another. CI holds the scheduler with one worker to at most twice
+  `Plan::run`'s instructions on the layered graphs, and gates the `schedule` rows on their committed baseline. The
+  job uploads its counts as an artifact, for `--write-baseline`.
+- The running guide gains "Partial results", the catalog example under `with_threads(8)` with an endpoint call that
+  times out.
 
 ### Fixed
 
@@ -156,6 +167,10 @@ change the public API; such changes are listed under **Changed** and **Removed**
 
 ### Changed
 
+- Rust core: the scheduler runs a plan without an expand or absence rules flat, off one table by step position,
+  with a heap of positions as its ready set. With one worker it costs about 1.8 times `Plan::run`'s instructions per
+  node, down from about 5. Its tasks, keys, reports and outputs are unchanged; a flat run's `TaskId` names its step's
+  position, so the ids of two of its tasks never share a slot.
 - The Threads section of the running guide is rewritten: what depends on timing and what doesn't, what a run shares
   and serializes, runs inside runs, thread counts and fork. The thread tests gain stress tests, which the CI `stress`
   job runs 200 rounds of (`FNLOOM_STRESS_ROUNDS`), with a `stress` hypothesis profile.

@@ -1028,6 +1028,73 @@ fnloom.build(lookups).execute(["answer"], inputs={"question": "why"}, timeout=0.
 - **Hooks.** `after_run` gets `ok=False` and the `TimeoutError`, and fires once any hook call already going on has
   returned, so a run's hook calls never overlap.
 
+## Partial results
+
+A node's own deadline is often an error, not a stop: an endpoint call that times out for one item. Decorate the node
+`@fnloom.absent_on(TimeoutError)` and annotate it `-> T | Absent`, and that item's branch is absent instead of
+failing the run, so the summary is built from the items whose calls came back:
+
+```python
+# file: catalog_partial.py
+from dataclasses import dataclass
+
+import fnloom
+from fnloom import Absent, Collect, Parallelizable
+
+#: The items whose endpoint call times out, as a real one would for a slow item.
+SLOW = {"desk"}
+
+
+@dataclass(frozen=True)
+class Endpoint:
+    """Where item details are fetched from."""
+
+    base_url: str
+
+
+def picked(items: list[str]) -> Parallelizable[str]:
+    """Every item asked for."""
+    yield from items
+
+
+@fnloom.absent_on(TimeoutError)
+def details(picked: str, endpoint: Endpoint) -> str | Absent:
+    """One item's details, absent when its endpoint call times out."""
+    if picked in SLOW:
+        raise TimeoutError(f"{endpoint.base_url}/{picked}")
+    return f"{endpoint.base_url}/{picked}"
+
+
+def summary(details: Collect[str]) -> list[str]:
+    """The details that came back, in the order asked."""
+    return details
+```
+
+```python
+import catalog_partial
+
+partial = fnloom.Builder().with_modules(catalog_partial).with_threads(8).build()
+partial.execute(
+    ["summary"],
+    inputs={
+        "items": ["chair", "desk", "lamp"],
+        "endpoint": catalog_partial.Endpoint("https://api.test"),
+    },
+)
+# -> {'summary': ['https://api.test/chair', 'https://api.test/lamp']}
+```
+
+- **Every driver**, with or without `with_threads`, and the async driver too, gives the same summary: which items
+  failed never depends on the worker count.
+- **`Collect[str]` drops the branch**; `Collect[str | Absent]` would keep its place as `ABSENT`. `after_node` still
+  reports the error with `ok=False`, and [`RunEnd.absent_errors`](hooks.md#the-events) lists each absence by node and
+  branch, in reference order.
+- **Nothing computed from an absence is cached**, so the next run calls the timed-out item's endpoint again, while
+  the items that came back are served from the cache ([Caching](caching.md)).
+- **A run's own `timeout=`** is never an absence: it stops the run, as in [Deadlines and
+  cancellation](#deadlines-and-cancellation). `Builder.with_absent_on(TimeoutError, tags=...)` covers every node a
+  tag query matches. [Partial results](writing-nodes.md#partial-results) has every rule.
+
 ## Many input sets
 
 `PreparedPlan.run_many(inputs_seq, *, overrides=None, timeout=None)` runs a [prepared plan](#prepared-plans) once per

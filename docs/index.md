@@ -155,6 +155,6 @@ tested against Hamilton side by side.
     [hooks](hooks.md), result builders, output checks, custom value checks, [drawing, export and the
     CLI](drawing.md), [`@check_output` validators](writing-nodes.md#checking-values), [steps](writing-nodes.md#steps),
     `@inject`, `@resolve`, [node wrappers](running.md#node-wrappers), [`bind=` for namespaces](writing-nodes.md#namespaces),
-    [fan-out and fan-in](running.md#fan-out-and-fan-in) and [typed absence](running.md#absence) are done. The
-    parallel executor comes later;
-    [the design](design/2026-10-26-fnloom-design.md) has the full plan.
+    [fan-out and fan-in](running.md#fan-out-and-fan-in), [typed absence](running.md#absence),
+    [partial results](running.md#partial-results) and the [parallel executor](running.md#running-in-parallel) are
+    done; [the design](design/2026-10-26-fnloom-design.md) has the full plan.
