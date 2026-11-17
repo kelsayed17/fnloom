@@ -62,6 +62,12 @@ impl OrderKey {
         Self::joined(parts, &[])
     }
 
+    /// The key of one part: a step outside every block.
+    #[inline]
+    pub(crate) const fn one(part: u32) -> Self {
+        Self(Parts::Inline(1, [part, 0, 0, 0, 0]))
+    }
+
     /// The key of `prefix` then `tail`.
     pub(crate) fn joined(prefix: &[u32], tail: &[u32]) -> Self {
         let len = prefix.len() + tail.len();
@@ -676,6 +682,19 @@ struct StepState<V> {
     block_used: bool,
 }
 
+/// One step of a flat plan, one without an expand or absence rules: its one scope runs off a
+/// table by step position, with no instance, entry or slab, and the ready set holds positions.
+struct FlatStep<V> {
+    value: Option<V>,
+    node: NodeId,
+    waiting: u32,
+    readers: u32,
+    /// The seat its task was handed out to, while it runs.
+    seat: Option<Seat>,
+    /// Which hand-out it is, while it runs.
+    generation: u32,
+}
+
 /// How far a step of an instance got.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Progress {
@@ -974,6 +993,11 @@ pub struct Scheduler<V, E, K> {
     refused: Option<NodeId>,
     /// How many tasks were handed out: the generation of the last `TaskId`.
     handed: u32,
+    /// Whether the run is flat (`FlatStep`): then `ready` holds step positions, and
+    /// `instances`, `frames` and `entries` stay empty.
+    flat: bool,
+    /// A flat run's steps, by position.
+    table: Vec<FlatStep<V>>,
 }
 
 /// The running compute of a single-flight key, and the entries waiting for its value.
@@ -1024,6 +1048,8 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
             lent: None,
             refused: None,
             handed: 0,
+            flat: false,
+            table: Vec::new(),
         };
         this.adopt(report);
         this.start(plan, graph, seeded);
@@ -1051,6 +1077,10 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         if let Some(detail) = detail {
             this.release_all(seeded.into_iter().flatten().map(|slot| slot.value));
             this.fail(OrderKey::default(), broken(detail));
+            return;
+        }
+        if !plan.has_expands() && !plan.needs_rules() {
+            this.start_flat(plan, graph, seeded);
             return;
         }
         this.wanted = vec![false; graph.nodes().len()];
@@ -1130,6 +1160,9 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
                     self.lent = Some(true);
                 }
                 return next;
+            }
+            if self.flat {
+                return self.next_flat(plan, graph, grant, seat);
             }
             let mut aside = Vec::new();
             let mut found = None;
@@ -1214,6 +1247,14 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         outcome: Outcome<V, E, K>,
         report: &mut Report<V>,
     ) {
+        if self.flat {
+            // The flat path adds to `report` itself, with what was released since the last
+            // call first, as `adopt` does; what its rare paths release follows.
+            report.released.append(&mut self.report.released);
+            self.settle_flat(plan, graph, grant, id, outcome, report);
+            report.released.append(&mut self.report.released);
+            return;
+        }
         self.adopt(report);
         self.settle_outcome(plan, graph, grant, id, outcome);
         self.hand_back(report);
@@ -1362,13 +1403,20 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         plan.outputs()
             .iter()
             .map(|&id| {
-                let slot = self
-                    .instances
-                    .get_mut(OUTER)
-                    .and_then(|outer| outer.steps.get_mut(self.layout.position(id)))
-                    .and_then(|state| state.slot.take());
-                match slot {
-                    Some(slot) => Ok((id, slot.value)),
+                let position = self.layout.position(id);
+                let value = if self.flat {
+                    self.table
+                        .get_mut(position)
+                        .and_then(|state| state.value.take())
+                } else {
+                    self.instances
+                        .get_mut(OUTER)
+                        .and_then(|outer| outer.steps.get_mut(position))
+                        .and_then(|state| state.slot.take())
+                        .map(|slot| slot.value)
+                };
+                match value {
+                    Some(value) => Ok((id, value)),
                     None => Err(broken(format!(
                         "output '{}' has no value at the end",
                         graph.node(id).name
@@ -2629,6 +2677,260 @@ impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
         if self.instance(instance).remaining == 0 {
             self.todo.push(Event::Ended(instance));
         }
+    }
+}
+
+/// The flat path: a plan without an expand or absence rules has one scope, no probe, no
+/// single-flight key and no skip, so its steps live in one table by position and its ready
+/// set is a min-heap of positions, which are its steps' order keys.
+impl<V: Clone, E, K: Ord + Clone> Scheduler<V, E, K> {
+    /// `start` for a flat plan: seeds it and makes its first steps ready.
+    fn start_flat<P>(&mut self, plan: &Plan, graph: &Graph<P>, mut seeded: Vec<Option<Slot<V>>>) {
+        self.flat = true;
+        let t = &self.layout.templates[OUTER];
+        self.table = plan
+            .steps()
+            .iter()
+            .zip(t.waiting.iter().zip(&t.readers))
+            .map(|(step, (&waiting, &readers))| FlatStep {
+                value: None,
+                node: step.node,
+                waiting,
+                readers,
+                seat: None,
+                generation: 0,
+            })
+            .collect();
+        let mut missing = Vec::new();
+        for (position, step) in plan.steps().iter().enumerate() {
+            if !matches!(step.action, Action::UseInput | Action::UseOverride) {
+                continue;
+            }
+            match seeded.get_mut(step.node.index()).and_then(Option::take) {
+                Some(slot) => self.table[position].value = Some(slot.value),
+                None => missing.push(graph.node(step.node).name.clone()),
+            }
+        }
+        self.release_all(seeded.into_iter().flatten().map(|slot| slot.value));
+        if !missing.is_empty() {
+            missing.sort();
+            self.fail(OrderKey::default(), RunError::MissingValues(missing));
+            return;
+        }
+        let mut released = std::mem::take(&mut self.report.released);
+        for (position, step) in plan.steps().iter().enumerate() {
+            if step.action != Action::Compute {
+                let value = self.table[position].value.take();
+                self.resolve_flat(position, value, &mut released);
+            }
+        }
+        released.append(&mut self.report.released);
+        self.report.released = released;
+        // A step that waits for nothing; the others were made ready as what they wait for was.
+        for (position, step) in plan.steps().iter().enumerate() {
+            if step.action == Action::Compute && self.layout.templates[OUTER].waiting[position] == 0
+            {
+                self.push_flat(position);
+            }
+        }
+    }
+
+    /// `next` for a flat plan that is not stopping.
+    fn next_flat<P>(
+        &mut self,
+        plan: &Plan,
+        graph: &Graph<P>,
+        grant: &dyn Grant,
+        seat: Seat,
+    ) -> Next<V> {
+        let mut aside = Vec::new();
+        let mut found = None;
+        while let Some(position) = self.pop_flat() {
+            let node = self.table[position].node;
+            if grant.try_start(Some(node), seat) {
+                found = Some((position, node));
+                break;
+            }
+            if aside.is_empty() {
+                self.refused = Some(node);
+            }
+            aside.push(position);
+        }
+        if !aside.is_empty() {
+            for position in aside {
+                self.push_flat(position);
+            }
+        }
+        let Some((position, node)) = found else {
+            return self.idle();
+        };
+        let key = OrderKey::one(as_u32(position));
+        let target = graph.node(node);
+        if target.payload().is_none() {
+            grant.release(Some(node), seat);
+            self.fail(key, planned_to_compute(target));
+            return self.idle_closing();
+        }
+        let mut args = self.spare.pop().unwrap_or_default();
+        let step = &plan.steps()[position];
+        let t = &self.layout.templates[OUTER];
+        let (start, end) = t.use_spans[position];
+        args.reserve(step.args.len());
+        let mut missing = None;
+        for (&arg, found) in step.args.iter().zip(&t.uses[start as usize..end as usize]) {
+            let Use::Slot(at) = *found else {
+                missing = Some(arg);
+                break;
+            };
+            let state = &mut self.table[at as usize];
+            let Some(value) = state.value.as_ref() else {
+                missing = Some(arg);
+                break;
+            };
+            args.push((arg, ArgValue::One(value.clone())));
+            // Its last reader has taken it: a reader is handed out only once it is done.
+            if state.readers != KEEP && state.readers > 0 {
+                state.readers -= 1;
+                if state.readers == 0 {
+                    if let Some(value) = state.value.take() {
+                        self.report.released.push(value);
+                    }
+                }
+            }
+        }
+        if let Some(arg) = missing {
+            self.recycle(args);
+            grant.release(Some(node), seat);
+            self.fail(key, no_value(graph, node, arg));
+            return self.idle_closing();
+        }
+        let generation = self.hand_out();
+        let state = &mut self.table[position];
+        state.seat = Some(seat);
+        state.generation = generation;
+        self.running += 1;
+        if seat == Seat::Lent {
+            self.lent = Some(true);
+        }
+        Next::Task(Task {
+            id: TaskId {
+                slot: as_u32(position),
+                generation,
+            },
+            node,
+            branch: Vec::new(),
+            key,
+            work: Work::Compute {
+                args,
+                expands: false,
+                late: false,
+            },
+        })
+    }
+
+    /// `settle_outcome` for a flat plan, adding to `report`.
+    fn settle_flat<P>(
+        &mut self,
+        plan: &Plan,
+        graph: &Graph<P>,
+        grant: &dyn Grant,
+        id: TaskId,
+        outcome: Outcome<V, E, K>,
+        report: &mut Report<V>,
+    ) {
+        let position = id.slot as usize;
+        let state = self
+            .table
+            .get_mut(position)
+            .filter(|state| state.seat.is_some() && state.generation == id.generation);
+        let Some(state) = state else {
+            // A stale or repeated id: ignored, as `settle_outcome` does.
+            self.discard(outcome);
+            return;
+        };
+        let seat = state.seat.take().unwrap_or(Seat::Take);
+        let node = state.node;
+        grant.release(Some(node), seat);
+        self.running -= 1;
+        if seat == Seat::Lent && self.lent.is_some() {
+            self.lent = Some(false);
+        }
+        if self.shape != shape_of(plan, graph) {
+            self.discard(outcome);
+            self.fail(OrderKey::default(), another_plan());
+            return;
+        }
+        let failed = matches!(outcome, Outcome::Failed(_) | Outcome::LookupFailed(..));
+        if self.stopping && !failed {
+            self.discard(outcome);
+            return;
+        }
+        match outcome {
+            // A flat plan has no absence rules, so no value is absent to its readers.
+            Outcome::Value { value, .. } | Outcome::ErrorAbsent(value) => {
+                self.resolve_flat(position, Some(value), &mut report.released);
+            }
+            Outcome::Hit { value, .. } => {
+                report.hits.push((node, Vec::new(), value.clone()));
+                self.resolve_flat(position, Some(value), &mut report.released);
+            }
+            Outcome::Failed(error) => {
+                let failure = node_error(graph, graph.node(node), error, &[], Vec::new());
+                self.fail(OrderKey::one(as_u32(position)), failure);
+            }
+            outcome => {
+                self.discard(outcome);
+                self.fail(
+                    OrderKey::one(as_u32(position)),
+                    broken(format!(
+                        "a task of node '{}' gave an outcome it cannot give",
+                        graph.node(node).name
+                    )),
+                );
+            }
+        }
+    }
+
+    /// Step `position` of a flat plan is done, holding `value`, released into `released` if
+    /// no step reads it: what waited for it is told.
+    fn resolve_flat(&mut self, position: usize, value: Option<V>, released: &mut Vec<V>) {
+        let state = &mut self.table[position];
+        if state.readers == 0 {
+            if let Some(value) = value {
+                released.push(value);
+            }
+        } else {
+            state.value = value;
+        }
+        let t = &self.layout.templates[OUTER];
+        let (start, end) = t.after_spans[position];
+        for &waiting in &t.after[start as usize..end as usize] {
+            let state = &mut self.table[waiting as usize];
+            if state.waiting > 0 {
+                state.waiting -= 1;
+                if state.waiting == 0 {
+                    // Inlined `push_flat`: `t` borrows the layout.
+                    self.ready.push(waiting as usize);
+                    let last = self.ready.len() - 1;
+                    sift_up(&mut self.ready, last, |a, b| a < b);
+                }
+            }
+        }
+    }
+
+    fn push_flat(&mut self, position: usize) {
+        self.ready.push(position);
+        let last = self.ready.len() - 1;
+        sift_up(&mut self.ready, last, |a, b| a < b);
+    }
+
+    fn pop_flat(&mut self) -> Option<usize> {
+        if self.ready.is_empty() {
+            return None;
+        }
+        let position = self.ready.swap_remove(0);
+        sift_down(&mut self.ready, 0, |a, b| a < b);
+        Some(position)
     }
 }
 
@@ -4597,41 +4899,56 @@ mod tests {
 
     #[test]
     fn a_stale_task_id_is_ignored_and_gives_back_no_slot() {
-        let graph = diamond();
-        let (plan, mut scheduler) = start(&graph, &["d"], &[("x", Num(1))]);
+        // A flat plan names a task by its step's position; a plan with blocks reuses slots.
+        stale_ids_are_ignored(&diamond(), "d", &[("x", Num(1))], false);
+        stale_ids_are_ignored(&chain(), "total", &[], true);
+    }
+
+    fn stale_ids_are_ignored(
+        graph: &Graph<Pay>,
+        output: &str,
+        inputs: &[(&str, Val)],
+        reuses: bool,
+    ) {
+        let expected = {
+            let (plan, mut scheduler) = start(graph, &[output], inputs);
+            to_the_end(&mut scheduler, &plan, graph, &mut Fan::default());
+            named(graph, scheduler.finish(&plan, graph)).unwrap()
+        };
+        let (plan, mut scheduler) = start(graph, &[output], inputs);
         let limits = Limits::new(NonZeroUsize::new(1), Vec::new(), Vec::new(), Vec::new());
         let mut eval = Fan::default();
-        let a = task_of(scheduler.next(&plan, &graph, &limits, Seat::Take));
-        let outcome = perform(&plan, &graph, &mut eval, &a, &mut Vec::new());
-        done(&mut scheduler, &plan, &graph, &limits, a.id, outcome);
-        // `b` reuses `a`'s slot, under another id.
-        let b = task_of(scheduler.next(&plan, &graph, &limits, Seat::Take));
-        assert_eq!(a.id.slot, b.id.slot);
+        let a = task_of(scheduler.next(&plan, graph, &limits, Seat::Take));
+        let outcome = perform(&plan, graph, &mut eval, &a, &mut Vec::new());
+        done(&mut scheduler, &plan, graph, &limits, a.id, outcome);
+        // `b` may reuse `a`'s slot, under another id.
+        let b = task_of(scheduler.next(&plan, graph, &limits, Seat::Take));
+        assert_eq!(a.id.slot == b.id.slot, reuses);
         assert_ne!(a.id, b.id);
         // `a`'s id again: ignored, its value released, and `b` keeps its worker slot.
         let stale = Outcome::Value {
             value: Num(-5),
             absent: false,
         };
-        let report = done(&mut scheduler, &plan, &graph, &limits, a.id, stale);
+        let report = done(&mut scheduler, &plan, graph, &limits, a.id, stale);
         assert_eq!(report.released, [Num(-5)]);
         assert_eq!(limits.held(Resource::Worker), 1);
         assert!(!scheduler.is_stopping());
-        let outcome = perform(&plan, &graph, &mut eval, &b, &mut Vec::new());
-        done(&mut scheduler, &plan, &graph, &limits, b.id, outcome);
+        let outcome = perform(&plan, graph, &mut eval, &b, &mut Vec::new());
+        done(&mut scheduler, &plan, graph, &limits, b.id, outcome);
         // And `b`'s twice.
         let twice = Outcome::Value {
             value: Num(-6),
             absent: false,
         };
-        let report = done(&mut scheduler, &plan, &graph, &limits, b.id, twice);
+        let report = done(&mut scheduler, &plan, graph, &limits, b.id, twice);
         assert_eq!(report.released, [Num(-6)]);
-        while let Next::Task(task) = scheduler.next(&plan, &graph, &limits, Seat::Take) {
-            let outcome = perform(&plan, &graph, &mut eval, &task, &mut Vec::new());
-            done(&mut scheduler, &plan, &graph, &limits, task.id, outcome);
+        while let Next::Task(task) = scheduler.next(&plan, graph, &limits, Seat::Take) {
+            let outcome = perform(&plan, graph, &mut eval, &task, &mut Vec::new());
+            done(&mut scheduler, &plan, graph, &limits, task.id, outcome);
         }
         assert_eq!(limits.held(Resource::Worker), 0);
-        let outputs = named(&graph, scheduler.finish(&plan, &graph)).unwrap();
-        assert_eq!(outputs["d"], Num(1110));
+        let outputs = named(graph, scheduler.finish(&plan, graph)).unwrap();
+        assert_eq!(outputs, expected);
     }
 }

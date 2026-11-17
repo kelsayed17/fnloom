@@ -326,18 +326,8 @@ def run_sets[T](
     try:
         for number in range(1, runners):
             # No permit, or no thread to be had: the sets run on the runners there are.
-            if permits is None or not permits.acquire(blocking=False):
-                break
-            thread = threading.Thread(
-                target=_helping,
-                args=(batch, permits),
-                name=f"fnloom-run-many-{number}",
-                daemon=True,
-            )
-            try:
-                thread.start()
-            except RuntimeError:
-                permits.release()
+            thread = None if permits is None else _helper(batch, permits, number)
+            if thread is None:
                 break
             helpers.append(thread)
         batch.work(caller=True)
@@ -364,12 +354,71 @@ def _left(deadline: float | None, timeout: float | None, index: int) -> float | 
     return left
 
 
-def _helping(batch: _Batch[object], permits: threading.Semaphore) -> None:
+def _helper[T](
+    batch: _Batch[T], permits: threading.Semaphore, number: int
+) -> threading.Thread | None:
+    """A helper thread for `batch`, started holding a permit; `None` without one.
+
+    A thread that can't start gives its permit back. An interrupt cutting its
+    `start` short gives the permit back too, unless the thread began, as it then
+    gives its own back as it ends.
+    """
+    if not permits.acquire(blocking=False):
+        return None
+    start = _Start()
+    thread = threading.Thread(
+        target=_helping,
+        args=(batch, permits, start),
+        name=f"fnloom-run-many-{number}",
+        daemon=True,
+    )
+    try:
+        thread.start()
+    except RuntimeError:
+        permits.release()
+        return None
+    except BaseException:
+        if start.give_up():
+            permits.release()
+        raise
+    return thread
+
+
+class _Start:
+    """Whether a helper thread began, or its starter gave it up first: settled once."""
+
+    __slots__ = ("_lock", "_state")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._state = "pending"
+
+    def begin(self) -> bool:
+        """The thread begins: whether it may, since its starter didn't give it up."""
+        with self._lock:
+            if self._state == "pending":
+                self._state = "began"
+            return self._state == "began"
+
+    def give_up(self) -> bool:
+        """The starter gives the thread up: whether it did, since it hadn't begun."""
+        with self._lock:
+            if self._state == "pending":
+                self._state = "given up"
+            return self._state == "given up"
+
+
+def _helping(
+    batch: _Batch[object], permits: threading.Semaphore, start: _Start
+) -> None:
     """A helper thread's part of `batch`, giving its permit back as it ends.
 
-    A forked child gives nothing back: its driver makes new permits, and the
+    One its starter gave up does nothing: the starter gave the permit back. A
+    forked child gives nothing back: its driver makes new permits, and the
     inherited ones' lock may be held by a thread the child doesn't have.
     """
+    if not start.begin():
+        return
     pid = os.getpid()
     try:
         batch.work()
@@ -506,14 +555,15 @@ def close_all(pools: Sequence[_core.Threads] | None = None) -> None:
 
     Busy threads end after their task, and are never waited for past that. A
     thread the pool counts as gone may still be in `threading`'s own cleanup,
-    which finalization would hang it in, so it is joined too. `pools` are every
-    live pool by default. A pool inherited across a fork is left alone by
-    `close` itself.
+    which finalization would hang it in, so it is joined too: matched by native
+    id and ident, since the system may reuse either once a thread ends. `pools`
+    are every live pool by default. A pool inherited across a fork is left alone
+    by `close` itself.
     """
     pools = list(_LIVE) if pools is None else pools
     deadline = time.monotonic() + _CLOSING
     # Taken first: `enumerate` drops a thread as its cleanup begins, not as it ends.
-    running = {thread.native_id: thread for thread in threading.enumerate()}
+    running = {(each.native_id, each.ident): each for each in threading.enumerate()}
     # Every pool stopped first, so their threads all leave at once.
     left = {key for threads in pools for key in threads.close(0.0)}
     for threads in pools:

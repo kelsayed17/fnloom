@@ -6,20 +6,20 @@ hooks pays nothing for them; one with a hook pays about 2 µs per node it report
 ([Benchmarks](benchmarks.md#hooks)). The examples on this page use one module:
 
 ```python
-# file: orders.py
-def subtotal(price: float, quantity: int) -> float:
-    """What the items cost."""
-    return price * quantity
+# file: parcels.py
+def load(weight: float, quantity: int) -> float:
+    """What the items weigh."""
+    return weight * quantity
 
 
-def shipping(subtotal: float, free_above: float = 50.0) -> float:
-    """Free above a threshold, a flat rate below it."""
-    return 0.0 if subtotal > free_above else 4.5
+def packaging(load: float, bare_above: float = 50.0) -> float:
+    """None above a threshold, a fixed box below it."""
+    return 0.0 if load > bare_above else 4.5
 
 
-def total(subtotal: float, shipping: float) -> float:
-    """What the customer pays."""
-    return subtotal + shipping
+def total(load: float, packaging: float) -> float:
+    """What the shipment weighs."""
+    return load + packaging
 ```
 
 ## Writing a hook
@@ -39,7 +39,7 @@ Give hooks to `Builder.with_hooks`:
 
 ```python
 import fnloom
-import orders
+import parcels
 
 
 class Trace(fnloom.Hook):
@@ -53,14 +53,14 @@ class Trace(fnloom.Hook):
 
 
 trace = Trace()
-driver = fnloom.Builder().with_modules(orders).with_hooks(trace).build()
-driver.execute(["total"], inputs={"price": 2.5, "quantity": 4})
+driver = fnloom.Builder().with_modules(parcels).with_hooks(trace).build()
+driver.execute(["total"], inputs={"weight": 2.5, "quantity": 4})
 # -> {'total': 14.5}
 trace.lines
-# -> ["subtotal{'price': 2.5, 'quantity': 4} -> 10.0", "shipping{'subtotal': 10.0} -> 4.5", "total{'shipping': 4.5, 'subtotal': 10.0} -> 14.5"]
+# -> ["load{'quantity': 4, 'weight': 2.5} -> 10.0", "packaging{'load': 10.0} -> 4.5", "total{'load': 10.0, 'packaging': 4.5} -> 14.5"]
 ```
 
-`free_above` isn't in `shipping`'s inputs: a parameter left to its default is absent, as it is in Hamilton.
+`bare_above` isn't in `packaging`'s inputs: a parameter left to its default is absent, as it is in Hamilton.
 
 Only the methods a hook overrides are called. A run whose hooks override neither node method makes no node events,
 so a hook that only times whole runs costs nothing per node. A driver with no hooks runs exactly as before.
@@ -83,12 +83,12 @@ class Named(fnloom.Hook):
 log: list[str] = []
 first, second = Named("first", log), Named("second", log)
 both = (
-    fnloom.Builder().with_modules(orders).with_hooks(first).with_hooks(second).build()
+    fnloom.Builder().with_modules(parcels).with_hooks(first).with_hooks(second).build()
 )
 both.hooks == (first, second)
 # -> True
-both.execute(["subtotal"], inputs={"price": 1.0, "quantity": 1})
-# -> {'subtotal': 1.0}
+both.execute(["load"], inputs={"weight": 1.0, "quantity": 1})
+# -> {'load': 1.0}
 log
 # -> ['first starts', 'second starts', 'first ends', 'second ends']
 ```
@@ -158,12 +158,12 @@ class Ends(fnloom.Hook):
 
 
 ends = Ends()
-watched = fnloom.Builder().with_modules(orders).with_hooks(ends).build()
-watched.execute(["total"], inputs={"price": 30.0, "quantity": 2})
+watched = fnloom.Builder().with_modules(parcels).with_hooks(ends).build()
+watched.execute(["total"], inputs={"weight": 30.0, "quantity": 2})
 # -> {'total': 60.0}
 end = ends.ends[0]
 (end.ok, end.outputs, end.nodes, dict(end.results))
-# -> (True, ('total',), ('subtotal', 'shipping', 'total'), {'total': 60.0})
+# -> (True, ('total',), ('load', 'packaging', 'total'), {'total': 60.0})
 ```
 
 `raw_execute` and `PreparedPlan.run_raw` fire every hook, as `execute` and `run` do; they only skip the
@@ -188,11 +188,11 @@ reported the call that made the generator, and `RunEnd.absent_errors` lists it.
 ```python
 ends.ends.clear()
 watched.execute(
-    ["total"], inputs={"price": 30.0, "quantity": 2}, overrides={"shipping": 1.0}
+    ["total"], inputs={"weight": 30.0, "quantity": 2}, overrides={"packaging": 1.0}
 )
 # -> {'total': 61.0}
 ends.ends[0].nodes
-# -> ('subtotal', 'total')
+# -> ('load', 'total')
 ```
 
 When a node raises, no later node starts. Its `after_node` gets `ok=False` and the node's own exception, and
@@ -208,8 +208,8 @@ override. So `after_run` sees their failure:
 
 ```python
 ends.ends.clear()
-watched.execute(["total"], inputs={"price": 30.0})
-# raises ValueError: missing inputs: 'quantity' (needed by 'subtotal')
+watched.execute(["total"], inputs={"weight": 30.0})
+# raises ValueError: missing inputs: 'quantity' (needed by 'load')
 (ends.ends[0].ok, ends.ends[0].nodes)
 # -> (False, ())
 ```
@@ -237,9 +237,9 @@ class Strict(fnloom.Hook):
             raise ValueError(f"{event.node.name} is zero")
 
 
-guarded = fnloom.Builder().with_modules(orders).with_hooks(Strict()).build()
-guarded.execute(["total"], inputs={"price": 0.0, "quantity": 1})
-# raises ValueError: subtotal is zero
+guarded = fnloom.Builder().with_modules(parcels).with_hooks(Strict()).build()
+guarded.execute(["total"], inputs={"weight": 0.0, "quantity": 1})
+# raises ValueError: load is zero
 ```
 
 ## Checked when attached
@@ -266,7 +266,7 @@ fnloom.Builder().with_hooks(Late())
 `fnloom.PrintNodes` is a ready-made hook that prints a line for each node a run calls (Q142). At `verbosity=1` that
 is `node 'total' ran in 1.2 ms`, or `node 'total' failed in 0.4 ms: ValueError('no')`, or, for a node served by the
 [cache](#with-a-cache), `node 'total' loaded from cache`: a hit is reported as a hit, where Hamilton's `PrintLn`
-reports a run. `verbosity=2` adds an indented `inputs:` line (`price=30.0, quantity=2`, sorted by name) and a `result:`
+reports a run. `verbosity=2` adds an indented `inputs:` line (`quantity=2, weight=30.0`, sorted by name) and a `result:`
 line, each value cut to `width` characters (50 by default) as [`LogFailures`](#logging-failures) cuts them.
 
 `nodes` limits what is printed: a sequence of names, or a function of the node's
@@ -281,14 +281,14 @@ branch, so the async driver and concurrent runs print correctly, and a block nod
 lines: list[str] = []
 printing = (
     fnloom.Builder()
-    .with_modules(orders)
+    .with_modules(parcels)
     .with_hooks(fnloom.PrintNodes(2, print_fn=lines.append, nodes=["total"]))
     .build()
 )
-printing.execute(["total"], inputs={"price": 30.0, "quantity": 2})
+printing.execute(["total"], inputs={"weight": 30.0, "quantity": 2})
 # -> {'total': 60.0}
 [line for line in lines if line.startswith("  ")]
-# -> ['  inputs: shipping=0.0, subtotal=60.0', '  result: 60.0']
+# -> ['  inputs: load=60.0, packaging=0.0', '  result: 60.0']
 ```
 
 ## Checking the graph at build
@@ -311,8 +311,8 @@ class NeedsOwner(fnloom.Hook):
             raise ValueError(f"no owner tag: {', '.join(missing)}")
 
 
-fnloom.Builder().with_modules(orders).with_hooks(NeedsOwner()).build()
-# raises ValueError: no owner tag: shipping, subtotal, total
+fnloom.Builder().with_modules(parcels).with_hooks(NeedsOwner()).build()
+# raises ValueError: no owner tag: load, packaging, total
 ```
 
 ## Logging failures
@@ -398,10 +398,10 @@ class RunRecord(fnloom.Hook):
 
 
 record = RunRecord()
-recorded = fnloom.Builder().with_modules(orders).with_hooks(record).build()
-recorded.execute(["total"], inputs={"price": 20.0, "quantity": 3})
+recorded = fnloom.Builder().with_modules(parcels).with_hooks(record).build()
+recorded.execute(["total"], inputs={"weight": 20.0, "quantity": 3})
 [json.loads(line)["node"] for line in record.lines]
-# -> ['subtotal', 'shipping', 'total']
+# -> ['load', 'packaging', 'total']
 ```
 
 Write the lines to a file instead to keep them; values are left out here, since they need not be JSON.
@@ -443,17 +443,17 @@ class Outcomes(fnloom.Hook):
 outcomes = Outcomes()
 cached = (
     fnloom.Builder()
-    .with_modules(orders)
+    .with_modules(parcels)
     .with_cache(fnloom.MemoryCache())
     .with_hooks(outcomes)
     .build()
 )
-cached.execute(["total"], inputs={"price": 2.5, "quantity": 4})
+cached.execute(["total"], inputs={"weight": 2.5, "quantity": 4})
 # -> {'total': 14.5}
 [(name, cache.status) for name, cache, _, _ in outcomes.seen]
-# -> [('subtotal', 'miss'), ('shipping', 'miss'), ('total', 'miss')]
+# -> [('load', 'miss'), ('packaging', 'miss'), ('total', 'miss')]
 outcomes.seen.clear()
-cached.execute(["total"], inputs={"price": 2.5, "quantity": 4})
+cached.execute(["total"], inputs={"weight": 2.5, "quantity": 4})
 # -> {'total': 14.5}
 [(name, tuple(cache), inputs, result) for name, cache, inputs, result in outcomes.seen]
 # -> [('total', ('hit', None), None, 14.5)]
@@ -471,7 +471,7 @@ On a driver built with [`with_threads`](running.md#threads), a run's nodes run o
   every worker;
 - run on the thread that ran the node, so `threading.current_thread()` in `after_node` is the node's worker;
 - report nodes in the order they start and finish, as on the async driver: sort by `order` for the order one worker
-  gives. With `with_threads(1)` the events come exactly as without threads, orders included.
+  gives. With `with_threads(1)` the events come exactly as without threads, parcels included.
 
 A slow hook holds up the run's other hooks, since they take turns, and the node it reports on waits on its worker
 meanwhile. A [limited](running.md#limits) node gives its slots back while its `before_node` hooks run, so slow hooks
@@ -513,11 +513,11 @@ class Starts(fnloom.Hook):
 
 
 starts = Starts()
-async_driver = fnloom.Builder().with_modules(orders).with_hooks(starts).build_async()
-asyncio.run(async_driver.execute(["total"], inputs={"price": 2.5, "quantity": 4}))
+async_driver = fnloom.Builder().with_modules(parcels).with_hooks(starts).build_async()
+asyncio.run(async_driver.execute(["total"], inputs={"weight": 2.5, "quantity": 4}))
 # -> {'total': 14.5}
 starts.names
-# -> ['subtotal', 'shipping', 'total']
+# -> ['load', 'packaging', 'total']
 ```
 
 Hamilton's async driver calls a sync hook when it schedules a node, not when the node runs. The hook gets the

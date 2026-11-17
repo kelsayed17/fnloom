@@ -504,6 +504,132 @@ from other changes since, such as calling node functions by vectorcall. The
 Measured on the machine above (now macOS 27.2), with CPython 3.14.8 and a release build, on 2026-11-15
 (`python -m benches.run fan_out fan_out_cached`; `absent_chain` in an earlier session that day).
 
+## Parallel fan-out
+
+`Builder.with_threads(8)` against Hamilton 1.90.0's `MultiThreadingExecutor(8)` as its remote executor, with
+`SynchronousLocalTaskExecutor` as its local one, on the `fan_out` graph. Hamilton sends only block tasks to the
+remote executor (Q169), so on this graph both run the branches in parallel. Milliseconds per steady run, the median
+over three fresh processes (one, for a run over 5 s), each the median of its runs after a warm one
+(`python -m benches.parallel`). Measured on 2026-11-16 on the Apple M2 Pro above, with 12 cores
+(`os.process_cpu_count()` is 12), macOS 27.2, CPython 3.14.8 and 3.14.8t, and a release build.
+
+**Trivial branches**, each adding one to its item. The last column is fnloom's cost per branch with eight workers:
+
+| build | branches | fnloom, no threads | fnloom, `with_threads(8)` | Hamilton, synchronous | Hamilton, threads (8) | per branch, 8 workers |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 3.14 | 1 | 0.003 | 0.010 | 0.108 | 0.184 | |
+| 3.14 | 100 | 0.050 | 0.200 | 4.485 | 71.9 | 2.0 µs |
+| 3.14 | 1,000 | 0.520 | 1.963 | 266.6 | 796.9 | 2.0 µs |
+| 3.14 | 10,000 | 5.198 | 20.3 | 25,742 | 26,972 | 2.0 µs |
+| 3.14t | 1 | 0.003 | 0.093 | 0.122 | 0.322 | |
+| 3.14t | 100 | 0.056 | 1.367 | 5.140 | 6.976 | 13.7 µs |
+| 3.14t | 1,000 | 0.544 | 13.5 | 304.3 | 316.2 | 13.5 µs |
+| 3.14t | 10,000 | 5.531 | 138.5 | 28,904 | 29,472 | 13.8 µs |
+
+**Branches that sleep 10 ms** (`time.sleep`, which releases the GIL) **or compute about 1 ms of pure Python**, 100
+of each:
+
+| build | branches | no threads | `with_threads(1)` | `with_threads(8)` | speedup over one worker | Hamilton, threads (8) |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 3.14 | sleeping | 1,209.4 | 1,205.3 | 156.2 | 7.7× | 302.1 |
+| 3.14t | sleeping | 1,212.7 | 1,208.3 | 155.7 | 7.8× | 160.1 |
+| 3.14 | CPU-bound | 89.3 | 89.0 | 88.6 | 1.0× (the GIL) | 162.4 |
+| 3.14t | CPU-bound | 83.9 | 84.1 | 20.0 | 4.2× | 28.2 |
+
+**A cached fan-out of 1,000 branches** with a `MemoryCache`, warm (over the items a run before it stored) and with
+one item appended (on a new driver and store each run):
+
+| build | run | `with_threads(1)` | `with_threads(8)` | 8 against 1 |
+| --- | --- | ---: | ---: | ---: |
+| 3.14 | warm | 3.79 | 3.93 | 1.04 |
+| 3.14 | one appended | 3.78 | 3.96 | 1.05 |
+| 3.14t | warm | 3.84 | 15.5 | 4.05 |
+| 3.14t | one appended | 3.95 | 15.0 | 3.80 |
+
+**Against Plan 11's targets** ([the plan](plans/2026-11-15-plan-11-parallel-executor.md#benchmark-targets)):
+
+| row | measured | target | |
+| --- | --- | --- | --- |
+| trivial branches, sequential | 0.52 µs a branch at 10,000 (3.14), 0.55 µs (3.14t); 1.075× 0.5.0 at 1,000 | within 10% of 0.5.0's 0.5 µs | met |
+| trivial branches, `with_threads(8)`, against Hamilton's threads | faster at every count, on both builds | faster on every count | met |
+| the same, per branch | 2.0 µs (3.14), 13.5 to 13.8 µs (3.14t) | under 10 µs | **missed on 3.14t** ([why](#missed-targets)) |
+| 100 sleeping branches, 8 workers against one | 7.7× (3.14), 7.8× (3.14t) | at least 6× | met |
+| the same, against Hamilton's threads | 1.9× faster (3.14), 1.03× faster (3.14t) | no slower | met |
+| 100 CPU-bound branches, 8 workers against one, 3.14t, 12 cores | 4.2× | at least 5× | **missed** ([why](#missed-targets)) |
+| the same, against Hamilton's threads | 1.4× faster (3.14t) | faster | met |
+| a graph without blocks, `with_threads(1)`, in the core | 1.80× (`layered_1000`), 1.81× (`layered_10000`) `Plan::run`'s instructions | at most 2× | met |
+| the same, from Python | 0.39 µs (3.14), 0.43 µs (3.14t) more per node | at most 1.5 µs more | met |
+| a cached fan-out of 1,000, warm and one appended, 8 workers against one | 1.04 and 1.05 (3.14); 4.05 and 3.80 (3.14t) | no slower by more than 20% | **missed on 3.14t** ([why](#missed-targets)) |
+| `ABSENT` through a 200-node chain, against 0.5.0 | 1.03× (12.35 µs against 11.95) | unchanged | met, within noise |
+| the async benchmarks against 0.5.0, both `sync_nodes` modes | 0.86× to 1.10× unhooked, 0.99× to 1.23× hooked (3.14); 1.02× to 1.24× hooked (3.14t) ([The scheduler](#the-scheduler)) | within 10% | **missed on the hooked rows** ([why](#missed-targets)) |
+| the default path against 0.5.0 | 0.98× to 1.08× on the sync shapes; the instruction-count gate green | within noise | met |
+
+### Missed targets
+
+Four targets are missed. Each is a bug by the rule above, and none is fixed yet:
+
+| missed row | measured | target | cause | levers |
+| --- | --- | --- | --- | --- |
+| **Missed:** trivial branches, `with_threads(8)`, per branch, 3.14t | 13.5 to 13.8 µs | under 10 µs | Lock contention: every hand-out and completion takes the run's one scheduler lock, and each completion wakes the pool, so eight workers queue on it for branches that take well under a microsecond. A fan-out of 1,000 costs 2.0 ms on one worker, 3.8 ms on two, 5.5 ms on four and 13.4 ms on eight | Hand out several ready tasks per lock; complete and take the next task in one lock; wake one idle worker per newly ready task instead of every waiter |
+| **Missed:** 100 CPU-bound branches, 8 workers against one, 3.14t | 4.2× | at least 5× | Not profiled separately. At about 0.85 ms a branch the scheduler's own share is small, so contention on the one lock between branches is the likely part, with the free-threaded build's own costs on shared objects | The same levers, then a profile of the rest |
+| **Missed:** a cached fan-out of 1,000, 8 workers against one, 3.14t | 4.05× warm, 3.80× appended | no slower by more than 20% | The same contention: a branch hit is a probe and a completion with no node call, so the run is all hand-outs and completions | The same levers; on 3.14 the GIL hides it (1.04×) |
+| **Missed:** the hooked async rows against 0.5.0 | 0.99× to 1.23× (3.14), 1.02× to 1.24× (3.14t) | within 10% | The async driver steps the core scheduler, which sends each node event from Rust through the hooked run's observer to its `Dispatch`, with the node's order key; 0.5.0's async driver called `Dispatch` from its own loop. That is one more Python frame and one order tuple per event, about 0.2 to 0.3 µs a node. The event code itself costs the same, profiled | Call `Dispatch` from the stepper directly, with the order key made once per node |
+
+Branches that do real work are where the pool pays already: 7.8× over one worker on the sleeping ones, on either
+build.
+
+## The scheduler
+
+`with_threads` runs a run on the core [scheduler](rust-core.md#the-scheduler), which `Plan::run`'s default path
+doesn't touch. With one worker, its cost per node is held by the [instruction-count
+gate](#the-instruction-count-gate), in the `rust:1.99.1` image on aarch64 Linux:
+
+| row | `Plan::run` | scheduler, before | scheduler, flat (now) |
+| --- | ---: | ---: | ---: |
+| chain, 1,000 | 369,541 | 1,698,268 (4.60×) | 673,892 (1.82×) |
+| chain, 10,000 | 3,672,782 | 16,925,324 (4.61×) | 6,702,578 (1.82×) |
+| layered, 1,000 | 452,570 | 2,241,435 (4.95×) | 813,642 (1.80×) |
+| layered, 10,000 | 4,472,080 | 22,417,568 (5.01×) | 8,103,964 (1.81×) |
+
+A plan without blocks or absence rules runs flat: its one scope's steps live in one table by position, its ready set
+is a heap of positions, and a completion writes straight into the caller's report. CI fails when any of these rows
+costs more than twice `Plan::run`'s, and when any `schedule` row rises more than 2% over its baseline.
+
+**Hooked and async runs against 0.5.0**, on 3.14, microseconds or milliseconds per prepared run: the median of 9
+samples in each of seven (sync) or five (async) fresh processes per side, alternating. The sync rows are within noise
+of 0.5.0, hooks included:
+
+| run | 0.5.0 | now | ratio |
+| --- | ---: | ---: | ---: |
+| chain of 100, no hook | 6.90 µs | 6.74 µs | 0.98 |
+| layered 1,000, no hook | 100.9 µs | 98.6 µs | 0.98 |
+| fan-out of 1,000, no hook | 432.9 µs | 465.3 µs | 1.07 |
+| chain of 100, a `before_node` and an `after_node` hook | 171.2 µs | 173.9 µs | 1.02 |
+| chain of 1,000, the counting hook | 1,718 µs | 1,730 µs | 1.01 |
+| layered 1,000, the counting hook | 1,839 µs | 1,748 µs | 0.95 |
+| fan-out of 1,000, the counting hook | 2,282 µs | 2,366 µs | 1.04 |
+
+The async rows (`benches.async_`) are within 10% of 0.5.0 unhooked, but the fan-in of 100 at 1.09 to 1.10, while the
+hooked ones are 0.99 to 1.23 times 0.5.0's. Steady milliseconds, `sync_nodes="inline"` / `"thread"`, for a selection
+of the 48 rows; the others fall within these ranges:
+
+| shape | nodes | unhooked, 0.5.0 → now | hooked, 0.5.0 → now | hooked ratio |
+| --- | --- | --- | --- | --- |
+| chain, 100 | async | 0.084 → 0.083 / 0.086 → 0.083 | 0.226 → 0.262 / 0.229 → 0.263 | 1.16 / 1.15 |
+| chain, 1,000 | async | 0.870 → 0.814 / 0.863 → 0.809 | 2.265 → 2.498 / 2.257 → 2.505 | 1.10 / 1.11 |
+| chain, 1,000 | sync | 0.653 → 0.628 / 34.5 → 35.1 | 2.038 → 2.306 / 36.9 → 37.7 | 1.13 / 1.02 |
+| fan-in, 100 | async | 0.021 → 0.024 / 0.021 → 0.023 | 0.030 → 0.036 / 0.029 → 0.035 | 1.23 / 1.19 |
+| fan-in, 1,000 | async | 0.390 → 0.387 / 0.388 → 0.390 | 0.400 → 0.397 / 0.399 → 0.421 | 0.99 / 1.06 |
+| layered, 100 | async | 0.094 → 0.093 / 0.094 → 0.091 | 0.237 → 0.266 / 0.239 → 0.265 | 1.13 / 1.11 |
+| layered, 1,000 | async | 0.991 → 0.861 / 0.990 → 0.869 | 2.394 → 2.555 / 2.403 → 2.563 | 1.07 / 1.07 |
+| layered, 1,000 | sync | 0.781 → 0.669 / 23.2 → 23.7 | 2.178 → 2.362 / 26.3 → 26.6 | 1.08 / 1.01 |
+
+On 3.14t (three processes per side) the unhooked rows are 0.87 to 1.17 times 0.5.0's, over 10% only on the fan-in of
+100 (1.12 to 1.17), and the hooked ones 1.02 to 1.24.
+
+**The hooked async rows miss the 10% target**, at about 0.2 to 0.3 µs more per node than 0.5.0's: the cause and the
+lever are in [Missed targets](#missed-targets).
+
 ## Cold start, first call and memory
 
 The tables above time a warm process. A short-lived process (a CLI, a job, a serverless handler) pays for the import,
@@ -642,6 +768,17 @@ It prints 60 JSON lines (`shape`, `n`, `nodes`, `runtime`, `first_ms`, `run_ms`,
 shape, kind of node (`async` or `sync`) and runtime (`hamilton`, `fnloom-thread`, `fnloom-inline`,
 `fnloom-thread-hooked` or `fnloom-inline-hooked`). Every answer is checked against the shape's closed form.
 
+The parallel runs have their own script too, also a fresh process per sample, to run once on each build:
+
+```bash
+uv run python -m benches.parallel > parallel.jsonl
+```
+
+It prints 30 JSON lines (`shape`, `branches`, `runtime`, `workers`, `build`, `cores`, `ms`, `per_branch_us`,
+`processes`, `error`), one per shape (`trivial`, `sleeping`, `cpu`, `cached_warm`, `cached_appended` or
+`layered`), runtime (`fnloom`, `fnloom-threads`, `hamilton-sync` or `hamilton-threads`) and worker count, with the
+build (`3.14` or `3.14t`) and `os.process_cpu_count()`. See [Parallel fan-out](#parallel-fan-out).
+
 ### What is timed
 
 All times use `time.perf_counter_ns`, in milliseconds. Graph generation is not timed.
@@ -682,12 +819,17 @@ Wall-clock time is too noisy on shared CI runners to gate on, so CI gates the Ru
 instructions `Graph::build`, `Graph::prepare` and `Plan::run` execute under callgrind, on chain, fan-in and layered
 graphs of 1,000 and 10,000 nodes (`crates/fnloom-core/benches/core.rs`). A rise of more than 2% over the committed
 `crates/fnloom-core/benches/baseline.json` fails the `instruction-counts` job, which runs `scripts/bench_gate.py`.
-A row with no baseline yet is reported, not gated: `run_skips.skip_chain_200`, a 200-node chain whose first node
-declines so every other node is skipped, measures the absence-aware loop that only such plans run.
+`run_skips.skip_chain_200`, a 200-node chain whose first node declines so every other node is skipped, measures
+the absence-aware loop that only such plans run. The `schedule` rows run the chain and layered graphs on the
+[scheduler](rust-core.md#the-scheduler) with one worker, and `--ratio` holds each of them, chain and layered,
+to at most twice its `run` row: see [The scheduler](#the-scheduler). A row with no
+baseline yet is reported, not gated.
 
 Counts depend on the CPU architecture, the toolchain and the C library, so the baseline is generated in the job's own
 environment: the `rust:1.99.1` image on aarch64 Linux. A change that costs instructions on purpose regenerates it with
-`--write-baseline` and says why in its commit message.
+`--write-baseline` and says why in its commit message. The job uploads the counts it measured as the
+`instruction-counts` artifact, so a baseline can be written from them: `gh run download <run> -n instruction-counts`,
+then `scripts/bench_gate.py --write-baseline --results bench.jsonl`.
 
 ## The CodSpeed gate
 
@@ -697,9 +839,10 @@ a prepared plan's steady `run` on each generated shape, `Driver.execute` on a re
 `@config`, the mixed numpy workload of the cold-start section (a steady run, two builds and the async driver in both
 modes), hooked runs of a 1,000-node chain on both drivers (with and without output checks, and cached, warm and cold),
 `Builder.build` on a 1,000-node graph, fan-outs of 1, 100 and 10,000 branches, a cached fan-out of 1,000 branches
-warm and with one item appended, and a 200-node chain run plain, through nodes that may be absent, and declining
-(`benchmarks/test_blocks.py`). The extension is built in release mode first, so the numbers are those of
-the optimised build.
+warm and with one item appended, a 200-node chain run plain, through nodes that may be absent, and declining
+(`benchmarks/test_blocks.py`), and the scheduler on one worker (`with_threads(1)`): fan-outs of 1, 100 and 10,000
+branches, the 1,000-node layered graph and the warm cached fan-out (`benchmarks/test_parallel.py`). The extension
+is built in release mode first, so the numbers are those of the optimised build.
 
 CodSpeed counts simulated CPU instructions and allocations instead of reading a clock, so a result is stable on a shared
 runner, and each pull request is compared against `main`. It complements the tables above, which are wall clock on one
@@ -708,7 +851,7 @@ CodSpeed sees the whole call from Python, the scan, the plan cache and the node 
 
 To enable it, install the CodSpeed GitHub app for the repository and set the repository variable
 `CODSPEED_ENABLED=true`. Until then the `benchmarks` job is skipped, and the `benchmarks-smoke` job still runs every
-benchmark once as a test on every pull request, so none of them rots. Locally:
+benchmark once as a test on every pull request, on 3.14 and 3.14t, so none of them rots. Locally:
 
 ```sh
 uv run pytest benchmarks

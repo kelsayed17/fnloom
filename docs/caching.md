@@ -284,20 +284,20 @@ default, not as a name, so a node's own `@cache` still wins over it: `recompute=
 from fnloom import cache
 
 
-def sales(region: str) -> float:
-    """Sales of a region."""
+def rainfall(region: str) -> float:
+    """Rainfall in a region."""
     return 1200.0 if region == "north" else 800.0
 
 
 @cache(behavior="disable")
-def rates() -> dict:
-    """Tax rates from a service, which must never be stored."""
+def factors() -> dict:
+    """Runoff factors from a service, which must never be stored."""
     return {"north": 0.2, "south": 0.1}
 
 
-def taxes(sales: float, rates: dict, region: str) -> float:
-    """The tax owed."""
-    return sales * rates[region]
+def runoff(rainfall: float, factors: dict, region: str) -> float:
+    """The water that runs off."""
+    return rainfall * factors[region]
 ```
 
 ```python
@@ -306,11 +306,11 @@ import regions
 refreshed = (
     fnloom.Builder()
     .with_modules(regions)
-    .with_cache(fnloom.MemoryCache(), recompute=True, default=["sales"])
+    .with_cache(fnloom.MemoryCache(), recompute=True, default=["rainfall"])
     .build()
 )
-refreshed.explain_cache(["taxes"], inputs={"region": "north"})
-# -> {"rates": ("uncacheable", "policy disable (decorator)"), "sales": ("miss", "policy default (driver)"), "taxes": ("uncacheable", "reads uncacheable 'rates'")}
+refreshed.explain_cache(["runoff"], inputs={"region": "north"})
+# -> {"factors": ("uncacheable", "policy disable (decorator)"), "rainfall": ("miss", "policy default (driver)"), "runoff": ("uncacheable", "reads uncacheable 'factors'")}
 ```
 
 ### Per-field policies
@@ -330,7 +330,7 @@ while a field of it is stored. When the field hits, the producer does not run. T
 producer's key would be, from its code and the values it reads, less any parameter the producer's `ignore` names:
 
 ```python
-# file: ledger.py
+# file: rain_log.py
 import threading
 
 from fnloom import cache, extract_fields
@@ -338,19 +338,21 @@ from fnloom import cache, extract_fields
 
 @cache(behavior="disable", fields={"totals": "default"})
 @extract_fields({"totals": dict, "lock": threading.Lock})
-def ledger(region: str) -> dict:
+def rain_log(region: str) -> dict:
     """The region's totals, and a lock that can't be pickled."""
-    return {"totals": {"sales": 1200.0}, "lock": threading.Lock()}
+    return {"totals": {"rainfall": 1200.0}, "lock": threading.Lock()}
 ```
 
 ```python
-import ledger
+import rain_log
 
-books = fnloom.Builder().with_modules(ledger).with_cache(fnloom.MemoryCache()).build()
-books.execute(["totals"], inputs={"region": "north"})
-# -> {'totals': {'sales': 1200.0}}
-books.explain_cache(["totals"], inputs={"region": "north"})
-# -> {"ledger": ("uncacheable", "policy disable (decorator)"), "totals": ("hit", "policy default (decorator)")}
+readings = (
+    fnloom.Builder().with_modules(rain_log).with_cache(fnloom.MemoryCache()).build()
+)
+readings.execute(["totals"], inputs={"region": "north"})
+# -> {'totals': {'rainfall': 1200.0}}
+readings.explain_cache(["totals"], inputs={"region": "north"})
+# -> {"rain_log": ("uncacheable", "policy disable (decorator)"), "totals": ("hit", "policy default (decorator)")}
 ```
 
 A field `fields=` doesn't name keeps the default: keyed, never stored, run whenever it is needed. A name the function
@@ -487,8 +489,8 @@ other `Field(...)` settings, its private attributes' defaults, its validators' f
 forward reference not resolved) is refused until you call its `model_rebuild()`. A field default that is a library
 object fnloom cannot fingerprint (a `SecretStr`, say) or a model that is not frozen makes the class uncacheable too.
 
-A name read by a string constant counts as read by name, so `globals()["RATE"]` and `getattr(config, "RATE")` see
-`RATE`. Your own code is any module that is neither built in, nor the standard library, nor installed: a module whose
+A name read by a string constant counts as read by name, so `globals()["SCALE"]` and `getattr(config, "SCALE")` see
+`SCALE`. Your own code is any module that is neither built in, nor the standard library, nor installed: a module whose
 file sits in the interpreter's library directories, or in any `site-packages` or `dist-packages` directory on
 `sys.path`, is a library. A project installed in editable mode keeps its files in the project, so it stays your own.
 
@@ -505,7 +507,7 @@ change, or change the version yourself when it does, give `@cache(version=...)`.
 - a global **rebound after the build**, by assignment from outside the function or by reloading its module: the
   driver keeps the version read at build until it is rebuilt;
 - code reached only by **dynamic import**, `importlib.import_module(name)` or `__import__(name)`;
-- a name **built at run time**, as in `getattr(config, prefix + "RATE")`;
+- a name **built at run time**, as in `getattr(config, prefix + "SCALE")`;
 - the **iteration order of a set literal** in a function's code (`for x in {"a", "b"}`), which a code version hashes
   in sorted order so that `x in {"a", "b"}`, the common use, keeps its version across processes;
 - **reflection at run time** on what the version leaves out: a function or class reading its own docstring, a class's
@@ -597,7 +599,7 @@ its ordinary key, with the item's fingerprint as the version of the expand it re
 So an item that moved, or that another run also had, hits, and an appended item computes one new branch.
 
 ```python
-# file: regions_sales.py
+# file: regions_rain.py
 from fnloom import Collect, Parallelizable
 
 
@@ -606,36 +608,33 @@ def region(regions: list[str]) -> Parallelizable[str]:
     yield from regions
 
 
-def sales(region: str) -> float:
-    """The region's sales, from a slow endpoint."""
-    print("sales", region)
+def rainfall(region: str) -> float:
+    """The region's rainfall, from a slow endpoint."""
+    print("rainfall", region)
     return float(len(region))
 
 
-def report(sales: Collect[float]) -> list[float]:
-    """Every region's sales, in the order asked."""
-    return list(sales)
+def report(rainfall: Collect[float]) -> list[float]:
+    """Every region's rainfall, in the order asked."""
+    return list(rainfall)
 ```
 
 ```python
 import fnloom
-import regions_sales
+import regions_rain
 
-books = (
-    fnloom.Builder()
-    .with_modules(regions_sales)
-    .with_cache(fnloom.MemoryCache())
-    .build()
+gauges = (
+    fnloom.Builder().with_modules(regions_rain).with_cache(fnloom.MemoryCache()).build()
 )
-books.execute(["report"], inputs={"regions": ["eu", "asia"]})
+gauges.execute(["report"], inputs={"regions": ["eu", "asia"]})
 # -> {'report': [2.0, 4.0]}
-books.execute(["report"], inputs={"regions": ["asia", "eu", "us"]})
+gauges.execute(["report"], inputs={"regions": ["asia", "eu", "us"]})
 # -> {'report': [4.0, 2.0, 2.0]}
-books.explain_cache(["report"], inputs={"regions": ["asia", "eu", "us"]})
-# -> {"region": ("hit", "branches: 3 hit, 0 miss, 0 uncacheable"), "report": ("hit", None), "sales": ("unknown", "keyed per item of 'region'")}
+gauges.explain_cache(["report"], inputs={"regions": ["asia", "eu", "us"]})
+# -> {"region": ("hit", "branches: 3 hit, 0 miss, 0 uncacheable"), "report": ("hit", None), "rainfall": ("unknown", "keyed per item of 'region'")}
 ```
 
-The second run calls `sales` once, for `"us"`, and prints `sales us`.
+The second run calls `rainfall` once, for `"us"`, and prints `rainfall us`.
 
 - **The expand is stored as the `list` of its items,** under its ordinary key, so a hit replays them without running
   it. Storing them means holding every item until the expand is exhausted. A large or endless generator can't afford

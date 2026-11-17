@@ -16,12 +16,12 @@ import sys
 import textwrap
 import threading
 import time
-from typing import TYPE_CHECKING, NoReturn, override
+from typing import TYPE_CHECKING, NoReturn, cast, override
 
 import pytest
 
 import fnloom
-from fnloom import _core, _threads
+from fnloom import _async, _core, _threads
 from helpers import make_module
 
 if TYPE_CHECKING:
@@ -576,6 +576,38 @@ def test_an_async_run_inside_a_stopping_run_stops_while_a_node_awaits(
     assert took < PROMPT
 
 
+# An async node that yields to the loop once, so its run waits on the loop.
+QUICK = """
+import asyncio
+
+
+async def quick(x: int) -> int:
+    await asyncio.sleep(0)
+    return x
+"""
+
+
+def test_an_async_run_following_a_stop_flag_leaves_no_timer_behind() -> None:
+    """Its next look at the flag it follows is cancelled as it ends.
+
+    So the loop keeps no run alive after it.
+    """
+    module = make_module("follow_quick", QUICK)
+    driver = fnloom.Builder().with_modules(module).build_async()
+
+    async def main() -> tuple[object, int]:
+        token = _threads.CANCELLED.set(_core.Stop())
+        try:
+            values = await driver.execute(["quick"], inputs={"x": 1})
+        finally:
+            _threads.CANCELLED.reset(token)
+        gc.collect()
+        runs = _async._Run  # noqa: SLF001  # what the timer kept
+        return values["quick"], sum(isinstance(kept, runs) for kept in gc.get_objects())
+
+    assert asyncio.run(main()) == (1, 0)
+
+
 # Branch 0, first in key order, runs a run of its own; branch 1 fails meanwhile.
 # `slow` sleeps through the stop; `finishing` returns its value as it sees it.
 MASKED = """
@@ -1063,6 +1095,36 @@ def test_closing_at_exit_joins_the_pools_threads() -> None:
     assert len(mine) == 7  # noqa: PLR2004  # max_workers - 1
     _threads.close_all([pool])
     assert [thread.name for thread in mine if thread.is_alive()] == []
+
+
+class _Stale:
+    """A pool whose `close` names, once, threads that left it."""
+
+    def __init__(self, left: list[tuple[int, int]]) -> None:
+        self._left = left
+
+    def close(self, timeout: float = 1.0) -> list[tuple[int, int]]:  # noqa: ARG002  # the pool's
+        left = [*self._left]
+        self._left.clear()
+        return left
+
+
+def test_closing_at_exit_never_joins_a_live_thread_that_reused_a_native_id() -> None:
+    """A thread that left is matched by native id and ident: either may be reused."""
+    release = threading.Event()
+    other = threading.Thread(target=release.wait, args=(SLOW,))
+    other.start()
+    try:
+        assert other.native_id is not None
+        assert other.ident is not None
+        stale = _Stale([(other.native_id, other.ident + 1)])
+        start = time.monotonic()
+        _threads.close_all([cast("_core.Threads", cast("object", stale))])
+        assert time.monotonic() - start < PROMPT / 2
+        assert other.is_alive()
+    finally:
+        release.set()
+        other.join(SLOW)
 
 
 def settled_workers() -> int:

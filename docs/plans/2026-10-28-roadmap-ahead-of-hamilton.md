@@ -1,11 +1,11 @@
 # Roadmap: ahead of Hamilton everywhere
 
-**Status:** in progress, 2026-11-15. Plans 1, 2 and 4 are released in 0.1.0, and the Plan 4 follow-up and Plan 3 in
+**Status:** in progress, 2026-11-16. Plans 1, 2 and 4 are released in 0.1.0, and the Plan 4 follow-up and Plan 3 in
 0.2.0. Plans 5 to 9 (#24 to #28) and Plan 12's PR 0 (#33) are released in 0.3.0, and Plan 12's PRs A to G
 (#43, #44, #46 to #49, #53) in 0.4.0. Plan 10, typed absence and sequential fan-out, is released in 0.5.0
 (PRs #56, #61, #62, #63, #66, #68, #69, #72, follow-ups #83, #84 and #90, and its close-out #96).
-Plan 11 follows it, then Plan 13. Plan 11 is designed, and its
-[implementation plan](2026-11-15-plan-11-parallel-executor.md) is approved (2026-11-16); nothing of it is built.
+Plan 11, the parallel executor and partial results, is built ([its plan](2026-11-15-plan-11-parallel-executor.md),
+PRs #104 to #111 and its close-out #112) and ships in 0.6.0. Plan 13 follows it.
 
 **Goal:** for every capability Hamilton 1.90.0 offers, fnloom has an equivalent that is at least as good, or a
 written decision explaining why it doesn't. "At least as good" means: same intent; behaviour proven differentially
@@ -58,10 +58,10 @@ and the design's change log takes a row when the item is approved.
 |---|---|
 | Lifecycle adapters (pre/post node, pre/post graph) | Done in Plan 6: `fnloom.Hook` with `before_run`, `before_node`, `after_node` and `after_run`, each given one frozen event with real values, on both drivers, any number per driver, checked when attached (Q84, Q86); cache outcomes on node events (Q85) |
 | Result builders (`do_build_result`, dict / pandas / polars builders) | Done in Plan 6: `Builder.with_result_builder(build)`, any callable given the raw dict in request order, typed through `Builder[R]` (Q19, Q24). No pandas or polars builder: a callable, with recipes, including a strict `frame` recipe that refuses the outer join `pandas.DataFrame` does (Q89) |
-| Dynamic execution (`Parallelizable`, `Collect`) | Designed and approved 2026-10-29: [the dynamic execution design](../design/2026-10-28-dynamic-execution-design.md). `Parallelizable[T]` and `Collect[T]` with no experimental flag, blocks compiled once into a reusable plan, nesting, content-addressed cache keys per branch, and `Builder.with_threads(...)` for a parallel executor on free-threaded 3.14t, correct on 3.14. Plan 10 built absence and sequential blocks, released in 0.5.0 (Q118 to Q132, Q135 to Q138); Plan 11 builds the executor |
+| Dynamic execution (`Parallelizable`, `Collect`) | Designed and approved 2026-10-29: [the dynamic execution design](../design/2026-10-28-dynamic-execution-design.md). `Parallelizable[T]` and `Collect[T]` with no experimental flag, blocks compiled once into a reusable plan, nesting, content-addressed cache keys per branch, and `Builder.with_threads(...)` for a parallel executor on free-threaded 3.14t, correct on 3.14. **Fixed (0.6.0).** Plan 10 built absence and sequential blocks, released in 0.5.0 (Q118 to Q132, Q135 to Q138); Plan 11 built the executor: `with_threads`, limits, single-flight, deadlines, `run_many` and blocks on the async driver (Q132, Q134, Q167 to Q171) |
 | Plugin ecosystem (dask, ray, spark, pandera, mlflow, UI, tracker) | Not built in (design §2 non-goal). Plan 6's hooks make each one writable outside fnloom (Q84) |
 | A failing node logs its inputs | Done in Plan 6: `after_node` gets `ok=False` with the node, its inputs and its error, and `fnloom.LogFailures` (*new*) is the ready-made hook that logs them (Q88) |
-| `NodeExecutionMethod` and `GracefulErrorAdapter` (node-execution wrappers) | `NodeExecutionMethod` done in Plan 8: `Builder.with_node_wrappers(*wrappers)`, Q24's ordered chain, any number per driver (Q111). Graceful partial failure is designed for Plan 11: `@fnloom.absent_on(*errors)` and `Builder.with_absent_on(...)` turn chosen errors into absence, and `Collect` keeps the branches that succeeded ([design](../design/2026-10-28-dynamic-execution-design.md) §7.5) |
+| `NodeExecutionMethod` and `GracefulErrorAdapter` (node-execution wrappers) | `NodeExecutionMethod` done in Plan 8: `Builder.with_node_wrappers(*wrappers)`, Q24's ordered chain, any number per driver (Q111). Graceful partial failure is **fixed (0.6.0)**, built in Plan 11: `@fnloom.absent_on(*errors)` and `Builder.with_absent_on(...)` turn chosen errors into absence, and `Collect` keeps the branches that succeeded ([design](../design/2026-10-28-dynamic-execution-design.md) §7.5, Q133) |
 | `StaticValidator` | Decided in Plan 9: not planned (Q117). A function over `Driver.nodes` after `build()` raises one `ValueError` listing every problem |
 | Async hook methods | Out of scope for Plan 6 (its decision 13): hook methods are plain `def`, called on the loop's thread on the async driver, and an `async def` method is a `TypeError` from `with_hooks` (Q84, Q86) |
 | A function in `final_vars` | Done in Plan 5: matched by identity, never by name (Q30) |
@@ -168,7 +168,7 @@ behind); **n/a** (fnloom has no such feature yet; the plan builds it without the
 | `@pipe_output` can't share work between steps; optional parameters leak in as inputs | fixed (Plan 8) | A defaulted step parameter keeps its default and is never an input (Q105); steps share work by `source("node")`, as in Hamilton, and each step is a node the cache keeps |
 | Two adapters can't implement the same lifecycle method (cache + graceful errors, result builder + type-check opt-out); a raising hook skips the others; hook signatures are checked only at run | fixed (Plan 6) | Any number of hooks per event, in the order given; every hook sees an event before its errors are raised, several as one `ExceptionGroup` with a node's own error first; signatures checked by `with_hooks` (Q23, Q24, Q84). One result builder per builder, as Hamilton (Q24) |
 | `execute` returns different types depending on the adapter; the legacy constructor returns a pandas frame that broadcasts scalars | fixed | Q19: always a dict |
-| `AsyncDriver`: async build, pandas default, a deprecated asyncio call, no sibling cancellation, sync nodes block the loop, no graceful partial failure, no caching, and a builder with methods it refuses | fixed (Plan 3), except graceful partial failure: n/a, a later design | Sync build, dict results in request order, no deprecated call (Q11–Q13); sync nodes off the loop (Q65); cancellation on failure (Q66); the sync driver's checks (Q67); caching (Q68); async rows awaited (Q69). A failure still raises the first exception (Q66): graceful partial failure is designed with "Graphs that carry I/O and failure" under [Beyond Hamilton](#beyond-hamilton). Done in Plan 6: hooks fire on the async driver as the node starts and finishes, with real values, and a result builder is used (Q86, Q19) |
+| `AsyncDriver`: async build, pandas default, a deprecated asyncio call, no sibling cancellation, sync nodes block the loop, no graceful partial failure, no caching, and a builder with methods it refuses | fixed (Plan 3); graceful partial failure **fixed (0.6.0)** | Sync build, dict results in request order, no deprecated call (Q11–Q13); sync nodes off the loop (Q65); cancellation on failure (Q66); the sync driver's checks (Q67); caching (Q68); async rows awaited (Q69). A failure still raises the first exception (Q66), unless the node is `@fnloom.absent_on` that error, which Plan 11 built on the async driver too (Q133). Done in Plan 6: hooks fire on the async driver as the node starts and finishes, with real values, and a result builder is used (Q86, Q19) |
 
 ### Caching
 
@@ -195,10 +195,10 @@ behind); **n/a** (fnloom has no such feature yet; the plan builds it without the
 These are problems Hamilton has no answer to at all. They need a design of their own before any plan:
 
 - **Incremental and streaming execution.** One appended record re-runs every node; re-running per new row is O(n).
-- **Batch and sweep execution.** Running one graph over many entities, or over a grid of `value()`s, is a Python
-  loop of `execute` calls today.
+- **Batch and sweep execution.** Running one graph over many entities, or over a grid of `value()`s, was a Python
+  loop of `execute` calls. Plan 11 built the batch half, `PreparedPlan.run_many` (Q171); sweeps are still to design.
 - **Graphs that carry I/O and failure.** An async node that fails can degrade to a declared empty answer, so a fan-out
-  returns partial results rather than one exception.
+  returns partial results rather than one exception. Plan 11 built this as `absent_on` (Q133), on every driver.
 
 ## The plans, in order
 
@@ -237,8 +237,11 @@ tests against Hamilton for every kept behaviour; benchmarks for anything on the 
    close-out (#96). Released in 0.5.0 (2026-11-15).
 10. **Plan 11: the parallel executor and partial results.** The same design, milestones C to E: the core
     `Scheduler`, `with_threads(...)` for free-threaded 3.14t, `run_many`, the async driver on the scheduler, and
-    `absent_on` for partial results. [Plan 11's implementation plan](2026-11-15-plan-11-parallel-executor.md) is
-    approved (2026-11-16) with every recommended answer; not started. It ships as 0.6.0. The rest of "Beyond Hamilton" (streaming, incremental execution, sweeps) is left
+    `absent_on` for partial results. [Plan 11's implementation plan](2026-11-15-plan-11-parallel-executor.md) was
+    approved (2026-11-16) with every recommended answer, and is built: the scheduler (#104), the parallel sync
+    driver (#105), single-flight and limits (#106), stopping (#107), the async driver on the scheduler (#108),
+    `run_many` (#109), partial results (#110), the stress tests and Threads docs (#111), and the close-out's
+    benchmarks and docs (#112). It ships as 0.6.0. The rest of "Beyond Hamilton" (streaming, incremental execution, sweeps) is left
     room for in its §8.
 11. **Plan 12: every comparison row better.** Done: [Plan 12](2026-10-29-plan-12-api-parity-plus.md), a test for
     every row of [Coming from Hamilton](../from-hamilton.md)'s comparison tables, then the four rows where fnloom is

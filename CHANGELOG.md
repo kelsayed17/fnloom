@@ -124,6 +124,18 @@ change the public API; such changes are listed under **Changed** and **Removed**
   helper threads for `run_many`, however many callers run it at once.
 - `fnloom.StoppedError`, the `RuntimeError` a run stopped by the run that started it raises, is public. A node that
   sees `fnloom.cancelled()` may raise it to stop: it is never raised in place of the failure that stopped its run.
+- Benchmarks of the parallel executor: `python -m benches.parallel` times trivial, sleeping and CPU-bound fan-outs
+  against Hamilton's synchronous and `MultiThreadingExecutor(8)` executors, a cached fan-out at one and eight workers,
+  and a graph without blocks on one worker, one JSON row per shape, runtime, worker count, build and core count. The
+  results for 3.14 and 3.14t are on the benchmarks page. `benchmarks/test_parallel.py` measures the one-worker rows
+  for CodSpeed, and `benchmarks-smoke` runs on 3.14t too.
+- `scripts/bench_gate.py --ratio NUMERATOR:DENOMINATOR:LIMIT`, repeatable, fails the instruction-count gate when one
+  benchmark costs more than `LIMIT` times another. CI holds the scheduler with one worker to at most twice
+  `Plan::run`'s instructions on the chain and layered graphs, and gates the `schedule` rows on their committed
+  baseline. The job uploads its counts as an artifact, for `--write-baseline`, and the whole baseline is refreshed
+  from it.
+- The running guide gains "Partial results", the catalog example under `with_threads(8)` with an endpoint call that
+  times out.
 
 ### Fixed
 
@@ -147,9 +159,19 @@ change the public API; such changes are listed under **Changed** and **Removed**
   is busy.
 - `LogFailures` logs an expand an error made absent while it yielded, from `RunEnd.absent_errors`, as `node 'x'
   failed while yielding its items`. Such an expand gets no second `after_node`, so it went unlogged.
+- An async run that follows the stop of the run that started it cancels its next look at it as it ends, so the loop
+  no longer keeps the finished run alive for up to 50 ms.
+- At interpreter exit, a pool thread that left is matched by its native id and its ident, so a later thread the system
+  gave the same native id is never waited for.
+- A `Ctrl-C` that cut short the start of one of `run_many`'s helper threads no longer keeps one of the driver's helper
+  permits: it is given back, once, by the caller if the thread never began, else by the thread as it ends.
 
 ### Changed
 
+- Rust core: the scheduler runs a plan without an expand or absence rules flat, off one table by step position,
+  with a heap of positions as its ready set. With one worker it costs about 1.8 times `Plan::run`'s instructions per
+  node, down from about 5. Its tasks, keys, reports and outputs are unchanged; a flat run's `TaskId` names its step's
+  position, so the ids of two of its tasks never share a slot.
 - The Threads section of the running guide is rewritten: what depends on timing and what doesn't, what a run shares
   and serializes, runs inside runs, thread counts and fork. The thread tests gain stress tests, which the CI `stress`
   job runs 200 rounds of (`FNLOOM_STRESS_ROUNDS`), with a `stress` hypothesis profile.
@@ -710,7 +732,7 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - **Breaking:** the build refuses a parameter with a default that reads a computed node, and an input that two
   consumers give different defaults. Hamilton lets the node replace the default, and each consumer keep its own. One
   `ValueError` lists every case, sorted, naming the parameter, the node or the other consumers, and the opt-out. To
-  keep the behaviour, write `@fnloom.defaults(shadowed=("cost",))` on the consumer, and
+  keep the behaviour, write `@fnloom.defaults(shadowed=("limit",))` on the consumer, and
   `@fnloom.defaults(differing=("shared",))` on each consumer of the input but one; or rename the node, or make the
   defaults equal (Q76). `@fnloom.defaults` is new, and records names only.
 - **Breaking:** `None` passes an input, override or extracted-field check only when the type admits it: `Optional[T]`,
@@ -875,7 +897,7 @@ change the public API; such changes are listed under **Changed** and **Removed**
   POSIX mode bits, which Windows reports as `0o777` for every directory; it now checks them on POSIX only.
 - The cache returned a stale result after an edit it should have seen. A module constant read through another name
   (a default, a helper handed the module, a class attribute), a function's own attribute, a name read as a string
-  (`globals()["RATE"]`, `getattr(config, "RATE")`), a name a module's `__getattr__` serves, and a method of an input
+  (`globals()["SCALE"]`, `getattr(config, "SCALE")`), a name a module's `__getattr__` serves, and a method of an input
   value's own class now all count in a code version or a fingerprint. Fingerprinting an input of a user class costs
   about 1 µs more per value.
 - A pandas index's frequency and a frame's or series' `attrs` are part of their fingerprints.

@@ -174,3 +174,70 @@ def test_results_that_are_empty_or_not_json_are_an_error(
     """A run that produced nothing readable must not pass."""
     baseline = json.dumps({KEY: 10})
     assert run_files(tmp_path, baseline, results) == bench_gate.EXIT_UNREADABLE
+
+
+SCHEDULE = "core::engine::schedule.layered_1000"
+PLAIN = f"{RUN}.layered_1000"
+
+
+def gate_ratio(tmp_path: Path, current: dict[str, int], *ratios: str) -> int:
+    """Runs the gate with `--ratio` checks, every id of `current` in the baseline."""
+    baseline_file = write_baseline(tmp_path / "baseline.json", current)
+    results_file = write_results(tmp_path / "results.jsonl", current)
+    argv = ["--baseline", str(baseline_file), "--results", str(results_file)]
+    for ratio in ratios:
+        argv += ["--ratio", ratio]
+    return bench_gate.main(argv)
+
+
+def test_a_ratio_over_its_limit_fails_and_one_at_it_passes(tmp_path: Path) -> None:
+    """The numerator may be up to `LIMIT` times the denominator, inclusive."""
+    ratio = f"{SCHEDULE}:{PLAIN}:2.0"
+    assert gate_ratio(tmp_path, {SCHEDULE: 2_000, PLAIN: 1_000}, ratio) == 0
+    assert gate_ratio(tmp_path, {SCHEDULE: 2_001, PLAIN: 1_000}, ratio) == 1
+    assert gate_ratio(tmp_path, {SCHEDULE: 1_500, PLAIN: 1_000}, ratio) == 0
+
+
+def test_each_ratio_is_judged_and_reported(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A second ratio that fails fails the gate, and the report names it."""
+    other = f"{BUILD}.layered_1000"
+    counts = {SCHEDULE: 1_800, PLAIN: 1_000, other: 3_000}
+    held, broken = f"{SCHEDULE}:{PLAIN}:2", f"{other}:{PLAIN}:2.5"
+    assert gate_ratio(tmp_path, counts, held, broken) == 1
+    out = capsys.readouterr().out
+    assert f"ok       ratio {SCHEDULE} / {PLAIN}: 1,800 / 1,000 = 1.800x" in out
+    assert f"FAIL     ratio {other} / {PLAIN}" in out
+
+
+def test_a_ratio_naming_an_id_missing_from_the_run_fails(tmp_path: Path) -> None:
+    """A ratio that can't be computed must not look like a pass."""
+    ratio = f"{SCHEDULE}:{PLAIN}:2"
+    assert gate_ratio(tmp_path, {PLAIN: 1_000}, ratio) == 1
+
+
+@pytest.mark.parametrize(
+    "ratio",
+    [
+        f"{SCHEDULE}:2",
+        f"{SCHEDULE}:{PLAIN}",
+        f"{SCHEDULE}:{PLAIN}:two",
+        f"{PLAIN}::2",
+        f"core:::engine::run.a:{PLAIN}:2",
+        f"{SCHEDULE}::::{PLAIN}:2",
+    ],
+)
+def test_a_malformed_ratio_is_refused(tmp_path: Path, ratio: str) -> None:
+    """Two ids and a positive number, split at single colons; argparse exits 2."""
+    with pytest.raises(SystemExit) as raised:
+        gate_ratio(tmp_path, {SCHEDULE: 1, PLAIN: 1}, ratio)
+    assert raised.value.code == bench_gate.EXIT_UNREADABLE
+
+
+def test_a_ratio_splits_at_single_colons() -> None:
+    """The ids keep their `::`; the limit is exact."""
+    parsed = bench_gate.parse_ratio(f"{SCHEDULE}:{PLAIN}:2.0")
+    assert (parsed.numerator, parsed.denominator) == (SCHEDULE, PLAIN)
+    assert parsed.limit == 2  # noqa: PLR2004  # the limit given

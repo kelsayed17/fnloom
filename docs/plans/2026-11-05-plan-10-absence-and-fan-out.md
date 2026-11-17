@@ -82,7 +82,7 @@ Also read `docs/plans/2026-10-28-roadmap-ahead-of-hamilton.md` and
   Every error lists all culprits, sorted.
 - Register rows come first. Each row gets its row text before its test: a `keeps("Qn")` differential test for KEEP, a
   `deliberate("Qn")` test for the rest, both in `tests/differential/`.
-- No new runtime dependency. No Hamilton code copied. Examples use neutral domains (catalogs, regions, sales).
+- No new runtime dependency. No Hamilton code copied. Examples use neutral domains (catalogs, regions, shipping).
 - The default path is untouched. `benches.run` stays within noise, and the instruction-count gate stays green, on a
   graph with no expand node and no node that may be absent.
 - Each PR adds a CHANGELOG `[Unreleased]` entry, and rewrites the `from-hamilton.md` rows it changes.
