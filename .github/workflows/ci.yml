@@ -122,6 +122,8 @@ jobs:
           --baseline crates/fnloom-core/benches/baseline.json --results bench.jsonl
           --ratio core::engine::schedule.layered_1000:core::engine::run.layered_1000:2.0
           --ratio core::engine::schedule.layered_10000:core::engine::run.layered_10000:2.0
+          --ratio core::engine::schedule.chain_1000:core::engine::run.chain_1000:2.0
+          --ratio core::engine::schedule.chain_10000:core::engine::run.chain_10000:2.0
 
   benchmarks-smoke:
     name: Benchmarks run (Python ${{ matrix.python }})

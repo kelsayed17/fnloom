@@ -220,7 +220,14 @@ def test_a_ratio_naming_an_id_missing_from_the_run_fails(tmp_path: Path) -> None
 
 @pytest.mark.parametrize(
     "ratio",
-    [f"{SCHEDULE}:2", f"{SCHEDULE}:{PLAIN}", f"{SCHEDULE}:{PLAIN}:two", f"{PLAIN}::2"],
+    [
+        f"{SCHEDULE}:2",
+        f"{SCHEDULE}:{PLAIN}",
+        f"{SCHEDULE}:{PLAIN}:two",
+        f"{PLAIN}::2",
+        f"core:::engine::run.a:{PLAIN}:2",
+        f"{SCHEDULE}::::{PLAIN}:2",
+    ],
 )
 def test_a_malformed_ratio_is_refused(tmp_path: Path, ratio: str) -> None:
     """Two ids and a positive number, split at single colons; argparse exits 2."""

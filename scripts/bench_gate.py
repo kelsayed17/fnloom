@@ -60,7 +60,11 @@ class Ratio:
 def parse_ratio(text: str) -> Ratio:
     """Parses `NUMERATOR:DENOMINATOR:LIMIT`, or raises `argparse.ArgumentTypeError`."""
     parts = _PART.split(text)
-    if len(parts) != 3 or not all(parts):  # noqa: PLR2004  # the three parts
+    # An empty part, or a run of colons other than `::`, as in `a:::b`, is no id.
+    malformed = any(
+        not part or ":::" in part or part.strip(":") != part for part in parts
+    )
+    if len(parts) != 3 or malformed:  # noqa: PLR2004  # the three parts
         msg = f"{text!r} is not NUMERATOR:DENOMINATOR:LIMIT"
         raise argparse.ArgumentTypeError(msg)
     numerator, denominator, limit = parts

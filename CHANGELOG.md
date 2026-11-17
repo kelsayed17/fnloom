@@ -131,8 +131,9 @@ change the public API; such changes are listed under **Changed** and **Removed**
   for CodSpeed, and `benchmarks-smoke` runs on 3.14t too.
 - `scripts/bench_gate.py --ratio NUMERATOR:DENOMINATOR:LIMIT`, repeatable, fails the instruction-count gate when one
   benchmark costs more than `LIMIT` times another. CI holds the scheduler with one worker to at most twice
-  `Plan::run`'s instructions on the layered graphs, and gates the `schedule` rows on their committed baseline. The
-  job uploads its counts as an artifact, for `--write-baseline`.
+  `Plan::run`'s instructions on the chain and layered graphs, and gates the `schedule` rows on their committed
+  baseline. The job uploads its counts as an artifact, for `--write-baseline`, and the whole baseline is refreshed
+  from it.
 - The running guide gains "Partial results", the catalog example under `with_threads(8)` with an endpoint call that
   times out.
 
