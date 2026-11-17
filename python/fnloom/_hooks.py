@@ -1134,13 +1134,19 @@ class LogFailures(Hook):
         self._lock = threading.Lock()
 
     @override
-    def __getstate__(self) -> tuple[logging.Logger, int]:
-        """The settings: a lock and a run's errors are not pickled."""
-        return (self._logger, self._level)
+    def __getstate__(self) -> tuple[logging.Logger, int, dict[str, object] | None]:
+        """The settings and a subclass's attributes: not the lock or a run's errors."""
+        # A subclass without `__slots__` keeps its own attributes in `__dict__`.
+        own = cast("dict[str, object] | None", getattr(self, "__dict__", None))
+        return (self._logger, self._level, own)
 
-    def __setstate__(self, state: tuple[logging.Logger, int]) -> None:
-        """Restores the settings, with no run in flight."""
-        self._logger, self._level = state
+    def __setstate__(
+        self, state: tuple[logging.Logger, int, dict[str, object] | None]
+    ) -> None:
+        """Restores the settings and a subclass's attributes, with no run in flight."""
+        self._logger, self._level, own = state
+        if own is not None:
+            vars(self).update(own)
         self._logged = {}
         self._lock = threading.Lock()
 
