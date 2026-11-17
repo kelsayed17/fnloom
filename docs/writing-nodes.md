@@ -1412,7 +1412,9 @@ def scaled(factor: float, base: float = 100.0) -> float:
     return base * factor
 
 
-@parameterize_values("gain", {("low_gain", "A low gain."): 0.1, ("high_gain", None): 0.3})
+@parameterize_values(
+    "gain", {("low_gain", "A low gain."): 0.1, ("high_gain", None): 0.3}
+)
 def boosted(gain: float, base: float = 100.0) -> float:
     return base * (1 + gain)
 ```

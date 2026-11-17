@@ -346,7 +346,9 @@ def rain_log(region: str) -> dict:
 ```python
 import rain_log
 
-readings = fnloom.Builder().with_modules(rain_log).with_cache(fnloom.MemoryCache()).build()
+readings = (
+    fnloom.Builder().with_modules(rain_log).with_cache(fnloom.MemoryCache()).build()
+)
 readings.execute(["totals"], inputs={"region": "north"})
 # -> {'totals': {'rainfall': 1200.0}}
 readings.explain_cache(["totals"], inputs={"region": "north"})
@@ -622,10 +624,7 @@ import fnloom
 import regions_rain
 
 gauges = (
-    fnloom.Builder()
-    .with_modules(regions_rain)
-    .with_cache(fnloom.MemoryCache())
-    .build()
+    fnloom.Builder().with_modules(regions_rain).with_cache(fnloom.MemoryCache()).build()
 )
 gauges.execute(["report"], inputs={"regions": ["eu", "asia"]})
 # -> {'report': [2.0, 4.0]}

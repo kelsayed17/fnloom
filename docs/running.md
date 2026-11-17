@@ -498,7 +498,9 @@ To skip only the override checks, build with `Builder.without_override_type_chec
 override of another type, such as `float("nan")` for an `int` node, runs while a badly typed input is still refused:
 
 ```python
-sentinel = fnloom.Builder().with_modules(shipping).without_override_type_checks().build()
+sentinel = (
+    fnloom.Builder().with_modules(shipping).without_override_type_checks().build()
+)
 sentinel.execute(["label"], overrides={"total": float("nan")})["label"]
 # -> 'nan kg'
 ```
@@ -1276,9 +1278,7 @@ import playback
 
 async_driver = fnloom.Builder().with_modules(playback).build_async()
 asyncio.run(
-    async_driver.execute(
-        ["covered", "rate"], inputs={"speed": "fast", "minutes": 10.0}
-    )
+    async_driver.execute(["covered", "rate"], inputs={"speed": "fast", "minutes": 10.0})
 )
 # -> {'covered': 15.0, 'rate': 1.5}
 ```
