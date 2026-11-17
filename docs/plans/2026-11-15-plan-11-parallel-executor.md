@@ -4,9 +4,9 @@
 > superpowers:executing-plans to implement this plan PR by PR, task by task, with superpowers:test-driven-development
 > inside each task and an independent reviewer subagent per PR. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Status:** approved 2026-11-16 with every recommended answer in [Open questions](#open-questions), and built: C1
-(#104), C2 (#105), C3 (#106), C5 (#107), C4 (#108), C6 (#109), D1 (#110), C7 (#111) and the close-out Z (#112). It
-ships as 0.6.0. Drafted 2026-11-15, and revised 2026-11-16 after two rounds of independent review (#99).
+**Status:** done; released in 0.6.0 (2026-11-16). Approved 2026-11-16 with every recommended answer in
+[Open questions](#open-questions), and built: C1 (#104), C2 (#105), C3 (#106), C5 (#107), C4 (#108), C6 (#109),
+D1 (#110), C7 (#111) and the close-out Z (#112). Drafted 2026-11-15, and revised 2026-11-16 after two rounds of independent review (#99).
 
 **Goal:** milestones C to E of the [dynamic execution design](../design/2026-10-28-dynamic-execution-design.md).
 
