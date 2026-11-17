@@ -4,27 +4,27 @@ Everything about calling a graph: inputs, overrides, prepared plans, type checks
 examples on this page all use one module:
 
 ```python
-# file: pricing.py
-def total(price: float, quantity: int) -> float:
-    """What the line costs before any discount."""
-    return price * quantity
+# file: shipping.py
+def total(weight: float, quantity: int) -> float:
+    """What the parcel weighs before any trim."""
+    return weight * quantity
 
 
-def discounted(total: float, discount: float = 0.0) -> float:
-    """The total after the discount, if one is given."""
-    return total * (1 - discount)
+def trimmed(total: float, trim: float = 0.0) -> float:
+    """The total after the trim, if one is given."""
+    return total * (1 - trim)
 
 
-def label(discounted: float, currency: str = "EUR") -> str:
-    """The price as shown to a customer."""
-    return f"{discounted:.2f} {currency}"
+def label(trimmed: float, unit: str = "kg") -> str:
+    """The weight as printed on the parcel."""
+    return f"{trimmed:.2f} {unit}"
 ```
 
 ```python
 import fnloom
-import pricing
+import shipping
 
-driver = fnloom.build(pricing)
+driver = fnloom.build(shipping)
 ```
 
 ## Execute
@@ -33,16 +33,16 @@ driver = fnloom.build(pricing)
 exactly those, each once, in the order you asked for them:
 
 ```python
-driver.execute(["label", "total"], inputs={"price": 2.5, "quantity": 4})
-# -> {'label': '10.00 EUR', 'total': 10.0}
+driver.execute(["label", "total"], inputs={"weight": 2.5, "quantity": 4})
+# -> {'label': '10.00 kg', 'total': 10.0}
 ```
 
 You can also pass a function instead of its name. It means the node the function makes in this driver, and the
 result is still keyed by the node's name:
 
 ```python
-driver.execute([pricing.label], inputs={"price": 2.5, "quantity": 4})
-# -> {'label': '10.00 EUR'}
+driver.execute([shipping.label], inputs={"weight": 2.5, "quantity": 4})
+# -> {'label': '10.00 kg'}
 ```
 
 fnloom matches the function itself, never its name. An `@extract_fields` function means its producer, not its fields.
@@ -57,11 +57,11 @@ must be a node in the graph. A misspelled input is an error, never a value that'
 ## Overrides
 
 `overrides` supplies a node's value instead of computing it, and cuts off everything upstream of it. Override
-`total`, and `price` and `quantity` are no longer needed:
+`total`, and `weight` and `quantity` are no longer needed:
 
 ```python
 driver.execute(["label"], overrides={"total": 100.0})
-# -> {'label': '100.00 EUR'}
+# -> {'label': '100.00 kg'}
 ```
 
 An override can name any node, whether a function or an input. It wins over a supplied input of the same name, and
@@ -78,13 +78,13 @@ an overridden node. To get that rule, build with `with_strict_overrides()`. The 
 sorted, with the nodes that need it. It is settled when the request is prepared, never on a run of a prepared plan:
 
 ```python
-strict = fnloom.Builder().with_modules(pricing).with_strict_overrides().build()
+strict = fnloom.Builder().with_modules(shipping).with_strict_overrides().build()
 strict.execute(
-    ["total"], inputs={"price": 2.0, "quantity": 3}, overrides={"price": 5.0}
+    ["total"], inputs={"weight": 2.0, "quantity": 3}, overrides={"weight": 5.0}
 )
 # -> {'total': 15.0}
-strict.execute(["total"], inputs={"quantity": 3}, overrides={"price": 5.0})
-# raises ValueError: override of input 'price' refused: not supplied, though needed by 'total' (supply it in inputs= too; strict overrides are on)
+strict.execute(["total"], inputs={"quantity": 3}, overrides={"weight": 5.0})
+# raises ValueError: override of input 'weight' refused: not supplied, though needed by 'total' (supply it in inputs= too; strict overrides are on)
 ```
 
 An input that no node the request computes needs, such as an output asked for itself, is never refused. `validate`
@@ -99,14 +99,14 @@ message. Calling it again adds names:
 
 ```python
 declared = (
-    fnloom.Builder().with_modules(pricing).with_declared_inputs("price", "quantty")
+    fnloom.Builder().with_modules(shipping).with_declared_inputs("weight", "quantty")
 )
 try:
     declared.build()
 except ValueError as error:
     lines = str(error).splitlines()
 lines
-# -> ["declared name 'quantty' is not an input of the graph (did you mean 'quantity'?)", "undeclared input 'currency'", "undeclared input 'discount' (did you mean 'discounted'?)", "undeclared input 'quantity' (did you mean 'quantty'?)"]
+# -> ["declared name 'quantty' is not an input of the graph (did you mean 'quantity'?)", "undeclared input 'quantity' (did you mean 'quantty'?)", "undeclared input 'trim'", "undeclared input 'unit'"]
 ```
 
 ## Prepared plans
@@ -116,11 +116,11 @@ freed. `prepare` does that work once and hands you the plan, which you can run a
 fastest way to run the same graph in a loop:
 
 ```python
-plan = driver.prepare(["label"], inputs={"price": 0.0, "quantity": 0})
-plan.run(inputs={"price": 1.5, "quantity": 2})
-# -> {'label': '3.00 EUR'}
-plan.run(inputs={"price": 4.0, "quantity": 3})
-# -> {'label': '12.00 EUR'}
+plan = driver.prepare(["label"], inputs={"weight": 0.0, "quantity": 0})
+plan.run(inputs={"weight": 1.5, "quantity": 2})
+# -> {'label': '3.00 kg'}
+plan.run(inputs={"weight": 4.0, "quantity": 3})
+# -> {'label': '12.00 kg'}
 ```
 
 A plan is compiled for its outputs and for the **names** of its inputs and overrides, not their values. The values
@@ -142,9 +142,9 @@ def pairs(outputs: dict[str, object]) -> list[str]:
     return [f"{name}={value}" for name, value in outputs.items()]
 
 
-listed = fnloom.Builder().with_modules(pricing).with_result_builder(pairs).build()
-listed.execute(["total", "price"], inputs={"price": 2.5, "quantity": 4})
-# -> ['total=10.0', 'price=2.5']
+listed = fnloom.Builder().with_modules(shipping).with_result_builder(pairs).build()
+listed.execute(["total", "weight"], inputs={"weight": 2.5, "quantity": 4})
+# -> ['total=10.0', 'weight=2.5']
 ```
 
 - **What it gets.** Each requested output once, in the order you asked for it, with the inputs and overrides you
@@ -165,7 +165,7 @@ listed.execute(["total", "price"], inputs={"price": 2.5, "quantity": 4})
 skip the builder and return the dict. Every hook fires, as for `execute`. On an `AsyncDriver` both are coroutines.
 
 ```python
-listed.raw_execute(["total"], inputs={"price": 2.5, "quantity": 4})
+listed.raw_execute(["total"], inputs={"weight": 2.5, "quantity": 4})
 # -> {'total': 10.0}
 ```
 
@@ -176,19 +176,19 @@ listed.raw_execute(["total"], inputs={"price": 2.5, "quantity": 4})
 for when you call it, and `import fnloom` imports neither.
 
 ```python
-# file: sales.py
+# file: harvest.py
 import pandas as pd
 
 
-def prices() -> pd.Series:
+def yields() -> pd.Series:
     return pd.Series([1.0, 2.0, 3.0])
 
 
-def quantities() -> pd.Series:
+def plots() -> pd.Series:
     return pd.Series([1, 2, 3])
 
 
-def refunds() -> pd.Series:
+def losses() -> pd.Series:
     return pd.Series([1, 0])
 
 
@@ -196,21 +196,21 @@ def regions() -> pd.DataFrame:
     return pd.DataFrame({"north": [1, 2, 3], "south": [4, 5, 6]})
 
 
-def rate() -> float:
+def moisture() -> float:
     return 0.2
 
 
-def revenue(prices: pd.Series, quantities: pd.Series) -> pd.Series:
-    return prices * quantities
+def crop(yields: pd.Series, plots: pd.Series) -> pd.Series:
+    return yields * plots
 ```
 
 ```python
-import sales
+import harvest
 
-builder = fnloom.Builder().with_modules(sales)
+builder = fnloom.Builder().with_modules(harvest)
 frames = builder.with_result_builder(fnloom.frame()).build()
-frames.execute(["revenue", "regions", "rate"]).to_dict("list")
-# -> {'revenue': [1.0, 4.0, 9.0], 'regions.north': [1, 2, 3], 'regions.south': [4, 5, 6], 'rate': [0.2, 0.2, 0.2]}
+frames.execute(["crop", "regions", "moisture"]).to_dict("list")
+# -> {'crop': [1.0, 4.0, 9.0], 'regions.north': [1, 2, 3], 'regions.south': [4, 5, 6], 'moisture': [0.2, 0.2, 0.2]}
 ```
 
 `frame(library="pandas", *, flatten=True, separator=".", join="strict")`:
@@ -231,8 +231,8 @@ frames.execute(["revenue", "regions", "rate"]).to_dict("list")
   `fnloom.FrameBuilder`, for annotations.
 
 ```python
-frames.execute(["quantities", "refunds"])
-# raises ValueError: frame(join='strict') needs every output on one index: quantities has 3 rows, refunds has 2 rows; pass join='outer' to align them
+frames.execute(["plots", "losses"])
+# raises ValueError: frame(join='strict') needs every output on one index: plots has 3 rows, losses has 2 rows; pass join='outer' to align them
 ```
 
 The frame class itself still works, and builds by the library's own rules (Q89):
@@ -241,7 +241,7 @@ The frame class itself still works, and builds by the library's own rules (Q89):
 import pandas
 
 plain = builder.with_result_builder(pandas.DataFrame).build()
-plain.execute(["quantities", "refunds"])["refunds"].isna().tolist()  # NaN-padded
+plain.execute(["plots", "losses"])["losses"].isna().tolist()  # NaN-padded
 # -> [False, False, True]
 ```
 
@@ -254,13 +254,13 @@ for outputs that are all scalars.
 and an empty list when the request would run:
 
 ```python
-driver.validate(["label"], inputs={"price": 1.5, "quantity": 2})
+driver.validate(["label"], inputs={"weight": 1.5, "quantity": 2})
 # -> []
 driver.validate(
-    ["labl", "total"], inputs={"price": "cheap", "quantity": 2, "quantty": 3}
+    ["labl", "total"], inputs={"weight": "heavy", "quantity": 2, "quantty": 3}
 )
-# -> ["price: expected float, got str", "unknown inputs: 'quantty' (did you mean 'quantity'?)", "unknown outputs: 'labl' (did you mean 'label'?)"]
-driver.validate(["total"], inputs={"price": 1.5, "quantty": 3})
+# -> ["unknown inputs: 'quantty' (did you mean 'quantity'?)", "unknown outputs: 'labl' (did you mean 'label'?)", 'weight: expected float, got str']
+driver.validate(["total"], inputs={"weight": 1.5, "quantty": 3})
 # -> ["missing inputs: 'quantity' (needed by 'total') (did you mean 'quantty'?)", "unknown inputs: 'quantty' (did you mean 'quantity'?)"]
 ```
 
@@ -336,8 +336,8 @@ overridden node's return type. Every value that doesn't fit is listed in one `Va
 `<name>: expected <type>, got <type of the value>`:
 
 ```python
-driver.execute(["total"], inputs={"price": "2.5", "quantity": 4})
-# raises ValueError: price: expected float, got str
+driver.execute(["total"], inputs={"weight": "2.5", "quantity": 4})
+# raises ValueError: weight: expected float, got str
 ```
 
 A few rules worth knowing:
@@ -352,8 +352,8 @@ A few rules worth knowing:
   plain class like `int` costs one `isinstance` call.
 
 ```python
-driver.execute(["total"], inputs={"price": None, "quantity": 4})
-# raises ValueError: price: expected float, got NoneType
+driver.execute(["total"], inputs={"weight": None, "quantity": 4})
+# raises ValueError: weight: expected float, got NoneType
 ```
 
 ### What the checks understand
@@ -367,7 +367,7 @@ driver.execute(["total"], inputs={"price": None, "quantity": 4})
 | `NewType` | As its supertype |
 | `TypeVar` | Anything but `None` fits; `None` fits a free one, or one whose bound or a constraint admits it. On an edge it matches only itself |
 | A `runtime_checkable` protocol | `isinstance` |
-| A PEP 695 alias (`type Price = float`) | As what it names |
+| A PEP 695 alias (`type Weight = float`) | As what it names |
 | `list`, `dict`, `tuple` and other plain classes | `isinstance` |
 | `tuple[int, str]`, `tuple[()]` and other fixed-length tuples | A tuple of that length whose items each fit, nested tuples included; `tuple[()]` takes only `()` (Q80) |
 | `list[T]`, `tuple[T, ...]`, `Sequence[T]`, `set[T]`, `Iterable[T]` | A value of exactly the declared class (a `list` for `list[T]`) by class only, so `["a"]` fits `list[int]`. Any other value by kind, plus its first element. Every item with [deep checks](#deep-checks-and-numeric-widening) |
@@ -379,7 +379,7 @@ driver.execute(["total"], inputs={"price": None, "quantity": 4})
 A generic alias such as `Pair[int]`, for `type Pair[T] = tuple[T, T]`, is read as `tuple[int, int]` when its value
 uses its type parameters in the order it declares them. One that reorders them is compared as written. On an edge, an
 alias inside another generic's arguments is compared as written too, so a node returning `list[float]` doesn't feed a
-`list[Price]` parameter.
+`list[Weight]` parameter.
 
 Both checks are public: `fnloom.value_matches(declared, value)` answers as the input check, and
 `fnloom.type_matches(produced, expected)` as the edge check.
@@ -398,10 +398,10 @@ Two opt-ins make the value checks stricter or looser. Both apply to inputs, over
 values, so neither changes them.
 
 ```python
-# file: baskets.py
-def basket_total(prices: list[float]) -> float:
-    """The sum of every price in the basket."""
-    return sum(prices)
+# file: boxes.py
+def box_total(weights: list[float]) -> float:
+    """The sum of every weight in the box."""
+    return sum(weights)
 ```
 
 `Builder.with_deep_type_checks()` checks every item of a `list`, `set`, `tuple[T, ...]` or other standard
@@ -410,13 +410,13 @@ without recursion. An iterator is still never read (Q43). By default a `list` pa
 as in Hamilton:
 
 ```python
-import baskets
+import boxes
 
-fnloom.build(baskets).validate(["basket_total"], inputs={"prices": [1.5, "2"]})
+fnloom.build(boxes).validate(["box_total"], inputs={"weights": [1.5, "2"]})
 # -> []
-deep = fnloom.Builder().with_modules(baskets).with_deep_type_checks().build()
-deep.validate(["basket_total"], inputs={"prices": [1.5, "2"]})
-# -> ['prices: expected list[float], got list (an item does not fit)']
+deep = fnloom.Builder().with_modules(boxes).with_deep_type_checks().build()
+deep.validate(["box_total"], inputs={"weights": [1.5, "2"]})
+# -> ['weights: expected list[float], got list (an item does not fit)']
 ```
 
 A deep check reads every item on every run, so it costs time in proportion to the value: about 2.6 ms for a list of
@@ -436,18 +436,18 @@ itself, a fixed tuple's items and the first item a default check reads. Every it
 deep checks:
 
 ```python
-widening = fnloom.Builder().with_modules(pricing).with_numeric_widening().build()
-widening.execute(["total"], inputs={"price": 2, "quantity": 4})
+widening = fnloom.Builder().with_modules(shipping).with_numeric_widening().build()
+widening.execute(["total"], inputs={"weight": 2, "quantity": 4})
 # -> {'total': 8}
 both = (
     fnloom.Builder()
-    .with_modules(baskets)
+    .with_modules(boxes)
     .with_deep_type_checks()
     .with_numeric_widening()
     .build()
 )
-both.execute(["basket_total"], inputs={"prices": [1, 2.5]})
-# -> {'basket_total': 3.5}
+both.execute(["box_total"], inputs={"weights": [1, 2.5]})
+# -> {'box_total': 3.5}
 ```
 
 `fnloom.value_matches(declared, value, deep=True, widen=True)` answers as a driver with both settings.
@@ -468,11 +468,11 @@ def decimal_floats(declared: object, value: object) -> bool:
     return declared is float and isinstance(value, decimal.Decimal)
 
 
-exact = fnloom.Builder().with_modules(pricing).with_value_check(decimal_floats).build()
-exact.execute(["total"], inputs={"price": decimal.Decimal("2.5"), "quantity": 4})
+exact = fnloom.Builder().with_modules(shipping).with_value_check(decimal_floats).build()
+exact.execute(["total"], inputs={"weight": decimal.Decimal("2.5"), "quantity": 4})
 # -> {'total': decimal.Decimal('10.0')}
-exact.validate(["total"], inputs={"price": "2.5", "quantity": 4})
-# -> ['price: expected float, got str']
+exact.validate(["total"], inputs={"weight": "2.5", "quantity": 4})
+# -> ['weight: expected float, got str']
 ```
 
 A check is called only for a value the default refuses, so a value that fits costs nothing more. It applies to
@@ -489,8 +489,8 @@ Anything else refuses every value. Two examples are a plain protocol (one not ma
 Either annotate with a supported form, or build with `Builder.without_input_type_checks()`:
 
 ```python
-lenient = fnloom.Builder().with_modules(pricing).without_input_type_checks().build()
-lenient.execute(["total"], inputs={"price": 2, "quantity": 4})
+lenient = fnloom.Builder().with_modules(shipping).without_input_type_checks().build()
+lenient.execute(["total"], inputs={"weight": 2, "quantity": 4})
 # -> {'total': 8}
 ```
 
@@ -498,9 +498,9 @@ To skip only the override checks, build with `Builder.without_override_type_chec
 override of another type, such as `float("nan")` for an `int` node, runs while a badly typed input is still refused:
 
 ```python
-sentinel = fnloom.Builder().with_modules(pricing).without_override_type_checks().build()
+sentinel = fnloom.Builder().with_modules(shipping).without_override_type_checks().build()
 sentinel.execute(["label"], overrides={"total": float("nan")})["label"]
-# -> 'nan EUR'
+# -> 'nan kg'
 ```
 
 The `without_input_type_checks()` opt-out turns off both the input and override checks. Edge checks stay on: they
@@ -609,11 +609,11 @@ skipped are skipped again without running. [Declining](writing-nodes.md#declinin
 
 ```python
 driver.node_names()
-# -> ['currency', 'discount', 'discounted', 'label', 'price', 'quantity', 'total']
-driver.what_is_upstream_of("discounted")
-# -> ['discount', 'discounted', 'price', 'quantity', 'total']
+# -> ['label', 'quantity', 'total', 'trim', 'trimmed', 'unit', 'weight']
+driver.what_is_upstream_of("trimmed")
+# -> ['quantity', 'total', 'trim', 'trimmed', 'weight']
 driver.what_is_downstream_of("total")
-# -> ['discounted', 'label', 'total']
+# -> ['label', 'total', 'trimmed']
 ```
 
 Each query returns sorted names, including the nodes you named. `node_names()` lists every node, inputs included.
@@ -623,9 +623,9 @@ The upstream end may be an input; the downstream end is one only when both ends 
 input. The order is topological, with ties broken by name, so it's the same on every run:
 
 ```python
-driver.what_is_the_path_between("price", "label")
-# -> ['price', 'total', 'discounted', 'label']
-driver.what_is_the_path_between("label", "price")
+driver.what_is_the_path_between("weight", "label")
+# -> ['weight', 'total', 'trimmed', 'label']
+driver.what_is_the_path_between("label", "weight")
 # -> []
 driver.what_is_the_path_between("total", "total")
 # -> ['total']
@@ -642,21 +642,21 @@ unknown end, sorted. The async driver has the same method.
 and its `consumers`, sorted. `driver.outputs()` lists the nodes nothing reads, sorted: the usual `final_vars`.
 
 ```python
-driver.inputs()["discount"] == fnloom.InputView(
-    "discount", float, required=False, consumers=("discounted",)
+driver.inputs()["trim"] == fnloom.InputView(
+    "trim", float, required=False, consumers=("trimmed",)
 )
 # -> True
-driver.inputs()["price"].required
+driver.inputs()["weight"].required
 # -> True
 list(driver.inputs())
-# -> ['currency', 'discount', 'price', 'quantity']
+# -> ['quantity', 'trim', 'unit', 'weight']
 driver.outputs()
 # -> ['label']
-driver.modules == (pricing,)
+driver.modules == (shipping,)
 # -> True
 ```
 
-An input is required when any consumer has no default for it, so `currency` is optional here. `driver.modules` holds
+An input is required when any consumer has no default for it, so `unit` is optional here. `driver.modules` holds
 the modules the graph was built from, each once, in the order you gave them. The async driver has all three.
 
 ## Inspecting a graph
@@ -665,18 +665,18 @@ the modules the graph was built from, each once, in the order you gave them. The
 
 ```python
 list(driver.nodes)
-# -> ['currency', 'discount', 'discounted', 'label', 'price', 'quantity', 'total']
-view = driver.nodes["discounted"]
+# -> ['label', 'quantity', 'total', 'trim', 'trimmed', 'unit', 'weight']
+view = driver.nodes["trimmed"]
 view.type
 # -> float
 view.dependencies
-# -> ('discount', 'total')
+# -> ('total', 'trim')
 view.is_input
 # -> False
 view.doc
-# -> 'The total after the discount, if one is given.'
+# -> 'The total after the trim, if one is given.'
 [(p.name, p.required) for p in view.params]
-# -> [('total', True), ('discount', False)]
+# -> [('total', True), ('trim', False)]
 ```
 
 `origin` is the function the node came from, `module` is its module's name, and `tags` are the ones you wrote with
@@ -717,7 +717,7 @@ its own.
 import pickle
 
 again = pickle.loads(pickle.dumps(driver))
-again.execute(["total"], inputs={"price": 2.0, "quantity": 3})
+again.execute(["total"], inputs={"weight": 2.0, "quantity": 3})
 # -> {'total': 6.0}
 ```
 
@@ -1155,7 +1155,7 @@ sees the reloaded module (Q83):
 
 ```python
 fresh = driver.rebuild()
-fresh.execute(["total"], inputs={"price": 2.0, "quantity": 3})
+fresh.execute(["total"], inputs={"weight": 2.0, "quantity": 3})
 # -> {'total': 6.0}
 ```
 
@@ -1224,11 +1224,11 @@ def retried(node, call, inputs):
         return call()
 
 
-wrapped = fnloom.Builder().with_modules(pricing).with_node_wrappers(timed, retried)
-wrapped.build().execute(["discounted"], inputs={"price": 20.0, "quantity": 3})
-# -> {'discounted': 60.0}
+wrapped = fnloom.Builder().with_modules(shipping).with_node_wrappers(timed, retried)
+wrapped.build().execute(["trimmed"], inputs={"weight": 20.0, "quantity": 3})
+# -> {'trimmed': 60.0}
 sorted(timings)
-# -> ['discounted', 'total']
+# -> ['total', 'trimmed']
 ```
 
 The first wrapper given is the outermost, and any number may be given, where Hamilton allows one `NodeExecutionMethod`
@@ -1254,7 +1254,7 @@ synchronously: an `async def` wrapper is refused, and on the async driver an `as
 you asked for:
 
 ```python
-# file: rates.py
+# file: playback.py
 import asyncio
 
 
@@ -1264,23 +1264,23 @@ async def rate(speed: str) -> float:
     return {"normal": 1.0, "fast": 1.5}[speed]
 
 
-def converted(rate: float, amount: float) -> float:
-    """The amount at that rate."""
-    return amount * rate
+def covered(rate: float, minutes: float) -> float:
+    """The minutes of a recording played in `minutes` at that rate."""
+    return minutes * rate
 ```
 
 ```python
 import asyncio
 
-import rates
+import playback
 
-async_driver = fnloom.Builder().with_modules(rates).build_async()
+async_driver = fnloom.Builder().with_modules(playback).build_async()
 asyncio.run(
     async_driver.execute(
-        ["converted", "rate"], inputs={"speed": "fast", "amount": 10.0}
+        ["covered", "rate"], inputs={"speed": "fast", "minutes": 10.0}
     )
 )
-# -> {'converted': 15.0, 'rate': 1.5}
+# -> {'covered': 15.0, 'rate': 1.5}
 ```
 
 Everything else is the sync driver's: inputs, overrides, the type checks and their errors, lineage, `nodes`,
@@ -1289,16 +1289,16 @@ defaults as with `build()`. `prepare` is synchronous too, and returns a plan who
 
 ```python
 async_plan = async_driver.prepare(
-    ["converted"], inputs={"speed": "normal", "amount": 0.0}
+    ["covered"], inputs={"speed": "normal", "minutes": 0.0}
 )
-asyncio.run(async_plan.run(inputs={"speed": "normal", "amount": 4.0}))
-# -> {'converted': 4.0}
+asyncio.run(async_plan.run(inputs={"speed": "normal", "minutes": 4.0}))
+# -> {'covered': 4.0}
 ```
 
 **How nodes run.** A node starts as soon as everything it reads is ready, so independent `async def` nodes await
 concurrently. A sync node runs in a worker thread of the loop's default executor, through `loop.run_in_executor` with
 your context variables, so the event loop keeps running while it does. A thread costs tens of microseconds, which is
-more than a cheap node such as `converted`. For a graph of cheap sync nodes, `build_async(sync_nodes="inline")` runs
+more than a cheap node such as `covered`. For a graph of cheap sync nodes, `build_async(sync_nodes="inline")` runs
 them on the loop instead. The nodes `@extract_fields` and `@extract_columns` generate always run on the loop.
 
 **With `with_threads`,** a sync node runs on the driver's own pool instead of the loop's default executor, so at most

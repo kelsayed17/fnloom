@@ -1133,8 +1133,8 @@ def _codes(code: types.CodeType) -> Iterator[types.CodeType]:
 def _names(code: types.CodeType) -> list[str]:
     """Every name `code` and its nested code read, sorted.
 
-    A string constant that is an identifier counts too: `globals()["RATE"]` and
-    `getattr(module, "RATE")` read `RATE` by it. A name built at run time cannot be
+    A string constant that is an identifier counts too: `globals()["SCALE"]` and
+    `getattr(module, "SCALE")` read `SCALE` by it. A name built at run time cannot be
     seen, a known limit.
     """
     names: set[str] = set()

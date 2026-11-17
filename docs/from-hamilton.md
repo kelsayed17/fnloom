@@ -85,7 +85,7 @@ Most decorators fnloom has so far take the same arguments as Hamilton's, so usua
 | `final_vars="total"` | One output per character | `TypeError` (Q6) |
 | A function in `final_vars` | Its `__name__`, even when no node has that name, and a forged function is accepted | The node it makes, matched by the function itself. A `@parameterize` function is a `TypeError` listing its rows; a function no node comes from is a `ValueError` (Q30) |
 | Overriding an input | Only when it's also supplied | Any node. It beats or replaces the input (Q7) ; `with_strict_overrides()` restores Hamilton's rule, and `with_declared_inputs(...)` turns a misspelled parameter into a build error (Q75) |
-| A node named like a parameter that has a default | The node silently replaces the default, and a supplied input of that name is ignored | `ValueError` at build, naming the parameter and the node. `@fnloom.defaults(shadowed=("cost",))` on the consumer lets the node win (Q76) |
+| A node named like a parameter that has a default | The node silently replaces the default, and a supplied input of that name is ignored | `ValueError` at build, naming the parameter and the node. `@fnloom.defaults(shadowed=("limit",))` on the consumer lets the node win (Q76) |
 | Two functions with different defaults for one input | Each keeps its own default | `ValueError` at build, naming every consumer and its default. `@fnloom.defaults(differing=("shared",))` on each consumer but one keeps them (Q76) |
 | An input or override naming a parameter only `value()` supplies | Silently dropped, even a wrong-typed one | `ValueError`, as for any unknown name; when another node reads the name, it's an input for that node alone, as in Hamilton (Q77) |
 | `__all__` in a module | Ignored: every public function the module defines is a node | Only the functions it names are nodes, by attribute name, so a `@config` variant is listed as `foo__a`. A malformed `__all__` is a `TypeError`. A missing input named like a function it left out says so (Q73) |
@@ -279,7 +279,7 @@ Hamilton makes it a namespaced input. A `bind=` key no node reads is a `ValueErr
 `config=` gives a copy its own config, as `@subdag(config=)` does:
 `with_modules(taxes, namespace="eu", config={"region": "eu"})` overlays the driver's config for that namespace's
 `@config` variants, `@resolve`s and `config.matches` predicates, while `driver.config` stays the driver's own (Q112).
-`@parameterized_subdag` isn't built: loop over `with_modules(taxes, namespace=name, bind=...)`, one call per copy.
+`@parameterized_subdag` isn't built: loop over `with_modules(zones, namespace=name, bind=...)`, one call per copy.
 
 ### `@does`
 

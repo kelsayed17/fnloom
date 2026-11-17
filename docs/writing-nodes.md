@@ -44,27 +44,27 @@ function is returned unchanged, so you can still call it, and it stacks with the
 excluded function is never read, so it may omit its annotations. Hamilton's `@hamilton_exclude` raises when called.
 
 ```python
-# file: pricing.py
+# file: sizing.py
 import fnloom
 
 
 @fnloom.exclude
-def round_cents(value: float) -> float:
+def round_two(value: float) -> float:
     """A public helper the graph doesn't need to know about."""
     return round(value, 2)
 
 
-def price(cost: float) -> float:
-    return round_cents(cost * 1.2)
+def scaled(length: float) -> float:
+    return round_two(length * 1.2)
 ```
 
 ```python
 import fnloom
-import pricing
+import sizing
 
-fnloom.build(pricing).node_names()
-# -> ['cost', 'price']
-pricing.round_cents(1.239)
+fnloom.build(sizing).node_names()
+# -> ['length', 'scaled']
+sizing.round_two(1.239)
 # -> 1.24
 ```
 
@@ -77,20 +77,20 @@ make it a node. `@fnloom.exclude` wins when a function is both listed and marked
 # file: public_api.py
 import fnloom
 
-__all__ = ["revenue", "margin"]
+__all__ = ["area", "border"]
 
 
-def revenue(units: int) -> int:
-    return units * 10
+def area(tiles: int) -> int:
+    return tiles * 10
 
 
-def margin(revenue: int) -> int:
-    return revenue // 4
+def border(area: int) -> int:
+    return area // 4
 
 
-def scratch(units: int) -> int:
+def scratch(tiles: int) -> int:
     """Not listed: not a node."""
-    return units
+    return tiles
 ```
 
 ```python
@@ -98,11 +98,11 @@ import fnloom
 import public_api
 
 fnloom.build(public_api).node_names()
-# -> ['margin', 'revenue', 'units']
+# -> ['area', 'border', 'tiles']
 ```
 
-`__all__` is read as the attribute names a module defines, so a `@fnloom.config.when` variant `price__eu` has to be
-listed as `price__eu` to be considered at all. An `__all__` that is not a list or tuple of `str` is a `TypeError` at
+`__all__` is read as the attribute names a module defines, so a `@fnloom.config.when` variant `size__eu` has to be
+listed as `size__eu` to be considered at all. An `__all__` that is not a list or tuple of `str` is a `TypeError` at
 build, naming every such module.
 
 When something reads the name of a function that was left out, it's a missing input, and the error adds a line saying
@@ -115,12 +115,12 @@ import fnloom
 __all__ = ["summary"]
 
 
-def discount(rate: float) -> float:
-    return rate / 2
+def half(step: float) -> float:
+    return step / 2
 
 
-def summary(discount: float) -> float:
-    return discount
+def summary(half: float) -> float:
+    return half
 ```
 
 ```python
@@ -132,7 +132,7 @@ try:
 except ValueError as error:
     hint = str(error).splitlines()[-1]
 hint
-# -> "'discount' is a function in module 'reports' not listed in its __all__"
+# -> "'half' is a function in module 'reports' not listed in its __all__"
 ```
 
 A function `@fnloom.exclude` marked gets `marked @exclude` in place of `not listed in its __all__`. A module whose
@@ -185,22 +185,22 @@ both. fnloom refuses them when you build (Q76), each with one `ValueError` that 
 `source("...")`, takes the node's value. The default is never used, and an input of that name is ignored:
 
 ```python
-# file: surcharge.py
-def fee() -> int:
+# file: attempts.py
+def retries() -> int:
     return 100
 
 
-def total(fee: int = 3) -> int:
-    """The author meant `3` unless the caller supplied a fee."""
-    return fee
+def total(retries: int = 3) -> int:
+    """The author meant `3` unless the caller supplied a count."""
+    return retries
 ```
 
 ```python
 import fnloom
-import surcharge
+import attempts
 
-fnloom.build(surcharge)
-# raises ValueError: shadowed default: parameter 'fee' of 'total' has a default, but it reads the node 'fee', which replaces it; rename one, or let the node win with @fnloom.defaults(shadowed=('fee',)) on 'total'
+fnloom.build(attempts)
+# raises ValueError: shadowed default: parameter 'retries' of 'total' has a default, but it reads the node 'retries', which replaces it; rename one, or let the node win with @fnloom.defaults(shadowed=('retries',)) on 'total'
 ```
 
 A `value()` binding has no edge, so a node of that name doesn't shadow it.
@@ -238,13 +238,13 @@ none to differ from.
 import fnloom
 
 
-def fee() -> int:
+def retries() -> int:
     return 100
 
 
-@fnloom.defaults(shadowed=("fee",))
-def total(fee: int = 3) -> int:
-    return fee
+@fnloom.defaults(shadowed=("retries",))
+def total(retries: int = 3) -> int:
+    return retries
 
 
 @fnloom.defaults(differing=("days",))
@@ -543,37 +543,37 @@ An annotation naming something that doesn't exist at run time, such as a class i
 annotation becomes an opaque type, shown as `unresolved 'Decimal'`, with its text as written:
 
 ```python
-# file: rates.py
+# file: factors.py
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from decimal import Decimal
 
 
-def rate() -> "Decimal":
+def factor() -> "Decimal":
     """A unit conversion factor."""
     raise NotImplementedError
 
 
-def converted(rate: "Decimal") -> "Decimal":
-    """Fed by `rate`: the same unresolved text on both ends."""
-    return rate
+def scaled(factor: "Decimal") -> "Decimal":
+    """Fed by `factor`: the same unresolved text on both ends."""
+    return factor
 
 
-def checked(amount: "Decimal") -> "Decimal":
+def checked(length: "Decimal") -> "Decimal":
     """Reads an input whose type didn't resolve."""
-    return amount
+    return length
 ```
 
 ```python
 import fnloom
-import rates
+import factors
 
-driver = fnloom.build(rates)
-repr(driver.nodes["rate"].type)
+driver = fnloom.build(factors)
+repr(driver.nodes["factor"].type)
 # -> "unresolved 'Decimal'"
-driver.execute(["checked"], inputs={"amount": 1})
-# raises TypeError: amount: cannot check a value against unresolved 'Decimal': it did not resolve when the graph was built; import what it names at run time, not only under TYPE_CHECKING
+driver.execute(["checked"], inputs={"length": 1})
+# raises TypeError: length: cannot check a value against unresolved 'Decimal': it did not resolve when the graph was built; import what it names at run time, not only under TYPE_CHECKING
 ```
 
 It surfaces only where a check needs it:
@@ -790,8 +790,8 @@ unbound is refused when decorating.
 
 - `.named("x")` names a step's node `<node>.x`.
 - `namespace=` on `@pipe_input` or `@pipe_output`, or `.named("x", namespace=...)` on one step, replaces the `<node>`
-  part: `None` drops it, so the step is `x` or `with_clip`, and a dotted path such as `"sales"` names it
-  `sales.with_clip`. The default, `...`, keeps `<node>`; a step's own namespace wins over the decorator's, and under a
+  part: `None` drops it, so the step is `x` or `with_clip`, and a dotted path such as `"stats"` names it
+  `stats.with_clip`. The default, `...`, keeps `<node>`; a step's own namespace wins over the decorator's, and under a
   [module namespace](#namespaces) the step stays within it. `.raw` and the node itself keep their names. A name two
   nodes would have fails the build, naming what made each (Q140).
 - `.when(mode="fast")`, `.when_not`, `.when_in` and `.when_not_in` run a step only under that [config](#config). A
@@ -818,17 +818,17 @@ follow the target's own, in the order the mutators are defined, and the mutator 
 from fnloom import apply_to, mutate
 
 
-def price(cost: float) -> float:
-    """The price before rounding."""
-    return cost * 1.2
+def length(raw: float) -> float:
+    """The length before rounding."""
+    return raw * 1.2
 
 
-def tax(price: float) -> float:
-    """The tax on the price."""
-    return price * 0.2
+def seam(length: float) -> float:
+    """The seam allowance on the length."""
+    return length * 0.2
 
 
-@mutate(price, apply_to(tax, places=1))
+@mutate(length, apply_to(seam, places=1))
 def _rounded(v: float, places: int = 2) -> float:
     return round(v, places)
 ```
@@ -836,8 +836,8 @@ def _rounded(v: float, places: int = 2) -> float:
 ```python
 import rounding
 
-fnloom.build(rounding).execute(["price", "tax"], inputs={"cost": 9.99})
-# -> {'price': 11.99, 'tax': 2.4}
+fnloom.build(rounding).execute(["length", "seam"], inputs={"raw": 9.99})
+# -> {'length': 11.99, 'seam': 2.4}
 ```
 
 A target may be in another module, as long as both are built. A target no built module defines fails the build, and so
@@ -878,12 +878,12 @@ from fnloom import parameterize, resolve, source
 
 @resolve(
     lambda regions: parameterize(
-        **{f"sales_{r}": {"orders": source(f"orders_{r}")} for r in regions}
+        **{f"visits_{r}": {"clicks": source(f"clicks_{r}")} for r in regions}
     )
 )
-def sales(orders: int) -> int:
-    """Sales in one region."""
-    return orders * 10
+def visits(clicks: int) -> int:
+    """Visits in one region."""
+    return clicks * 10
 ```
 
 ```python
@@ -893,9 +893,9 @@ by_region = (
     fnloom.Builder().with_modules(regions).with_config({"regions": ["eu", "us"]})
 )
 by_region.build().execute(
-    ["sales_eu", "sales_us"], inputs={"orders_eu": 1, "orders_us": 2}
+    ["visits_eu", "visits_us"], inputs={"clicks_eu": 1, "clicks_us": 2}
 )
-# -> {'sales_eu': 10, 'sales_us': 20}
+# -> {'visits_eu': 10, 'visits_us': 20}
 ```
 
 No power-user mode is needed. A missing required key fails the build, naming the function and the key. The
@@ -989,31 +989,31 @@ used more than once in a graph (Q74). A namespace is a dotted path of identifier
 
 ```python
 # file: regional.py
-def net(gross: float, tax_rate: float) -> float:
-    """The price without tax."""
-    return gross / (1 + tax_rate)
+def net(gross: float, tare: float) -> float:
+    """The weight without its packaging."""
+    return gross / (1 + tare)
 
 
-def tax_rate() -> float:
-    """This region's tax rate, 20%."""
+def tare() -> float:
+    """This region's packaging, a fifth of the net weight."""
     return 0.2
 ```
 
 ```python
 # file: totals.py
-def tax_rate() -> float:
-    """The default tax rate, 10%."""
+def tare() -> float:
+    """The default packaging, a tenth of the net weight."""
     return 0.1
 
 
 def both(eu_net: float, us_net: float) -> tuple[float, float]:
-    """Each region's net price."""
+    """Each region's net weight."""
     return (eu_net, us_net)
 ```
 
 Inside a namespace, a parameter reads the namespace's own node when one of its modules defines that name, and
-otherwise the plain name: a node given without a namespace, or an input. Here `eu.net` reads `eu.tax_rate`, which
-shadows the plain `tax_rate` for readers inside `eu` only. An input is never namespaced, so both copies of `net` read
+otherwise the plain name: a node given without a namespace, or an input. Here `eu.net` reads `eu.tare`, which
+shadows the plain `tare` for readers inside `eu` only. An input is never namespaced, so both copies of `net` read
 the one input `gross`:
 
 ```python
@@ -1029,15 +1029,15 @@ driver = (
     .build()
 )
 driver.node_names()
-# -> ['both', 'eu.net', 'eu.tax_rate', 'eu_net', 'gross', 'tax_rate', 'us.net', 'us.tax_rate', 'us_net']
+# -> ['both', 'eu.net', 'eu.tare', 'eu_net', 'gross', 'tare', 'us.net', 'us.tare', 'us_net']
 driver.nodes["eu.net"].dependencies
-# -> ('eu.tax_rate', 'gross')
+# -> ('eu.tare', 'gross')
 driver.nodes["eu.net"].namespace
 # -> 'eu'
 list(driver.inputs())
 # -> ['eu_net', 'gross', 'us_net']
-driver.execute(["eu.net", "tax_rate"], inputs={"gross": 12.0})
-# -> {'eu.net': 10.0, 'tax_rate': 0.1}
+driver.execute(["eu.net", "tare"], inputs={"gross": 12.0})
+# -> {'eu.net': 10.0, 'tare': 0.1}
 ```
 
 A node outside reads a namespaced node by its full name, with `source(...)` in a `@parameterize` row or
@@ -1081,7 +1081,7 @@ driver = (
 list(driver.inputs())
 # -> ['eu_gross']
 driver.nodes["eu.net"].dependencies
-# -> ('eu.tax_rate', 'eu_gross')
+# -> ('eu.tare', 'eu_gross')
 driver.execute(["eu.net", "us.net"], inputs={"eu_gross": 12.0})
 # -> {'eu.net': 10.0, 'us.net': 20.0}
 ```
@@ -1098,39 +1098,39 @@ their `@resolve`s and `config.matches` predicates, and keep their steps by the b
 keys. Like `bind=`, it holds for the whole namespace:
 
 ```python
-# file: regional_rates.py
+# file: regional_shares.py
 from fnloom import config
 
 
 @config.when(region="eu")
-def rate__eu() -> float:
-    """The EU's rate."""
+def share__eu() -> float:
+    """The EU's share."""
     return 0.2
 
 
 @config.when(region="us")
-def rate__us() -> float:
-    """The US's rate."""
+def share__us() -> float:
+    """The US's share."""
     return 0.1
 
 
-def tax(rate: float, sales: float) -> float:
-    """The tax on the sales."""
-    return rate * sales
+def served(share: float, requests: float) -> float:
+    """The requests this region serves."""
+    return share * requests
 ```
 
 ```python
 import fnloom
-import regional_rates
+import regional_shares
 
 driver = (
     fnloom.Builder()
-    .with_modules(regional_rates, namespace="eu", config={"region": "eu"})
-    .with_modules(regional_rates, namespace="us", config={"region": "us"})
+    .with_modules(regional_shares, namespace="eu", config={"region": "eu"})
+    .with_modules(regional_shares, namespace="us", config={"region": "us"})
     .build()
 )
-driver.execute(["eu.tax", "us.tax"], inputs={"sales": 100.0})
-# -> {'eu.tax': 20.0, 'us.tax': 10.0}
+driver.execute(["eu.served", "us.served"], inputs={"requests": 100.0})
+# -> {'eu.served': 20.0, 'us.served': 10.0}
 dict(driver.config)
 # -> {}
 driver.export()["namespace_config"]
@@ -1406,15 +1406,15 @@ bound to a constant per node, each with its own doc:
 from fnloom import parameterize_sources, parameterize_values
 
 
-@parameterize_sources(west=dict(rate="west_rate"), east=dict(rate="east_rate"))
-def price(rate: float, base: float = 100.0) -> float:
-    """{output_name} price at {rate}."""
-    return base * rate
+@parameterize_sources(west=dict(factor="west_factor"), east=dict(factor="east_factor"))
+def scaled(factor: float, base: float = 100.0) -> float:
+    """{output_name} scaled by {factor}."""
+    return base * factor
 
 
-@parameterize_values("tax", {("low_tax", "A low tax."): 0.1, ("high_tax", None): 0.3})
-def taxed(tax: float, base: float = 100.0) -> float:
-    return base * (1 + tax)
+@parameterize_values("gain", {("low_gain", "A low gain."): 0.1, ("high_gain", None): 0.3})
+def boosted(gain: float, base: float = 100.0) -> float:
+    return base * (1 + gain)
 ```
 
 ```python
@@ -1422,12 +1422,12 @@ import fnloom
 import shorthands
 
 driver = fnloom.build(shorthands)
-driver.execute(["west", "high_tax"], inputs={"west_rate": 1.5})
-# -> {'west': 150.0, 'high_tax': 130.0}
+driver.execute(["west", "high_gain"], inputs={"west_factor": 1.5})
+# -> {'west': 150.0, 'high_gain': 130.0}
 driver.nodes["west"].doc
-# -> 'west price at west_rate.'
-driver.nodes["low_tax"].doc
-# -> 'A low tax.'
+# -> 'west scaled by west_factor.'
+driver.nodes["low_gain"].doc
+# -> 'A low gain.'
 ```
 
 - **`parameterize_sources`** takes a `str` for each source, refused otherwise when decorating; Hamilton fails later with
@@ -1440,9 +1440,9 @@ driver.nodes["low_tax"].doc
 ## Config
 
 `@config.when` and its relatives make one node out of several **variants**, picking one when you build. Name each
-variant after its node, followed by `__` and anything you like: `cost__post` and `cost__courier` are both variants of
-`cost`. The name is cut at the last `__`, and only on a config-decorated function, so a plain `cost__total` stays
-`cost__total`. Pass `name=` to choose the node name yourself.
+variant after its node, followed by `__` and anything you like: `handling__post` and `handling__courier` are both variants
+of `handling`. The name is cut at the last `__`, and only on a config-decorated function, so a plain
+`handling__total` stays `handling__total`. Pass `name=` to choose the node name yourself.
 
 | Decorator | The variant is used when |
 | --- | --- |
@@ -1459,26 +1459,26 @@ from fnloom import config
 
 
 @config.when(carrier="post")
-def cost__post(weight: float) -> float:
-    """A flat fee plus the weight."""
+def handling__post(weight: float) -> float:
+    """Two minutes, plus one for each kilo."""
     return 2.0 + weight
 
 
 @config.when_in(carrier=["courier", "express"])
-def cost__courier(weight: float) -> float:
-    """A higher fee, and twice the weight."""
+def handling__courier(weight: float) -> float:
+    """Five minutes, plus two for each kilo."""
     return 5.0 + 2 * weight
 
 
 @config.default
-def cost__free() -> float:
-    """Free shipping when no carrier matches."""
+def handling__none() -> float:
+    """No handling when no carrier matches."""
     return 0.0
 
 
-def total(price: float, cost: float) -> float:
-    """What the customer pays."""
-    return price + cost
+def total(packing: float, handling: float) -> float:
+    """The minutes a parcel takes to send."""
+    return packing + handling
 ```
 
 `Builder.with_config` gives the config. Each call merges into a copy, and a key given again takes its later value:
@@ -1489,18 +1489,18 @@ import shipping
 
 builder = fnloom.Builder().with_modules(shipping)
 post = builder.with_config({"carrier": "post"}).build()
-post.execute(["total"], inputs={"price": 10.0, "weight": 1.0})
+post.execute(["total"], inputs={"packing": 10.0, "weight": 1.0})
 # -> {'total': 13.0}
 express = builder.with_config({"carrier": "express"}).build()
-express.execute(["total"], inputs={"price": 10.0, "weight": 1.0})
+express.execute(["total"], inputs={"packing": 10.0, "weight": 1.0})
 # -> {'total': 17.0}
-fnloom.build(shipping).execute(["total"], inputs={"price": 10.0})
+fnloom.build(shipping).execute(["total"], inputs={"packing": 10.0})
 # -> {'total': 10.0}
 dict(post.config)
 # -> {'carrier': 'post'}
-post.nodes["cost"].origin is shipping.cost__post
+post.nodes["handling"].origin is shipping.handling__post
 # -> True
-[condition.key for condition in post.nodes["cost"].config]
+[condition.key for condition in post.nodes["handling"].config]
 # -> ['carrier']
 ```
 
@@ -1528,21 +1528,21 @@ from fnloom import config
 
 
 @config.when(tier="gold")
-def discount__gold() -> float:
-    """Gold customers save a fifth."""
+def boost__gold() -> float:
+    """Gold members get a fifth more speed."""
     return 0.2
 
 
-def price(list_price: float, discount: float) -> float:
-    """The list price after the discount."""
-    return list_price * (1 - discount)
+def speed(base_speed: float, boost: float) -> float:
+    """The base speed with the boost."""
+    return base_speed * (1 + boost)
 ```
 
 ```python
 import tiers
 
 fnloom.Builder().with_config({"tier": "basic"}).with_modules(tiers).build()
-# raises ValueError: no variant of 'discount' matches the config {'tier': 'basic'}; its variants need tier == 'gold' (discount__gold); add @config.default or a variant for it
+# raises ValueError: no variant of 'boost' matches the config {'tier': 'basic'}; its variants need tier == 'gold' (boost__gold); add @config.default or a variant for it
 ```
 
 The same holds for a name only an unselected variant gives: a `@parameterize` row, or a field it extracts. It's never
@@ -1570,38 +1570,38 @@ optional key, and a missing required key never matches, so the predicate isn't c
 mark it `@exclude`: a public function a module defines is a node, and the build refuses a predicate that is one:
 
 ```python
-# file: vat.py
+# file: charger.py
 from fnloom import config
 
 
 def _is_eu(region: str, year: int = 2024) -> bool:
-    return region == "eu" and year >= 2021
+    return region == "eu" and year >= 2024
 
 
 @config.matches(_is_eu)
-def vat__eu() -> float:
-    """The EU's rate."""
-    return 0.2
+def port__eu() -> str:
+    """The EU's common charger."""
+    return "usb-c"
 
 
 @config.default
-def vat__none() -> float:
-    """No VAT elsewhere."""
-    return 0.0
+def port__any() -> str:
+    """Any port elsewhere."""
+    return "any"
 ```
 
 ```python
 import fnloom
-import vat
+import charger
 
-builder = fnloom.Builder().with_modules(vat)
-builder.with_config({"region": "eu"}).build().execute(["vat"])
-# -> {'vat': 0.2}
-builder.with_config({"region": "eu", "year": 2020}).build().execute(["vat"])
-# -> {'vat': 0.0}
-builder.build().execute(["vat"])
-# -> {'vat': 0.0}
-builder.with_config({"region": "eu"}).build().nodes["vat"].config[0].kind
+builder = fnloom.Builder().with_modules(charger)
+builder.with_config({"region": "eu"}).build().execute(["port"])
+# -> {'port': 'usb-c'}
+builder.with_config({"region": "eu", "year": 2020}).build().execute(["port"])
+# -> {'port': 'any'}
+builder.build().execute(["port"])
+# -> {'port': 'any'}
+builder.with_config({"region": "eu"}).build().nodes["port"].config[0].kind
 # -> 'matches'
 ```
 
@@ -1609,7 +1609,7 @@ builder.with_config({"region": "eu"}).build().nodes["vat"].config[0].kind
   the variant. An error it raises gets a note naming both.
 - It stacks with `config.when*`, every condition holding, and two variants that both match fail as any two do.
 - Its code version is part of the cache key of the variant it selects, and of that node's export `version`, where the
-  condition shows as `matches(vat._is_eu)`. Edit the predicate and the variant misses, and `diff` says so.
+  condition shows as `matches(charger._is_eu)`. Edit the predicate and the variant misses, and `diff` says so.
 - `*args`, `**kwargs` and positional-only parameters are refused when decorating: each parameter must name a key.
 
 ## Extracting fields

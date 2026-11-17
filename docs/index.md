@@ -85,46 +85,46 @@ executor rebuilt in Rust.
 Start with a module of plain functions:
 
 ```python
-# file: pricing.py
-def total(price: float, quantity: int) -> float:
-    """What the line costs before any discount."""
-    return price * quantity
+# file: shipping.py
+def total(weight: float, quantity: int) -> float:
+    """What the parcel weighs before any trim."""
+    return weight * quantity
 
 
-def discounted(total: float, discount: float = 0.0) -> float:
-    """The total after the discount, if one is given."""
-    return total * (1 - discount)
+def trimmed(total: float, trim: float = 0.0) -> float:
+    """The total after the trim, if one is given."""
+    return total * (1 - trim)
 
 
-def label(discounted: float, currency: str = "EUR") -> str:
-    """The price as shown to a customer."""
-    return f"{discounted:.2f} {currency}"
+def label(trimmed: float, unit: str = "kg") -> str:
+    """The weight as printed on the parcel."""
+    return f"{trimmed:.2f} {unit}"
 ```
 
-fnloom reads this graph from it. `price` and `quantity` aren't the name of any function, so they're inputs. `discount`
-and `currency` have defaults, so they're optional (dashed):
+fnloom reads this graph from it. `weight` and `quantity` aren't the name of any function, so they're inputs. `trim`
+and `unit` have defaults, so they're optional (dashed):
 
 ```mermaid
 flowchart TD
-    price([price]) --> total
+    weight([weight]) --> total
     quantity([quantity]) --> total
-    total --> discounted
-    discount([discount?]) -.-> discounted
-    discounted --> label
-    currency([currency?]) -.-> label
+    total --> trimmed
+    trim([trim?]) -.-> trimmed
+    trimmed --> label
+    unit([unit?]) -.-> label
 ```
 
 Build a driver and ask for what you want. Only the functions your outputs need will run:
 
 ```python
 import fnloom
-import pricing
+import shipping
 
-driver = fnloom.build(pricing)
-driver.execute(["label"], inputs={"price": 2.5, "quantity": 4})
-# -> {'label': '10.00 EUR'}
-driver.execute(["label"], inputs={"price": 2.5, "quantity": 4, "discount": 0.1})
-# -> {'label': '9.00 EUR'}
+driver = fnloom.build(shipping)
+driver.execute(["label"], inputs={"weight": 2.5, "quantity": 4})
+# -> {'label': '10.00 kg'}
+driver.execute(["label"], inputs={"weight": 2.5, "quantity": 4, "trim": 0.1})
+# -> {'label': '9.00 kg'}
 ```
 
 ## Why not just use Hamilton?

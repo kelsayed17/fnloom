@@ -46,49 +46,49 @@ needed to produce them, in a fixed order, with your mistakes caught before anyth
 ## A graph in one screen
 
 ```python
-# file: pricing.py
-def total(price: float, quantity: int) -> float:
-    """What the line costs before any discount."""
-    return price * quantity
+# file: shipping.py
+def total(weight: float, quantity: int) -> float:
+    """What the parcel weighs before any trim."""
+    return weight * quantity
 
 
-def discounted(total: float, discount: float = 0.0) -> float:
-    """The total after the discount, if one is given."""
-    return total * (1 - discount)
+def trimmed(total: float, trim: float = 0.0) -> float:
+    """The total after the trim, if one is given."""
+    return total * (1 - trim)
 
 
-def label(discounted: float, currency: str = "EUR") -> str:
-    """The price as shown to a customer."""
-    return f"{discounted:.2f} {currency}"
+def label(trimmed: float, unit: str = "kg") -> str:
+    """The weight as printed on the parcel."""
+    return f"{trimmed:.2f} {unit}"
 ```
 
-That module is this graph. `price` and `quantity` aren't the name of any function, so they're inputs. `discount` and
-`currency` have defaults, so they're optional:
+That module is this graph. `weight` and `quantity` aren't the name of any function, so they're inputs. `trim` and
+`unit` have defaults, so they're optional:
 
 ```mermaid
 flowchart TD
-    price([price]) --> total
+    weight([weight]) --> total
     quantity([quantity]) --> total
-    total --> discounted
-    discount([discount?]) -.-> discounted
-    discounted --> label
-    currency([currency?]) -.-> label
+    total --> trimmed
+    trim([trim?]) -.-> trimmed
+    trimmed --> label
+    unit([unit?]) -.-> label
 ```
 
 Build a driver and ask for what you need:
 
 ```python
 import fnloom
-import pricing
+import shipping
 
-driver = fnloom.build(pricing)
-driver.execute(["label"], inputs={"price": 2.5, "quantity": 4})
-# -> {'label': '10.00 EUR'}
+driver = fnloom.build(shipping)
+driver.execute(["label"], inputs={"weight": 2.5, "quantity": 4})
+# -> {'label': '10.00 kg'}
 
 # Running the same request in a loop? Compile it once.
-plan = driver.prepare(["label"], inputs={"price": 0.0, "quantity": 0})
-plan.run(inputs={"price": 4.0, "quantity": 3})
-# -> {'label': '12.00 EUR'}
+plan = driver.prepare(["label"], inputs={"weight": 0.0, "quantity": 0})
+plan.run(inputs={"weight": 4.0, "quantity": 3})
+# -> {'label': '12.00 kg'}
 ```
 
 Next, the [guides](https://kelsayed17.github.io/fnloom/writing-nodes/) cover which functions become nodes, overrides,
@@ -134,7 +134,7 @@ dispatch.
 
 ## Is fnloom a good fit?
 
-**Yes, if** you compute many derived values from a few inputs (features, metrics, pricing, signals), want each step
+**Yes, if** you compute many derived values from a few inputs (features, metrics, scores, flags), want each step
 to be a small function you can test on its own, and run the same graph many times in one process.
 
 **Not, if** you need work spread over processes or machines: fnloom runs a graph's nodes in parallel on one

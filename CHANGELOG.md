@@ -731,7 +731,7 @@ change the public API; such changes are listed under **Changed** and **Removed**
 - **Breaking:** the build refuses a parameter with a default that reads a computed node, and an input that two
   consumers give different defaults. Hamilton lets the node replace the default, and each consumer keep its own. One
   `ValueError` lists every case, sorted, naming the parameter, the node or the other consumers, and the opt-out. To
-  keep the behaviour, write `@fnloom.defaults(shadowed=("cost",))` on the consumer, and
+  keep the behaviour, write `@fnloom.defaults(shadowed=("limit",))` on the consumer, and
   `@fnloom.defaults(differing=("shared",))` on each consumer of the input but one; or rename the node, or make the
   defaults equal (Q76). `@fnloom.defaults` is new, and records names only.
 - **Breaking:** `None` passes an input, override or extracted-field check only when the type admits it: `Optional[T]`,
@@ -896,7 +896,7 @@ change the public API; such changes are listed under **Changed** and **Removed**
   POSIX mode bits, which Windows reports as `0o777` for every directory; it now checks them on POSIX only.
 - The cache returned a stale result after an edit it should have seen. A module constant read through another name
   (a default, a helper handed the module, a class attribute), a function's own attribute, a name read as a string
-  (`globals()["RATE"]`, `getattr(config, "RATE")`), a name a module's `__getattr__` serves, and a method of an input
+  (`globals()["SCALE"]`, `getattr(config, "SCALE")`), a name a module's `__getattr__` serves, and a method of an input
   value's own class now all count in a code version or a fingerprint. Fingerprinting an input of a user class costs
   about 1 µs more per value.
 - A pandas index's frequency and a frame's or series' `attrs` are part of their fingerprints.
