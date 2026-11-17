@@ -108,15 +108,20 @@ def fan(
     return builder.build()
 
 
-def settled_workers() -> int:
-    """`live_workers()`, once pools that are closing have let their threads go."""
+def settled_workers(expected: int | None = None) -> int:
+    """`live_workers()`, once pools that are closing have let their threads go.
+
+    With `expected`, once it equals it, or after 5 s: a thread that has returned
+    from its last call may still be leaving, so a count read at once can be one
+    high, while a real leak still fails. Without, once two reads 50 ms apart agree.
+    """
     gc.collect()
     count = _core.live_workers()
-    deadline = time.monotonic() + 2
-    while time.monotonic() < deadline:
+    deadline = time.monotonic() + (2 if expected is None else 5)
+    while count != expected and time.monotonic() < deadline:
         time.sleep(0.05)
         now = _core.live_workers()
-        if now == count:
+        if expected is None and now == count:
             return now
         count = now
     return count
@@ -175,9 +180,9 @@ def test_no_pool_thread_starts_before_the_first_run() -> None:
     """A pool starts at its driver's first run, not at build."""
     before = settled_workers()
     driver = fan("lazy", 4)
-    assert _core.live_workers() == before
+    assert settled_workers(before) == before
     driver.execute(["summary"], inputs={"n": 2, **NO_FAIL})
-    assert _core.live_workers() == before + 3
+    assert settled_workers(before + 3) == before + 3
 
 
 def test_the_pool_holds_max_workers_minus_one_threads() -> None:
@@ -186,9 +191,9 @@ def test_the_pool_holds_max_workers_minus_one_threads() -> None:
     driver = fan("sized", 3)
     for _ in range(3):
         driver.execute(["summary"], inputs={"n": 8, **NO_FAIL})
-    assert _core.live_workers() == before + 2
+    assert settled_workers(before + 2) == before + 2
     del driver
-    assert settled_workers() == before
+    assert settled_workers(before) == before
 
 
 def test_a_failure_waits_for_running_branches() -> None:
@@ -1528,13 +1533,13 @@ def test_abandoned_pool_calls_are_replaced_and_their_threads_leave() -> None:
             assert _core.live_workers() - before <= 4  # noqa: PLR2004
     finally:
         module.GATE.set()
-    assert settled_workers() - before == 2  # noqa: PLR2004  # max_workers
+    assert settled_workers(before + 2) - before == 2  # noqa: PLR2004  # max_workers
     outputs = [f"n{i}" for i in range(50)]
     for _ in range(10):
         assert _async_run(driver.execute(outputs, inputs={"x": 1})) == dict.fromkeys(
             outputs, 1
         )
-    assert settled_workers() - before == 2  # noqa: PLR2004  # max_workers
+    assert settled_workers(before + 2) - before == 2  # noqa: PLR2004  # max_workers
 
 
 COLLECTED = """
@@ -1575,7 +1580,7 @@ def test_a_failed_async_runs_driver_is_collected_and_its_pool_stops(
     del driver, builder, module, info
     gc.collect()
     assert collected() is None
-    assert settled_workers() == before
+    assert settled_workers(before) == before
 
 
 NESTED_WIDE = """
