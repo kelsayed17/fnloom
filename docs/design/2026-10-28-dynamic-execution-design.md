@@ -1,7 +1,7 @@
 # fnloom — dynamic execution, design
 
 **Status:** approved by the maintainer 2026-10-29, with the open questions of §13 decided, and built: milestones A
-and B as Plan 10 (released in 0.5.0), and C to E as Plan 11 (shipping in 0.6.0); see §14.
+and B as Plan 10 (released in 0.5.0), and C to E as Plan 11 (released in 0.6.0); see §14.
 It designs Plans 10 and 11 of the [roadmap](../plans/2026-10-28-roadmap-ahead-of-hamilton.md): dynamic fan-out and
 fan-in, a parallel executor, and a typed absent outcome, and it says which parts of the roadmap's "Beyond Hamilton" it
 delivers and which it only leaves room for. Facts about Hamilton were read in the `apache-hamilton 1.90.0` wheel and
@@ -702,7 +702,7 @@ Plan 12's PRs A to G merge. Per the maintainer's 2026-11-03 decision above, Plan
   rows without threads are in the [benchmarks](../benchmarks.md#fan-out-and-absence): a branch costs about 0.5 µs,
   under the 2 µs target.
 - **2026-11-16:** milestones C to E are built, as [Plan 11](../plans/2026-11-15-plan-11-parallel-executor.md) (#104
-  to #111, and the close-out #112), shipping in 0.6.0: the core `Scheduler`, `with_threads`, per-node and per-group
+  to #111, and the close-out #112), released in 0.6.0: the core `Scheduler`, `with_threads`, per-node and per-group
   limits, single-flight per key, deadlines and `cancelled()`, `run_many`, the async driver on the scheduler with
   blocks, and `absent_on` for partial results (Q133, Q134, Q167 to Q171). The maintainer approved every departure
   in the plan's calls and its PRs, as merged: the `Scheduler` borrows nothing, and takes a `Layout` built once per

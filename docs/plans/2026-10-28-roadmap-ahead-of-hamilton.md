@@ -4,8 +4,8 @@
 0.2.0. Plans 5 to 9 (#24 to #28) and Plan 12's PR 0 (#33) are released in 0.3.0, and Plan 12's PRs A to G
 (#43, #44, #46 to #49, #53) in 0.4.0. Plan 10, typed absence and sequential fan-out, is released in 0.5.0
 (PRs #56, #61, #62, #63, #66, #68, #69, #72, follow-ups #83, #84 and #90, and its close-out #96).
-Plan 11, the parallel executor and partial results, is built ([its plan](2026-11-15-plan-11-parallel-executor.md),
-PRs #104 to #111 and its close-out #112) and ships in 0.6.0. Plan 13 follows it.
+Plan 11, the parallel executor and partial results, is released in 0.6.0
+([its plan](2026-11-15-plan-11-parallel-executor.md), PRs #104 to #111 and its close-out #112). Plan 13 follows it.
 
 **Goal:** for every capability Hamilton 1.90.0 offers, fnloom has an equivalent that is at least as good, or a
 written decision explaining why it doesn't. "At least as good" means: same intent; behaviour proven differentially
@@ -241,7 +241,7 @@ tests against Hamilton for every kept behaviour; benchmarks for anything on the 
     approved (2026-11-16) with every recommended answer, and is built: the scheduler (#104), the parallel sync
     driver (#105), single-flight and limits (#106), stopping (#107), the async driver on the scheduler (#108),
     `run_many` (#109), partial results (#110), the stress tests and Threads docs (#111), and the close-out's
-    benchmarks and docs (#112). It ships as 0.6.0. The rest of "Beyond Hamilton" (streaming, incremental execution, sweeps) is left
+    benchmarks and docs (#112). Released in 0.6.0 (2026-11-16). The rest of "Beyond Hamilton" (streaming, incremental execution, sweeps) is left
     room for in its §8.
 11. **Plan 12: every comparison row better.** Done: [Plan 12](2026-10-29-plan-12-api-parity-plus.md), a test for
     every row of [Coming from Hamilton](../from-hamilton.md)'s comparison tables, then the four rows where fnloom is
